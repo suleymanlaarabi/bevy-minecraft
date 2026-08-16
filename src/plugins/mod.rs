@@ -2,6 +2,7 @@ use bevy::app::plugin_group;
 
 pub mod animation;
 pub mod core;
+pub mod player;
 
 use animation::SpriteAnimationPlugin;
 use core::GameCorePlugin;

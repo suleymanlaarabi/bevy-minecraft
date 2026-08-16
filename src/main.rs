@@ -1,40 +1,19 @@
-use bevy::{image::TextureAtlasTemplate, prelude::*};
-
-use crate::plugins::{
-    GamePlugins,
-    animation::{SpriteAnimationIndices, SpriteAnimationTimer},
-    core::FollowedBy,
+use avian2d::{
+    PhysicsPlugins, collision::collider::Collider, debug_render::PhysicsDebugPlugin,
+    dynamics::rigid_body::RigidBody,
 };
+use bevy::prelude::*;
+
+use crate::plugins::{GamePlugins, player::Player};
 
 mod plugins;
-
-#[derive(SceneComponent, Default, Clone)]
-struct Player;
-
-impl Player {
-    fn scene() -> impl Scene {
-        bsn! {
-            Transform::from_scale(Vec3::splat(2.))
-            Sprite {
-                image: "idle.png",
-                texture_atlas: Option::<TextureAtlasTemplate>::Some(
-                    TextureAtlasTemplate {
-                        layout: asset_value(TextureAtlasLayout::from_grid(UVec2::new(46, 55), 10, 1, None, None)),
-                        index: 0,
-                    }
-                )
-            }
-            SpriteAnimationTimer(Timer::from_seconds(0.1, TimerMode::Repeating))
-            SpriteAnimationIndices::new(0, 9)
-            FollowedBy [Camera2d]
-        }
-    }
-}
 
 fn main() {
     App::new()
         .add_plugins((
             DefaultPlugins.set(ImagePlugin::default_nearest()),
+            PhysicsPlugins::default(),
+            PhysicsDebugPlugin,
             GamePlugins,
         ))
         .add_systems(Startup, setup)
@@ -43,4 +22,9 @@ fn main() {
 
 fn setup(mut commands: Commands) {
     commands.spawn_scene(Player::scene());
+    commands.spawn((
+        Transform::from_translation(Vec3::ZERO.with_y(-200.)),
+        Collider::rectangle(500., 10.),
+        RigidBody::Static,
+    ));
 }
