@@ -4,5 +4,27 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bevy = { version = "=0.19.1", default-features = false, features = ["ui", "2d", "debug"] }
-avian2d = "0.7"
+avian3d = { version = "0.7", default-features = false, features = ["3d", "parry-f32", "parallel", "debug-plugin"] }
+bevy = { version = "=0.19.1", default-features = false, features = ["ui", "3d", "debug", "free_camera", "bevy_dev_tools"] }
+noiz = "0.5"
+
+[profile.dev]
+opt-level = 0
+debug = 0
+incremental = true
+codegen-units = 256
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+incremental = false
+
+[profile.release.package."*"]
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 1
