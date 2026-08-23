@@ -44,28 +44,29 @@ pub(crate) fn set_voxel(
     mut chunks: Query<&mut ChunkVoxels>,
 ) {
     let (chunk, local) = settings.split_world_position(event.world_position);
-    if let Some(entity) = index.0.get(&chunk)
+    if let Some(entity) = index.get(&chunk)
         && let Ok(mut voxels) = chunks.get_mut(*entity)
     {
         voxels.set(local, event.kind);
         return;
     }
     let voxels = stored
-        .0
         .entry(chunk)
         .or_insert_with(|| super::generation::generate_chunk(chunk, &settings));
     voxels.set(local, event.kind);
 }
 
-pub(crate) fn persist_removed_chunk(
+pub(crate) fn cleanup_removed_chunk(
     event: On<Remove, ChunkVoxels>,
     chunks: Query<(&super::VoxelChunk, &ChunkVoxels)>,
+    mut index: ResMut<ChunkIndex>,
     mut stored: ResMut<StoredChunks>,
 ) {
-    if let Ok((chunk, voxels)) = chunks.get(event.entity)
-        && voxels.modified
-    {
-        stored.0.insert(chunk.position, voxels.clone());
+    if let Ok((chunk, voxels)) = chunks.get(event.entity) {
+        index.remove(&chunk.position);
+        if voxels.modified {
+            stored.insert(chunk.position, voxels.clone());
+        }
     }
 }
 

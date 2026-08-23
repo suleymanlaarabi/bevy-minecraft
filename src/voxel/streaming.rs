@@ -3,15 +3,17 @@ use super::{
     rebuild::VoxelAssets,
 };
 use avian3d::prelude::*;
-use bevy::prelude::*;
-use std::collections::HashMap;
-#[derive(Resource, Default)]
-pub(crate) struct ChunkIndex(pub HashMap<IVec2, Entity>);
-#[derive(Resource, Default)]
-pub(crate) struct StoredChunks(pub HashMap<IVec2, ChunkVoxels>);
+use bevy::{
+    platform::collections::{HashMap, hash_map::Entry},
+    prelude::*,
+};
+#[derive(Resource, Default, Deref, DerefMut)]
+pub(crate) struct ChunkIndex(HashMap<IVec2, Entity>);
+#[derive(Resource, Default, Deref, DerefMut)]
+pub(crate) struct StoredChunks(HashMap<IVec2, ChunkVoxels>);
 
-#[derive(Resource)]
-pub(crate) struct StreamOffsets(pub(crate) Vec<IVec2>);
+#[derive(Resource, Deref)]
+pub(crate) struct StreamOffsets(Vec<IVec2>);
 
 impl StreamOffsets {
     pub(crate) fn new(radius: u32) -> Self {
@@ -29,7 +31,7 @@ impl StreamOffsets {
 pub(crate) struct StreamState {
     center: Option<IVec2>,
     cursor: usize,
-    pending_despawns: Vec<(IVec2, Entity)>,
+    pending_despawns: Vec<Entity>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -46,41 +48,38 @@ pub(crate) fn stream_chunks(
     let center = settings.chunk_at(viewer.translation());
     if state.center != Some(center) {
         let radius_squared = (settings.view_distance * settings.view_distance) as i32;
-        state.pending_despawns = index
-            .0
-            .iter()
-            .filter(|(position, _)| position.distance_squared(center) > radius_squared)
-            .map(|(&position, &entity)| (position, entity))
-            .collect();
+        state.pending_despawns.clear();
+        state.pending_despawns.extend(
+            index
+                .iter()
+                .filter(|(position, _)| position.distance_squared(center) > radius_squared)
+                .map(|(_, &entity)| entity),
+        );
         state.center = Some(center);
         state.cursor = 0;
     }
 
     for _ in 0..settings.despawn_budget_per_frame {
-        let Some((position, entity)) = state.pending_despawns.pop() else {
+        let Some(entity) = state.pending_despawns.pop() else {
             break;
         };
-        if index.0.remove(&position) == Some(entity) {
-            commands.entity(entity).despawn();
-        }
+        commands.entity(entity).despawn();
     }
 
     let mut spawned = 0;
-    while spawned < settings.spawn_budget_per_frame && state.cursor < offsets.0.len() {
-        let position = center + offsets.0[state.cursor];
+    while spawned < settings.spawn_budget_per_frame && state.cursor < offsets.len() {
+        let position = center + offsets[state.cursor];
         state.cursor += 1;
-        if index.0.contains_key(&position) {
+        let Entry::Vacant(index_entry) = index.entry(position) else {
             continue;
-        }
+        };
         let mut voxels = stored
-            .0
             .remove(&position)
             .unwrap_or_else(|| generate_chunk(position, &settings));
         voxels.changes = super::data::MESH_CHANGED | super::data::COLLIDER_CHANGED;
         let origin = position * settings.chunk_size;
         let entity = commands
             .spawn((
-                Name::new(format!("Voxel chunk {}, {}", position.x, position.y)),
                 VoxelChunk { position },
                 voxels,
                 MeshMaterial3d(assets.0.clone()),
@@ -89,20 +88,8 @@ pub(crate) fn stream_chunks(
                 Friction::new(0.8),
             ))
             .id();
-        index.0.insert(position, entity);
+        index_entry.insert(entity);
         spawned += 1;
-    }
-}
-
-pub(crate) fn remove_chunk_from_index(
-    event: On<Remove, VoxelChunk>,
-    chunks: Query<&VoxelChunk>,
-    mut index: ResMut<ChunkIndex>,
-) {
-    if let Ok(chunk) = chunks.get(event.entity)
-        && index.0.get(&chunk.position) == Some(&event.entity)
-    {
-        index.0.remove(&chunk.position);
     }
 }
 
@@ -115,7 +102,7 @@ mod tests {
 
     #[test]
     fn streaming_is_bounded_persistent_and_idle() {
-        assert_eq!(StreamOffsets::new(8).0.len(), 197);
+        assert_eq!(StreamOffsets::new(8).len(), 197);
         let settings = VoxelSettings {
             view_distance: 0,
             spawn_budget_per_frame: 1,
@@ -164,6 +151,11 @@ mod tests {
             ));
         wait_for_chunk(&mut app, IVec2::new(3, 0));
         assert!(!app.world().entities().contains(origin));
+        assert!(
+            !app.world()
+                .resource::<ChunkIndex>()
+                .contains_key(&IVec2::ZERO)
+        );
         app.world_mut()
             .entity_mut(viewer)
             .insert(Transform::default());
@@ -174,14 +166,14 @@ mod tests {
         for _ in 0..100 {
             app.update();
         }
-        assert_eq!(app.world().resource::<ChunkIndex>().0.len(), 1);
+        assert_eq!(app.world().resource::<ChunkIndex>().len(), 1);
     }
 
     fn wait_for_chunk(app: &mut App, position: IVec2) -> Entity {
         for _ in 0..2_000 {
             app.update();
             thread::yield_now();
-            if let Some(&entity) = app.world().resource::<ChunkIndex>().0.get(&position)
+            if let Some(&entity) = app.world().resource::<ChunkIndex>().get(&position)
                 && app.world().get::<Collider>(entity).is_some()
             {
                 return entity;

@@ -6,9 +6,9 @@ mod streaming;
 use bevy::prelude::*;
 pub use data::{ChunkVoxels, SetVoxel, VoxelChunk, VoxelKind, VoxelViewer};
 use rebuild::{
-    persist_removed_chunk, poll_builds, prepare_assets, set_voxel, start_changed_builds,
+    cleanup_removed_chunk, poll_builds, prepare_assets, set_voxel, start_changed_builds,
 };
-use streaming::{ChunkIndex, StoredChunks, StreamOffsets, remove_chunk_from_index, stream_chunks};
+use streaming::{ChunkIndex, StoredChunks, StreamOffsets, stream_chunks};
 
 pub struct VoxelPlugin {
     settings: VoxelSettings,
@@ -33,8 +33,7 @@ impl Plugin for VoxelPlugin {
             .init_resource::<ChunkIndex>()
             .init_resource::<StoredChunks>()
             .add_observer(set_voxel)
-            .add_observer(persist_removed_chunk)
-            .add_observer(remove_chunk_from_index)
+            .add_observer(cleanup_removed_chunk)
             .add_systems(PreStartup, prepare_assets)
             .add_systems(Update, stream_chunks)
             .add_systems(PostUpdate, (start_changed_builds, poll_builds).chain());

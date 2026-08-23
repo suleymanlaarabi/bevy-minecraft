@@ -1,18 +1,34 @@
 use avian3d::prelude::*;
 use bevy::{
-    camera_controller::free_camera::{FreeCamera, FreeCameraPlugin},
+    camera_controller::free_camera::FreeCameraPlugin,
     dev_tools::fps_overlay::{FpsOverlayConfig, FpsOverlayPlugin, FrameTimeGraphConfig},
     prelude::*,
+    window::{CursorOptions, WindowMode},
 };
 
-use crate::voxel::{VoxelPlugin, VoxelSettings, VoxelViewer};
+use crate::{
+    player::PlayerPlugin,
+    voxel::{VoxelPlugin, VoxelSettings},
+};
 
+mod player;
 pub mod voxel;
 
 fn main() {
     App::new()
         .add_plugins((
-            DefaultPlugins,
+            DefaultPlugins.set(WindowPlugin {
+                primary_window: Some(Window {
+                    mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+
+                    ..default()
+                }),
+                primary_cursor_options: Some(CursorOptions {
+                    visible: false,
+                    ..default()
+                }),
+                ..default()
+            }),
             PhysicsPlugins::default(),
             // PhysicsDebugPlugin,
             FreeCameraPlugin,
@@ -32,13 +48,24 @@ fn main() {
                     frame_time_graph_config: FrameTimeGraphConfig {
                         enabled: true,
                         min_fps: 30.0,
-                        target_fps: 144.0,
+                        target_fps: 120.0,
                     },
                 },
             },
+            PlayerPlugin,
         ))
         .add_systems(Startup, setup)
+        .add_systems(Update, close_on_esc)
         .run();
+}
+
+fn close_on_esc(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut app_exit_events: MessageWriter<AppExit>,
+) {
+    if keyboard_input.just_pressed(KeyCode::Escape) {
+        app_exit_events.write(AppExit::Success);
+    }
 }
 
 fn setup(
@@ -49,27 +76,15 @@ fn setup(
 ) {
     commands.spawn((
         DirectionalLight {
-            shadow_maps_enabled: true,
-            contact_shadows_enabled: true,
+            shadow_maps_enabled: false,
+            contact_shadows_enabled: false,
             ..default()
         },
         Transform::from_xyz(20.0, 30.0, 20.0).looking_at(Vec3::new(8.0, 0.0, 8.0), Vec3::Y),
     ));
 
-    commands.spawn((
-        Camera3d::default(),
-        VoxelViewer,
-        Transform::from_xyz(24.0, 22.0, 28.0)
-            .looking_at(voxel_settings.chunk_center(IVec2::ZERO), Vec3::Y),
-        FreeCamera {
-            walk_speed: 20.,
-            ..default()
-        },
-    ));
-
     let center = voxel_settings.chunk_center(IVec2::ZERO);
     commands.spawn((
-        Name::new("Physics test cube"),
         RigidBody::Dynamic,
         Collider::cuboid(1.0, 1.0, 1.0),
         Mesh3d(meshes.add(Cuboid::from_length(1.0))),
