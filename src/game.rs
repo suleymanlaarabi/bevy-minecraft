@@ -9,6 +9,7 @@ use crate::{menu::GameMenuPlugin, player::PlayerPlugin};
 pub enum GameState {
     #[default]
     Menu,
+    Settings,
     Game,
 }
 
@@ -19,6 +20,7 @@ impl Plugin for GamePlugin {
         app.insert_state(GameState::Menu)
             .add_plugins((PlayerPlugin, GameMenuPlugin))
             .add_systems(OnEnter(GameState::Menu), setup_menu_environment)
+            .add_systems(OnEnter(GameState::Settings), setup_menu_environment)
             .add_systems(OnEnter(GameState::Game), setup_game_environment);
     }
 }
