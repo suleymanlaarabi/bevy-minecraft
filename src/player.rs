@@ -1,7 +1,7 @@
 use std::f32::consts::FRAC_PI_2;
 
 use avian3d::prelude::*;
-use bevy::{anti_alias::smaa::Smaa, input::mouse::AccumulatedMouseMotion, prelude::*};
+use bevy::{input::mouse::AccumulatedMouseMotion, prelude::*};
 
 use crate::{
     game::GameState,
@@ -101,7 +101,6 @@ fn setup_camera(mut commands: Commands) {
         Transform::from_xyz(0.0, 30.0, 0.0),
         Visibility::default(),
         VoxelViewer,
-        Msaa::Off,
     ));
 }
 
@@ -148,10 +147,48 @@ fn spawn_player(
         DespawnOnExit(GameState::Game),
     ));
 
+    commands.spawn_scene(bsn! {
+        Node {
+            width: percent(100),
+            height: percent(100),
+            display: Display::Flex,
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center
+        }
+        GlobalZIndex(100)
+        Children [
+            Node {
+                width: px(32),
+                height: px(32),
+                position_type: PositionType::Relative
+            }
+            Children [
+                Node {
+                    width: px(2),
+                    height: px(18),
+                    position_type: PositionType::Absolute,
+                    left: px(15),
+                    top: px(7)
+                }
+                BackgroundColor(Color::WHITE),
+
+                Node {
+                    width: px(18),
+                    height: px(2),
+                    position_type: PositionType::Absolute,
+                    left: px(7),
+                    top: px(15)
+                }
+                BackgroundColor(Color::WHITE)
+            ]
+        ]
+        DespawnOnExit::<GameState>(GameState::Game)
+    });
+
     // Sun directional light
     commands.spawn((
         DirectionalLight {
-            shadow_maps_enabled: false,
+            shadow_maps_enabled: true,
             shadow_depth_bias: 0.02,
             shadow_normal_bias: 1.8,
             illuminance: 5_000.0,

@@ -2,15 +2,12 @@ use avian3d::prelude::*;
 #[cfg(feature = "dev")]
 use bevy::dev_tools::fps_overlay::{FpsOverlayConfig, FpsOverlayPlugin, FrameTimeGraphConfig};
 use bevy::{
-    camera::MainPassResolutionOverride,
     prelude::*,
-    render::{Extract, RenderApp, sync_world::RenderEntity},
     settings::SettingsPlugin,
-    window::{CursorGrabMode, CursorOptions, WindowMode, WindowResolution},
+    window::{CursorGrabMode, CursorOptions, WindowMode},
 };
 use hollow::{
     game::{GamePlugin, GameState},
-    player::PlayerCamera,
     settings::GraphicsSettings,
     voxel::{VoxelPlugin, VoxelSettings},
 };
@@ -21,7 +18,6 @@ fn main() {
         DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
-                resolution: WindowResolution::new(1920, 1080),
                 ..default()
             }),
             primary_cursor_options: Some(CursorOptions {

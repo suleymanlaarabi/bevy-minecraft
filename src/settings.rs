@@ -6,3 +6,5 @@ use bevy::{
 #[derive(Resource, SettingsGroup, Reflect, Default)]
 #[reflect(Resource, SettingsGroup, Default)]
 pub struct GraphicsSettings {}
+
+pub struct GameSettingsPlugin {}
