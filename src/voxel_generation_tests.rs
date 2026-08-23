@@ -44,7 +44,7 @@ fn generation_is_deterministic_diverse_and_seamless() {
             lowest = lowest.min(column.height);
             highest = highest.max(column.height);
             snow_found |= column.snow;
-            assert!(column.height <= settings.max_height - 3);
+            assert!(column.height <= settings.max_height - TERRAIN_HEADROOM);
             if column.snow {
                 assert!(column.height > sea_level(&settings) + 10);
             }
@@ -54,6 +54,26 @@ fn generation_is_deterministic_diverse_and_seamless() {
     assert!(snow_found);
     assert!(lowest < sea_level(&settings));
     assert!(highest > sea_level(&settings) + 15);
+}
+
+#[test]
+fn terrain_has_no_wall_like_height_jumps() {
+    let settings = VoxelSettings::default();
+    let generator = WorldGenerator::new(settings.seed);
+
+    for z in -256..=256 {
+        for x in -256..=256 {
+            let position = IVec2::new(x, z);
+            let height = generator.column(position, &settings).height;
+            for neighbor in [position + IVec2::X, position + IVec2::Y] {
+                let neighbor_height = generator.column(neighbor, &settings).height;
+                assert!(
+                    (height - neighbor_height).abs() <= 4,
+                    "wall-like height jump from {position:?} ({height}) to {neighbor:?} ({neighbor_height})"
+                );
+            }
+        }
+    }
 }
 
 #[test]

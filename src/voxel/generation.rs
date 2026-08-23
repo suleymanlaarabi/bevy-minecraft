@@ -5,6 +5,7 @@ use noiz::{prelude::*, rng::NoiseRng};
 type Simplex = Noise<common_noise::Simplex>;
 const SAMPLE_MARGIN: i32 = 4;
 const TREE_GRID: i32 = 8;
+const TERRAIN_HEADROOM: i32 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Biome {
@@ -47,23 +48,22 @@ impl WorldGenerator {
 
     fn column(&self, world: IVec2, settings: &VoxelSettings) -> Column {
         let point = world.as_vec2();
+        let continental: f32 = self.continental.sample(point);
         let erosion: f32 = self.erosion.sample(point);
+        let peaks: f32 = self.peaks.sample(point);
         let detail: f32 = self.detail.sample(point);
-        let warped = point + Vec2::new(erosion, detail) * 18.0;
-        let continental: f32 = self.continental.sample(warped);
-        let peaks: f32 = self.peaks.sample(warped);
-        let temperature: f32 = self.temperature.sample(warped);
-        let humidity: f32 = self.humidity.sample(warped);
+        let temperature: f32 = self.temperature.sample(point);
+        let humidity: f32 = self.humidity.sample(point);
         let sea = sea_level(settings);
-        let ceiling = (settings.max_height - 3).max(1) as f32;
+        let ceiling = (settings.max_height - TERRAIN_HEADROOM).max(1) as f32;
         let room = (ceiling - sea as f32).max(1.0);
         let land = smoothstep(-0.32, 0.12, continental);
         let mountain_region =
-            smoothstep(-0.15, 0.60, -erosion) * smoothstep(-0.05, 0.30, continental);
-        let ridges = (1.0 - peaks.abs()).clamp(0.0, 1.0).powi(3);
-        let base = (sea as f32 - 5.0 + land * 10.0 + detail * 1.5).clamp(1.0, ceiling);
-        let mountain = ridges * mountain_region;
-        let height = base + mountain * (ceiling - base) * 0.92;
+            smoothstep(-0.10, 0.45, continental) * smoothstep(-0.25, 0.50, -erosion);
+        let mountain_shape = smoothstep(-0.15, 0.65, peaks).powi(2);
+        let base =
+            (sea as f32 - 5.0 + land * 10.0 + erosion * 2.0 + detail * 1.25).clamp(1.0, ceiling);
+        let height = base + mountain_region * mountain_shape * room * 0.58;
         let height = height.round().clamp(1.0, ceiling) as i32;
         let elevation = ((height - sea).max(0) as f32 / room).clamp(0.0, 1.0);
         let cold = temperature - elevation * 0.8;
