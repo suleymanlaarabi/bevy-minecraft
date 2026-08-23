@@ -3,17 +3,22 @@ use std::f32::consts::FRAC_PI_2;
 use avian3d::prelude::*;
 use bevy::{input::mouse::AccumulatedMouseMotion, prelude::*};
 
-use crate::voxel::{VoxelSettings, VoxelViewer};
+use crate::{
+    game::GameState,
+    voxel::{VoxelSettings, VoxelViewer},
+};
 
 pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<PlayerController>()
-            .add_systems(Startup, spawn_player)
+            .add_systems(OnEnter(GameState::Game), spawn_player)
             .add_systems(
                 Update,
-                (update_grounded_state, mouse_look, player_movement).chain(),
+                (update_grounded_state, mouse_look, player_movement)
+                    .chain()
+                    .run_if(in_state(GameState::Game)),
             );
     }
 }
@@ -92,6 +97,7 @@ fn spawn_player(mut commands: Commands, voxel_settings: Option<Res<VoxelSettings
             .with_ignore_self(true),
             Transform::from_translation(spawn_pos),
             Visibility::default(),
+            DespawnOnExit(GameState::Game),
         ))
         .with_children(|parent| {
             parent.spawn((
@@ -107,6 +113,15 @@ fn spawn_player(mut commands: Commands, voxel_settings: Option<Res<VoxelSettings
                 VoxelViewer,
             ));
         });
+    commands.spawn((
+        DirectionalLight {
+            shadow_maps_enabled: true,
+            contact_shadows_enabled: true,
+            ..default()
+        },
+        Transform::from_xyz(20.0, 30.0, 20.0).looking_at(Vec3::new(8.0, 0.0, 8.0), Vec3::Y),
+        DespawnOnExit(GameState::Game),
+    ));
 }
 
 fn update_grounded_state(

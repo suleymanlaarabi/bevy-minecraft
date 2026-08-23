@@ -5,10 +5,11 @@ mod rebuild;
 mod streaming;
 use bevy::prelude::*;
 pub use data::{ChunkVoxels, SetVoxel, VoxelChunk, VoxelKind, VoxelViewer};
+use crate::game::GameState;
 use rebuild::{
     cleanup_removed_chunk, poll_builds, prepare_assets, set_voxel, start_changed_builds,
 };
-use streaming::{ChunkIndex, StoredChunks, StreamOffsets, stream_chunks};
+use streaming::{ChunkIndex, StoredChunks, StreamOffsets, StreamState, stream_chunks};
 
 pub struct VoxelPlugin {
     settings: VoxelSettings,
@@ -32,12 +33,37 @@ impl Plugin for VoxelPlugin {
             .insert_resource(StreamOffsets::new(self.settings.view_distance))
             .init_resource::<ChunkIndex>()
             .init_resource::<StoredChunks>()
+            .init_resource::<StreamState>()
             .add_observer(set_voxel)
             .add_observer(cleanup_removed_chunk)
             .add_systems(PreStartup, prepare_assets)
-            .add_systems(Update, stream_chunks)
-            .add_systems(PostUpdate, (start_changed_builds, poll_builds).chain());
+            .add_systems(
+                Update,
+                stream_chunks.run_if(in_state(GameState::Game)),
+            )
+            .add_systems(
+                PostUpdate,
+                (start_changed_builds, poll_builds)
+                    .chain()
+                    .run_if(in_state(GameState::Game)),
+            )
+            .add_systems(OnExit(GameState::Game), cleanup_voxel_world);
     }
+}
+
+fn cleanup_voxel_world(
+    mut commands: Commands,
+    chunks: Query<Entity, With<VoxelChunk>>,
+    mut chunk_index: ResMut<ChunkIndex>,
+    mut stored_chunks: ResMut<StoredChunks>,
+    mut stream_state: ResMut<StreamState>,
+) {
+    for entity in &chunks {
+        commands.entity(entity).despawn();
+    }
+    chunk_index.clear();
+    stored_chunks.clear();
+    *stream_state = StreamState::default();
 }
 
 #[derive(Resource, Clone, Debug)]

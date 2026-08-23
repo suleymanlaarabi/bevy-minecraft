@@ -7,6 +7,8 @@ use bevy::{
     platform::collections::{HashMap, hash_map::Entry},
     prelude::*,
 };
+use crate::game::GameState;
+
 #[derive(Resource, Default, Deref, DerefMut)]
 pub(crate) struct ChunkIndex(HashMap<IVec2, Entity>);
 #[derive(Resource, Default, Deref, DerefMut)]
@@ -27,11 +29,11 @@ impl StreamOffsets {
     }
 }
 
-#[derive(Default)]
+#[derive(Resource, Default)]
 pub(crate) struct StreamState {
-    center: Option<IVec2>,
-    cursor: usize,
-    pending_despawns: Vec<Entity>,
+    pub center: Option<IVec2>,
+    pub cursor: usize,
+    pub pending_despawns: Vec<Entity>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -43,7 +45,7 @@ pub(crate) fn stream_chunks(
     mut stored: ResMut<StoredChunks>,
     assets: Res<VoxelAssets>,
     mut index: ResMut<ChunkIndex>,
-    mut state: Local<StreamState>,
+    mut state: ResMut<StreamState>,
 ) {
     let center = settings.chunk_at(viewer.translation());
     if state.center != Some(center) {
@@ -86,6 +88,7 @@ pub(crate) fn stream_chunks(
                 Transform::from_xyz(origin.x as f32, 0.0, origin.y as f32),
                 RigidBody::Static,
                 Friction::new(0.8),
+                DespawnOnExit(GameState::Game),
             ))
             .id();
         index_entry.insert(entity);

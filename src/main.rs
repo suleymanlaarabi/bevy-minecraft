@@ -2,16 +2,12 @@ use avian3d::prelude::*;
 use bevy::{
     dev_tools::fps_overlay::{FpsOverlayConfig, FpsOverlayPlugin, FrameTimeGraphConfig},
     prelude::*,
-    window::{CursorOptions, WindowMode},
+    window::{CursorGrabMode, CursorOptions, WindowMode},
 };
-
-use crate::{
-    player::PlayerPlugin,
+use hollow::{
+    game::{GamePlugin, GameState},
     voxel::{VoxelPlugin, VoxelSettings},
 };
-
-mod player;
-pub mod voxel;
 
 fn main() {
     App::new()
@@ -23,7 +19,8 @@ fn main() {
                     ..default()
                 }),
                 primary_cursor_options: Some(CursorOptions {
-                    visible: false,
+                    visible: true,
+                    grab_mode: CursorGrabMode::None,
                     ..default()
                 }),
                 ..default()
@@ -49,43 +46,17 @@ fn main() {
                     },
                 },
             },
-            PlayerPlugin,
+            GamePlugin,
         ))
-        .add_systems(Startup, setup)
-        .add_systems(Update, close_on_esc)
+        .add_systems(Update, handle_escape.run_if(in_state(GameState::Game)))
         .run();
 }
 
-fn close_on_esc(
+fn handle_escape(
     keyboard_input: Res<ButtonInput<KeyCode>>,
-    mut app_exit_events: MessageWriter<AppExit>,
+    mut next_state: ResMut<NextState<GameState>>,
 ) {
     if keyboard_input.just_pressed(KeyCode::Escape) {
-        app_exit_events.write(AppExit::Success);
+        next_state.set(GameState::Menu);
     }
-}
-
-fn setup(
-    mut commands: Commands,
-    voxel_settings: Res<VoxelSettings>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    commands.spawn((
-        DirectionalLight {
-            shadow_maps_enabled: false,
-            contact_shadows_enabled: false,
-            ..default()
-        },
-        Transform::from_xyz(20.0, 30.0, 20.0).looking_at(Vec3::new(8.0, 0.0, 8.0), Vec3::Y),
-    ));
-
-    let center = voxel_settings.chunk_center(IVec2::ZERO);
-    commands.spawn((
-        RigidBody::Dynamic,
-        Collider::cuboid(1.0, 1.0, 1.0),
-        Mesh3d(meshes.add(Cuboid::from_length(1.0))),
-        MeshMaterial3d(materials.add(Color::srgb(0.8, 0.2, 0.15))),
-        Transform::from_xyz(center.x, voxel_settings.base_height + 10.0, center.z),
-    ));
 }
