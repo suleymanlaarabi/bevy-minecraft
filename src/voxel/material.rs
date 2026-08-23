@@ -5,7 +5,7 @@ use bevy::{
     },
     pbr::{ExtendedMaterial, MaterialExtension},
     prelude::*,
-    render::render_resource::AsBindGroup,
+    render::render_resource::{AsBindGroup, ShaderType},
     shader::ShaderRef,
 };
 
@@ -20,6 +20,34 @@ pub(crate) struct VoxelMaterialExtension {
 }
 
 pub(crate) type VoxelMaterial = ExtendedMaterial<StandardMaterial, VoxelMaterialExtension>;
+
+#[derive(Clone, Copy, Debug, Reflect, ShaderType)]
+pub(crate) struct WaterSettings {
+    /// Two normalized XZ wave directions packed as XY and ZW.
+    directions: Vec4,
+    /// Spatial frequencies packed as XY and animation speeds packed as ZW.
+    frequency_speed: Vec4,
+    /// Wave slopes packed as XY. ZW are reserved for future tuning.
+    strength: Vec4,
+}
+
+impl Default for WaterSettings {
+    fn default() -> Self {
+        Self {
+            directions: Vec4::new(0.8, 0.6, -0.45, 0.89),
+            frequency_speed: Vec4::new(0.32, 0.57, 0.75, -0.48),
+            strength: Vec4::new(0.10, 0.055, 0.0, 0.0),
+        }
+    }
+}
+
+#[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
+pub(crate) struct WaterMaterialExtension {
+    #[uniform(100)]
+    settings: WaterSettings,
+}
+
+pub(crate) type WaterMaterial = ExtendedMaterial<StandardMaterial, WaterMaterialExtension>;
 
 pub(crate) fn block_texture(asset_server: &AssetServer) -> Handle<Image> {
     asset_server
@@ -43,5 +71,11 @@ pub(crate) fn block_texture(asset_server: &AssetServer) -> Handle<Image> {
 impl MaterialExtension for VoxelMaterialExtension {
     fn fragment_shader() -> ShaderRef {
         "shaders/voxel_material.wgsl".into()
+    }
+}
+
+impl MaterialExtension for WaterMaterialExtension {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/water_material.wgsl".into()
     }
 }

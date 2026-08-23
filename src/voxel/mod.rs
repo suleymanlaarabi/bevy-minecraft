@@ -5,10 +5,13 @@ mod meshing;
 mod rebuild;
 mod streaming;
 use crate::game::GameState;
-use bevy::prelude::*;
+use bevy::{
+    pbr::{DistanceFog, FogFalloff},
+    prelude::*,
+};
 pub use data::{ChunkVoxels, SetVoxel, VoxelChunk, VoxelKind, VoxelViewer};
 use generation::WorldGenerator;
-use material::VoxelMaterial;
+use material::{VoxelMaterial, WaterMaterial};
 use rebuild::{
     cleanup_removed_chunk, poll_builds, prepare_assets, set_voxel, start_changed_builds,
 };
@@ -32,24 +35,74 @@ impl Default for VoxelPlugin {
 
 impl Plugin for VoxelPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(MaterialPlugin::<VoxelMaterial>::default())
-            .insert_resource(self.settings.clone())
-            .insert_resource(WorldGenerator::new(self.settings.seed))
-            .insert_resource(StreamOffsets::new(self.settings.view_distance))
-            .init_resource::<ChunkIndex>()
-            .init_resource::<StoredChunks>()
-            .init_resource::<StreamState>()
-            .add_observer(set_voxel)
-            .add_observer(cleanup_removed_chunk)
-            .add_systems(PreStartup, prepare_assets)
-            .add_systems(Update, stream_chunks.run_if(in_state(GameState::Game)))
-            .add_systems(
-                PostUpdate,
-                (start_changed_builds, poll_builds)
-                    .chain()
-                    .run_if(in_state(GameState::Game)),
-            )
-            .add_systems(OnExit(GameState::Game), cleanup_voxel_world);
+        app.add_plugins((
+            MaterialPlugin::<VoxelMaterial>::default(),
+            MaterialPlugin::<WaterMaterial>::default(),
+        ))
+        .insert_resource(self.settings.clone())
+        .insert_resource(WorldGenerator::new(self.settings.seed))
+        .insert_resource(StreamOffsets::new(self.settings.view_distance))
+        .init_resource::<ChunkIndex>()
+        .init_resource::<StoredChunks>()
+        .init_resource::<StreamState>()
+        .add_observer(set_voxel)
+        .add_observer(cleanup_removed_chunk)
+        .add_systems(PreStartup, prepare_assets)
+        .add_systems(Update, stream_chunks.run_if(in_state(GameState::Game)))
+        .add_systems(
+            PostUpdate,
+            (start_changed_builds, poll_builds)
+                .chain()
+                .run_if(in_state(GameState::Game)),
+        )
+        .add_systems(
+            PostUpdate,
+            update_underwater_effect.run_if(in_state(GameState::Game)),
+        )
+        .add_systems(OnExit(GameState::Game), cleanup_voxel_world);
+    }
+}
+
+fn update_underwater_effect(
+    settings: Res<VoxelSettings>,
+    index: Res<ChunkIndex>,
+    chunks: Query<&ChunkVoxels>,
+    mut camera: Single<(&Transform, &mut DistanceFog, &mut AmbientLight), With<VoxelViewer>>,
+    mut clear_color: ResMut<ClearColor>,
+    mut previous: Local<Option<bool>>,
+) {
+    let world_position = camera.0.translation.floor().as_ivec3();
+    let (chunk_position, local_position) = settings.split_world_position(world_position);
+    let underwater = index
+        .get(&chunk_position)
+        .and_then(|entity| chunks.get(*entity).ok())
+        .and_then(|voxels| voxels.get(local_position))
+        == Some(VoxelKind::Water);
+
+    if *previous == Some(underwater) {
+        return;
+    }
+    *previous = Some(underwater);
+
+    let (_, fog, ambient) = &mut *camera;
+    if underwater {
+        fog.color = Color::srgb_u8(18, 72, 98);
+        fog.falloff = FogFalloff::Linear {
+            start: 2.0,
+            end: 35.0,
+        };
+        ambient.color = Color::srgb_u8(80, 145, 170);
+        ambient.brightness = 260.0;
+        clear_color.0 = Color::srgb_u8(18, 72, 98);
+    } else {
+        fog.color = Color::srgb_u8(195, 222, 255);
+        fog.falloff = FogFalloff::Linear {
+            start: 160.0,
+            end: 280.0,
+        };
+        ambient.color = Color::srgb_u8(215, 235, 255);
+        ambient.brightness = 500.0;
+        clear_color.0 = Color::srgb_u8(148, 195, 255);
     }
 }
 

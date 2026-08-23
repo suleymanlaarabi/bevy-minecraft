@@ -150,7 +150,7 @@ fn spawn_player(
     // Sun directional light
     commands.spawn((
         DirectionalLight {
-            shadow_maps_enabled: false,
+            shadow_maps_enabled: true,
             shadow_depth_bias: 0.02,
             shadow_normal_bias: 1.8,
             illuminance: 5_000.0,

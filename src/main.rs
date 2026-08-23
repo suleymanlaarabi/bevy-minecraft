@@ -3,10 +3,12 @@ use avian3d::prelude::*;
 use bevy::dev_tools::fps_overlay::{FpsOverlayConfig, FpsOverlayPlugin, FrameTimeGraphConfig};
 use bevy::{
     prelude::*,
+    settings::SettingsPlugin,
     window::{CursorGrabMode, CursorOptions, WindowMode},
 };
 use hollow::{
     game::{GamePlugin, GameState},
+    settings::GraphicsSettings,
     voxel::{VoxelPlugin, VoxelSettings},
 };
 
@@ -16,7 +18,6 @@ fn main() {
         DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
-
                 ..default()
             }),
             primary_cursor_options: Some(CursorOptions {
@@ -28,11 +29,13 @@ fn main() {
         }),
         PhysicsPlugins::default(),
         VoxelPlugin::new(VoxelSettings {
-            view_distance: 10,
+            view_distance: 40,
             ..default()
         }),
         GamePlugin,
     ));
+    app.register_type::<GraphicsSettings>();
+    app.add_plugins(SettingsPlugin::new("org.hollow.game"));
     add_dev_tools(&mut app);
     app.insert_resource(ClearColor(Color::srgb_u8(15, 15, 18)))
         .add_systems(Update, handle_escape.run_if(in_state(GameState::Game)))

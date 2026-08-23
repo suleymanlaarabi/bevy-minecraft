@@ -2,27 +2,29 @@ use super::{
     ChunkVoxels, SetVoxel, VoxelSettings,
     data::COLLIDER_CHANGED,
     generation::WorldGenerator,
-    material::{VoxelMaterial, VoxelMaterialExtension, block_texture},
+    material::{
+        VoxelMaterial, VoxelMaterialExtension, WaterMaterial, WaterMaterialExtension, block_texture,
+    },
     meshing::{ChunkMeshes, build_chunk_mesh},
     streaming::{ChunkIndex, StoredChunks},
 };
 use avian3d::prelude::*;
 use bevy::{
-    light::NotShadowCaster,
+    light::{NotShadowCaster, NotShadowReceiver},
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
 #[derive(Resource)]
 pub(crate) struct VoxelAssets {
     pub(crate) terrain: Handle<VoxelMaterial>,
-    water: Handle<StandardMaterial>,
+    water: Handle<WaterMaterial>,
 }
 
 pub(crate) fn prepare_assets(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut voxel_materials: ResMut<Assets<VoxelMaterial>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut water_materials: ResMut<Assets<WaterMaterial>>,
 ) {
     let blocks = block_texture(&asset_server);
     commands.insert_resource(VoxelAssets {
@@ -34,11 +36,16 @@ pub(crate) fn prepare_assets(
             },
             extension: VoxelMaterialExtension { blocks },
         }),
-        water: materials.add(StandardMaterial {
-            alpha_mode: AlphaMode::Blend,
-            cull_mode: None,
-            perceptual_roughness: 0.15,
-            ..default()
+        water: water_materials.add(WaterMaterial {
+            base: StandardMaterial {
+                base_color: Color::linear_rgba(0.035, 0.30, 0.38, 0.56),
+                alpha_mode: AlphaMode::Blend,
+                cull_mode: None,
+                perceptual_roughness: 0.08,
+                reflectance: 0.75,
+                ..default()
+            },
+            extension: WaterMaterialExtension::default(),
         }),
     });
 }
@@ -163,6 +170,7 @@ pub(crate) fn poll_builds(
                         MeshMaterial3d(assets.water.clone()),
                         ChildOf(entity),
                         NotShadowCaster,
+                        NotShadowReceiver,
                     ))
                     .id();
                 commands.entity(entity).insert(ChunkWater {
