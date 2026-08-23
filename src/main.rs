@@ -2,6 +2,7 @@ use avian3d::prelude::*;
 #[cfg(feature = "dev")]
 use bevy::dev_tools::fps_overlay::{FpsOverlayConfig, FpsOverlayPlugin, FrameTimeGraphConfig};
 use bevy::{
+    feathers::{FeathersPlugins, dark_theme::create_dark_theme, theme::UiTheme},
     prelude::*,
     window::{CursorGrabMode, CursorOptions, ExitCondition, WindowMode},
 };
@@ -27,6 +28,7 @@ fn main() {
             }),
             ..default()
         }),
+        FeathersPlugins,
         GameSettingsPlugin,
         PhysicsPlugins::default(),
         VoxelPlugin::new(VoxelSettings {
@@ -36,7 +38,8 @@ fn main() {
         GamePlugin,
     ));
     add_dev_tools(&mut app);
-    app.insert_resource(ClearColor(Color::srgb_u8(15, 15, 18)))
+    app.insert_resource(UiTheme(create_dark_theme()))
+        .insert_resource(ClearColor(Color::srgb_u8(15, 15, 18)))
         .add_systems(Update, handle_escape.run_if(in_state(GameState::Game)))
         .run();
 }

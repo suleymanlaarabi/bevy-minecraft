@@ -1,38 +1,37 @@
 use core::time::Duration;
 
 use bevy::{
-    anti_alias::fxaa::Fxaa,
-    light::DirectionalLightShadowMap,
+    feathers::{
+        containers::{pane, pane_body, pane_header},
+        controls::{
+            ButtonVariant, FeathersButton, FeathersRadio, FeathersSlider, FeathersToggleSwitch,
+        },
+        theme::{InheritableThemeTextColor, ThemeBackgroundColor, ThemedText},
+        tokens,
+    },
+    input::common_conditions::input_just_pressed,
     prelude::*,
     settings::{
         ReflectSettingsGroup, SaveSettingsDeferred, SaveSettingsSync, SettingsGroup, SettingsPlugin,
     },
+    ui::Checked,
     ui_widgets::{
-        Slider, SliderPrecision, SliderRange, SliderStep, SliderThumb, SliderValue, ValueChange,
+        Activate, RadioGroup, SliderPrecision, SliderStep, ValueChange, checkbox_self_update,
+        radio_self_update, slider_self_update,
     },
-    window::{MonitorSelection, PresentMode, WindowCloseRequested, WindowMode},
+    window::WindowCloseRequested,
 };
 
-use crate::{game::GameState, player::PlayerCamera};
+use crate::game::GameState;
+
+mod apply;
 
 const SETTINGS_APP_NAME: &str = "org.hollow.game";
 const FOV_MIN: f32 = 60.0;
 const FOV_MAX: f32 = 110.0;
-const WINDOWED_WIDTH: f32 = 1600.0;
-const WINDOWED_HEIGHT: f32 = 900.0;
+const SAVE_DELAY: Duration = Duration::from_millis(250);
 
-const PAGE_BACKGROUND: Color = Color::srgb(0.055, 0.055, 0.07);
-const PANEL_BACKGROUND: Color = Color::srgb(0.085, 0.085, 0.105);
-const ROW_BACKGROUND: Color = Color::srgb(0.115, 0.115, 0.14);
-const BUTTON_BACKGROUND: Color = Color::srgb(0.16, 0.16, 0.19);
-const BUTTON_HOVERED: Color = Color::srgb(0.23, 0.23, 0.28);
-const BUTTON_PRESSED: Color = Color::srgb(0.33, 0.33, 0.4);
-const BUTTON_SELECTED: Color = Color::srgb(0.18, 0.42, 0.68);
-const BUTTON_SELECTED_HOVERED: Color = Color::srgb(0.23, 0.5, 0.78);
-const ACCENT: Color = Color::srgb(0.27, 0.58, 0.9);
-const MUTED_TEXT: Color = Color::srgb(0.68, 0.7, 0.76);
-
-#[derive(Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Component, Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AntiAliasingMode {
     Off,
     Fxaa,
@@ -51,13 +50,9 @@ impl AntiAliasingMode {
             Self::Msaa8x => Msaa::Sample8,
         }
     }
-
-    const fn uses_fxaa(self) -> bool {
-        matches!(self, Self::Fxaa)
-    }
 }
 
-#[derive(Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Component, Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ShadowQuality {
     Off,
     Low,
@@ -77,7 +72,7 @@ impl ShadowQuality {
     }
 }
 
-#[derive(Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Component, Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DisplayMode {
     Windowed,
     #[default]
@@ -85,6 +80,7 @@ pub enum DisplayMode {
 }
 
 #[derive(Resource, SettingsGroup, Reflect, Clone, Copy, Debug, PartialEq)]
+#[component(immutable)]
 #[reflect(Resource, SettingsGroup, Default)]
 #[settings_group(group = "graphics")]
 pub struct GraphicsSettings {
@@ -107,408 +103,292 @@ impl Default for GraphicsSettings {
     }
 }
 
-pub struct GameSettingsPlugin;
-
-#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum SettingsSystem {
-    Input,
-    Apply,
-    Present,
+impl GraphicsSettings {
+    fn normalized(mut self) -> Self {
+        self.field_of_view = normalized_fov(self.field_of_view);
+        self
+    }
 }
+
+pub struct GameSettingsPlugin;
 
 impl Plugin for GameSettingsPlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<AntiAliasingMode>()
             .register_type::<ShadowQuality>()
             .register_type::<DisplayMode>()
-            .register_type::<GraphicsSettings>()
-            .add_plugins(SettingsPlugin::new(SETTINGS_APP_NAME));
-
-        apply_loaded_window_settings(app);
-
-        app.configure_sets(
-            Update,
-            (
-                SettingsSystem::Input,
-                SettingsSystem::Apply,
-                SettingsSystem::Present,
+            .register_type::<GraphicsSettings>();
+        apply::register(app);
+        app.add_plugins(SettingsPlugin::new(SETTINGS_APP_NAME))
+            .add_systems(OnEnter(GameState::Settings), spawn_settings_page)
+            .add_systems(
+                Update,
+                back_to_menu
+                    .run_if(in_state(GameState::Settings))
+                    .run_if(input_just_pressed(KeyCode::Escape)),
             )
-                .chain(),
-        )
-        .add_observer(handle_fov_change)
-        .add_systems(OnEnter(GameState::Settings), spawn_settings_page)
-        .add_systems(
-            Update,
-            (
-                sanitize_graphics_settings,
-                handle_settings_buttons,
-                handle_settings_escape,
-            )
-                .chain()
-                .in_set(SettingsSystem::Input)
-                .run_if(in_state(GameState::Settings)),
-        )
-        .add_systems(
-            Update,
-            apply_changed_graphics_settings
-                .in_set(SettingsSystem::Apply)
-                .run_if(resource_changed::<GraphicsSettings>),
-        )
-        .add_systems(
-            Update,
-            apply_graphics_to_new_targets.in_set(SettingsSystem::Apply),
-        )
-        .add_systems(
-            Update,
-            sync_settings_ui
-                .in_set(SettingsSystem::Present)
-                .run_if(in_state(GameState::Settings)),
-        )
-        .add_systems(Update, handle_window_close);
-    }
-}
-
-fn apply_loaded_window_settings(app: &mut App) {
-    let Some(settings) = app.world().get_resource::<GraphicsSettings>().copied() else {
-        return;
-    };
-    let world = app.world_mut();
-    let mut windows = world.query::<&mut Window>();
-    for mut window in windows.iter_mut(world) {
-        apply_window_settings(&settings, &mut window);
+            .add_systems(Update, handle_window_close);
     }
 }
 
 #[derive(Component, Clone, Copy, Debug, Default)]
-enum SettingsAction {
-    SetAntiAliasing(AntiAliasingMode),
-    ToggleVsync,
-    SetShadowQuality(ShadowQuality),
-    SetDisplayMode(DisplayMode),
-    Reset,
-    #[default]
-    Back,
+struct SettingsPage;
+
+trait GraphicsChoice: Component + Clone + Copy + Default + PartialEq + Unpin {
+    fn set(self, settings: &mut GraphicsSettings);
 }
 
-#[derive(Component, Clone, Copy, Debug, Default)]
-struct SettingsControl {
-    action: SettingsAction,
+impl GraphicsChoice for AntiAliasingMode {
+    fn set(self, settings: &mut GraphicsSettings) {
+        settings.anti_aliasing = self;
+    }
 }
 
-#[derive(Component, Clone, Copy, Debug, Default)]
-struct VsyncValueText;
+impl GraphicsChoice for ShadowQuality {
+    fn set(self, settings: &mut GraphicsSettings) {
+        settings.shadow_quality = self;
+    }
+}
 
-#[derive(Component, Clone, Copy, Debug, Default)]
-struct FovSlider;
-
-#[derive(Component, Clone, Copy, Debug, Default)]
-struct FovSliderThumb;
-
-#[derive(Component, Clone, Copy, Debug, Default)]
-struct FovValueText;
+impl GraphicsChoice for DisplayMode {
+    fn set(self, settings: &mut GraphicsSettings) {
+        settings.display_mode = self;
+    }
+}
 
 fn spawn_settings_page(mut commands: Commands, settings: Res<GraphicsSettings>) {
-    commands.spawn_scene_list(settings_page(*settings));
+    commands.spawn_scene(settings_page(settings.normalized()));
 }
 
-fn settings_page(settings: GraphicsSettings) -> impl SceneList {
-    bsn_list! [
-        Node {
-            width: percent(100),
-            height: percent(100),
-            display: Display::Flex,
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-            padding: px(30),
-        }
-        BackgroundColor(PAGE_BACKGROUND)
-        GlobalZIndex(200)
-        DespawnOnExit::<GameState>(GameState::Settings)
-        Children [
-            Node {
-                width: percent(100),
-                max_width: px(1080),
-                display: Display::Flex,
-                flex_direction: FlexDirection::Column,
-                row_gap: px(18),
-                padding: px(28),
-                border: px(1),
-                border_radius: BorderRadius::all(px(12)),
-            }
-            BackgroundColor(PANEL_BACKGROUND)
-            BorderColor::all(Color::srgb(0.22, 0.22, 0.27))
-            Children [
-                Node {
-                    width: percent(100),
-                    display: Display::Flex,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: px(4),
-                }
-                Children [
-                    Text::new("Graphics Settings")
-                    TextFont { font_size: px(42) }
-                    TextColor(Color::WHITE),
-                    Text::new("Changes are applied and saved automatically")
-                    TextFont { font_size: px(18) }
-                    TextColor(MUTED_TEXT)
-                ],
-
-                setting_row("Anti-Aliasing", bsn_list![
-                    option_button("Off", SettingsAction::SetAntiAliasing(AntiAliasingMode::Off)),
-                    option_button("FXAA", SettingsAction::SetAntiAliasing(AntiAliasingMode::Fxaa)),
-                    option_button("MSAA 2x", SettingsAction::SetAntiAliasing(AntiAliasingMode::Msaa2x)),
-                    option_button("MSAA 4x", SettingsAction::SetAntiAliasing(AntiAliasingMode::Msaa4x)),
-                    option_button("MSAA 8x", SettingsAction::SetAntiAliasing(AntiAliasingMode::Msaa8x)),
-                ]),
-
-                setting_row("VSync", bsn_list![
-                    vsync_button(settings.vsync)
-                ]),
-
-                setting_row("Shadow Quality", bsn_list![
-                    option_button("Off", SettingsAction::SetShadowQuality(ShadowQuality::Off)),
-                    option_button("Low", SettingsAction::SetShadowQuality(ShadowQuality::Low)),
-                    option_button("Medium", SettingsAction::SetShadowQuality(ShadowQuality::Medium)),
-                    option_button("High", SettingsAction::SetShadowQuality(ShadowQuality::High)),
-                ]),
-
-                setting_row("Field of View", bsn_list![
-                    fov_control(settings.field_of_view)
-                ]),
-
-                setting_row("Display Mode", bsn_list![
-                    option_button("Windowed", SettingsAction::SetDisplayMode(DisplayMode::Windowed)),
-                    option_button("Borderless", SettingsAction::SetDisplayMode(DisplayMode::BorderlessFullscreen)),
-                ]),
-
-                Node {
-                    width: percent(100),
-                    display: Display::Flex,
-                    justify_content: JustifyContent::SpaceBetween,
-                    align_items: AlignItems::Center,
-                    column_gap: px(12),
-                    margin: UiRect::top(px(4)),
-                }
-                Children [
-                    footer_button("Reset Defaults", SettingsAction::Reset),
-                    footer_button("Back", SettingsAction::Back)
-                ]
-            ]
-        ]
-    ]
-}
-
-fn setting_row(label: &'static str, controls: impl SceneList) -> impl Scene {
+fn settings_page(settings: GraphicsSettings) -> impl Scene {
     bsn! {
         Node {
             width: percent(100),
-            min_height: px(76),
-            display: Display::Flex,
+            height: percent(100),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            padding: px(24),
+        }
+        SettingsPage
+        ThemeBackgroundColor(tokens::WINDOW_BG)
+        GlobalZIndex(200)
+        DespawnOnExit::<GameState>(GameState::Settings)
+        Children [(
+            pane()
+            Node {
+                width: percent(100),
+                max_width: px(780),
+            }
+            Children [
+                pane_header()
+                Children [(Text("Graphics Settings") ThemedText)],
+                pane_body()
+                Node { row_gap: px(8) }
+                InheritableThemeTextColor(tokens::TEXT_MAIN)
+                Children [
+                    setting_row("Anti-Aliasing", anti_aliasing_control(settings.anti_aliasing)),
+                    setting_row("VSync", vsync_control(settings.vsync)),
+                    setting_row("Shadow Quality", shadow_quality_control(settings.shadow_quality)),
+                    setting_row("Field of View", fov_control(settings.field_of_view)),
+                    setting_row("Display Mode", display_mode_control(settings.display_mode)),
+                    Node {
+                        width: percent(100),
+                        justify_content: JustifyContent::SpaceBetween,
+                        column_gap: px(8),
+                        margin: UiRect::top(px(4)),
+                    }
+                    Children [
+                        reset_button(),
+                        back_button(),
+                    ]
+                ]
+            ]
+        )]
+    }
+}
+
+fn setting_row(label: &'static str, control: impl Scene) -> impl Scene {
+    bsn! {
+        Node {
+            width: percent(100),
+            min_height: px(48),
             flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::Center,
             justify_content: JustifyContent::SpaceBetween,
             column_gap: px(20),
-            row_gap: px(10),
-            padding: UiRect::axes(px(18), px(14)),
-            border_radius: BorderRadius::all(px(8)),
+            row_gap: px(8),
+            padding: UiRect::axes(px(10), px(6)),
         }
-        BackgroundColor(ROW_BACKGROUND)
         Children [
+            Node { width: px(170), min_width: px(170), display: Display::Flex, align_items: AlignItems::Center }
+            Children [(Text(label) ThemedText)],
             Node {
-                width: px(190),
-                min_width: px(190),
-                align_items: AlignItems::Center
-            }
-            Children [
-                Text::new(label)
-                TextFont { font_size: px(21) }
-                TextColor(Color::WHITE)
-            ],
-            Node {
-                display: Display::Flex,
                 flex_grow: 1.0,
-                flex_wrap: FlexWrap::Wrap,
                 justify_content: JustifyContent::FlexEnd,
                 align_items: AlignItems::Center,
-                column_gap: px(8),
-                row_gap: px(8),
             }
-            Children [ {controls} ]
+            Children [control]
         ]
     }
 }
 
-fn option_button(label: &'static str, action: SettingsAction) -> impl Scene {
+fn radio_group() -> impl Scene {
     bsn! {
-        Button
-        Interaction::default()
-        SettingsControl { action }
         Node {
-            min_width: px(100),
-            height: px(42),
-            display: Display::Flex,
+            flex_wrap: FlexWrap::Wrap,
+            justify_content: JustifyContent::FlexEnd,
             align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-            padding: UiRect::horizontal(px(14)),
-            border_radius: BorderRadius::all(px(7)),
+            column_gap: px(12),
+            row_gap: px(6),
         }
-        BackgroundColor(BUTTON_BACKGROUND)
+        RadioGroup
+        on(radio_self_update)
+    }
+}
+
+fn anti_aliasing_control(selected: AntiAliasingMode) -> impl Scene {
+    bsn! {
+        radio_group()
+        on(set_choice::<AntiAliasingMode>)
         Children [
-            Text::new(label)
-            TextFont { font_size: px(17) }
-            TextColor(Color::WHITE)
+            radio_choice("Off", AntiAliasingMode::Off, selected),
+            radio_choice("FXAA", AntiAliasingMode::Fxaa, selected),
+            radio_choice("MSAA 2x", AntiAliasingMode::Msaa2x, selected),
+            radio_choice("MSAA 4x", AntiAliasingMode::Msaa4x, selected),
+            radio_choice("MSAA 8x", AntiAliasingMode::Msaa8x, selected),
         ]
     }
 }
 
-fn vsync_button(enabled: bool) -> impl Scene {
-    let label = if enabled { "On" } else { "Off" };
+fn radio_choice<T: GraphicsChoice>(label: &'static str, value: T, selected: T) -> impl Scene {
+    let checked = (value == selected).then_some(bsn! { Checked });
     bsn! {
-        Button
-        Interaction::default()
-        SettingsControl { action: SettingsAction::ToggleVsync }
-        Node {
-            min_width: px(110),
-            height: px(42),
-            display: Display::Flex,
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-            padding: UiRect::horizontal(px(14)),
-            border_radius: BorderRadius::all(px(7)),
-        }
-        BackgroundColor(BUTTON_BACKGROUND)
+        @FeathersRadio { @caption: bsn! { Text(label) ThemedText } }
+        template_value(value)
+        checked
+    }
+}
+
+fn shadow_quality_control(selected: ShadowQuality) -> impl Scene {
+    bsn! {
+        radio_group()
+        on(set_choice::<ShadowQuality>)
         Children [
-            Text::new(label)
-            VsyncValueText
-            TextFont { font_size: px(17) }
-            TextColor(Color::WHITE)
+            radio_choice("Off", ShadowQuality::Off, selected),
+            radio_choice("Low", ShadowQuality::Low, selected),
+            radio_choice("Medium", ShadowQuality::Medium, selected),
+            radio_choice("High", ShadowQuality::High, selected),
         ]
     }
 }
 
-fn footer_button(label: &'static str, action: SettingsAction) -> impl Scene {
+fn display_mode_control(selected: DisplayMode) -> impl Scene {
     bsn! {
-        Button
-        Interaction::default()
-        SettingsControl { action }
-        Node {
-            min_width: px(170),
-            height: px(50),
-            display: Display::Flex,
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-            padding: UiRect::horizontal(px(20)),
-            border_radius: BorderRadius::all(px(8)),
-        }
-        BackgroundColor(BUTTON_BACKGROUND)
+        radio_group()
+        on(set_choice::<DisplayMode>)
         Children [
-            Text::new(label)
-            TextFont { font_size: px(19) }
-            TextColor(Color::WHITE)
+            radio_choice("Windowed", DisplayMode::Windowed, selected),
+            radio_choice("Borderless", DisplayMode::BorderlessFullscreen, selected),
         ]
+    }
+}
+
+fn vsync_control(enabled: bool) -> impl Scene {
+    let checked = enabled.then_some(bsn! { Checked });
+    bsn! {
+        @FeathersToggleSwitch
+        checked
+        on(checkbox_self_update)
+        on(set_vsync)
     }
 }
 
 fn fov_control(value: f32) -> impl Scene {
     bsn! {
-        Node {
-            min_width: px(430),
-            height: px(42),
-            display: Display::Flex,
-            align_items: AlignItems::Center,
-            column_gap: px(16),
+        @FeathersSlider {
+            @value: value,
+            @min: FOV_MIN,
+            @max: FOV_MAX,
         }
-        Children [
-            Node {
-                position_type: PositionType::Relative,
-                width: percent(100),
-                height: px(20),
-                display: Display::Flex,
-                align_items: AlignItems::Center,
-            }
-            FovSlider
-            Slider::default()
-            SliderValue(value)
-            SliderRange::new(FOV_MIN, FOV_MAX)
-            SliderStep(1.0)
-            SliderPrecision(0)
-            Children [
-                Node {
-                    width: percent(100),
-                    height: px(6),
-                    border_radius: BorderRadius::all(px(3)),
-                }
-                BackgroundColor(Color::srgb(0.055, 0.055, 0.07)),
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: px(0),
-                    right: px(16),
-                    top: px(0),
-                    bottom: px(0),
-                }
-                Children [
-                    Node {
-                        position_type: PositionType::Absolute,
-                        left: percent(0),
-                        width: px(16),
-                        height: px(16),
-                        border_radius: BorderRadius::MAX,
-                    }
-                    FovSliderThumb
-                    SliderThumb
-                    BackgroundColor(ACCENT)
-                ]
-            ],
-            Node {
-                width: px(62),
-                display: Display::Flex,
-                justify_content: JustifyContent::FlexEnd,
-            }
-            Children [
-                Text::new(format!("{}", value.round() as i32))
-                FovValueText
-                TextFont { font_size: px(18) }
-                TextColor(Color::WHITE)
-            ]
-        ]
+        Node { width: px(320) }
+        SliderStep(1.0)
+        SliderPrecision(0)
+        on(slider_self_update)
+        on(set_field_of_view)
     }
 }
 
-fn handle_settings_buttons(
+fn reset_button() -> impl Scene {
+    bsn! {
+        @FeathersButton {
+            @caption: bsn! { Text("Reset Defaults") ThemedText }
+        }
+        on(reset_settings)
+    }
+}
+
+fn back_button() -> impl Scene {
+    bsn! {
+        @FeathersButton {
+            @caption: bsn! { Text("Back") ThemedText },
+            @variant: ButtonVariant::Primary,
+        }
+        on(back_to_menu_on_activate)
+    }
+}
+
+fn set_choice<T: GraphicsChoice>(
+    change: On<ValueChange<Entity>>,
+    choices: Query<&T>,
+    settings: Res<GraphicsSettings>,
     mut commands: Commands,
-    mut settings: ResMut<GraphicsSettings>,
-    mut next_state: ResMut<NextState<GameState>>,
-    controls: Query<(&Interaction, &SettingsControl), Changed<Interaction>>,
+) {
+    if let Ok(choice) = choices.get(change.value) {
+        let mut updated = *settings;
+        choice.set(&mut updated);
+        store_settings(*settings, updated, &mut commands);
+    }
+}
+
+fn set_vsync(
+    change: On<ValueChange<bool>>,
+    settings: Res<GraphicsSettings>,
+    mut commands: Commands,
 ) {
     let mut updated = *settings;
-
-    for (interaction, control) in &controls {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
-
-        match control.action {
-            SettingsAction::SetAntiAliasing(value) => updated.anti_aliasing = value,
-            SettingsAction::ToggleVsync => updated.vsync = !updated.vsync,
-            SettingsAction::SetShadowQuality(value) => updated.shadow_quality = value,
-            SettingsAction::SetDisplayMode(value) => updated.display_mode = value,
-            SettingsAction::Reset => updated = GraphicsSettings::default(),
-            SettingsAction::Back => next_state.set(GameState::Menu),
-        }
-    }
-
-    if updated != *settings {
-        *settings = updated;
-        queue_settings_save(&mut commands);
-    }
+    updated.vsync = change.value;
+    store_settings(*settings, updated, &mut commands);
 }
 
-fn sanitize_graphics_settings(mut settings: ResMut<GraphicsSettings>, mut commands: Commands) {
-    let field_of_view = normalized_fov(settings.field_of_view);
-    if settings.field_of_view != field_of_view {
-        settings.field_of_view = field_of_view;
-        queue_settings_save(&mut commands);
+fn set_field_of_view(
+    change: On<ValueChange<f32>>,
+    settings: Res<GraphicsSettings>,
+    mut commands: Commands,
+) {
+    let mut updated = *settings;
+    updated.field_of_view = normalized_fov(change.value.round());
+    store_settings(*settings, updated, &mut commands);
+}
+
+fn reset_settings(
+    _activate: On<Activate>,
+    pages: Query<Entity, With<SettingsPage>>,
+    settings: Res<GraphicsSettings>,
+    mut commands: Commands,
+) {
+    let defaults = GraphicsSettings::default();
+    store_settings(*settings, defaults, &mut commands);
+    for page in &pages {
+        commands.entity(page).despawn();
+    }
+    commands.spawn_scene(settings_page(defaults));
+}
+
+fn store_settings(current: GraphicsSettings, updated: GraphicsSettings, commands: &mut Commands) {
+    let updated = updated.normalized();
+    if updated != current {
+        commands.insert_resource_if_neq(updated);
+        commands.queue(SaveSettingsDeferred(SAVE_DELAY));
     }
 }
 
@@ -520,193 +400,12 @@ fn normalized_fov(value: f32) -> f32 {
     }
 }
 
-fn handle_fov_change(
-    event: On<ValueChange<f32>>,
-    sliders: Query<(), With<FovSlider>>,
-    mut settings: ResMut<GraphicsSettings>,
-    mut commands: Commands,
-) {
-    if sliders.get(event.source).is_err() {
-        return;
-    }
-
-    let value = normalized_fov(event.value.round());
-    commands.entity(event.source).insert(SliderValue(value));
-    if settings.field_of_view != value {
-        settings.field_of_view = value;
-        queue_settings_save(&mut commands);
-    }
+fn back_to_menu(mut next_state: ResMut<NextState<GameState>>) {
+    next_state.set(GameState::Menu);
 }
 
-fn handle_settings_escape(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut next_state: ResMut<NextState<GameState>>,
-) {
-    if keyboard.just_pressed(KeyCode::Escape) {
-        next_state.set(GameState::Menu);
-    }
-}
-
-fn sync_settings_ui(
-    settings: Res<GraphicsSettings>,
-    mut controls: Query<(&Interaction, &SettingsControl, &mut BackgroundColor)>,
-    mut vsync_text: Query<&mut Text, With<VsyncValueText>>,
-    mut fov_text: Query<&mut Text, (With<FovValueText>, Without<VsyncValueText>)>,
-    sliders: Query<(Entity, &SliderValue), With<FovSlider>>,
-    mut thumbs: Query<&mut Node, With<FovSliderThumb>>,
-    mut commands: Commands,
-) {
-    for (interaction, control, mut background) in &mut controls {
-        let selected = control.action.is_selected(&settings);
-        background.0 = match (*interaction, selected) {
-            (Interaction::Pressed, _) => BUTTON_PRESSED,
-            (Interaction::Hovered, true) => BUTTON_SELECTED_HOVERED,
-            (Interaction::Hovered, false) => BUTTON_HOVERED,
-            (Interaction::None, true) => BUTTON_SELECTED,
-            (Interaction::None, false) => BUTTON_BACKGROUND,
-        };
-    }
-
-    for mut text in &mut vsync_text {
-        text.0 = if settings.vsync { "On" } else { "Off" }.into();
-    }
-    for mut text in &mut fov_text {
-        text.0 = format!("{}", settings.field_of_view.round() as i32);
-    }
-
-    for (entity, value) in &sliders {
-        if value.0 != settings.field_of_view {
-            commands
-                .entity(entity)
-                .insert(SliderValue(settings.field_of_view));
-        }
-    }
-
-    let position = ((settings.field_of_view - FOV_MIN) / (FOV_MAX - FOV_MIN)) * 100.0;
-    for mut thumb in &mut thumbs {
-        thumb.left = percent(position);
-    }
-}
-
-impl SettingsAction {
-    fn is_selected(self, settings: &GraphicsSettings) -> bool {
-        match self {
-            Self::SetAntiAliasing(value) => settings.anti_aliasing == value,
-            Self::ToggleVsync => settings.vsync,
-            Self::SetShadowQuality(value) => settings.shadow_quality == value,
-            Self::SetDisplayMode(value) => settings.display_mode == value,
-            Self::Reset | Self::Back => false,
-        }
-    }
-}
-
-fn queue_settings_save(commands: &mut Commands) {
-    commands.queue(SaveSettingsDeferred(Duration::from_millis(250)));
-}
-
-fn apply_changed_graphics_settings(
-    settings: Res<GraphicsSettings>,
-    mut windows: Query<&mut Window>,
-    mut cameras: Query<(Entity, &mut Projection), With<PlayerCamera>>,
-    mut lights: Query<&mut DirectionalLight>,
-    mut shadow_map: ResMut<DirectionalLightShadowMap>,
-    mut commands: Commands,
-) {
-    for mut window in &mut windows {
-        apply_window_settings(&settings, &mut window);
-    }
-    for (entity, mut projection) in &mut cameras {
-        apply_camera_settings(&settings, entity, &mut projection, &mut commands);
-    }
-    for mut light in &mut lights {
-        apply_light_settings(&settings, &mut light);
-    }
-    apply_shadow_map_settings(&settings, &mut shadow_map);
-}
-
-type AddedPlayerCameraQuery<'w, 's> =
-    Query<'w, 's, (Entity, &'static mut Projection), (With<PlayerCamera>, Added<PlayerCamera>)>;
-
-fn apply_graphics_to_new_targets(
-    settings: Res<GraphicsSettings>,
-    mut windows: Query<&mut Window, Added<Window>>,
-    mut cameras: AddedPlayerCameraQuery,
-    mut lights: Query<&mut DirectionalLight, Added<DirectionalLight>>,
-    mut commands: Commands,
-) {
-    for mut window in &mut windows {
-        apply_window_settings(&settings, &mut window);
-    }
-    for (entity, mut projection) in &mut cameras {
-        apply_camera_settings(&settings, entity, &mut projection, &mut commands);
-    }
-    for mut light in &mut lights {
-        apply_light_settings(&settings, &mut light);
-    }
-}
-
-fn apply_window_settings(settings: &GraphicsSettings, window: &mut Window) {
-    let present_mode = if settings.vsync {
-        PresentMode::Fifo
-    } else {
-        PresentMode::AutoNoVsync
-    };
-    if window.present_mode != present_mode {
-        window.present_mode = present_mode;
-    }
-
-    match settings.display_mode {
-        DisplayMode::Windowed => {
-            if window.mode != WindowMode::Windowed {
-                window.mode = WindowMode::Windowed;
-                window.resolution.set(WINDOWED_WIDTH, WINDOWED_HEIGHT);
-            }
-        }
-        DisplayMode::BorderlessFullscreen => {
-            let mode = WindowMode::BorderlessFullscreen(MonitorSelection::Primary);
-            if window.mode != mode {
-                window.mode = mode;
-            }
-        }
-    }
-}
-
-fn apply_camera_settings(
-    settings: &GraphicsSettings,
-    entity: Entity,
-    projection: &mut Projection,
-    commands: &mut Commands,
-) {
-    apply_projection_settings(settings, projection);
-
-    let mut camera = commands.entity(entity);
-    camera.insert(settings.anti_aliasing.msaa());
-    if settings.anti_aliasing.uses_fxaa() {
-        camera.insert(Fxaa::default());
-    } else {
-        camera.remove::<Fxaa>();
-    }
-}
-
-fn apply_projection_settings(settings: &GraphicsSettings, projection: &mut Projection) {
-    if let Projection::Perspective(perspective) = projection {
-        perspective.fov = normalized_fov(settings.field_of_view).to_radians();
-    }
-}
-
-fn apply_light_settings(settings: &GraphicsSettings, light: &mut DirectionalLight) {
-    light.shadow_maps_enabled = settings.shadow_quality != ShadowQuality::Off;
-}
-
-fn apply_shadow_map_settings(
-    settings: &GraphicsSettings,
-    shadow_map: &mut DirectionalLightShadowMap,
-) {
-    if let Some(size) = settings.shadow_quality.map_size()
-        && shadow_map.size != size
-    {
-        shadow_map.size = size;
-    }
+fn back_to_menu_on_activate(_activate: On<Activate>, mut next_state: ResMut<NextState<GameState>>) {
+    next_state.set(GameState::Menu);
 }
 
 fn handle_window_close(
