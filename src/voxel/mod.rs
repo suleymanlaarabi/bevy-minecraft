@@ -3,9 +3,10 @@ mod generation;
 mod meshing;
 mod rebuild;
 mod streaming;
+use crate::game::GameState;
 use bevy::prelude::*;
 pub use data::{ChunkVoxels, SetVoxel, VoxelChunk, VoxelKind, VoxelViewer};
-use crate::game::GameState;
+use generation::WorldGenerator;
 use rebuild::{
     cleanup_removed_chunk, poll_builds, prepare_assets, set_voxel, start_changed_builds,
 };
@@ -30,6 +31,7 @@ impl Default for VoxelPlugin {
 impl Plugin for VoxelPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(self.settings.clone())
+            .insert_resource(WorldGenerator::new(self.settings.seed))
             .insert_resource(StreamOffsets::new(self.settings.view_distance))
             .init_resource::<ChunkIndex>()
             .init_resource::<StoredChunks>()
@@ -37,10 +39,7 @@ impl Plugin for VoxelPlugin {
             .add_observer(set_voxel)
             .add_observer(cleanup_removed_chunk)
             .add_systems(PreStartup, prepare_assets)
-            .add_systems(
-                Update,
-                stream_chunks.run_if(in_state(GameState::Game)),
-            )
+            .add_systems(Update, stream_chunks.run_if(in_state(GameState::Game)))
             .add_systems(
                 PostUpdate,
                 (start_changed_builds, poll_builds)
@@ -82,7 +81,7 @@ impl Default for VoxelSettings {
         Self {
             chunk_size: 16,
             base_height: 8.0,
-            max_height: 24,
+            max_height: 40,
             seed: 42,
             view_distance: 8,
             spawn_budget_per_frame: 4,

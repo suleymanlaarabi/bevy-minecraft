@@ -115,8 +115,8 @@ fn spawn_player(mut commands: Commands, voxel_settings: Option<Res<VoxelSettings
         });
     commands.spawn((
         DirectionalLight {
-            shadow_maps_enabled: true,
-            contact_shadows_enabled: true,
+            shadow_maps_enabled: false,
+            contact_shadows_enabled: false,
             ..default()
         },
         Transform::from_xyz(20.0, 30.0, 20.0).looking_at(Vec3::new(8.0, 0.0, 8.0), Vec3::Y),

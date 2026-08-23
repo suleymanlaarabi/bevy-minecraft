@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use std::sync::Arc;
 pub(crate) const MESH_CHANGED: u8 = 1;
 pub(crate) const COLLIDER_CHANGED: u8 = 2;
-
+type VoxelBuffer = Vec<VoxelKind>;
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum VoxelKind {
@@ -11,10 +11,19 @@ pub enum VoxelKind {
     Grass,
     Dirt,
     Stone,
+    Sand,
+    Snow,
+    Wood,
+    Leaves,
+    Water,
 }
 impl VoxelKind {
     pub const fn is_solid(self) -> bool {
-        !matches!(self, Self::Air)
+        !matches!(self, Self::Air | Self::Leaves | Self::Water)
+    }
+
+    pub(crate) const fn is_opaque(self) -> bool {
+        !matches!(self, Self::Air | Self::Water)
     }
 
     pub(crate) const fn color(self) -> [f32; 4] {
@@ -23,18 +32,11 @@ impl VoxelKind {
             Self::Grass => [0.25, 0.65, 0.18, 1.0],
             Self::Dirt => [0.40, 0.25, 0.12, 1.0],
             Self::Stone => [0.40, 0.40, 0.40, 1.0],
-        }
-    }
-
-    pub(crate) const fn terrain_at(y: i32, surface: i32) -> Self {
-        if y < 0 || y >= surface {
-            Self::Air
-        } else if y == surface - 1 {
-            Self::Grass
-        } else if y >= surface - 4 {
-            Self::Dirt
-        } else {
-            Self::Stone
+            Self::Sand => [0.76, 0.68, 0.42, 1.0],
+            Self::Snow => [0.92, 0.96, 1.0, 1.0],
+            Self::Wood => [0.36, 0.20, 0.08, 1.0],
+            Self::Leaves => [0.12, 0.48, 0.10, 1.0],
+            Self::Water => [0.08, 0.35, 0.72, 0.62],
         }
     }
 }
@@ -44,12 +46,12 @@ pub struct ChunkVoxels {
     pub(crate) size: i32,
     pub(crate) height: i32,
     cells: Arc<[VoxelKind]>,
-    halo: Arc<[i32]>,
+    halo: Arc<[VoxelKind]>,
     pub(crate) changes: u8,
     pub(crate) modified: bool,
 }
 impl ChunkVoxels {
-    pub(crate) fn generated(size: i32, height: i32, cells: Vec<VoxelKind>, halo: Vec<i32>) -> Self {
+    pub(crate) fn generated(size: i32, height: i32, cells: VoxelBuffer, halo: VoxelBuffer) -> Self {
         Self {
             size,
             height,
@@ -65,11 +67,9 @@ impl ChunkVoxels {
     }
 
     pub(crate) fn sample(&self, local: IVec3) -> VoxelKind {
-        self.get(local).unwrap_or_else(|| {
-            self.halo_height(local).map_or(VoxelKind::Air, |surface| {
-                VoxelKind::terrain_at(local.y, surface)
-            })
-        })
+        self.get(local)
+            .or_else(|| self.halo_kind(local))
+            .unwrap_or(VoxelKind::Air)
     }
 
     /// Changes one cell. Out-of-bounds and identical values return `false`.
@@ -122,16 +122,19 @@ impl ChunkVoxels {
         )
     }
 
-    fn halo_height(&self, local: IVec3) -> Option<i32> {
+    fn halo_kind(&self, local: IVec3) -> Option<VoxelKind> {
+        if !(0..self.height).contains(&local.y) {
+            return None;
+        }
         let size = self.size as usize;
-        let index = match (local.x, local.z) {
-            (-1, z) if (0..self.size).contains(&z) => z as usize,
-            (x, z) if x == self.size && (0..self.size).contains(&z) => size + z as usize,
-            (x, -1) if (0..self.size).contains(&x) => size * 2 + x as usize,
-            (x, z) if z == self.size && (0..self.size).contains(&x) => size * 3 + x as usize,
+        let (side, offset) = match (local.x, local.z) {
+            (-1, z) if (0..self.size).contains(&z) => (0, z),
+            (x, z) if x == self.size && (0..self.size).contains(&z) => (1, z),
+            (x, -1) if (0..self.size).contains(&x) => (2, x),
+            (x, z) if z == self.size && (0..self.size).contains(&x) => (3, x),
             _ => return None,
         };
-        Some(self.halo[index])
+        Some(self.halo[offset as usize + size * (side + 4 * local.y as usize)])
     }
 }
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]

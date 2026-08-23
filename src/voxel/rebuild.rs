@@ -1,25 +1,38 @@
 use super::{
     ChunkVoxels, SetVoxel, VoxelSettings,
     data::COLLIDER_CHANGED,
-    meshing::build_chunk_mesh,
+    generation::WorldGenerator,
+    meshing::{ChunkMeshes, build_chunk_mesh},
     streaming::{ChunkIndex, StoredChunks},
 };
 use avian3d::prelude::*;
 use bevy::{
+    light::NotShadowCaster,
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
 #[derive(Resource)]
-pub(crate) struct VoxelAssets(pub Handle<StandardMaterial>);
+pub(crate) struct VoxelAssets {
+    pub(crate) terrain: Handle<StandardMaterial>,
+    water: Handle<StandardMaterial>,
+}
 
 pub(crate) fn prepare_assets(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    commands.insert_resource(VoxelAssets(materials.add(StandardMaterial {
-        perceptual_roughness: 1.0,
-        ..default()
-    })));
+    commands.insert_resource(VoxelAssets {
+        terrain: materials.add(StandardMaterial {
+            perceptual_roughness: 1.0,
+            ..default()
+        }),
+        water: materials.add(StandardMaterial {
+            alpha_mode: AlphaMode::Blend,
+            cull_mode: None,
+            perceptual_roughness: 0.15,
+            ..default()
+        }),
+    });
 }
 
 enum ColliderUpdate {
@@ -28,8 +41,13 @@ enum ColliderUpdate {
     Remove,
 }
 struct BuildOutput {
-    mesh: Mesh,
+    meshes: ChunkMeshes,
     collider: ColliderUpdate,
+}
+#[derive(Component)]
+pub(crate) struct ChunkWater {
+    entity: Entity,
+    mesh: Handle<Mesh>,
 }
 #[derive(Component)]
 pub(crate) struct ChunkBuild {
@@ -39,6 +57,7 @@ pub(crate) struct ChunkBuild {
 pub(crate) fn set_voxel(
     event: On<SetVoxel>,
     settings: Res<VoxelSettings>,
+    generator: Res<WorldGenerator>,
     index: Res<ChunkIndex>,
     mut stored: ResMut<StoredChunks>,
     mut chunks: Query<&mut ChunkVoxels>,
@@ -52,7 +71,7 @@ pub(crate) fn set_voxel(
     }
     let voxels = stored
         .entry(chunk)
-        .or_insert_with(|| super::generation::generate_chunk(chunk, &settings));
+        .or_insert_with(|| super::generation::generate_chunk(chunk, &settings, &generator));
     voxels.set(local, event.kind);
 }
 
@@ -83,7 +102,7 @@ pub(crate) fn start_changed_builds(
         let snapshot = voxels.bypass_change_detection().clone();
         let flags = changes | build.map_or(0, |build| build.flags);
         let task = pool.spawn(async move {
-            let mesh = build_chunk_mesh(&snapshot);
+            let meshes = build_chunk_mesh(&snapshot);
             let collider = if flags & COLLIDER_CHANGED == 0 {
                 ColliderUpdate::Keep
             } else {
@@ -94,7 +113,7 @@ pub(crate) fn start_changed_builds(
                     ColliderUpdate::Replace(Collider::voxels(Vec3::ONE, &solids))
                 }
             };
-            BuildOutput { mesh, collider }
+            BuildOutput { meshes, collider }
         });
         commands.entity(entity).insert(ChunkBuild { task, flags });
     }
@@ -103,22 +122,53 @@ pub(crate) fn start_changed_builds(
 pub(crate) fn poll_builds(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut chunks: Query<(Entity, &mut ChunkBuild, Option<&Mesh3d>)>,
+    assets: Res<VoxelAssets>,
+    mut chunks: Query<(
+        Entity,
+        &mut ChunkBuild,
+        Option<&Mesh3d>,
+        Option<&ChunkWater>,
+    )>,
 ) {
-    for (entity, mut build, mesh_handle) in &mut chunks {
+    for (entity, mut build, mesh_handle, water) in &mut chunks {
         let Some(output) = check_ready(&mut build.task) else {
             continue;
         };
+        let BuildOutput {
+            meshes: ChunkMeshes(terrain, next_water),
+            collider,
+        } = output;
         if let Some(handle) = mesh_handle
             && let Some(mut mesh) = meshes.get_mut(&handle.0)
         {
-            *mesh = output.mesh;
+            *mesh = terrain;
         } else {
-            commands
-                .entity(entity)
-                .insert(Mesh3d(meshes.add(output.mesh)));
+            commands.entity(entity).insert(Mesh3d(meshes.add(terrain)));
         }
-        match output.collider {
+        match (next_water, water) {
+            (Some(mesh), Some(water)) => *meshes.get_mut(&water.mesh).unwrap() = mesh,
+            (Some(mesh), None) => {
+                let mesh = meshes.add(mesh);
+                let child = commands
+                    .spawn((
+                        Mesh3d(mesh.clone()),
+                        MeshMaterial3d(assets.water.clone()),
+                        ChildOf(entity),
+                        NotShadowCaster,
+                    ))
+                    .id();
+                commands.entity(entity).insert(ChunkWater {
+                    entity: child,
+                    mesh,
+                });
+            }
+            (None, Some(water)) => {
+                commands.entity(water.entity).despawn();
+                commands.entity(entity).remove::<ChunkWater>();
+            }
+            (None, None) => {}
+        }
+        match collider {
             ColliderUpdate::Keep => {}
             ColliderUpdate::Replace(collider) => {
                 commands.entity(entity).insert(collider);
@@ -130,3 +180,7 @@ pub(crate) fn poll_builds(
         commands.entity(entity).remove::<ChunkBuild>();
     }
 }
+
+#[cfg(test)]
+#[path = "../voxel_rebuild_tests.rs"]
+mod tests;

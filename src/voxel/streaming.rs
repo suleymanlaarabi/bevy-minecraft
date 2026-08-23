@@ -1,13 +1,14 @@
 use super::{
-    ChunkVoxels, VoxelChunk, VoxelSettings, VoxelViewer, generation::generate_chunk,
+    ChunkVoxels, VoxelChunk, VoxelSettings, VoxelViewer,
+    generation::{WorldGenerator, generate_chunk},
     rebuild::VoxelAssets,
 };
+use crate::game::GameState;
 use avian3d::prelude::*;
 use bevy::{
     platform::collections::{HashMap, hash_map::Entry},
     prelude::*,
 };
-use crate::game::GameState;
 
 #[derive(Resource, Default, Deref, DerefMut)]
 pub(crate) struct ChunkIndex(HashMap<IVec2, Entity>);
@@ -41,6 +42,7 @@ pub(crate) fn stream_chunks(
     mut commands: Commands,
     viewer: Single<&GlobalTransform, With<VoxelViewer>>,
     settings: Res<VoxelSettings>,
+    generator: Res<WorldGenerator>,
     offsets: Res<StreamOffsets>,
     mut stored: ResMut<StoredChunks>,
     assets: Res<VoxelAssets>,
@@ -77,14 +79,14 @@ pub(crate) fn stream_chunks(
         };
         let mut voxels = stored
             .remove(&position)
-            .unwrap_or_else(|| generate_chunk(position, &settings));
+            .unwrap_or_else(|| generate_chunk(position, &settings, &generator));
         voxels.changes = super::data::MESH_CHANGED | super::data::COLLIDER_CHANGED;
         let origin = position * settings.chunk_size;
         let entity = commands
             .spawn((
                 VoxelChunk { position },
                 voxels,
-                MeshMaterial3d(assets.0.clone()),
+                MeshMaterial3d(assets.terrain.clone()),
                 Transform::from_xyz(origin.x as f32, 0.0, origin.y as f32),
                 RigidBody::Static,
                 Friction::new(0.8),
