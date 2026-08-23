@@ -1,6 +1,5 @@
 use avian3d::prelude::*;
 use bevy::{
-    camera_controller::free_camera::FreeCameraPlugin,
     dev_tools::fps_overlay::{FpsOverlayConfig, FpsOverlayPlugin, FrameTimeGraphConfig},
     prelude::*,
     window::{CursorOptions, WindowMode},
@@ -30,10 +29,8 @@ fn main() {
                 ..default()
             }),
             PhysicsPlugins::default(),
-            // PhysicsDebugPlugin,
-            FreeCameraPlugin,
             VoxelPlugin::new(VoxelSettings {
-                view_distance: 10,
+                view_distance: 20,
                 ..default()
             }),
             FpsOverlayPlugin {

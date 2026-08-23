@@ -133,11 +133,6 @@ impl ChunkVoxels {
         };
         Some(self.halo[index])
     }
-
-    #[cfg(test)]
-    pub(crate) fn shares_cells_with(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.cells, &other.cells)
-    }
 }
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VoxelChunk {

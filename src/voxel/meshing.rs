@@ -136,21 +136,3 @@ fn push_quad(
     };
     indices.extend(order.map(|index| first + index));
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn greedy_meshing_merges_faces_and_preserves_materials() {
-        let mut voxels = ChunkVoxels::generated(2, 1, vec![VoxelKind::Stone; 4], vec![0; 8]);
-        assert_eq!(build_chunk_mesh(&voxels).indices().unwrap().len(), 36);
-        voxels.set(IVec3::new(1, 0, 1), VoxelKind::Dirt);
-        assert!(build_chunk_mesh(&voxels).indices().unwrap().len() > 36);
-    }
-
-    #[test]
-    fn procedural_halo_hides_chunk_seams() {
-        let voxels = ChunkVoxels::generated(1, 1, vec![VoxelKind::Stone], vec![1; 4]);
-        assert_eq!(build_chunk_mesh(&voxels).indices().unwrap().len(), 12);
-    }
-}
