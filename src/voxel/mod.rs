@@ -1,5 +1,6 @@
 mod data;
 mod generation;
+mod material;
 mod meshing;
 mod rebuild;
 mod streaming;
@@ -7,6 +8,7 @@ use crate::game::GameState;
 use bevy::prelude::*;
 pub use data::{ChunkVoxels, SetVoxel, VoxelChunk, VoxelKind, VoxelViewer};
 use generation::WorldGenerator;
+use material::VoxelMaterial;
 use rebuild::{
     cleanup_removed_chunk, poll_builds, prepare_assets, set_voxel, start_changed_builds,
 };
@@ -30,7 +32,8 @@ impl Default for VoxelPlugin {
 
 impl Plugin for VoxelPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(self.settings.clone())
+        app.add_plugins(MaterialPlugin::<VoxelMaterial>::default())
+            .insert_resource(self.settings.clone())
             .insert_resource(WorldGenerator::new(self.settings.seed))
             .insert_resource(StreamOffsets::new(self.settings.view_distance))
             .init_resource::<ChunkIndex>()

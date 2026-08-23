@@ -2,6 +2,7 @@ use super::{
     ChunkVoxels, SetVoxel, VoxelSettings,
     data::COLLIDER_CHANGED,
     generation::WorldGenerator,
+    material::{VoxelMaterial, VoxelMaterialExtension, block_texture},
     meshing::{ChunkMeshes, build_chunk_mesh},
     streaming::{ChunkIndex, StoredChunks},
 };
@@ -13,18 +14,25 @@ use bevy::{
 };
 #[derive(Resource)]
 pub(crate) struct VoxelAssets {
-    pub(crate) terrain: Handle<StandardMaterial>,
+    pub(crate) terrain: Handle<VoxelMaterial>,
     water: Handle<StandardMaterial>,
 }
 
 pub(crate) fn prepare_assets(
     mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut voxel_materials: ResMut<Assets<VoxelMaterial>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    let blocks = block_texture(&asset_server);
     commands.insert_resource(VoxelAssets {
-        terrain: materials.add(StandardMaterial {
-            perceptual_roughness: 1.0,
-            ..default()
+        terrain: voxel_materials.add(VoxelMaterial {
+            base: StandardMaterial {
+                alpha_mode: AlphaMode::Mask(0.5),
+                perceptual_roughness: 1.0,
+                ..default()
+            },
+            extension: VoxelMaterialExtension { blocks },
         }),
         water: materials.add(StandardMaterial {
             alpha_mode: AlphaMode::Blend,

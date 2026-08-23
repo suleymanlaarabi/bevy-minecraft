@@ -18,21 +18,29 @@ impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
         app.insert_state(GameState::Menu)
             .add_plugins((PlayerPlugin, GameMenuPlugin))
-            .add_systems(OnEnter(GameState::Menu), setup_menu_cursor)
-            .add_systems(OnEnter(GameState::Game), setup_game_cursor);
+            .add_systems(OnEnter(GameState::Menu), setup_menu_environment)
+            .add_systems(OnEnter(GameState::Game), setup_game_environment);
     }
 }
 
-fn setup_menu_cursor(mut cursors: Query<&mut CursorOptions>) {
+fn setup_menu_environment(
+    mut cursors: Query<&mut CursorOptions>,
+    mut clear_color: ResMut<ClearColor>,
+) {
     for mut cursor in &mut cursors {
         cursor.visible = true;
         cursor.grab_mode = CursorGrabMode::None;
     }
+    clear_color.0 = Color::srgb_u8(15, 15, 18);
 }
 
-fn setup_game_cursor(mut cursors: Query<&mut CursorOptions>) {
+fn setup_game_environment(
+    mut cursors: Query<&mut CursorOptions>,
+    mut clear_color: ResMut<ClearColor>,
+) {
     for mut cursor in &mut cursors {
         cursor.visible = false;
         cursor.grab_mode = CursorGrabMode::Locked;
     }
+    clear_color.0 = Color::srgb_u8(148, 195, 255);
 }

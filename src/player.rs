@@ -68,7 +68,14 @@ impl Default for CameraSensitivity {
     }
 }
 
-fn spawn_player(mut commands: Commands, voxel_settings: Option<Res<VoxelSettings>>) {
+use bevy::pbr::{DistanceFog, FogFalloff};
+
+fn spawn_player(
+    mut commands: Commands,
+    voxel_settings: Option<Res<VoxelSettings>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
     let spawn_pos = if let Some(settings) = voxel_settings {
         let center = settings.chunk_center(IVec2::ZERO);
         Vec3::new(center.x, settings.base_height + 15.0, center.z)
@@ -104,6 +111,14 @@ fn spawn_player(mut commands: Commands, voxel_settings: Option<Res<VoxelSettings
                 PlayerCamera::default(),
                 CameraSensitivity::default(),
                 Camera3d::default(),
+                DistanceFog {
+                    color: Color::srgb_u8(195, 222, 255),
+                    falloff: FogFalloff::Linear {
+                        start: 160.0,
+                        end: 280.0,
+                    },
+                    ..default()
+                },
                 Projection::from(PerspectiveProjection {
                     fov: 85.0_f32.to_radians(),
                     ..default()
@@ -113,13 +128,35 @@ fn spawn_player(mut commands: Commands, voxel_settings: Option<Res<VoxelSettings
                 VoxelViewer,
             ));
         });
+
+    // Sun directional light + ambient light
     commands.spawn((
         DirectionalLight {
             shadow_maps_enabled: false,
-            contact_shadows_enabled: false,
+            shadow_depth_bias: 0.02,
+            shadow_normal_bias: 1.8,
+            illuminance: 5_000.0,
+            color: Color::srgb(1.0, 0.98, 0.94),
             ..default()
         },
-        Transform::from_xyz(20.0, 30.0, 20.0).looking_at(Vec3::new(8.0, 0.0, 8.0), Vec3::Y),
+        AmbientLight {
+            color: Color::srgb_u8(215, 235, 255),
+            brightness: 500.0,
+            ..default()
+        },
+        Transform::from_xyz(100.0, 200.0, 100.0).looking_at(Vec3::ZERO, Vec3::Y),
+        DespawnOnExit(GameState::Game),
+    ));
+
+    // Minecraft-style square Sun in the sky
+    commands.spawn((
+        Mesh3d(meshes.add(Rectangle::new(50.0, 50.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 1.0, 0.9),
+            unlit: true,
+            ..default()
+        })),
+        Transform::from_xyz(250.0, 350.0, 250.0).looking_at(Vec3::ZERO, Vec3::Y),
         DespawnOnExit(GameState::Game),
     ));
 }

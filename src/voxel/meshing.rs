@@ -21,6 +21,7 @@ fn greedy_mesh(size: i32, height: i32, sample: impl Fn(IVec3) -> VoxelKind) -> M
     let mut positions = Vec::new();
     let mut normals = Vec::new();
     let mut colors = Vec::new();
+    let mut uvs = Vec::new();
     let mut indices = Vec::new();
     let mut mask = vec![None; (size * height).max(size * size) as usize];
     for axis in 0..3 {
@@ -63,19 +64,21 @@ fn greedy_mesh(size: i32, height: i32, sample: impl Fn(IVec3) -> VoxelKind) -> M
                         &mut positions,
                         &mut normals,
                         &mut colors,
+                        &mut uvs,
                         &mut indices,
                         corner,
                         du,
                         dv,
                         axis,
                         face,
+                        true,
                     );
                 },
             );
         }
     }
 
-    finish_mesh(positions, normals, colors, indices)
+    finish_mesh(positions, normals, colors, uvs, indices)
 }
 
 fn water_mesh(voxels: &ChunkVoxels) -> Option<Mesh> {
@@ -83,6 +86,7 @@ fn water_mesh(voxels: &ChunkVoxels) -> Option<Mesh> {
     let mut positions = Vec::new();
     let mut normals = Vec::new();
     let mut colors = Vec::new();
+    let mut uvs = Vec::new();
     let mut indices = Vec::new();
     let mut mask = vec![None; size * size];
     for y in 0..voxels.height {
@@ -99,16 +103,18 @@ fn water_mesh(voxels: &ChunkVoxels) -> Option<Mesh> {
                 &mut positions,
                 &mut normals,
                 &mut colors,
+                &mut uvs,
                 &mut indices,
                 [x as i32, y + 1, z as i32],
                 [0, 0, depth as i32],
                 [width as i32, 0, 0],
                 1,
                 Face(VoxelKind::Water, true),
+                false,
             );
         });
     }
-    (!indices.is_empty()).then(|| finish_mesh(positions, normals, colors, indices))
+    (!indices.is_empty()).then(|| finish_mesh(positions, normals, colors, uvs, indices))
 }
 
 fn consume_mask<T: Copy + Eq>(
@@ -154,6 +160,7 @@ fn finish_mesh(
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     colors: Vec<[f32; 4]>,
+    uvs: Vec<[f32; 2]>,
     indices: Vec<u32>,
 ) -> Mesh {
     Mesh::new(
@@ -163,6 +170,7 @@ fn finish_mesh(
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
     .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
     .with_inserted_indices(Indices::U32(indices))
 }
 
@@ -171,12 +179,14 @@ fn push_quad(
     positions: &mut Vec<[f32; 3]>,
     normals: &mut Vec<[f32; 3]>,
     colors: &mut Vec<[f32; 4]>,
+    uvs: &mut Vec<[f32; 2]>,
     indices: &mut Vec<u32>,
     corner: [i32; 3],
     du: [i32; 3],
     dv: [i32; 3],
     axis: usize,
     face: Face,
+    textured: bool,
 ) {
     let add = |a: [i32; 3], b: [i32; 3]| [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
     let vertices = [
@@ -189,7 +199,14 @@ fn push_quad(
     let mut normal = [0.0; 3];
     normal[axis] = if face.1 { 1.0 } else { -1.0 };
     normals.extend([normal; 4]);
-    colors.extend([face.0.color(); 4]);
+    if textured {
+        let tint = face.0.texture_tint(axis, face.1);
+        let layer = face.0.texture_layer(axis, face.1) as f32;
+        colors.extend([[tint[0], tint[1], tint[2], layer]; 4]);
+    } else {
+        colors.extend([face.0.color(); 4]);
+    }
+    uvs.extend(quad_uvs(axis, du, dv));
     let first = positions.len() as u32 - 4;
     let order = if face.1 {
         [0, 1, 2, 0, 2, 3]
@@ -197,6 +214,23 @@ fn push_quad(
         [0, 2, 1, 0, 3, 2]
     };
     indices.extend(order.map(|index| first + index));
+}
+
+fn quad_uvs(axis: usize, du: [i32; 3], dv: [i32; 3]) -> [[f32; 2]; 4] {
+    match axis {
+        0 => {
+            let (width, height) = (dv[2] as f32, du[1] as f32);
+            [[0.0, height], [0.0, 0.0], [width, 0.0], [width, height]]
+        }
+        1 => {
+            let (width, height) = (du[2] as f32, dv[0] as f32);
+            [[0.0, 0.0], [width, 0.0], [width, height], [0.0, height]]
+        }
+        _ => {
+            let (width, height) = (du[0] as f32, dv[1] as f32);
+            [[0.0, height], [width, height], [width, 0.0], [0.0, 0.0]]
+        }
+    }
 }
 
 #[cfg(test)]

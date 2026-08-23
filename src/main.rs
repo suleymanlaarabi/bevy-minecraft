@@ -48,6 +48,7 @@ fn main() {
             },
             GamePlugin,
         ))
+        .insert_resource(ClearColor(Color::srgb_u8(15, 15, 18)))
         .add_systems(Update, handle_escape.run_if(in_state(GameState::Game)))
         .run();
 }

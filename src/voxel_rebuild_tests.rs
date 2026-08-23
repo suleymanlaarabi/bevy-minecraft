@@ -2,7 +2,9 @@ use std::thread;
 
 use super::*;
 use bevy::{
-    asset::RenderAssetUsages, render::render_resource::PrimitiveTopology, state::app::StatesPlugin,
+    asset::{AssetPlugin, RenderAssetUsages},
+    render::render_resource::PrimitiveTopology,
+    state::app::StatesPlugin,
 };
 
 #[test]
@@ -18,10 +20,12 @@ fn plugin_streams_a_generated_chunk_end_to_end() {
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins,
+        AssetPlugin::default(),
         StatesPlugin,
         TransformPlugin,
         VoxelPlugin::new(settings),
     ))
+    .init_asset::<Image>()
     .insert_state(GameState::Game)
     .init_resource::<Assets<Mesh>>()
     .init_resource::<Assets<StandardMaterial>>();

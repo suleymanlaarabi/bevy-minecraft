@@ -88,6 +88,7 @@ fn menu() -> impl SceneList {
             justify_content: JustifyContent::Center,
             row_gap: px(20),
         }
+        BackgroundColor(Color::srgb_u8(15, 15, 18))
         DespawnOnExit::<GameState>(GameState::Menu)
         Children [
             button::<PlayButton>() Children [
