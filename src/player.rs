@@ -1,7 +1,7 @@
 use std::f32::consts::FRAC_PI_2;
 
 use avian3d::prelude::*;
-use bevy::{input::mouse::AccumulatedMouseMotion, prelude::*};
+use bevy::{anti_alias::smaa::Smaa, input::mouse::AccumulatedMouseMotion, prelude::*};
 
 use crate::{
     game::GameState,
@@ -101,6 +101,7 @@ fn setup_camera(mut commands: Commands) {
         Transform::from_xyz(0.0, 30.0, 0.0),
         Visibility::default(),
         VoxelViewer,
+        Msaa::Off,
     ));
 }
 
@@ -150,7 +151,7 @@ fn spawn_player(
     // Sun directional light
     commands.spawn((
         DirectionalLight {
-            shadow_maps_enabled: true,
+            shadow_maps_enabled: false,
             shadow_depth_bias: 0.02,
             shadow_normal_bias: 1.8,
             illuminance: 5_000.0,

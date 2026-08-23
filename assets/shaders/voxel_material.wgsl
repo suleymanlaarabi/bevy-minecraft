@@ -1,7 +1,4 @@
-#import bevy_pbr::{
-    pbr_fragment::pbr_input_from_standard_material,
-    pbr_functions::alpha_discard,
-}
+#import bevy_pbr::pbr_fragment::pbr_input_from_standard_material
 #ifdef PREPASS_PIPELINE
 #import bevy_pbr::{
     prepass_io::{VertexOutput, FragmentOutput},
@@ -42,10 +39,6 @@ fn fragment(
         );
     }
     pbr_input.material.base_color = texture_color * tint;
-    pbr_input.material.base_color = alpha_discard(
-        pbr_input.material,
-        pbr_input.material.base_color,
-    );
 
 #ifdef PREPASS_PIPELINE
     return deferred_output(in, pbr_input);

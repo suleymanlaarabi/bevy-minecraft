@@ -31,8 +31,8 @@ fn fragment(
 ) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     let position = pbr_input.world_position.xz;
-    let first_direction = normalize(water.directions.xy);
-    let second_direction = normalize(water.directions.zw);
+    let first_direction = water.directions.xy;
+    let second_direction = water.directions.zw;
     let first_phase = dot(position, first_direction) * water.frequency_speed.x
         + globals.time * water.frequency_speed.z;
     let second_phase = dot(position, second_direction) * water.frequency_speed.y

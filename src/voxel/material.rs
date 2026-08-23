@@ -33,8 +33,15 @@ pub(crate) struct WaterSettings {
 
 impl Default for WaterSettings {
     fn default() -> Self {
+        let first_direction = Vec2::new(0.8, 0.6).normalize();
+        let second_direction = Vec2::new(-0.45, 0.89).normalize();
         Self {
-            directions: Vec4::new(0.8, 0.6, -0.45, 0.89),
+            directions: Vec4::new(
+                first_direction.x,
+                first_direction.y,
+                second_direction.x,
+                second_direction.y,
+            ),
             frequency_speed: Vec4::new(0.32, 0.57, 0.75, -0.48),
             strength: Vec4::new(0.10, 0.055, 0.0, 0.0),
         }

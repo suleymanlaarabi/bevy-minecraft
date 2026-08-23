@@ -30,7 +30,6 @@ pub(crate) fn prepare_assets(
     commands.insert_resource(VoxelAssets {
         terrain: voxel_materials.add(VoxelMaterial {
             base: StandardMaterial {
-                alpha_mode: AlphaMode::Mask(0.5),
                 perceptual_roughness: 1.0,
                 ..default()
             },
