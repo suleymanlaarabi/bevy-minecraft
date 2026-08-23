@@ -44,12 +44,4 @@ impl MaterialExtension for VoxelMaterialExtension {
     fn fragment_shader() -> ShaderRef {
         "shaders/voxel_material.wgsl".into()
     }
-
-    fn prepass_fragment_shader() -> ShaderRef {
-        Self::fragment_shader()
-    }
-
-    fn deferred_fragment_shader() -> ShaderRef {
-        Self::fragment_shader()
-    }
 }

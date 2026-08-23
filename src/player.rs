@@ -13,10 +13,11 @@ pub struct PlayerPlugin;
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<PlayerController>()
+            .add_systems(Startup, setup_camera)
             .add_systems(OnEnter(GameState::Game), spawn_player)
             .add_systems(
                 Update,
-                (update_grounded_state, mouse_look, player_movement)
+                (update_grounded_state, mouse_look, player_movement, sync_camera_position)
                     .chain()
                     .run_if(in_state(GameState::Game)),
             );
@@ -70,11 +71,40 @@ impl Default for CameraSensitivity {
 
 use bevy::pbr::{DistanceFog, FogFalloff};
 
+fn setup_camera(mut commands: Commands) {
+    commands.spawn((
+        PlayerCamera::default(),
+        CameraSensitivity::default(),
+        Camera3d::default(),
+        AmbientLight {
+            color: Color::srgb_u8(215, 235, 255),
+            brightness: 500.0,
+            ..default()
+        },
+        DistanceFog {
+            color: Color::srgb_u8(195, 222, 255),
+            falloff: FogFalloff::Linear {
+                start: 160.0,
+                end: 280.0,
+            },
+            ..default()
+        },
+        Projection::from(PerspectiveProjection {
+            fov: 85.0_f32.to_radians(),
+            ..default()
+        }),
+        Transform::from_xyz(0.0, 30.0, 0.0),
+        Visibility::default(),
+        VoxelViewer,
+    ));
+}
+
 fn spawn_player(
     mut commands: Commands,
     voxel_settings: Option<Res<VoxelSettings>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut camera_query: Query<(&mut Transform, &mut PlayerCamera), Without<Player>>,
 ) {
     let spawn_pos = if let Some(settings) = voxel_settings {
         let center = settings.chunk_center(IVec2::ZERO);
@@ -83,65 +113,43 @@ fn spawn_player(
         Vec3::new(0.0, 30.0, 0.0)
     };
 
-    commands
-        .spawn((
-            Player,
-            PlayerController::default(),
-            RigidBody::Dynamic,
-            Collider::capsule(0.3, 1.2),
-            LockedAxes::ROTATION_LOCKED,
-            GravityScale(2.8),
-            Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
-            Restitution::ZERO.with_combine_rule(CoefficientCombine::Min),
-            LinearVelocity::default(),
-            ShapeCaster::new(
-                Collider::sphere(0.25),
-                Vec3::ZERO,
-                Quat::IDENTITY,
-                Dir3::NEG_Y,
-            )
-            .with_max_distance(0.75)
-            .with_ignore_self(true),
-            Transform::from_translation(spawn_pos),
-            Visibility::default(),
-            DespawnOnExit(GameState::Game),
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                PlayerCamera::default(),
-                CameraSensitivity::default(),
-                Camera3d::default(),
-                DistanceFog {
-                    color: Color::srgb_u8(195, 222, 255),
-                    falloff: FogFalloff::Linear {
-                        start: 160.0,
-                        end: 280.0,
-                    },
-                    ..default()
-                },
-                Projection::from(PerspectiveProjection {
-                    fov: 85.0_f32.to_radians(),
-                    ..default()
-                }),
-                Transform::from_xyz(0.0, 0.65, 0.0),
-                Visibility::default(),
-                VoxelViewer,
-            ));
-        });
+    if let Ok((mut cam_transform, mut cam)) = camera_query.single_mut() {
+        cam_transform.translation = spawn_pos + Vec3::new(0.0, 0.65, 0.0);
+        cam_transform.rotation = Quat::IDENTITY;
+        cam.pitch = 0.0;
+    }
 
-    // Sun directional light + ambient light
+    commands.spawn((
+        Player,
+        PlayerController::default(),
+        RigidBody::Dynamic,
+        Collider::capsule(0.3, 1.2),
+        LockedAxes::ROTATION_LOCKED,
+        GravityScale(2.8),
+        Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
+        Restitution::ZERO.with_combine_rule(CoefficientCombine::Min),
+        LinearVelocity::default(),
+        ShapeCaster::new(
+            Collider::sphere(0.25),
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            Dir3::NEG_Y,
+        )
+        .with_max_distance(0.75)
+        .with_ignore_self(true),
+        Transform::from_translation(spawn_pos),
+        Visibility::default(),
+        DespawnOnExit(GameState::Game),
+    ));
+
+    // Sun directional light
     commands.spawn((
         DirectionalLight {
-            shadow_maps_enabled: false,
+            shadow_maps_enabled: true,
             shadow_depth_bias: 0.02,
             shadow_normal_bias: 1.8,
             illuminance: 5_000.0,
             color: Color::srgb(1.0, 0.98, 0.94),
-            ..default()
-        },
-        AmbientLight {
-            color: Color::srgb_u8(215, 235, 255),
-            brightness: 500.0,
             ..default()
         },
         Transform::from_xyz(100.0, 200.0, 100.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -150,7 +158,7 @@ fn spawn_player(
 
     // Minecraft-style square Sun in the sky
     commands.spawn((
-        Mesh3d(meshes.add(Rectangle::new(50.0, 50.0))),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(50.0, 50.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(1.0, 1.0, 0.9),
             unlit: true,
@@ -159,6 +167,17 @@ fn spawn_player(
         Transform::from_xyz(250.0, 350.0, 250.0).looking_at(Vec3::ZERO, Vec3::Y),
         DespawnOnExit(GameState::Game),
     ));
+}
+
+fn sync_camera_position(
+    player_query: Query<&Transform, With<Player>>,
+    mut camera_query: Query<&mut Transform, (With<PlayerCamera>, Without<Player>)>,
+) {
+    if let Ok(player_transform) = player_query.single()
+        && let Ok(mut camera_transform) = camera_query.single_mut()
+    {
+        camera_transform.translation = player_transform.translation + Vec3::new(0.0, 0.65, 0.0);
+    }
 }
 
 fn update_grounded_state(
@@ -203,7 +222,11 @@ fn mouse_look(
 
     const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.01;
     player_camera.pitch = (player_camera.pitch + delta_pitch).clamp(-PITCH_LIMIT, PITCH_LIMIT);
-    camera_transform.rotation = Quat::from_rotation_x(player_camera.pitch);
+
+    if let Ok(player_transform) = player_query.single() {
+        camera_transform.rotation =
+            player_transform.rotation * Quat::from_rotation_x(player_camera.pitch);
+    }
 }
 
 fn player_movement(

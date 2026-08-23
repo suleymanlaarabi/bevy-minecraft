@@ -105,8 +105,6 @@ fn menu() -> impl SceneList {
                 }
                 TextColor(Color::WHITE)
             ]
-        ],
-        Camera2d
-        DespawnOnExit::<GameState>(GameState::Menu)
+        ]
     ]
 }
