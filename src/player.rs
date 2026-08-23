@@ -17,7 +17,12 @@ impl Plugin for PlayerPlugin {
             .add_systems(OnEnter(GameState::Game), spawn_player)
             .add_systems(
                 Update,
-                (update_grounded_state, mouse_look, player_movement, sync_camera_position)
+                (
+                    update_grounded_state,
+                    mouse_look,
+                    player_movement,
+                    sync_camera_position,
+                )
                     .chain()
                     .run_if(in_state(GameState::Game)),
             );
@@ -145,7 +150,7 @@ fn spawn_player(
     // Sun directional light
     commands.spawn((
         DirectionalLight {
-            shadow_maps_enabled: true,
+            shadow_maps_enabled: false,
             shadow_depth_bias: 0.02,
             shadow_normal_bias: 1.8,
             illuminance: 5_000.0,

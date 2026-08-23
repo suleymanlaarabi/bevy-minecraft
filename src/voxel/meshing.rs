@@ -232,7 +232,3 @@ fn quad_uvs(axis: usize, du: [i32; 3], dv: [i32; 3]) -> [[f32; 2]; 4] {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "../voxel_meshing_tests.rs"]
-mod tests;

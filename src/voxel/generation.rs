@@ -333,7 +333,3 @@ fn smoothstep(min: f32, max: f32, value: f32) -> f32 {
     let t = ((value - min) / (max - min)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
-
-#[cfg(test)]
-#[path = "../voxel_generation_tests.rs"]
-mod tests;

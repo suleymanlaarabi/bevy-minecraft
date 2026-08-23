@@ -3,9 +3,13 @@ name = "hollow"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+dev = ["bevy/bevy_dev_tools", "bevy/debug", "avian3d/debug-plugin"]
+
 [dependencies]
-avian3d = { version = "0.7", default-features = false, features = ["3d", "parry-f32", "parallel", "debug-plugin"] }
-bevy = { version = "=0.19.1", default-features = false, features = ["ui", "3d", "debug", "bevy_dev_tools"] }
+avian3d = { version = "0.7", default-features = false, features = ["3d", "parry-f32", "parallel"] }
+bevy = { version = "=0.19.1", default-features = false, features = ["ui", "3d"] }
 noiz = "0.5"
 
 [profile.dev]

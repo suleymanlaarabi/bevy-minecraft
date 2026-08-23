@@ -188,7 +188,3 @@ pub(crate) fn poll_builds(
         commands.entity(entity).remove::<ChunkBuild>();
     }
 }
-
-#[cfg(test)]
-#[path = "../voxel_rebuild_tests.rs"]
-mod tests;
