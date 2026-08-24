@@ -4,20 +4,19 @@ use avian3d::{
         GravityScale, LinearDamping, LinearVelocity,
         forces::{Forces, WriteRigidBodyForces},
     },
+    prelude::{Position, Rotation},
     schedule::PhysicsSystems,
-    spatial_query::{ShapeCaster, ShapeHits},
+    spatial_query::{ShapeCastConfig, ShapeCaster, ShapeHits, SpatialQuery, SpatialQueryFilter},
 };
 use bevy::prelude::*;
 
-use crate::{
-    game::GameState,
-    voxel::{VoxelKind, VoxelWorld},
-};
+use crate::{game::GameState, voxel::VoxelWorld};
 
 pub const CHARACTER_GRAVITY_SCALE: f32 = 2.8;
 pub const CHARACTER_WATER_GRAVITY_SCALE: f32 = 0.15;
 const WATER_DAMPING: f32 = 4.0;
 const SWIM_VERTICAL_ACCELERATION: f32 = 8.0;
+const STEP_CLEARANCE: f32 = 0.05;
 
 pub struct CharacterPlugin;
 
@@ -59,6 +58,9 @@ pub struct CharacterController {
 
     pub swim_speed: f32,
     pub swim_sprint_speed: f32,
+
+    pub max_step_height: f32,
+    pub step_probe_distance: f32,
 }
 
 #[derive(Component, Default, Debug, Clone, Copy)]
@@ -82,46 +84,17 @@ impl Default for CharacterController {
             friction: 25.0,
             swim_speed: 2.2,
             swim_sprint_speed: 5.612,
+            max_step_height: 1.0,
+            step_probe_distance: 0.25,
         }
     }
 }
 
-#[derive(Component, Debug, Clone, Copy)]
-pub struct CharacterBody {
-    pub radius: f32,
-    pub half_height: f32,
-}
-
-impl Default for CharacterBody {
-    fn default() -> Self {
-        Self {
-            radius: 0.3,
-            half_height: 0.9,
-        }
-    }
-}
-
-#[derive(Component, Debug, Clone, Copy)]
-pub struct AutoJump {
-    pub probe_distance: f32,
-}
-
-impl Default for AutoJump {
-    fn default() -> Self {
-        Self {
-            probe_distance: 0.25,
-        }
-    }
-}
+#[derive(Component, Default, Debug, Clone, Copy)]
+pub struct AutoJump;
 
 #[derive(Component, Default)]
-#[require(
-    OnGroundSensor,
-    InWaterSensor,
-    CharacterController,
-    CharacterMovement,
-    CharacterBody
-)]
+#[require(OnGroundSensor, InWaterSensor, CharacterController, CharacterMovement)]
 pub struct GameCharacter;
 
 impl Plugin for CharacterPlugin {
@@ -138,14 +111,10 @@ impl Plugin for CharacterPlugin {
         )
         .add_systems(
             FixedPostUpdate,
-            character_swim_movement
+            (character_land_movement, character_swim_movement)
                 .after(PhysicsSystems::Prepare)
                 .before(PhysicsSystems::StepSimulation)
                 .run_if(in_state(GameState::Game)),
-        )
-        .add_systems(
-            Update,
-            (character_land_movement, character_auto_jump).run_if(in_state(GameState::Game)),
         );
     }
 }
@@ -206,28 +175,40 @@ fn remove_in_water_state(
 
 fn character_land_movement(
     time: Res<Time>,
+    spatial_query: SpatialQuery,
     mut characters: Query<
         (
+            Entity,
+            &Position,
+            &Rotation,
+            &Collider,
             &mut LinearVelocity,
             &CharacterController,
             &CharacterMovement,
             &mut GravityScale,
             &mut LinearDamping,
             Has<OnGround>,
-            Has<InWater>,
+            Has<AutoJump>,
         ),
-        With<GameCharacter>,
+        (With<GameCharacter>, Without<InWater>),
     >,
 ) {
     let dt = time.delta_secs();
 
-    for (mut velocity, controller, movement, mut gravity, mut damping, grounded, in_water) in
-        &mut characters
+    for (
+        entity,
+        position,
+        rotation,
+        collider,
+        mut velocity,
+        controller,
+        movement,
+        mut gravity,
+        mut damping,
+        grounded,
+        auto_jump,
+    ) in &mut characters
     {
-        if in_water {
-            continue;
-        }
-
         gravity.0 = CHARACTER_GRAVITY_SCALE;
         damping.0 = 0.0;
 
@@ -266,7 +247,21 @@ fn character_land_movement(
                 }
             }
 
-            if movement.jump {
+            let should_jump = movement.jump
+                || (auto_jump
+                    && velocity.y <= 0.0
+                    && wish_dir != Vec3::ZERO
+                    && can_clear_step(
+                        &spatial_query,
+                        entity,
+                        collider,
+                        position.0,
+                        rotation.0,
+                        wish_dir,
+                        controller,
+                    ));
+
+            if should_jump {
                 velocity.y = controller.jump_speed;
             }
         } else if wish_dir != Vec3::ZERO {
@@ -279,22 +274,33 @@ fn character_land_movement(
 }
 
 fn character_swim_movement(
-    voxel_world: VoxelWorld,
+    spatial_query: SpatialQuery,
     mut characters: Query<
         (
+            Entity,
             Forces,
             &CharacterController,
             &CharacterMovement,
-            &CharacterBody,
-            &Transform,
+            &Collider,
+            &Position,
+            &Rotation,
             &mut GravityScale,
             &mut LinearDamping,
         ),
         (With<GameCharacter>, With<InWater>),
     >,
 ) {
-    for (mut forces, controller, movement, body, transform, mut gravity, mut damping) in
-        &mut characters
+    for (
+        entity,
+        mut forces,
+        controller,
+        movement,
+        collider,
+        position,
+        rotation,
+        mut gravity,
+        mut damping,
+    ) in &mut characters
     {
         let horizontal_direction =
             Vec3::new(movement.direction.x, 0.0, movement.direction.z).normalize_or_zero();
@@ -302,11 +308,14 @@ fn character_swim_movement(
         if movement.jump
             && !movement.sneak
             && horizontal_direction != Vec3::ZERO
-            && can_climb_shore(
-                &voxel_world,
-                transform.translation,
+            && can_clear_step(
+                &spatial_query,
+                entity,
+                collider,
+                position.0,
+                rotation.0,
                 horizontal_direction,
-                *body,
+                controller,
             )
         {
             gravity.0 = CHARACTER_GRAVITY_SCALE;
@@ -351,67 +360,39 @@ fn character_swim_movement(
     }
 }
 
-fn can_climb_shore(
-    voxels: &VoxelWorld,
+fn can_clear_step(
+    spatial_query: &SpatialQuery,
+    entity: Entity,
+    collider: &Collider,
     position: Vec3,
+    rotation: Quat,
     direction: Vec3,
-    body: CharacterBody,
+    controller: &CharacterController,
 ) -> bool {
-    let feet = position - Vec3::Y * (body.half_height - 0.1);
-    let ahead = feet + direction * (body.radius + 0.25);
+    let Ok(direction) = Dir3::new(direction) else {
+        return false;
+    };
+    let config = ShapeCastConfig::from_max_distance(controller.step_probe_distance);
+    let filter = SpatialQueryFilter::from_excluded_entities([entity]);
+    let origin = position + Vec3::Y * STEP_CLEARANCE;
 
-    let solid_ledge = [0.1, 0.45, 0.8].into_iter().any(|y| {
-        voxels
-            .get_at(ahead + Vec3::Y * y)
-            .is_some_and(VoxelKind::is_solid)
-    });
+    let Some(obstacle) =
+        spatial_query.cast_shape(collider, origin, rotation, direction, &config, &filter)
+    else {
+        return false;
+    };
 
-    let body_clear = [1.1, 1.7].into_iter().all(|y| {
-        voxels
-            .get_at(ahead + Vec3::Y * y)
-            .is_some_and(|kind| !kind.is_solid())
-    });
-
-    solid_ledge && body_clear
-}
-
-fn character_auto_jump(
-    voxel_world: VoxelWorld,
-    mut characters: Query<
-        (
-            &Transform,
-            &CharacterBody,
-            &AutoJump,
-            &mut CharacterMovement,
-            Has<OnGround>,
-            Has<InWater>,
-        ),
-        With<GameCharacter>,
-    >,
-) {
-    for (transform, body, auto_jump, mut movement, grounded, in_water) in &mut characters {
-        if !grounded || in_water || movement.direction == Vec3::ZERO || movement.jump {
-            continue;
-        }
-
-        let direction =
-            Vec3::new(movement.direction.x, 0.0, movement.direction.z).normalize_or_zero();
-
-        let feet = transform.translation - Vec3::Y * body.half_height;
-        let ahead = feet + direction * (body.radius + auto_jump.probe_distance);
-
-        let obstacle = voxel_world
-            .get_at(ahead + Vec3::Y * 0.4)
-            .is_some_and(VoxelKind::is_solid);
-
-        let space_above = [1.1, 1.7].into_iter().all(|y| {
-            voxel_world
-                .get_at(ahead + Vec3::Y * y)
-                .is_some_and(|voxel| !voxel.is_solid())
-        });
-
-        if obstacle && space_above {
-            movement.jump = true;
-        }
-    }
+    // A small ground penetration can produce a hit at the cast origin. Only a
+    // surface facing the movement direction is an obstacle to step over.
+    obstacle.normal1.dot(*direction) < -0.5
+        && spatial_query
+            .cast_shape(
+                collider,
+                origin + Vec3::Y * controller.max_step_height,
+                rotation,
+                direction,
+                &config,
+                &filter,
+            )
+            .is_none()
 }
