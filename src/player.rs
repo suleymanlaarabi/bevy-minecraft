@@ -19,8 +19,8 @@ use crate::{
     voxel::{VoxelSettings, VoxelViewer},
 };
 
-const PLAYER_RADIUS: f32 = 0.3;
-const PLAYER_CAPSULE_LENGTH: f32 = 1.2;
+const PLAYER_WIDTH: f32 = 0.6;
+const PLAYER_HEIGHT: f32 = 1.8;
 const PLAYER_EYE_HEIGHT: f32 = 0.65;
 
 pub struct PlayerPlugin;
@@ -54,7 +54,7 @@ fn default_restitution() -> Restitution {
     GameCharacter,
     AutoJump,
     RigidBody::Dynamic,
-    Collider::capsule(PLAYER_RADIUS, PLAYER_CAPSULE_LENGTH),
+    Collider::cuboid(PLAYER_WIDTH, PLAYER_HEIGHT, PLAYER_WIDTH),
     LockedAxes::ROTATION_LOCKED,
     GravityScale(CHARACTER_GRAVITY_SCALE),
     LinearDamping::default(),
