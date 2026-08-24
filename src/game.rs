@@ -47,7 +47,21 @@ fn setup_menu_environment(
 fn setup_game_environment(
     mut cursors: Query<&mut CursorOptions>,
     mut clear_color: ResMut<ClearColor>,
+    mut commands: Commands,
 ) {
+    commands.spawn((
+        DirectionalLight {
+            shadow_maps_enabled: true,
+            shadow_depth_bias: 0.02,
+            shadow_normal_bias: 1.8,
+            illuminance: 5_000.0,
+            color: Color::srgb(1.0, 0.98, 0.94),
+            ..default()
+        },
+        Transform::from_xyz(100.0, 200.0, 100.0).looking_at(Vec3::ZERO, Vec3::Y),
+        DespawnOnExit(GameState::Game),
+    ));
+
     for mut cursor in &mut cursors {
         cursor.visible = false;
         cursor.grab_mode = CursorGrabMode::Locked;

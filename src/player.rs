@@ -148,8 +148,6 @@ fn setup_camera(mut commands: Commands) {
 fn spawn_player(
     mut commands: Commands,
     voxel_settings: Option<Res<VoxelSettings>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     mut camera_query: Query<(Entity, &mut Transform, &mut PlayerCamera), Without<Player>>,
 ) {
     let spawn_pos = if let Some(settings) = voxel_settings {
@@ -226,32 +224,6 @@ fn spawn_player(
         ]
         DespawnOnExit::<GameState>(GameState::Game)
     });
-
-    // Sun directional light
-    commands.spawn((
-        DirectionalLight {
-            shadow_maps_enabled: true,
-            shadow_depth_bias: 0.02,
-            shadow_normal_bias: 1.8,
-            illuminance: 5_000.0,
-            color: Color::srgb(1.0, 0.98, 0.94),
-            ..default()
-        },
-        Transform::from_xyz(100.0, 200.0, 100.0).looking_at(Vec3::ZERO, Vec3::Y),
-        DespawnOnExit(GameState::Game),
-    ));
-
-    // Minecraft-style square Sun in the sky
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(50.0, 50.0))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 1.0, 0.9),
-            unlit: true,
-            ..default()
-        })),
-        Transform::from_xyz(250.0, 350.0, 250.0).looking_at(Vec3::ZERO, Vec3::Y),
-        DespawnOnExit(GameState::Game),
-    ));
 }
 
 fn mouse_look(
