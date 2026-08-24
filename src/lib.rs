@@ -1,5 +1,6 @@
 pub mod character;
 pub mod game;
+pub mod inventory;
 pub mod menu;
 pub mod player;
 pub mod settings;

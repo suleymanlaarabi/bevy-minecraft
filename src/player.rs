@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use std::f32::consts::FRAC_PI_2;
 
 use avian3d::prelude::*;
@@ -12,6 +14,7 @@ use bevy::{
 use crate::{
     character::{AutoJump, CHARACTER_GRAVITY_SCALE, CharacterMovement, GameCharacter},
     game::GameState,
+    inventory::{InventoryState, PlayerInventory},
     spatial::{FollowOffset, FollowedBy},
     voxel::{VoxelChunk, VoxelSettings, VoxelViewer},
 };
@@ -33,13 +36,15 @@ impl Plugin for PlayerPlugin {
                 (mouse_look, player_input)
                     .chain()
                     .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
-                    .run_if(in_state(GameState::Game)),
+                    .run_if(in_state(GameState::Game))
+                    .run_if(in_state(InventoryState::Closed)),
             )
             .add_systems(
                 PostUpdate,
                 draw_targeted_block
                     .after(TransformSystems::Propagate)
-                    .run_if(in_state(GameState::Game)),
+                    .run_if(in_state(GameState::Game))
+                    .run_if(in_state(InventoryState::Closed)),
             );
     }
 }
@@ -54,6 +59,7 @@ fn default_restitution() -> Restitution {
 
 #[derive(Component, Default, Debug, Clone)]
 #[require(
+    PlayerInventory,
     GameCharacter,
     AutoJump,
     RigidBody::Dynamic,
@@ -108,6 +114,9 @@ impl Default for CameraSensitivity {
     }
 }
 
+#[derive(Component, Clone, Default)]
+pub(crate) struct Crosshair;
+
 fn spawn_player(mut commands: Commands, voxel_settings: Option<Res<VoxelSettings>>) {
     let spawn_pos = if let Some(settings) = voxel_settings {
         let center = settings.chunk_center(IVec2::ZERO);
@@ -133,6 +142,7 @@ fn spawn_player(mut commands: Commands, voxel_settings: Option<Res<VoxelSettings
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center
         }
+        Crosshair
         Children [
             Node {
                 width: px(32),

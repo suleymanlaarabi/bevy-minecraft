@@ -19,6 +19,7 @@ use bevy::{
 };
 use hollow::{
     game::{GamePlugin, GameState},
+    inventory::InventoryState,
     settings::GameSettingsPlugin,
     voxel::VoxelPlugin,
 };
@@ -101,9 +102,17 @@ fn add_dev_tools(_app: &mut App) {}
 
 fn handle_escape(
     keyboard_input: Res<ButtonInput<KeyCode>>,
-    mut next_state: ResMut<NextState<GameState>>,
+    inventory_state: Res<State<InventoryState>>,
+    mut next_inventory_state: ResMut<NextState<InventoryState>>,
+    mut next_game_state: ResMut<NextState<GameState>>,
 ) {
-    if keyboard_input.just_pressed(KeyCode::Escape) {
-        next_state.set(GameState::Menu);
+    if !keyboard_input.just_pressed(KeyCode::Escape) {
+        return;
+    }
+
+    if *inventory_state.get() == InventoryState::Open {
+        next_inventory_state.set(InventoryState::Closed);
+    } else {
+        next_game_state.set(GameState::Menu);
     }
 }

@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use avian3d::{
     collision::collider::Collider,
     dynamics::rigid_body::{

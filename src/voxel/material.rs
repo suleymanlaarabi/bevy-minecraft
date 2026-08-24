@@ -1,3 +1,5 @@
+#![allow(clippy::needless_arbitrary_self_type)]
+
 use bevy::{
     image::{
         ImageAddressMode, ImageArrayLayout, ImageFilterMode, ImageLoaderSettings, ImageSampler,

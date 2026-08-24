@@ -4,8 +4,8 @@ use bevy::{
 };
 
 use crate::{
-    character::CharacterPlugin, menu::GameMenuPlugin, player::PlayerPlugin,
-    spatial::GameSpatialPlugin,
+    character::CharacterPlugin, inventory::InventoryPlugin, menu::GameMenuPlugin,
+    player::PlayerPlugin, spatial::GameSpatialPlugin,
 };
 
 #[derive(Clone, Copy, Default, Eq, PartialEq, Debug, Hash, States)]
@@ -22,6 +22,7 @@ impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
         app.insert_state(GameState::Menu)
             .add_plugins((
+                InventoryPlugin,
                 PlayerPlugin,
                 GameMenuPlugin,
                 CharacterPlugin,
