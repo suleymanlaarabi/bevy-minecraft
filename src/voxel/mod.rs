@@ -19,7 +19,9 @@ use rebuild::{
     apply_texture_pack, cleanup_removed_chunk, poll_builds, prepare_assets, set_voxel,
     start_changed_builds,
 };
-use streaming::{ChunkIndex, StoredChunks, StreamOffsets, StreamState, stream_chunks};
+use streaming::{
+    ChunkIndex, StoredChunks, StreamOffsets, StreamState, stream_chunks, sync_spawned_halos,
+};
 
 #[derive(SystemParam)]
 pub struct VoxelWorld<'w, 's> {
@@ -97,7 +99,7 @@ impl Plugin for VoxelPlugin {
         .add_systems(Update, stream_chunks.run_if(in_state(GameState::Game)))
         .add_systems(
             PostUpdate,
-            (start_changed_builds, poll_builds)
+            (sync_spawned_halos, start_changed_builds, poll_builds)
                 .chain()
                 .run_if(in_state(GameState::Game)),
         )

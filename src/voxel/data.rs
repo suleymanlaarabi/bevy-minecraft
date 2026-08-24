@@ -94,6 +94,38 @@ impl ChunkVoxels {
         true
     }
 
+    /// Updates a non-owning neighbor sample used only by the mesher.
+    pub(crate) fn set_halo(&mut self, local: IVec3, kind: VoxelKind) -> bool {
+        let Some(index) = self.halo_index(local) else {
+            return false;
+        };
+        if self.halo[index] == kind {
+            return false;
+        }
+        Arc::make_mut(&mut self.halo)[index] = kind;
+        self.changes |= MESH_CHANGED;
+        true
+    }
+
+    /// Copies one complete border from an adjacent chunk into this chunk's halo.
+    pub(crate) fn sync_halo(&mut self, direction: IVec2, neighbor: &Self) -> bool {
+        let (halo, cell, step) = match direction {
+            IVec2::NEG_X => (IVec3::NEG_X, IVec3::new(self.size - 1, 0, 0), IVec3::Z),
+            IVec2::X => (IVec3::new(self.size, 0, 0), IVec3::ZERO, IVec3::Z),
+            IVec2::NEG_Y => (IVec3::NEG_Z, IVec3::new(0, 0, self.size - 1), IVec3::X),
+            IVec2::Y => (IVec3::new(0, 0, self.size), IVec3::ZERO, IVec3::X),
+            _ => unreachable!("chunk neighbors are cardinal"),
+        };
+        let mut changed = false;
+        for y in 0..self.height {
+            for offset in 0..self.size {
+                let offset = IVec3::Y * y + step * offset;
+                changed |= self.set_halo(halo + offset, neighbor.get(cell + offset).unwrap());
+            }
+        }
+        changed
+    }
+
     pub(crate) fn solid_positions(&self) -> Vec<IVec3> {
         let size = self.size as usize;
         self.cells
@@ -126,7 +158,7 @@ impl ChunkVoxels {
         )
     }
 
-    fn halo_kind(&self, local: IVec3) -> Option<VoxelKind> {
+    fn halo_index(&self, local: IVec3) -> Option<usize> {
         if !(0..self.height).contains(&local.y) {
             return None;
         }
@@ -138,7 +170,11 @@ impl ChunkVoxels {
             (x, z) if z == self.size && (0..self.size).contains(&x) => (3, x),
             _ => return None,
         };
-        Some(self.halo[offset as usize + size * (side + 4 * local.y as usize)])
+        Some(offset as usize + size * (side + 4 * local.y as usize))
+    }
+
+    fn halo_kind(&self, local: IVec3) -> Option<VoxelKind> {
+        self.halo_index(local).map(|index| self.halo[index])
     }
 }
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]

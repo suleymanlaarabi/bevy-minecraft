@@ -109,16 +109,51 @@ pub(crate) fn set_voxel(
     mut chunks: Query<&mut ChunkVoxels>,
 ) {
     let (chunk, local) = settings.split_world_position(event.world_position);
-    if let Some(entity) = index.get(&chunk)
-        && let Ok(mut voxels) = chunks.get_mut(*entity)
-    {
-        voxels.set(local, event.kind);
+    let changed = if let Some(entity) = index.get(&chunk) {
+        let Ok(mut voxels) = chunks.get_mut(*entity) else {
+            return;
+        };
+        let changed = voxels.bypass_change_detection().set(local, event.kind);
+        if changed {
+            voxels.set_changed();
+        }
+        changed
+    } else {
+        stored
+            .entry(chunk)
+            .or_insert_with(|| super::generation::generate_chunk(chunk, &settings, &generator))
+            .set(local, event.kind)
+    };
+    if !changed {
         return;
     }
-    let voxels = stored
-        .entry(chunk)
-        .or_insert_with(|| super::generation::generate_chunk(chunk, &settings, &generator));
-    voxels.set(local, event.kind);
+
+    for (neighbor_offset, neighbor_local) in border_halos(local, settings.chunk_size) {
+        let position = chunk + neighbor_offset;
+        if let Some(entity) = index.get(&position)
+            && let Ok(mut voxels) = chunks.get_mut(*entity)
+        {
+            let changed = voxels
+                .bypass_change_detection()
+                .set_halo(neighbor_local, event.kind);
+            if changed {
+                voxels.set_changed();
+            }
+        } else if let Some(voxels) = stored.get_mut(&position) {
+            voxels.set_halo(neighbor_local, event.kind);
+        }
+    }
+}
+
+fn border_halos(local: IVec3, size: i32) -> impl Iterator<Item = (IVec2, IVec3)> {
+    [
+        (local.x == 0).then_some((IVec2::NEG_X, IVec3::new(size, local.y, local.z))),
+        (local.x == size - 1).then_some((IVec2::X, IVec3::new(-1, local.y, local.z))),
+        (local.z == 0).then_some((IVec2::NEG_Y, IVec3::new(local.x, local.y, size))),
+        (local.z == size - 1).then_some((IVec2::Y, IVec3::new(local.x, local.y, -1))),
+    ]
+    .into_iter()
+    .flatten()
 }
 
 pub(crate) fn cleanup_removed_chunk(

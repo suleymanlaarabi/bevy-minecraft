@@ -14,9 +14,9 @@ use bevy::{
 use crate::{
     character::{AutoJump, CHARACTER_GRAVITY_SCALE, CharacterMovement, GameCharacter},
     game::GameState,
-    inventory::{InventoryState, PlayerInventory},
+    inventory::{InventoryState, ItemKind, PlayerInventory},
     spatial::{FollowOffset, FollowedBy},
-    voxel::{VoxelChunk, VoxelSettings, VoxelViewer},
+    voxel::{VoxelChunk, VoxelCommandsExt, VoxelKind, VoxelSettings, VoxelViewer, VoxelWorld},
 };
 
 const PLAYER_RADIUS: f32 = 0.3;
@@ -41,7 +41,12 @@ impl Plugin for PlayerPlugin {
             )
             .add_systems(
                 PostUpdate,
-                draw_targeted_block
+                (
+                    update_block_target,
+                    handle_block_interaction,
+                    draw_targeted_block,
+                )
+                    .chain()
                     .after(TransformSystems::Propagate)
                     .run_if(in_state(GameState::Game))
                     .run_if(in_state(InventoryState::Closed)),
@@ -77,6 +82,7 @@ pub struct Player;
 #[derive(Debug, Component, Default, Clone)]
 #[require(
     CameraSensitivity,
+    BlockTargetState,
     Camera3d,
     IsDefaultUiCamera,
     AmbientLight {
@@ -104,6 +110,15 @@ pub struct Player;
 pub struct PlayerCamera {
     pub pitch: f32,
 }
+
+#[derive(Debug, Clone, Copy)]
+struct BlockTarget {
+    destroy: IVec3,
+    place: IVec3,
+}
+
+#[derive(Component, Default)]
+struct BlockTargetState(Option<BlockTarget>);
 
 #[derive(Debug, Component, Deref, DerefMut)]
 pub struct CameraSensitivity(pub Vec2);
@@ -219,23 +234,84 @@ fn player_input(
     movement.sprint = keyboard.pressed(KeyCode::ControlLeft);
 }
 
-fn draw_targeted_block(
-    mut gizmos: Gizmos,
+fn update_block_target(
     spatial_query: SpatialQuery,
-    camera: Single<&GlobalTransform, With<PlayerCamera>>,
+    camera: Single<(&GlobalTransform, &mut BlockTargetState), With<PlayerCamera>>,
     chunks: Query<(), With<VoxelChunk>>,
 ) {
-    let Some(voxel) = targeted_voxel(
+    let (transform, mut target) = camera.into_inner();
+    target.0 = targeted_voxel(
         &spatial_query,
         &chunks,
-        camera.translation(),
-        camera.forward(),
-    ) else {
+        transform.translation(),
+        transform.forward(),
+    );
+}
+
+fn handle_block_interaction(
+    mut commands: Commands,
+    mouse: Res<ButtonInput<MouseButton>>,
+    target: Single<&BlockTargetState, With<PlayerCamera>>,
+    voxel_world: VoxelWorld,
+    spatial_query: SpatialQuery,
+    players: Query<(), With<Player>>,
+    mut inventory: Single<&mut PlayerInventory, With<Player>>,
+) {
+    let Some(target) = target.0 else {
+        return;
+    };
+
+    if mouse.just_pressed(MouseButton::Left)
+        && voxel_world
+            .get(target.destroy)
+            .is_some_and(|kind| kind != VoxelKind::Air)
+    {
+        commands.set_voxel(target.destroy, VoxelKind::Air);
+    }
+
+    if !mouse.just_pressed(MouseButton::Right)
+        || voxel_world.get(target.place) != Some(VoxelKind::Air)
+    {
+        return;
+    }
+
+    let Some(ItemKind::Block(kind)) = inventory.selected_stack().map(|stack| stack.item()) else {
+        return;
+    };
+    if block_contains_player(&spatial_query, &players, target.place) {
+        return;
+    }
+    if inventory.consume_selected(1) {
+        commands.set_voxel(target.place, kind);
+    }
+}
+
+fn block_contains_player(
+    spatial_query: &SpatialQuery,
+    players: &Query<(), With<Player>>,
+    position: IVec3,
+) -> bool {
+    let mut contains_player = false;
+    spatial_query.shape_intersections_callback(
+        &Collider::cuboid(0.999, 0.999, 0.999),
+        position.as_vec3() + Vec3::splat(0.5),
+        Quat::IDENTITY,
+        &SpatialQueryFilter::DEFAULT,
+        |entity| {
+            contains_player = players.contains(entity);
+            !contains_player
+        },
+    );
+    contains_player
+}
+
+fn draw_targeted_block(mut gizmos: Gizmos, target: Single<&BlockTargetState, With<PlayerCamera>>) {
+    let Some(target) = target.0 else {
         return;
     };
 
     gizmos.cube(
-        Transform::from_translation(voxel.as_vec3() + Vec3::splat(0.5))
+        Transform::from_translation(target.destroy.as_vec3() + Vec3::splat(0.5))
             .with_scale(Vec3::splat(BLOCK_OUTLINE_SIZE)),
         BLACK,
     );
@@ -246,7 +322,7 @@ fn targeted_voxel(
     chunks: &Query<(), With<VoxelChunk>>,
     origin: Vec3,
     direction: Dir3,
-) -> Option<IVec3> {
+) -> Option<BlockTarget> {
     let hit = spatial_query.cast_ray_predicate(
         origin,
         direction,
@@ -257,7 +333,10 @@ fn targeted_voxel(
     )?;
     let hit_point = origin + direction * hit.distance;
 
-    Some(voxel_from_hit(hit_point, hit.normal))
+    Some(BlockTarget {
+        destroy: voxel_from_hit(hit_point, hit.normal),
+        place: (hit_point + hit.normal * HIT_EPSILON).floor().as_ivec3(),
+    })
 }
 
 fn voxel_from_hit(hit_point: Vec3, normal: Vec3) -> IVec3 {

@@ -5,6 +5,7 @@ use bevy::{
 };
 
 use crate::{
+    game::GameState,
     inventory::{
         DragMode, DragState, HOTBAR_SIZE, INVENTORY_SIZE, InventoryCursor, InventoryState,
         ItemKind, PlayerInventory,

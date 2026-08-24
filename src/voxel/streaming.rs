@@ -10,6 +10,11 @@ use bevy::{
     prelude::*,
 };
 
+const CHUNK_DIRECTIONS: [IVec2; 4] = [IVec2::NEG_X, IVec2::X, IVec2::NEG_Y, IVec2::Y];
+type AddedChunks<'w, 's> =
+    Query<'w, 's, (Entity, &'static VoxelChunk, &'static ChunkVoxels), Added<ChunkVoxels>>;
+type MutableChunks<'w, 's> = Query<'w, 's, &'static mut ChunkVoxels>;
+
 #[derive(Resource, Default, Deref, DerefMut)]
 pub(crate) struct ChunkIndex(HashMap<IVec2, Entity>);
 #[derive(Resource, Default, Deref, DerefMut)]
@@ -102,5 +107,55 @@ pub(crate) fn stream_chunks(
             .id();
         index_entry.insert(entity);
         spawned += 1;
+    }
+}
+
+pub(crate) fn sync_spawned_halos(
+    index: Res<ChunkIndex>,
+    stored: Res<StoredChunks>,
+    mut chunks: ParamSet<(AddedChunks, MutableChunks)>,
+) {
+    let spawned: Vec<_> = chunks
+        .p0()
+        .iter()
+        .map(|(entity, chunk, voxels)| (entity, chunk.position, voxels.clone()))
+        .collect();
+
+    for (entity, position, snapshot) in spawned {
+        let neighbors = CHUNK_DIRECTIONS.map(|direction| {
+            let neighbor_position = position + direction;
+            if let Some(entity) = index.get(&neighbor_position) {
+                chunks
+                    .p1()
+                    .get_mut(*entity)
+                    .ok()
+                    .map(|neighbor| (direction, Some(*entity), neighbor.clone()))
+            } else {
+                stored
+                    .get(&neighbor_position)
+                    .cloned()
+                    .map(|neighbor| (direction, None, neighbor))
+            }
+        });
+
+        if let Ok(mut voxels) = chunks.p1().get_mut(entity) {
+            for (direction, _, neighbor) in neighbors.iter().flatten() {
+                voxels.sync_halo(*direction, neighbor);
+            }
+        }
+        if snapshot.modified {
+            for (direction, neighbor, _) in neighbors.iter().flatten() {
+                if let Some(entity) = neighbor
+                    && let Ok(mut neighbor) = chunks.p1().get_mut(*entity)
+                {
+                    let changed = neighbor
+                        .bypass_change_detection()
+                        .sync_halo(-*direction, &snapshot);
+                    if changed {
+                        neighbor.set_changed();
+                    }
+                }
+            }
+        }
     }
 }
