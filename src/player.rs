@@ -4,7 +4,7 @@ use avian3d::prelude::*;
 use bevy::{input::mouse::AccumulatedMouseMotion, prelude::*};
 
 use crate::{
-    character::{OnGround, OnGroundSensor},
+    character::{CHARACTER_GRAVITY_SCALE, CHARACTER_WATER_GRAVITY_SCALE, OnGround, OnGroundSensor},
     game::GameState,
     voxel::{VoxelKind, VoxelSettings, VoxelViewer, VoxelWorld},
 };
@@ -12,8 +12,6 @@ use crate::{
 const PLAYER_RADIUS: f32 = 0.3;
 const PLAYER_CAPSULE_LENGTH: f32 = 1.2;
 const PLAYER_EYE_HEIGHT: f32 = 0.65;
-const PLAYER_GRAVITY_SCALE: f32 = 2.8;
-const WATER_GRAVITY_SCALE: f32 = 0.15;
 const WATER_DAMPING: f32 = 4.0;
 const WATER_EYE_CLEARANCE: f32 = 0.25;
 const WATER_SURFACE_BAND: f32 = 0.12;
@@ -169,7 +167,7 @@ fn spawn_player(
         RigidBody::Dynamic,
         Collider::capsule(PLAYER_RADIUS, PLAYER_CAPSULE_LENGTH),
         LockedAxes::ROTATION_LOCKED,
-        GravityScale(PLAYER_GRAVITY_SCALE),
+        GravityScale(CHARACTER_GRAVITY_SCALE),
         LinearDamping::default(),
         ConstantLinearAcceleration::default(),
         Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
@@ -319,17 +317,15 @@ fn player_movement(
     let right = transform.right().as_vec3();
     let right_flat = Vec3::new(right.x, 0.0, right.z).normalize_or_zero();
 
-    // Support both WASD and ZQSD layouts.
+    // Support ZQSD layouts.
     let forward_input =
-        i8::from(keyboard.pressed(KeyCode::KeyW) || keyboard.pressed(KeyCode::KeyZ))
-            - i8::from(keyboard.pressed(KeyCode::KeyS));
-    let right_input = i8::from(keyboard.pressed(KeyCode::KeyD))
-        - i8::from(keyboard.pressed(KeyCode::KeyA) || keyboard.pressed(KeyCode::KeyQ));
+        i8::from(keyboard.pressed(KeyCode::KeyW)) - i8::from(keyboard.pressed(KeyCode::KeyS));
+    let right_input =
+        i8::from(keyboard.pressed(KeyCode::KeyD)) - i8::from(keyboard.pressed(KeyCode::KeyA));
 
     // Determine target movement speed
     let is_sneaking = keyboard.pressed(KeyCode::ShiftLeft);
-    let is_sprinting =
-        keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ShiftRight);
+    let is_sprinting = keyboard.pressed(KeyCode::ControlLeft);
 
     let in_water = voxel_world
         .get_at(transform.translation)
@@ -383,7 +379,7 @@ fn player_movement(
             controller.swim_speed
         };
 
-        gravity_scale.0 = WATER_GRAVITY_SCALE;
+        gravity_scale.0 = CHARACTER_WATER_GRAVITY_SCALE;
         damping.0 = WATER_DAMPING;
         let vertical_acceleration = if is_sneaking {
             -SWIM_VERTICAL_ACCELERATION
@@ -404,7 +400,7 @@ fn player_movement(
     }
 
     controller.surface_rising = false;
-    gravity_scale.0 = PLAYER_GRAVITY_SCALE;
+    gravity_scale.0 = CHARACTER_GRAVITY_SCALE;
     damping.0 = 0.0;
     acceleration.0 = Vec3::ZERO;
 

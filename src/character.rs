@@ -4,6 +4,9 @@ use avian3d::{
 };
 use bevy::prelude::*;
 
+pub const CHARACTER_GRAVITY_SCALE: f32 = 2.8;
+pub const CHARACTER_WATER_GRAVITY_SCALE: f32 = 0.15;
+
 pub struct CharacterPlugin;
 
 #[derive(Component)]
