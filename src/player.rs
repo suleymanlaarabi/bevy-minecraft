@@ -28,7 +28,6 @@ pub struct PlayerPlugin;
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<PlayerController>()
-            .add_systems(Startup, setup_camera)
             .add_systems(OnEnter(GameState::Game), spawn_player)
             .add_systems(
                 Update,
@@ -117,39 +116,7 @@ type PlayerMovementQuery<'w, 's> = Query<
 
 use bevy::pbr::{DistanceFog, FogFalloff};
 
-fn setup_camera(mut commands: Commands) {
-    commands.spawn((
-        PlayerCamera::default(),
-        CameraSensitivity::default(),
-        Camera3d::default(),
-        AmbientLight {
-            color: Color::srgb_u8(215, 235, 255),
-            brightness: 500.0,
-            ..default()
-        },
-        DistanceFog {
-            color: Color::srgb_u8(195, 222, 255),
-            falloff: FogFalloff::Linear {
-                start: 160.0,
-                end: 280.0,
-            },
-            ..default()
-        },
-        Projection::from(PerspectiveProjection {
-            fov: 85.0_f32.to_radians(),
-            ..default()
-        }),
-        Transform::from_xyz(0.0, 30.0, 0.0),
-        Visibility::default(),
-        VoxelViewer,
-    ));
-}
-
-fn spawn_player(
-    mut commands: Commands,
-    voxel_settings: Option<Res<VoxelSettings>>,
-    mut camera_query: Query<(Entity, &mut Transform, &mut PlayerCamera), Without<Player>>,
-) {
+fn spawn_player(mut commands: Commands, voxel_settings: Option<Res<VoxelSettings>>) {
     let spawn_pos = if let Some(settings) = voxel_settings {
         let center = settings.chunk_center(IVec2::ZERO);
         Vec3::new(center.x, settings.base_height + 15.0, center.z)
@@ -177,15 +144,34 @@ fn spawn_player(
         ))
         .id();
 
-    if let Ok((cam_entity, mut cam_transform, mut cam)) = camera_query.single_mut() {
-        cam_transform.translation = spawn_pos + Vec3::Y * PLAYER_EYE_HEIGHT;
-        cam_transform.rotation = Quat::IDENTITY;
-        cam.pitch = 0.0;
-
-        commands
-            .entity(cam_entity)
-            .insert(Follow::new(player_entity, Vec3::Y * PLAYER_EYE_HEIGHT));
-    }
+    commands.spawn((
+        PlayerCamera::default(),
+        CameraSensitivity::default(),
+        Camera3d::default(),
+        IsDefaultUiCamera,
+        AmbientLight {
+            color: Color::srgb_u8(215, 235, 255),
+            brightness: 500.0,
+            ..default()
+        },
+        DistanceFog {
+            color: Color::srgb_u8(195, 222, 255),
+            falloff: FogFalloff::Linear {
+                start: 160.0,
+                end: 280.0,
+            },
+            ..default()
+        },
+        Projection::from(PerspectiveProjection {
+            fov: 85.0_f32.to_radians(),
+            ..default()
+        }),
+        Transform::from_xyz(0.0, 30.0, 0.0),
+        Visibility::default(),
+        VoxelViewer,
+        Follow::new(player_entity, Vec3::Y * PLAYER_EYE_HEIGHT),
+        DespawnOnExit(GameState::Game),
+    ));
 
     commands.spawn_scene(bsn! {
         Node {
