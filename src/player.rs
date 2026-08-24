@@ -4,7 +4,9 @@ use avian3d::prelude::*;
 use bevy::{input::mouse::AccumulatedMouseMotion, prelude::*};
 
 use crate::{
-    character::{CHARACTER_GRAVITY_SCALE, CHARACTER_WATER_GRAVITY_SCALE, OnGround, OnGroundSensor},
+    character::{
+        CHARACTER_GRAVITY_SCALE, CHARACTER_WATER_GRAVITY_SCALE, GameCharacter, InWater, OnGround,
+    },
     game::GameState,
     spatial::Follow,
     voxel::{VoxelKind, VoxelSettings, VoxelViewer, VoxelWorld},
@@ -108,6 +110,7 @@ type PlayerMovementQuery<'w, 's> = Query<
         &'static mut LinearDamping,
         &'static mut ConstantLinearAcceleration,
         Has<OnGround>,
+        Has<InWater>,
     ),
     With<Player>,
 >;
@@ -159,6 +162,7 @@ fn spawn_player(
     let player_entity = commands
         .spawn((
             Player,
+            GameCharacter,
             PlayerController::default(),
             RigidBody::Dynamic,
             Collider::capsule(PLAYER_RADIUS, PLAYER_CAPSULE_LENGTH),
@@ -169,7 +173,6 @@ fn spawn_player(
             Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
             Restitution::ZERO.with_combine_rule(CoefficientCombine::Min),
             LinearVelocity::default(),
-            OnGroundSensor,
             Transform::from_translation(spawn_pos),
             Visibility::default(),
             DespawnOnExit(GameState::Game),
@@ -302,6 +305,7 @@ fn player_movement(
         mut damping,
         mut acceleration,
         is_on_ground,
+        is_in_water,
     )) = player_query.single_mut()
     else {
         return;
@@ -323,10 +327,7 @@ fn player_movement(
     let is_sneaking = keyboard.pressed(KeyCode::ShiftLeft);
     let is_sprinting = keyboard.pressed(KeyCode::ControlLeft);
 
-    let in_water = voxel_world
-        .get_at(transform.translation)
-        .is_some_and(|kind| kind.is_liquid());
-    if in_water {
+    if is_in_water {
         let eye_position = transform.translation + Vec3::Y * PLAYER_EYE_HEIGHT;
         let surface_probe = eye_position - Vec3::Y * WATER_EYE_CLEARANCE;
         let water_above_target = voxel_world
