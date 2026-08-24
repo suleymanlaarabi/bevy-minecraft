@@ -6,16 +6,53 @@ mod rebuild;
 mod streaming;
 use crate::{game::GameState, settings::GraphicsSettings};
 use bevy::{
+    ecs::system::SystemParam,
     pbr::{DistanceFog, FogFalloff},
     prelude::*,
 };
-pub use data::{ChunkVoxels, SetVoxel, VoxelChunk, VoxelKind, VoxelViewer};
+pub(crate) use data::{ChunkVoxels, VoxelChunk};
+pub use data::{SetVoxel, VoxelKind, VoxelViewer};
 use generation::WorldGenerator;
 use material::{VoxelMaterial, WaterMaterial};
 use rebuild::{
     cleanup_removed_chunk, poll_builds, prepare_assets, set_voxel, start_changed_builds,
 };
 use streaming::{ChunkIndex, StoredChunks, StreamOffsets, StreamState, stream_chunks};
+
+#[derive(SystemParam)]
+pub struct VoxelWorld<'w, 's> {
+    settings: Res<'w, VoxelSettings>,
+    index: Res<'w, ChunkIndex>,
+    chunks: Query<'w, 's, &'static ChunkVoxels>,
+}
+
+impl VoxelWorld<'_, '_> {
+    /// Returns the voxel at an integer world position, or `None` when it is unavailable.
+    pub fn get(&self, world_position: IVec3) -> Option<VoxelKind> {
+        let (chunk_position, local_position) = self.settings.split_world_position(world_position);
+        self.index
+            .get(&chunk_position)
+            .and_then(|entity| self.chunks.get(*entity).ok())
+            .and_then(|voxels| voxels.get(local_position))
+    }
+
+    /// Returns the voxel containing a continuous world position.
+    pub fn get_at(&self, world_position: Vec3) -> Option<VoxelKind> {
+        self.get(world_position.floor().as_ivec3())
+    }
+}
+
+pub trait VoxelCommandsExt {
+    /// Queues a world-space voxel edit, generating an unloaded chunk when necessary.
+    fn set_voxel(&mut self, world_position: IVec3, kind: VoxelKind) -> &mut Self;
+}
+
+impl VoxelCommandsExt for Commands<'_, '_> {
+    fn set_voxel(&mut self, world_position: IVec3, kind: VoxelKind) -> &mut Self {
+        self.trigger(SetVoxel::new(world_position, kind));
+        self
+    }
+}
 
 pub struct VoxelPlugin {
     settings: VoxelSettings,
@@ -84,20 +121,14 @@ fn apply_view_distance(
 }
 
 fn update_underwater_effect(
-    settings: Res<VoxelSettings>,
-    index: Res<ChunkIndex>,
-    chunks: Query<&ChunkVoxels>,
+    voxel_world: VoxelWorld,
     mut camera: Single<(&Transform, &mut DistanceFog, &mut AmbientLight), With<VoxelViewer>>,
     mut clear_color: ResMut<ClearColor>,
     mut previous: Local<Option<bool>>,
 ) {
-    let world_position = camera.0.translation.floor().as_ivec3();
-    let (chunk_position, local_position) = settings.split_world_position(world_position);
-    let underwater = index
-        .get(&chunk_position)
-        .and_then(|entity| chunks.get(*entity).ok())
-        .and_then(|voxels| voxels.get(local_position))
-        == Some(VoxelKind::Water);
+    let underwater = voxel_world
+        .get_at(camera.0.translation)
+        .is_some_and(VoxelKind::is_liquid);
 
     if *previous == Some(underwater) {
         return;
@@ -197,6 +228,30 @@ impl VoxelSettings {
 mod tests {
     use super::*;
 
+    #[derive(Resource, Default)]
+    struct VoxelProbe {
+        exact: Option<VoxelKind>,
+        continuous: Option<VoxelKind>,
+        unavailable: Option<VoxelKind>,
+    }
+
+    fn probe_voxel_world(voxels: VoxelWorld, mut probe: ResMut<VoxelProbe>) {
+        probe.exact = voxels.get(IVec3::new(-1, 0, 1));
+        probe.continuous = voxels.get_at(Vec3::new(-0.2, 0.4, 1.8));
+        probe.unavailable = voxels.get(IVec3::new(2, 0, 0));
+    }
+
+    #[derive(Resource, Default)]
+    struct EditProbe(Option<SetVoxel>);
+
+    fn queue_voxel_edit(mut commands: Commands) {
+        commands.set_voxel(IVec3::new(4, 5, 6), VoxelKind::Stone);
+    }
+
+    fn record_voxel_edit(event: On<SetVoxel>, mut probe: ResMut<EditProbe>) {
+        probe.0 = Some(*event);
+    }
+
     #[test]
     fn view_distance_change_restarts_streaming() {
         let mut app = App::new();
@@ -220,5 +275,48 @@ mod tests {
         });
         assert_eq!(app.world().resource::<StreamOffsets>().radius, 32);
         assert_eq!(app.world().resource::<StreamState>().center, None);
+    }
+
+    #[test]
+    fn voxel_world_reads_world_coordinates() {
+        let settings = VoxelSettings {
+            chunk_size: 2,
+            max_height: 2,
+            ..default()
+        };
+        let mut cells = vec![VoxelKind::Air; 8];
+        cells[3] = VoxelKind::Water;
+        let voxels = ChunkVoxels::generated(2, 2, cells, vec![VoxelKind::Air; 16]);
+
+        let mut app = App::new();
+        app.insert_resource(settings)
+            .init_resource::<ChunkIndex>()
+            .insert_resource(VoxelProbe::default())
+            .add_systems(Update, probe_voxel_world);
+        let entity = app.world_mut().spawn(voxels).id();
+        app.world_mut()
+            .resource_mut::<ChunkIndex>()
+            .insert(IVec2::new(-1, 0), entity);
+
+        app.update();
+
+        let probe = app.world().resource::<VoxelProbe>();
+        assert_eq!(probe.exact, Some(VoxelKind::Water));
+        assert_eq!(probe.continuous, Some(VoxelKind::Water));
+        assert_eq!(probe.unavailable, None);
+    }
+
+    #[test]
+    fn voxel_commands_extension_triggers_world_edit() {
+        let mut app = App::new();
+        app.insert_resource(EditProbe::default())
+            .add_observer(record_voxel_edit)
+            .add_systems(Update, queue_voxel_edit);
+
+        app.update();
+
+        let event = app.world().resource::<EditProbe>().0.unwrap();
+        assert_eq!(event.world_position, IVec3::new(4, 5, 6));
+        assert_eq!(event.kind, VoxelKind::Stone);
     }
 }

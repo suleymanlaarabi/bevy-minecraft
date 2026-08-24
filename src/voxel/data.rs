@@ -22,6 +22,10 @@ impl VoxelKind {
         !matches!(self, Self::Air | Self::Leaves | Self::Water)
     }
 
+    pub const fn is_liquid(self) -> bool {
+        matches!(self, Self::Water)
+    }
+
     pub(crate) const fn is_opaque(self) -> bool {
         !matches!(self, Self::Air | Self::Water)
     }

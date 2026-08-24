@@ -4,9 +4,23 @@ use avian3d::prelude::*;
 use bevy::{input::mouse::AccumulatedMouseMotion, prelude::*};
 
 use crate::{
+    character::{OnGround, OnGroundSensor},
     game::GameState,
-    voxel::{VoxelSettings, VoxelViewer},
+    voxel::{VoxelKind, VoxelSettings, VoxelViewer, VoxelWorld},
 };
+
+const PLAYER_RADIUS: f32 = 0.3;
+const PLAYER_CAPSULE_LENGTH: f32 = 1.2;
+const PLAYER_EYE_HEIGHT: f32 = 0.65;
+const PLAYER_GRAVITY_SCALE: f32 = 2.8;
+const WATER_GRAVITY_SCALE: f32 = 0.15;
+const WATER_DAMPING: f32 = 4.0;
+const WATER_EYE_CLEARANCE: f32 = 0.25;
+const WATER_SURFACE_BAND: f32 = 0.12;
+const WATER_DEEP_SAMPLE: f32 = 0.5;
+const SWIM_VERTICAL_ACCELERATION: f32 = 8.0;
+const SWIM_SURFACE_ACCELERATION: f32 = 3.0;
+const SHORE_PROBE_DISTANCE: f32 = PLAYER_RADIUS + 0.2;
 
 pub struct PlayerPlugin;
 
@@ -17,12 +31,7 @@ impl Plugin for PlayerPlugin {
             .add_systems(OnEnter(GameState::Game), spawn_player)
             .add_systems(
                 Update,
-                (
-                    update_grounded_state,
-                    mouse_look,
-                    player_movement,
-                    sync_camera_position,
-                )
+                (mouse_look, player_movement, sync_camera_position)
                     .chain()
                     .run_if(in_state(GameState::Game)),
             );
@@ -42,7 +51,9 @@ pub struct PlayerController {
     pub acceleration: f32,
     pub air_acceleration: f32,
     pub friction: f32,
-    pub is_grounded: bool,
+    pub swim_speed: f32,
+    pub swim_sprint_speed: f32,
+    surface_rising: bool,
 }
 
 impl Default for PlayerController {
@@ -55,7 +66,9 @@ impl Default for PlayerController {
             acceleration: 60.0,
             air_acceleration: 15.0,
             friction: 25.0,
-            is_grounded: false,
+            swim_speed: 2.2,
+            swim_sprint_speed: 5.612,
+            surface_rising: false,
         }
     }
 }
@@ -73,6 +86,32 @@ impl Default for CameraSensitivity {
         Self(Vec2::new(0.0025, 0.002))
     }
 }
+
+type PlayerCameraQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Transform,
+        &'static mut PlayerCamera,
+        &'static CameraSensitivity,
+    ),
+    (With<PlayerCamera>, Without<Player>),
+>;
+
+type PlayerMovementQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut LinearVelocity,
+        &'static mut PlayerController,
+        &'static Transform,
+        &'static mut GravityScale,
+        &'static mut LinearDamping,
+        &'static mut ConstantLinearAcceleration,
+        Has<OnGround>,
+    ),
+    With<Player>,
+>;
 
 use bevy::pbr::{DistanceFog, FogFalloff};
 
@@ -119,7 +158,7 @@ fn spawn_player(
     };
 
     if let Ok((mut cam_transform, mut cam)) = camera_query.single_mut() {
-        cam_transform.translation = spawn_pos + Vec3::new(0.0, 0.65, 0.0);
+        cam_transform.translation = spawn_pos + Vec3::Y * PLAYER_EYE_HEIGHT;
         cam_transform.rotation = Quat::IDENTITY;
         cam.pitch = 0.0;
     }
@@ -128,20 +167,15 @@ fn spawn_player(
         Player,
         PlayerController::default(),
         RigidBody::Dynamic,
-        Collider::capsule(0.3, 1.2),
+        Collider::capsule(PLAYER_RADIUS, PLAYER_CAPSULE_LENGTH),
         LockedAxes::ROTATION_LOCKED,
-        GravityScale(2.8),
+        GravityScale(PLAYER_GRAVITY_SCALE),
+        LinearDamping::default(),
+        ConstantLinearAcceleration::default(),
         Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
         Restitution::ZERO.with_combine_rule(CoefficientCombine::Min),
         LinearVelocity::default(),
-        ShapeCaster::new(
-            Collider::sphere(0.25),
-            Vec3::ZERO,
-            Quat::IDENTITY,
-            Dir3::NEG_Y,
-        )
-        .with_max_distance(0.75)
-        .with_ignore_self(true),
+        OnGroundSensor,
         Transform::from_translation(spawn_pos),
         Visibility::default(),
         DespawnOnExit(GameState::Game),
@@ -219,32 +253,14 @@ fn sync_camera_position(
     if let Ok(player_transform) = player_query.single()
         && let Ok(mut camera_transform) = camera_query.single_mut()
     {
-        camera_transform.translation = player_transform.translation + Vec3::new(0.0, 0.65, 0.0);
-    }
-}
-
-fn update_grounded_state(
-    mut player_query: Query<(&mut PlayerController, &ShapeHits), With<Player>>,
-) {
-    for (mut controller, hits) in &mut player_query {
-        let mut grounded = false;
-        for hit in hits.iter() {
-            if hit.normal1.y > 0.5 {
-                grounded = true;
-                break;
-            }
-        }
-        controller.is_grounded = grounded;
+        camera_transform.translation = player_transform.translation + Vec3::Y * PLAYER_EYE_HEIGHT;
     }
 }
 
 fn mouse_look(
     accumulated_mouse_motion: Res<AccumulatedMouseMotion>,
     mut player_query: Query<&mut Transform, With<Player>>,
-    mut camera_query: Query<
-        (&mut Transform, &mut PlayerCamera, &CameraSensitivity),
-        (With<PlayerCamera>, Without<Player>),
-    >,
+    mut camera_query: PlayerCameraQuery,
 ) {
     let delta = accumulated_mouse_motion.delta;
     if delta == Vec2::ZERO {
@@ -275,14 +291,25 @@ fn mouse_look(
 fn player_movement(
     time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,
-    mut player_query: Query<(&mut LinearVelocity, &mut PlayerController, &Transform), With<Player>>,
+    voxel_world: VoxelWorld,
+    camera_query: Query<&Transform, (With<PlayerCamera>, Without<Player>)>,
+    mut player_query: PlayerMovementQuery,
 ) {
     let dt = time.delta_secs();
     if dt < 0.0 {
         return;
     }
 
-    let Ok((mut velocity, mut controller, transform)) = player_query.single_mut() else {
+    let Ok((
+        mut velocity,
+        mut controller,
+        transform,
+        mut gravity_scale,
+        mut damping,
+        mut acceleration,
+        is_on_ground,
+    )) = player_query.single_mut()
+    else {
         return;
     };
 
@@ -292,27 +319,97 @@ fn player_movement(
     let right = transform.right().as_vec3();
     let right_flat = Vec3::new(right.x, 0.0, right.z).normalize_or_zero();
 
-    let mut wish_dir = Vec3::ZERO;
-    // Support both WASD and ZQSD layouts
-    if keyboard.pressed(KeyCode::KeyW) || keyboard.pressed(KeyCode::KeyZ) {
-        wish_dir += forward_flat;
-    }
-    if keyboard.pressed(KeyCode::KeyS) {
-        wish_dir -= forward_flat;
-    }
-    if keyboard.pressed(KeyCode::KeyD) {
-        wish_dir += right_flat;
-    }
-    if keyboard.pressed(KeyCode::KeyA) || keyboard.pressed(KeyCode::KeyQ) {
-        wish_dir -= right_flat;
-    }
-
-    let wish_dir = wish_dir.normalize_or_zero();
+    // Support both WASD and ZQSD layouts.
+    let forward_input =
+        i8::from(keyboard.pressed(KeyCode::KeyW) || keyboard.pressed(KeyCode::KeyZ))
+            - i8::from(keyboard.pressed(KeyCode::KeyS));
+    let right_input = i8::from(keyboard.pressed(KeyCode::KeyD))
+        - i8::from(keyboard.pressed(KeyCode::KeyA) || keyboard.pressed(KeyCode::KeyQ));
 
     // Determine target movement speed
     let is_sneaking = keyboard.pressed(KeyCode::ShiftLeft);
     let is_sprinting =
         keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ShiftRight);
+
+    let in_water = voxel_world
+        .get_at(transform.translation)
+        .is_some_and(|kind| kind.is_liquid());
+    if in_water {
+        let eye_position = transform.translation + Vec3::Y * PLAYER_EYE_HEIGHT;
+        let surface_probe = eye_position - Vec3::Y * WATER_EYE_CLEARANCE;
+        let water_above_target = voxel_world
+            .get_at(surface_probe + Vec3::Y * WATER_SURFACE_BAND)
+            .is_some_and(|kind| kind.is_liquid());
+        let water_below_target = voxel_world
+            .get_at(surface_probe - Vec3::Y * WATER_SURFACE_BAND)
+            .is_some_and(|kind| kind.is_liquid());
+        let eyes_submerged = voxel_world
+            .get_at(eye_position)
+            .is_some_and(|kind| kind.is_liquid());
+        let deeply_submerged = voxel_world
+            .get_at(eye_position + Vec3::Y * WATER_DEEP_SAMPLE)
+            .is_some_and(|kind| kind.is_liquid());
+        let holding_space = keyboard.pressed(KeyCode::Space) && !is_sneaking;
+        if !holding_space {
+            controller.surface_rising = false;
+        } else if water_above_target {
+            controller.surface_rising = true;
+        } else if !water_below_target {
+            controller.surface_rising = false;
+        }
+
+        let swim_sprinting = is_sprinting && !is_sneaking && forward_input > 0;
+        let horizontal_direction = (forward_flat * forward_input as f32
+            + right_flat * right_input as f32)
+            .normalize_or_zero();
+        let swim_forward = if swim_sprinting && eyes_submerged {
+            camera_query
+                .single()
+                .map_or(forward_flat, |camera| camera.forward().as_vec3())
+        } else {
+            forward_flat
+        };
+        let direction = (swim_forward * forward_input as f32 + right_flat * right_input as f32)
+            .normalize_or_zero();
+        let climbing_shore = holding_space
+            && horizontal_direction != Vec3::ZERO
+            && can_climb_shore(&voxel_world, transform.translation, horizontal_direction);
+        if climbing_shore {
+            velocity.y = velocity.y.max(controller.jump_speed);
+        }
+        let speed = if swim_sprinting {
+            controller.swim_sprint_speed
+        } else {
+            controller.swim_speed
+        };
+
+        gravity_scale.0 = WATER_GRAVITY_SCALE;
+        damping.0 = WATER_DAMPING;
+        let vertical_acceleration = if is_sneaking {
+            -SWIM_VERTICAL_ACCELERATION
+        } else if climbing_shore {
+            0.0
+        } else if controller.surface_rising {
+            if deeply_submerged {
+                SWIM_VERTICAL_ACCELERATION
+            } else {
+                SWIM_SURFACE_ACCELERATION
+            }
+        } else {
+            0.0
+        };
+        acceleration.0 = swim_acceleration(direction, speed, vertical_acceleration);
+        // controller.is_grounded = false;
+        return;
+    }
+
+    controller.surface_rising = false;
+    gravity_scale.0 = PLAYER_GRAVITY_SCALE;
+    damping.0 = 0.0;
+    acceleration.0 = Vec3::ZERO;
+
+    let wish_dir =
+        (forward_flat * forward_input as f32 + right_flat * right_input as f32).normalize_or_zero();
 
     let target_speed = if is_sneaking {
         controller.sneak_speed
@@ -325,7 +422,7 @@ fn player_movement(
     let target_horizontal_vel = wish_dir * target_speed;
     let current_horizontal_vel = Vec3::new(velocity.x, 0.0, velocity.z);
 
-    if controller.is_grounded {
+    if is_on_ground {
         if wish_dir != Vec3::ZERO {
             // Rapid acceleration towards target velocity
             let diff = target_horizontal_vel - current_horizontal_vel;
@@ -351,7 +448,6 @@ fn player_movement(
         // Jump impulse when grounded
         if keyboard.just_pressed(KeyCode::Space) || keyboard.pressed(KeyCode::Space) {
             velocity.y = controller.jump_speed;
-            controller.is_grounded = false;
         }
     } else {
         // Air control: preserve momentum while allowing steering
@@ -367,5 +463,60 @@ fn player_movement(
         const AIR_DRAG: f32 = 0.5;
         velocity.x -= velocity.x * AIR_DRAG * dt;
         velocity.z -= velocity.z * AIR_DRAG * dt;
+    }
+}
+
+fn swim_acceleration(direction: Vec3, speed: f32, vertical: f32) -> Vec3 {
+    direction * speed * WATER_DAMPING + Vec3::Y * vertical
+}
+
+fn can_climb_shore(voxels: &VoxelWorld, position: Vec3, direction: Vec3) -> bool {
+    let obstacle = position + direction * SHORE_PROBE_DISTANCE;
+    has_shore_clearance([
+        voxels.get_at(obstacle),
+        voxels.get_at(obstacle + Vec3::Y),
+        voxels.get_at(obstacle + Vec3::Y * 2.0),
+    ])
+}
+
+fn has_shore_clearance(samples: [Option<VoxelKind>; 3]) -> bool {
+    samples[0].is_some_and(VoxelKind::is_solid)
+        && samples[1..]
+            .iter()
+            .all(|kind| kind.is_some_and(|kind| !kind.is_solid()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swimming_acceleration_uses_avian_damping_and_controls() {
+        let forward = swim_acceleration(Vec3::NEG_Z, 2.2, 0.0);
+        assert_eq!(forward, Vec3::new(0.0, 0.0, -8.8));
+
+        let ascend = swim_acceleration(Vec3::ZERO, 0.0, SWIM_VERTICAL_ACCELERATION);
+        let descend = swim_acceleration(Vec3::ZERO, 0.0, -SWIM_VERTICAL_ACCELERATION);
+        assert_eq!(ascend.y, SWIM_VERTICAL_ACCELERATION);
+        assert_eq!(descend.y, -SWIM_VERTICAL_ACCELERATION);
+    }
+
+    #[test]
+    fn shore_exit_requires_a_solid_step_and_two_clear_voxels() {
+        assert!(has_shore_clearance([
+            Some(VoxelKind::Sand),
+            Some(VoxelKind::Air),
+            Some(VoxelKind::Air),
+        ]));
+        assert!(!has_shore_clearance([
+            Some(VoxelKind::Sand),
+            Some(VoxelKind::Stone),
+            Some(VoxelKind::Air),
+        ]));
+        assert!(!has_shore_clearance([
+            Some(VoxelKind::Water),
+            Some(VoxelKind::Air),
+            Some(VoxelKind::Air),
+        ]));
     }
 }

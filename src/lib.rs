@@ -1,3 +1,4 @@
+pub mod character;
 pub mod game;
 pub mod menu;
 pub mod player;
