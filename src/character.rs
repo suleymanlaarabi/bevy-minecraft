@@ -101,6 +101,19 @@ impl Default for CharacterBody {
     }
 }
 
+#[derive(Component, Debug, Clone, Copy)]
+pub struct AutoJump {
+    pub probe_distance: f32,
+}
+
+impl Default for AutoJump {
+    fn default() -> Self {
+        Self {
+            probe_distance: 0.25,
+        }
+    }
+}
+
 #[derive(Component, Default)]
 #[require(
     OnGroundSensor,
@@ -132,7 +145,7 @@ impl Plugin for CharacterPlugin {
         )
         .add_systems(
             Update,
-            character_land_movement.run_if(in_state(GameState::Game)),
+            (character_land_movement, character_auto_jump).run_if(in_state(GameState::Game)),
         );
     }
 }
@@ -286,7 +299,6 @@ fn character_swim_movement(
         let horizontal_direction =
             Vec3::new(movement.direction.x, 0.0, movement.direction.z).normalize_or_zero();
 
-        // Sortie d'eau Minecraft-like
         if movement.jump
             && !movement.sneak
             && horizontal_direction != Vec3::ZERO
@@ -361,4 +373,45 @@ fn can_climb_shore(
     });
 
     solid_ledge && body_clear
+}
+
+fn character_auto_jump(
+    voxel_world: VoxelWorld,
+    mut characters: Query<
+        (
+            &Transform,
+            &CharacterBody,
+            &AutoJump,
+            &mut CharacterMovement,
+            Has<OnGround>,
+            Has<InWater>,
+        ),
+        With<GameCharacter>,
+    >,
+) {
+    for (transform, body, auto_jump, mut movement, grounded, in_water) in &mut characters {
+        if !grounded || in_water || movement.direction == Vec3::ZERO || movement.jump {
+            continue;
+        }
+
+        let direction =
+            Vec3::new(movement.direction.x, 0.0, movement.direction.z).normalize_or_zero();
+
+        let feet = transform.translation - Vec3::Y * body.half_height;
+        let ahead = feet + direction * (body.radius + auto_jump.probe_distance);
+
+        let obstacle = voxel_world
+            .get_at(ahead + Vec3::Y * 0.4)
+            .is_some_and(VoxelKind::is_solid);
+
+        let space_above = [1.1, 1.7].into_iter().all(|y| {
+            voxel_world
+                .get_at(ahead + Vec3::Y * y)
+                .is_some_and(|voxel| !voxel.is_solid())
+        });
+
+        if obstacle && space_above {
+            movement.jump = true;
+        }
+    }
 }

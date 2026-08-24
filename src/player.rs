@@ -8,7 +8,7 @@ use bevy::{
 };
 
 use crate::{
-    character::{CHARACTER_GRAVITY_SCALE, CharacterMovement, GameCharacter},
+    character::{AutoJump, CHARACTER_GRAVITY_SCALE, CharacterMovement, GameCharacter},
     game::GameState,
     spatial::{FollowOffset, FollowedBy},
     voxel::{VoxelSettings, VoxelViewer},
@@ -44,6 +44,7 @@ fn default_restitution() -> Restitution {
 #[derive(Component, Default, Debug, Clone)]
 #[require(
     GameCharacter,
+    AutoJump,
     RigidBody::Dynamic,
     Collider::capsule(PLAYER_RADIUS, PLAYER_CAPSULE_LENGTH),
     LockedAxes::ROTATION_LOCKED,
@@ -172,6 +173,7 @@ fn mouse_look(
         (player_camera.pitch - delta.y * sensitivity.y).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     camera_transform.rotation = player.rotation * Quat::from_rotation_x(player_camera.pitch);
 }
+
 fn player_input(
     keyboard: Res<ButtonInput<KeyCode>>,
     camera: Single<&Transform, With<PlayerCamera>>,
