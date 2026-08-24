@@ -1,14 +1,23 @@
 use avian3d::{
     collision::collider::Collider,
-    dynamics::rigid_body::{GravityScale, LinearDamping, LinearVelocity},
+    dynamics::rigid_body::{
+        GravityScale, LinearDamping, LinearVelocity,
+        forces::{Forces, WriteRigidBodyForces},
+    },
+    schedule::PhysicsSystems,
     spatial_query::{ShapeCaster, ShapeHits},
 };
 use bevy::prelude::*;
 
-use crate::{game::GameState, voxel::VoxelWorld};
+use crate::{
+    game::GameState,
+    voxel::{VoxelKind, VoxelWorld},
+};
 
 pub const CHARACTER_GRAVITY_SCALE: f32 = 2.8;
 pub const CHARACTER_WATER_GRAVITY_SCALE: f32 = 0.15;
+const WATER_DAMPING: f32 = 4.0;
+const SWIM_VERTICAL_ACCELERATION: f32 = 8.0;
 
 pub struct CharacterPlugin;
 
@@ -77,8 +86,29 @@ impl Default for CharacterController {
     }
 }
 
+#[derive(Component, Debug, Clone, Copy)]
+pub struct CharacterBody {
+    pub radius: f32,
+    pub half_height: f32,
+}
+
+impl Default for CharacterBody {
+    fn default() -> Self {
+        Self {
+            radius: 0.3,
+            half_height: 0.9,
+        }
+    }
+}
+
 #[derive(Component, Default)]
-#[require(OnGroundSensor, InWaterSensor, CharacterController, CharacterMovement)]
+#[require(
+    OnGroundSensor,
+    InWaterSensor,
+    CharacterController,
+    CharacterMovement,
+    CharacterBody
+)]
 pub struct GameCharacter;
 
 impl Plugin for CharacterPlugin {
@@ -91,6 +121,13 @@ impl Plugin for CharacterPlugin {
                 add_in_water_state,
                 remove_in_water_state,
             )
+                .run_if(in_state(GameState::Game)),
+        )
+        .add_systems(
+            FixedPostUpdate,
+            character_swim_movement
+                .after(PhysicsSystems::Prepare)
+                .before(PhysicsSystems::StepSimulation)
                 .run_if(in_state(GameState::Game)),
         )
         .add_systems(
@@ -226,4 +263,102 @@ fn character_land_movement(
             velocity.z += change.z;
         }
     }
+}
+
+fn character_swim_movement(
+    voxel_world: VoxelWorld,
+    mut characters: Query<
+        (
+            Forces,
+            &CharacterController,
+            &CharacterMovement,
+            &CharacterBody,
+            &Transform,
+            &mut GravityScale,
+            &mut LinearDamping,
+        ),
+        (With<GameCharacter>, With<InWater>),
+    >,
+) {
+    for (mut forces, controller, movement, body, transform, mut gravity, mut damping) in
+        &mut characters
+    {
+        let horizontal_direction =
+            Vec3::new(movement.direction.x, 0.0, movement.direction.z).normalize_or_zero();
+
+        // Sortie d'eau Minecraft-like
+        if movement.jump
+            && !movement.sneak
+            && horizontal_direction != Vec3::ZERO
+            && can_climb_shore(
+                &voxel_world,
+                transform.translation,
+                horizontal_direction,
+                *body,
+            )
+        {
+            gravity.0 = CHARACTER_GRAVITY_SCALE;
+            damping.0 = 0.0;
+
+            let velocity = forces.linear_velocity_mut();
+            let shore_velocity = horizontal_direction * controller.walk_speed;
+
+            velocity.x = shore_velocity.x;
+            velocity.z = shore_velocity.z;
+            velocity.y = velocity.y.max(controller.jump_speed);
+
+            continue;
+        }
+
+        gravity.0 = CHARACTER_WATER_GRAVITY_SCALE;
+        damping.0 = WATER_DAMPING;
+
+        let look = movement.look_direction.normalize_or_zero();
+        let look_flat = Vec3::new(look.x, 0.0, look.z).normalize_or_zero();
+
+        let sprint_swimming =
+            movement.sprint && !movement.sneak && horizontal_direction.dot(look_flat) > 0.5;
+
+        let direction = if sprint_swimming {
+            look
+        } else {
+            horizontal_direction
+        };
+
+        let speed = if sprint_swimming {
+            controller.swim_sprint_speed
+        } else {
+            controller.swim_speed
+        };
+
+        let vertical = movement.jump as i8 as f32 - movement.sneak as i8 as f32;
+
+        forces.apply_linear_acceleration(
+            direction * speed * WATER_DAMPING + Vec3::Y * vertical * SWIM_VERTICAL_ACCELERATION,
+        );
+    }
+}
+
+fn can_climb_shore(
+    voxels: &VoxelWorld,
+    position: Vec3,
+    direction: Vec3,
+    body: CharacterBody,
+) -> bool {
+    let feet = position - Vec3::Y * (body.half_height - 0.1);
+    let ahead = feet + direction * (body.radius + 0.25);
+
+    let solid_ledge = [0.1, 0.45, 0.8].into_iter().any(|y| {
+        voxels
+            .get_at(ahead + Vec3::Y * y)
+            .is_some_and(VoxelKind::is_solid)
+    });
+
+    let body_clear = [1.1, 1.7].into_iter().all(|y| {
+        voxels
+            .get_at(ahead + Vec3::Y * y)
+            .is_some_and(|kind| !kind.is_solid())
+    });
+
+    solid_ledge && body_clear
 }
