@@ -7,8 +7,9 @@
 #else
 #import bevy_pbr::{
     forward_io::{VertexOutput, FragmentOutput},
-    pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
+    pbr_functions::main_pass_post_lighting_processing,
 }
+#import "shaders/voxel_lighting.wgsl"::apply_voxel_lighting
 #endif
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
@@ -44,7 +45,7 @@ fn fragment(
     return deferred_output(in, pbr_input);
 #else
     var out: FragmentOutput;
-    out.color = apply_pbr_lighting(pbr_input);
+    out.color = apply_voxel_lighting(pbr_input);
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
     return out;
 #endif

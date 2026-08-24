@@ -61,7 +61,6 @@ struct BuildOutput {
 #[derive(Component)]
 pub(crate) struct ChunkWater {
     entity: Entity,
-    mesh: Handle<Mesh>,
 }
 #[derive(Component)]
 pub(crate) struct ChunkBuild {
@@ -137,14 +136,9 @@ pub(crate) fn poll_builds(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     assets: Res<VoxelAssets>,
-    mut chunks: Query<(
-        Entity,
-        &mut ChunkBuild,
-        Option<&Mesh3d>,
-        Option<&ChunkWater>,
-    )>,
+    mut chunks: Query<(Entity, &mut ChunkBuild, Option<&ChunkWater>)>,
 ) {
-    for (entity, mut build, mesh_handle, water) in &mut chunks {
+    for (entity, mut build, water) in &mut chunks {
         let Some(output) = check_ready(&mut build.task) else {
             continue;
         };
@@ -152,15 +146,14 @@ pub(crate) fn poll_builds(
             meshes: ChunkMeshes(terrain, next_water),
             collider,
         } = output;
-        if let Some(handle) = mesh_handle
-            && let Some(mut mesh) = meshes.get_mut(&handle.0)
-        {
-            *mesh = terrain;
-        } else {
-            commands.entity(entity).insert(Mesh3d(meshes.add(terrain)));
-        }
+        let terrain = meshes.add(terrain);
+        commands.entity(entity).insert(Mesh3d(terrain));
         match (next_water, water) {
-            (Some(mesh), Some(water)) => *meshes.get_mut(&water.mesh).unwrap() = mesh,
+            (Some(mesh), Some(water)) => {
+                commands
+                    .entity(water.entity)
+                    .insert(Mesh3d(meshes.add(mesh)));
+            }
             (Some(mesh), None) => {
                 let mesh = meshes.add(mesh);
                 let child = commands
@@ -172,10 +165,7 @@ pub(crate) fn poll_builds(
                         NotShadowReceiver,
                     ))
                     .id();
-                commands.entity(entity).insert(ChunkWater {
-                    entity: child,
-                    mesh,
-                });
+                commands.entity(entity).insert(ChunkWater { entity: child });
             }
             (None, Some(water)) => {
                 commands.entity(water.entity).despawn();

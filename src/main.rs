@@ -1,6 +1,17 @@
 use avian3d::prelude::*;
 #[cfg(feature = "dev")]
-use bevy::dev_tools::fps_overlay::{FpsOverlayConfig, FpsOverlayPlugin, FrameTimeGraphConfig};
+use bevy::{
+    dev_tools::fps_overlay::{FpsOverlayConfig, FpsOverlayPlugin, FrameTimeGraphConfig},
+    diagnostic::{
+        EntityCountDiagnosticsPlugin, LogDiagnosticsPlugin, SystemInformationDiagnosticsPlugin,
+    },
+    render::{
+        diagnostic::{
+            MeshAllocatorDiagnosticPlugin, RenderAssetDiagnosticPlugin, RenderDiagnosticsPlugin,
+        },
+        mesh::RenderMesh,
+    },
+};
 use bevy::{
     feathers::{FeathersPlugins, dark_theme::create_dark_theme, theme::UiTheme},
     prelude::*,
@@ -59,6 +70,30 @@ fn add_dev_tools(app: &mut App) {
             },
         },
     });
+    if std::env::var_os("HOLLOW_DIAGNOSTICS").is_some() {
+        app.add_plugins((
+            PhysicsDiagnosticsPlugin,
+            SystemInformationDiagnosticsPlugin,
+            EntityCountDiagnosticsPlugin::default(),
+            RenderDiagnosticsPlugin,
+            MeshAllocatorDiagnosticPlugin,
+            RenderAssetDiagnosticPlugin::<RenderMesh>::new(" meshes"),
+            LogDiagnosticsPlugin {
+                wait_duration: core::time::Duration::from_secs(5),
+                ..default()
+            },
+        ));
+    }
+    if std::env::var_os("HOLLOW_DIAGNOSTICS_AUTOPLAY").is_some() {
+        app.add_systems(Startup, dev_diagnostics_autoplay);
+    }
+}
+
+#[cfg(feature = "dev")]
+fn dev_diagnostics_autoplay(mut next_state: ResMut<NextState<GameState>>) {
+    if std::env::var_os("HOLLOW_DIAGNOSTICS_AUTOPLAY").is_some() {
+        next_state.set(GameState::Game);
+    }
 }
 
 #[cfg(not(feature = "dev"))]
