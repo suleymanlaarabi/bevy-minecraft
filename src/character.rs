@@ -35,7 +35,7 @@ pub struct InWater;
 #[derive(Component, Default)]
 pub struct InWaterSensor;
 
-#[derive(Component)]
+#[derive(Component, Default)]
 #[require(OnGroundSensor, InWaterSensor)]
 pub struct GameCharacter;
 

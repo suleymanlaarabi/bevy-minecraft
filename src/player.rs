@@ -8,7 +8,7 @@ use crate::{
         CHARACTER_GRAVITY_SCALE, CHARACTER_WATER_GRAVITY_SCALE, GameCharacter, InWater, OnGround,
     },
     game::GameState,
-    spatial::Follow,
+    spatial::{FollowOffset, FollowedBy},
     voxel::{VoxelKind, VoxelSettings, VoxelViewer, VoxelWorld},
 };
 
@@ -38,7 +38,30 @@ impl Plugin for PlayerPlugin {
     }
 }
 
-#[derive(Debug, Component)]
+fn default_friction() -> Friction {
+    Friction::ZERO.with_combine_rule(CoefficientCombine::Min)
+}
+
+fn default_restitution() -> Restitution {
+    Restitution::ZERO.with_combine_rule(CoefficientCombine::Min)
+}
+
+#[derive(Component, Default, Debug, Clone)]
+#[require(
+    GameCharacter,
+    PlayerController::default(),
+    RigidBody::Dynamic,
+    Collider::capsule(PLAYER_RADIUS, PLAYER_CAPSULE_LENGTH),
+    LockedAxes::ROTATION_LOCKED,
+    GravityScale(CHARACTER_GRAVITY_SCALE),
+    LinearDamping::default(),
+    ConstantLinearAcceleration::default(),
+    Friction = default_friction(),
+    Restitution = default_restitution(),
+    LinearVelocity::default(),
+    Visibility::default(),
+    DespawnOnExit::<GameState>(GameState::Game)
+)]
 pub struct Player;
 
 #[derive(Debug, Component, Reflect)]
@@ -73,7 +96,33 @@ impl Default for PlayerController {
     }
 }
 
-#[derive(Debug, Component, Default)]
+#[derive(Debug, Component, Default, Clone)]
+#[require(
+    CameraSensitivity,
+    Camera3d,
+    IsDefaultUiCamera,
+    AmbientLight {
+        color: Color::srgb_u8(215, 235, 255),
+        brightness: 500.0,
+        ..default()
+    },
+    DistanceFog {
+        color: Color::srgb_u8(195, 222, 255),
+        falloff: FogFalloff::Linear {
+            start: 160.0,
+            end: 280.0,
+        },
+        ..default()
+    },
+    Projection::from(PerspectiveProjection {
+        fov: 85.0_f32.to_radians(),
+        ..default()
+    }),
+    Transform::from_xyz(0.0, 30.0, 0.0),
+    Visibility::default(),
+    VoxelViewer,
+    DespawnOnExit::<GameState>(GameState::Game),
+)]
 pub struct PlayerCamera {
     pub pitch: f32,
 }
@@ -124,54 +173,14 @@ fn spawn_player(mut commands: Commands, voxel_settings: Option<Res<VoxelSettings
         Vec3::new(0.0, 30.0, 0.0)
     };
 
-    let player_entity = commands
-        .spawn((
-            Player,
-            GameCharacter,
-            PlayerController::default(),
-            RigidBody::Dynamic,
-            Collider::capsule(PLAYER_RADIUS, PLAYER_CAPSULE_LENGTH),
-            LockedAxes::ROTATION_LOCKED,
-            GravityScale(CHARACTER_GRAVITY_SCALE),
-            LinearDamping::default(),
-            ConstantLinearAcceleration::default(),
-            Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
-            Restitution::ZERO.with_combine_rule(CoefficientCombine::Min),
-            LinearVelocity::default(),
-            Transform::from_translation(spawn_pos),
-            Visibility::default(),
-            DespawnOnExit(GameState::Game),
-        ))
-        .id();
-
-    commands.spawn((
-        PlayerCamera::default(),
-        CameraSensitivity::default(),
-        Camera3d::default(),
-        IsDefaultUiCamera,
-        AmbientLight {
-            color: Color::srgb_u8(215, 235, 255),
-            brightness: 500.0,
-            ..default()
-        },
-        DistanceFog {
-            color: Color::srgb_u8(195, 222, 255),
-            falloff: FogFalloff::Linear {
-                start: 160.0,
-                end: 280.0,
-            },
-            ..default()
-        },
-        Projection::from(PerspectiveProjection {
-            fov: 85.0_f32.to_radians(),
-            ..default()
-        }),
-        Transform::from_xyz(0.0, 30.0, 0.0),
-        Visibility::default(),
-        VoxelViewer,
-        Follow::new(player_entity, Vec3::Y * PLAYER_EYE_HEIGHT),
-        DespawnOnExit(GameState::Game),
-    ));
+    commands.spawn_scene_list(bsn! {
+        Player
+        Transform::from_translation(spawn_pos)
+        FollowedBy [
+            PlayerCamera
+            FollowOffset({Vec3::Y * PLAYER_EYE_HEIGHT}),
+        ]
+    });
 
     commands.spawn_scene(bsn! {
         Node {
