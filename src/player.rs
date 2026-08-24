@@ -2,21 +2,26 @@ use std::f32::consts::FRAC_PI_2;
 
 use avian3d::prelude::*;
 use bevy::{
+    color::palettes::css::BLACK,
     input::mouse::AccumulatedMouseMotion,
     pbr::{DistanceFog, FogFalloff},
     prelude::*,
+    transform::TransformSystems,
 };
 
 use crate::{
     character::{AutoJump, CHARACTER_GRAVITY_SCALE, CharacterMovement, GameCharacter},
     game::GameState,
     spatial::{FollowOffset, FollowedBy},
-    voxel::{VoxelSettings, VoxelViewer},
+    voxel::{VoxelChunk, VoxelSettings, VoxelViewer},
 };
 
 const PLAYER_RADIUS: f32 = 0.3;
 const PLAYER_CAPSULE_LENGTH: f32 = 1.2;
 const PLAYER_EYE_HEIGHT: f32 = 0.65;
+const BLOCK_REACH: f32 = 5.0;
+const BLOCK_OUTLINE_SIZE: f32 = 1.01;
+const HIT_EPSILON: f32 = 0.001;
 
 pub struct PlayerPlugin;
 
@@ -28,6 +33,12 @@ impl Plugin for PlayerPlugin {
                 (mouse_look, player_input)
                     .chain()
                     .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
+                    .run_if(in_state(GameState::Game)),
+            )
+            .add_systems(
+                PostUpdate,
+                draw_targeted_block
+                    .after(TransformSystems::Propagate)
                     .run_if(in_state(GameState::Game)),
             );
     }
@@ -198,6 +209,142 @@ fn player_input(
     movement.sprint = keyboard.pressed(KeyCode::ControlLeft);
 }
 
+fn draw_targeted_block(
+    mut gizmos: Gizmos,
+    spatial_query: SpatialQuery,
+    camera: Single<&GlobalTransform, With<PlayerCamera>>,
+    chunks: Query<(), With<VoxelChunk>>,
+) {
+    let Some(voxel) = targeted_voxel(
+        &spatial_query,
+        &chunks,
+        camera.translation(),
+        camera.forward(),
+    ) else {
+        return;
+    };
+
+    gizmos.cube(
+        Transform::from_translation(voxel.as_vec3() + Vec3::splat(0.5))
+            .with_scale(Vec3::splat(BLOCK_OUTLINE_SIZE)),
+        BLACK,
+    );
+}
+
+fn targeted_voxel(
+    spatial_query: &SpatialQuery,
+    chunks: &Query<(), With<VoxelChunk>>,
+    origin: Vec3,
+    direction: Dir3,
+) -> Option<IVec3> {
+    let hit = spatial_query.cast_ray_predicate(
+        origin,
+        direction,
+        BLOCK_REACH,
+        false,
+        &SpatialQueryFilter::DEFAULT,
+        &|entity| chunks.contains(entity),
+    )?;
+    let hit_point = origin + direction * hit.distance;
+
+    Some(voxel_from_hit(hit_point, hit.normal))
+}
+
+fn voxel_from_hit(hit_point: Vec3, normal: Vec3) -> IVec3 {
+    (hit_point - normal * HIT_EPSILON).floor().as_ivec3()
+}
+
 fn axis(input: &ButtonInput<KeyCode>, positive: KeyCode, negative: KeyCode) -> f32 {
     (input.pressed(positive) as i8 - input.pressed(negative) as i8) as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use avian3d::prelude::{Collider, PhysicsPlugins, RigidBody};
+    use bevy::transform::TransformPlugin;
+
+    use super::*;
+
+    #[derive(Resource)]
+    struct TestRay {
+        origin: Vec3,
+        direction: Dir3,
+    }
+
+    fn test_target(
+        spatial_query: SpatialQuery,
+        chunks: Query<(), With<VoxelChunk>>,
+        ray: Res<TestRay>,
+    ) -> Option<IVec3> {
+        targeted_voxel(&spatial_query, &chunks, ray.origin, ray.direction)
+    }
+
+    fn targeted_in_scene(origin: Vec3, blocks: &[IVec3], with_decoy: bool) -> Option<IVec3> {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, TransformPlugin, PhysicsPlugins::default()))
+            .insert_resource(TestRay {
+                origin,
+                direction: Dir3::X,
+            });
+        app.finish();
+
+        for &block in blocks {
+            app.world_mut().spawn((
+                VoxelChunk {
+                    position: IVec2::ZERO,
+                },
+                RigidBody::Static,
+                Collider::voxels(Vec3::ONE, &[IVec3::ZERO]),
+                Transform::from_translation(block.as_vec3()),
+            ));
+        }
+        if with_decoy {
+            app.world_mut().spawn((
+                RigidBody::Static,
+                Collider::cuboid(0.5, 0.5, 0.5),
+                Transform::from_xyz(-1.0, 0.5, 0.5),
+            ));
+        }
+
+        app.world_mut().run_schedule(FixedPostUpdate);
+        app.world_mut().run_system_cached(test_target).unwrap()
+    }
+
+    #[test]
+    fn hit_faces_map_inside_the_voxel() {
+        let voxel = IVec3::new(-2, 3, -4);
+        let min = voxel.as_vec3();
+        let max = min + Vec3::ONE;
+
+        for (point, normal) in [
+            (Vec3::new(min.x, 3.5, -3.5), Vec3::NEG_X),
+            (Vec3::new(max.x, 3.5, -3.5), Vec3::X),
+            (Vec3::new(-1.5, min.y, -3.5), Vec3::NEG_Y),
+            (Vec3::new(-1.5, max.y, -3.5), Vec3::Y),
+            (Vec3::new(-1.5, 3.5, min.z), Vec3::NEG_Z),
+            (Vec3::new(-1.5, 3.5, max.z), Vec3::Z),
+        ] {
+            assert_eq!(voxel_from_hit(point, normal), voxel);
+        }
+    }
+
+    #[test]
+    fn targets_the_nearest_voxel_chunk_and_ignores_other_colliders() {
+        assert_eq!(
+            targeted_in_scene(
+                Vec3::new(-2.0, 0.5, 0.5),
+                &[IVec3::ZERO, IVec3::new(2, 0, 0)],
+                true,
+            ),
+            Some(IVec3::ZERO)
+        );
+    }
+
+    #[test]
+    fn ignores_voxels_beyond_reach() {
+        assert_eq!(
+            targeted_in_scene(Vec3::new(-6.0, 0.5, 0.5), &[IVec3::ZERO], false),
+            None
+        );
+    }
 }
