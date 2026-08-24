@@ -22,7 +22,7 @@ struct Column {
     snow: bool,
 }
 
-#[derive(Resource)]
+#[derive(Resource, Clone)]
 pub(crate) struct WorldGenerator {
     continental: Simplex,
     erosion: Simplex,

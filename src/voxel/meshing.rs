@@ -7,6 +7,22 @@ use bevy::{
 struct Face(VoxelKind, bool);
 pub(crate) struct ChunkMeshes(pub(crate) Mesh, pub(crate) Option<Mesh>);
 
+#[cfg(feature = "dev")]
+impl ChunkMeshes {
+    pub(crate) fn geometry_counts(&self) -> (usize, usize) {
+        let terrain_vertices = self.0.count_vertices();
+        let water_vertices = self.1.as_ref().map_or(0, Mesh::count_vertices);
+        let terrain_triangles = self.0.indices().map_or(0, |indices| indices.len() / 3);
+        let water_triangles = self
+            .1
+            .as_ref()
+            .and_then(Mesh::indices)
+            .map_or(0, |indices| indices.len() / 3);
+        let triangles = terrain_triangles + water_triangles;
+        (terrain_vertices + water_vertices, triangles)
+    }
+}
+
 pub(crate) fn build_chunk_mesh(voxels: &ChunkVoxels, texture_pack: &TexturePack) -> ChunkMeshes {
     ChunkMeshes(
         greedy_mesh(

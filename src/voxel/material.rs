@@ -5,7 +5,7 @@ use bevy::{
         ImageAddressMode, ImageArrayLayout, ImageFilterMode, ImageLoaderSettings, ImageSampler,
         ImageSamplerDescriptor,
     },
-    pbr::{ExtendedMaterial, MaterialExtension},
+    pbr::{ExtendedMaterial, Material, MaterialExtension},
     prelude::*,
     render::render_resource::{AsBindGroup, ShaderType},
     shader::ShaderRef,
@@ -153,13 +153,11 @@ impl TexturePack {
 }
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
-pub(crate) struct VoxelMaterialExtension {
-    #[texture(100, dimension = "2d_array")]
-    #[sampler(101)]
+pub(crate) struct VoxelMaterial {
+    #[texture(0, dimension = "2d_array")]
+    #[sampler(1)]
     pub(crate) blocks: Handle<Image>,
 }
-
-pub(crate) type VoxelMaterial = ExtendedMaterial<StandardMaterial, VoxelMaterialExtension>;
 
 #[derive(Clone, Copy, Debug, Reflect, ShaderType)]
 pub(crate) struct WaterSettings {
@@ -215,7 +213,7 @@ pub(crate) fn block_texture(asset_server: &AssetServer, path: &str) -> Handle<Im
         .load(path.to_owned())
 }
 
-impl MaterialExtension for VoxelMaterialExtension {
+impl Material for VoxelMaterial {
     fn fragment_shader() -> ShaderRef {
         "shaders/voxel_material.wgsl".into()
     }

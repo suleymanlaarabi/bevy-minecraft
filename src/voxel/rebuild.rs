@@ -2,10 +2,7 @@ use super::{
     ChunkVoxels, SetVoxel, VoxelSettings,
     data::COLLIDER_CHANGED,
     generation::WorldGenerator,
-    material::{
-        TexturePack, VoxelMaterial, VoxelMaterialExtension, WaterMaterial, WaterMaterialExtension,
-        block_texture,
-    },
+    material::{TexturePack, VoxelMaterial, WaterMaterial, WaterMaterialExtension, block_texture},
     meshing::{ChunkMeshes, build_chunk_mesh},
     streaming::{ChunkIndex, StoredChunks},
 };
@@ -15,6 +12,8 @@ use bevy::{
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
+#[cfg(feature = "dev")]
+use std::time::{Duration, Instant};
 #[derive(Resource)]
 pub(crate) struct VoxelAssets {
     pub(crate) terrain: Handle<VoxelMaterial>,
@@ -38,13 +37,7 @@ pub(crate) fn prepare_assets(
     let blocks = block_texture(&asset_server, &pack.texture_path);
     commands.insert_resource(pack);
     commands.insert_resource(VoxelAssets {
-        terrain: voxel_materials.add(VoxelMaterial {
-            base: StandardMaterial {
-                perceptual_roughness: 1.0,
-                ..default()
-            },
-            extension: VoxelMaterialExtension { blocks },
-        }),
+        terrain: voxel_materials.add(VoxelMaterial { blocks }),
         water: water_materials.add(WaterMaterial {
             base: StandardMaterial {
                 base_color: Color::linear_rgba(0.035, 0.30, 0.38, 0.56),
@@ -77,7 +70,7 @@ pub(crate) fn apply_texture_pack(
 
     let next_pack = TexturePack::load(settings.texture_pack);
     if let Some(mut material) = voxel_materials.get_mut(&voxel_assets.terrain) {
-        material.extension.blocks = block_texture(&asset_server, &next_pack.texture_path);
+        material.blocks = block_texture(&asset_server, &next_pack.texture_path);
     }
     *texture_pack = next_pack;
 }
@@ -90,6 +83,14 @@ enum ColliderUpdate {
 struct BuildOutput {
     meshes: ChunkMeshes,
     collider: ColliderUpdate,
+    #[cfg(feature = "dev")]
+    meshing_elapsed: Duration,
+    #[cfg(feature = "dev")]
+    collider_elapsed: Duration,
+    #[cfg(feature = "dev")]
+    vertices: usize,
+    #[cfg(feature = "dev")]
+    triangles: usize,
 }
 #[derive(Component)]
 pub(crate) struct ChunkWater {
@@ -98,8 +99,13 @@ pub(crate) struct ChunkWater {
 #[derive(Component)]
 pub(crate) struct ChunkBuild {
     task: Task<BuildOutput>,
-    flags: u8,
+    revision: u64,
 }
+
+fn build_revision_is_current(build_revision: u64, voxel_revision: u64) -> bool {
+    build_revision == voxel_revision
+}
+
 pub(crate) fn set_voxel(
     event: On<SetVoxel>,
     settings: Res<VoxelSettings>,
@@ -177,16 +183,27 @@ pub(crate) fn start_changed_builds(
 ) {
     let pool = AsyncComputeTaskPool::get();
     for (entity, mut voxels, build) in &mut chunks {
+        if build.is_some() {
+            continue;
+        }
         let changes = core::mem::take(&mut voxels.bypass_change_detection().changes);
         if changes == 0 {
             continue;
         }
         let snapshot = voxels.bypass_change_detection().clone();
+        let revision = snapshot.revision;
         let texture_pack = texture_pack.clone();
-        let flags = changes | build.map_or(0, |build| build.flags);
         let task = pool.spawn(async move {
+            #[cfg(feature = "dev")]
+            let meshing_started = Instant::now();
             let meshes = build_chunk_mesh(&snapshot, &texture_pack);
-            let collider = if flags & COLLIDER_CHANGED == 0 {
+            #[cfg(feature = "dev")]
+            let meshing_elapsed = meshing_started.elapsed();
+            #[cfg(feature = "dev")]
+            let (vertices, triangles) = meshes.geometry_counts();
+            #[cfg(feature = "dev")]
+            let collider_started = Instant::now();
+            let collider = if changes & COLLIDER_CHANGED == 0 {
                 ColliderUpdate::Keep
             } else {
                 let solids = snapshot.solid_positions();
@@ -196,9 +213,22 @@ pub(crate) fn start_changed_builds(
                     ColliderUpdate::Replace(Collider::voxels(Vec3::ONE, &solids))
                 }
             };
-            BuildOutput { meshes, collider }
+            BuildOutput {
+                meshes,
+                collider,
+                #[cfg(feature = "dev")]
+                meshing_elapsed,
+                #[cfg(feature = "dev")]
+                collider_elapsed: collider_started.elapsed(),
+                #[cfg(feature = "dev")]
+                vertices,
+                #[cfg(feature = "dev")]
+                triangles,
+            }
         });
-        commands.entity(entity).insert(ChunkBuild { task, flags });
+        commands
+            .entity(entity)
+            .insert(ChunkBuild { task, revision });
     }
 }
 
@@ -206,18 +236,46 @@ pub(crate) fn poll_builds(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     assets: Res<VoxelAssets>,
-    mut chunks: Query<(Entity, &mut ChunkBuild, Option<&ChunkWater>)>,
+    settings: Res<VoxelSettings>,
+    mut chunks: Query<(
+        Entity,
+        &mut ChunkVoxels,
+        &mut ChunkBuild,
+        Option<&ChunkWater>,
+    )>,
+    #[cfg(feature = "dev")] mut diagnostics: Option<ResMut<super::diagnostics::VoxelDiagnostics>>,
 ) {
-    for (entity, mut build, water) in &mut chunks {
+    let mut completed = 0;
+    for (entity, mut voxels, mut build, water) in &mut chunks {
+        if completed >= settings.spawn_budget_per_frame {
+            break;
+        }
         let Some(output) = check_ready(&mut build.task) else {
             continue;
         };
+        completed += 1;
+        if !build_revision_is_current(build.revision, voxels.revision) {
+            commands.entity(entity).remove::<ChunkBuild>();
+            voxels.set_changed();
+            continue;
+        }
         let BuildOutput {
             meshes: ChunkMeshes(terrain, next_water),
             collider,
+            #[cfg(feature = "dev")]
+            meshing_elapsed,
+            #[cfg(feature = "dev")]
+            collider_elapsed,
+            #[cfg(feature = "dev")]
+            vertices,
+            #[cfg(feature = "dev")]
+            triangles,
         } = output;
-        let terrain = meshes.add(terrain);
-        commands.entity(entity).insert(Mesh3d(terrain));
+        #[cfg(feature = "dev")]
+        if let Some(diagnostics) = diagnostics.as_deref_mut() {
+            diagnostics.record_build(meshing_elapsed, collider_elapsed, vertices, triangles);
+        }
+        commands.entity(entity).insert(Mesh3d(meshes.add(terrain)));
         match (next_water, water) {
             (Some(mesh), Some(water)) => {
                 commands
@@ -253,5 +311,16 @@ pub(crate) fn poll_builds(
             }
         }
         commands.entity(entity).remove::<ChunkBuild>();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_revision_is_current;
+
+    #[test]
+    fn stale_builds_are_rejected() {
+        assert!(build_revision_is_current(7, 7));
+        assert!(!build_revision_is_current(7, 8));
     }
 }

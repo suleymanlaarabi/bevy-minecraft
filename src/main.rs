@@ -13,6 +13,7 @@ use bevy::{
     },
 };
 use bevy::{
+    ecs::schedule::ScheduleLabel,
     feathers::{FeathersPlugins, dark_theme::create_dark_theme, theme::UiTheme},
     prelude::*,
     window::{CursorGrabMode, CursorOptions, ExitCondition, WindowMode},
@@ -23,6 +24,9 @@ use hollow::{
     settings::GameSettingsPlugin,
     voxel::VoxelPlugin,
 };
+
+#[derive(ScheduleLabel, Debug, Clone, PartialEq, Eq, Hash)]
+struct NoPhysics;
 
 fn main() {
     let mut app = App::new();

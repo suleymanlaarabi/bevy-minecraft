@@ -87,6 +87,7 @@ pub struct ChunkVoxels {
     cells: Arc<[VoxelKind]>,
     halo: Arc<[VoxelKind]>,
     pub(crate) changes: u8,
+    pub(crate) revision: u64,
     pub(crate) modified: bool,
 }
 impl ChunkVoxels {
@@ -97,6 +98,7 @@ impl ChunkVoxels {
             cells: cells.into(),
             halo: halo.into(),
             changes: MESH_CHANGED | COLLIDER_CHANGED,
+            revision: 0,
             modified: false,
         }
     }
@@ -121,6 +123,7 @@ impl ChunkVoxels {
             return false;
         }
         Arc::make_mut(&mut self.cells)[index] = kind;
+        self.revision = self.revision.wrapping_add(1);
         self.changes |= MESH_CHANGED;
         if old.is_solid() != kind.is_solid() {
             self.changes |= COLLIDER_CHANGED;
@@ -138,6 +141,7 @@ impl ChunkVoxels {
             return false;
         }
         Arc::make_mut(&mut self.halo)[index] = kind;
+        self.revision = self.revision.wrapping_add(1);
         self.changes |= MESH_CHANGED;
         true
     }
@@ -232,5 +236,31 @@ impl SetVoxel {
             world_position,
             kind,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edits_advance_revision_and_only_dirty_required_outputs() {
+        let mut chunk =
+            ChunkVoxels::generated(2, 2, vec![VoxelKind::Air; 8], vec![VoxelKind::Air; 16]);
+        chunk.changes = 0;
+
+        assert!(chunk.set(IVec3::ZERO, VoxelKind::Stone));
+        assert_eq!(chunk.revision, 1);
+        assert_eq!(chunk.changes, MESH_CHANGED | COLLIDER_CHANGED);
+        assert!(chunk.modified);
+
+        chunk.changes = 0;
+        assert!(!chunk.set(IVec3::ZERO, VoxelKind::Stone));
+        assert_eq!(chunk.revision, 1);
+        assert_eq!(chunk.changes, 0);
+
+        assert!(chunk.set_halo(IVec3::new(-1, 0, 0), VoxelKind::Stone));
+        assert_eq!(chunk.revision, 2);
+        assert_eq!(chunk.changes, MESH_CHANGED);
     }
 }

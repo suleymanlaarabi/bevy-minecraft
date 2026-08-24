@@ -1,4 +1,6 @@
 mod data;
+#[cfg(feature = "dev")]
+mod diagnostics;
 mod generation;
 mod material;
 mod meshing;
@@ -23,7 +25,8 @@ use rebuild::{
     start_changed_builds,
 };
 use streaming::{
-    ChunkIndex, StoredChunks, StreamOffsets, StreamState, stream_chunks, sync_spawned_halos,
+    ChunkIndex, PendingChunks, StoredChunks, StreamOffsets, StreamState, poll_chunk_generations,
+    stream_chunks, sync_spawned_halos,
 };
 
 #[derive(SystemParam)]
@@ -93,6 +96,7 @@ impl Plugin for VoxelPlugin {
         .insert_resource(StreamOffsets::new(view_distance))
         .init_resource::<ChunkIndex>()
         .init_resource::<StoredChunks>()
+        .init_resource::<PendingChunks>()
         .init_resource::<StreamState>()
         .add_observer(apply_view_distance)
         .add_observer(apply_texture_pack)
@@ -102,7 +106,12 @@ impl Plugin for VoxelPlugin {
         .add_systems(Update, stream_chunks.run_if(in_state(GameState::Game)))
         .add_systems(
             PostUpdate,
-            (sync_spawned_halos, start_changed_builds, poll_builds)
+            (
+                poll_chunk_generations,
+                sync_spawned_halos,
+                start_changed_builds,
+                poll_builds,
+            )
                 .chain()
                 .run_if(in_state(GameState::Game)),
         )
@@ -111,6 +120,9 @@ impl Plugin for VoxelPlugin {
             update_underwater_effect.run_if(in_state(GameState::Game)),
         )
         .add_systems(OnExit(GameState::Game), cleanup_voxel_world);
+
+        #[cfg(feature = "dev")]
+        diagnostics::register(app);
     }
 }
 
@@ -168,14 +180,20 @@ fn update_underwater_effect(
 fn cleanup_voxel_world(
     mut commands: Commands,
     chunks: Query<Entity, With<VoxelChunk>>,
+    generations: Query<Entity, With<streaming::ChunkGeneration>>,
     mut chunk_index: ResMut<ChunkIndex>,
+    mut pending_chunks: ResMut<PendingChunks>,
     mut stored_chunks: ResMut<StoredChunks>,
     mut stream_state: ResMut<StreamState>,
 ) {
     for entity in &chunks {
         commands.entity(entity).despawn();
     }
+    for entity in &generations {
+        commands.entity(entity).despawn();
+    }
     chunk_index.clear();
+    pending_chunks.clear();
     stored_chunks.clear();
     *stream_state = StreamState::default();
 }

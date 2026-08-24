@@ -10,9 +10,8 @@
     shadows,
 }
 
-// The voxel world only uses ambient light and a directional sun. Keep Bevy's
-// exact PBR and shadow implementations, but skip the clustered point/spot,
-// area-light, transmission and environment-map paths from the general shader.
+// The water still uses the StandardMaterial input. Keep its specialized
+// ambient-and-sun lighting path separate from the lean opaque voxel material.
 fn apply_voxel_lighting(in: PbrInput) -> vec4<f32> {
     let base_color = in.material.base_color;
     let metallic = in.material.metallic;
