@@ -80,6 +80,7 @@ fn prepare_breaking_assets(
     let mesh = meshes.add(Cuboid::new(1.006, 1.006, 1.006));
     let stages = core::array::from_fn(|stage| {
         materials.add(StandardMaterial {
+            base_color: Color::srgb(0.65, 0.65, 0.65),
             base_color_texture: Some(
                 asset_server
                     .load_builder()
