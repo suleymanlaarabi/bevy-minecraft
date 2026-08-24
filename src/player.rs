@@ -6,6 +6,7 @@ use bevy::{input::mouse::AccumulatedMouseMotion, prelude::*};
 use crate::{
     character::{CHARACTER_GRAVITY_SCALE, CHARACTER_WATER_GRAVITY_SCALE, OnGround, OnGroundSensor},
     game::GameState,
+    spatial::Follow,
     voxel::{VoxelKind, VoxelSettings, VoxelViewer, VoxelWorld},
 };
 
@@ -29,7 +30,7 @@ impl Plugin for PlayerPlugin {
             .add_systems(OnEnter(GameState::Game), spawn_player)
             .add_systems(
                 Update,
-                (mouse_look, player_movement, sync_camera_position)
+                (mouse_look, player_movement)
                     .chain()
                     .run_if(in_state(GameState::Game)),
             );
@@ -146,7 +147,7 @@ fn spawn_player(
     voxel_settings: Option<Res<VoxelSettings>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut camera_query: Query<(&mut Transform, &mut PlayerCamera), Without<Player>>,
+    mut camera_query: Query<(Entity, &mut Transform, &mut PlayerCamera), Without<Player>>,
 ) {
     let spawn_pos = if let Some(settings) = voxel_settings {
         let center = settings.chunk_center(IVec2::ZERO);
@@ -155,29 +156,35 @@ fn spawn_player(
         Vec3::new(0.0, 30.0, 0.0)
     };
 
-    if let Ok((mut cam_transform, mut cam)) = camera_query.single_mut() {
+    let player_entity = commands
+        .spawn((
+            Player,
+            PlayerController::default(),
+            RigidBody::Dynamic,
+            Collider::capsule(PLAYER_RADIUS, PLAYER_CAPSULE_LENGTH),
+            LockedAxes::ROTATION_LOCKED,
+            GravityScale(CHARACTER_GRAVITY_SCALE),
+            LinearDamping::default(),
+            ConstantLinearAcceleration::default(),
+            Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
+            Restitution::ZERO.with_combine_rule(CoefficientCombine::Min),
+            LinearVelocity::default(),
+            OnGroundSensor,
+            Transform::from_translation(spawn_pos),
+            Visibility::default(),
+            DespawnOnExit(GameState::Game),
+        ))
+        .id();
+
+    if let Ok((cam_entity, mut cam_transform, mut cam)) = camera_query.single_mut() {
         cam_transform.translation = spawn_pos + Vec3::Y * PLAYER_EYE_HEIGHT;
         cam_transform.rotation = Quat::IDENTITY;
         cam.pitch = 0.0;
-    }
 
-    commands.spawn((
-        Player,
-        PlayerController::default(),
-        RigidBody::Dynamic,
-        Collider::capsule(PLAYER_RADIUS, PLAYER_CAPSULE_LENGTH),
-        LockedAxes::ROTATION_LOCKED,
-        GravityScale(CHARACTER_GRAVITY_SCALE),
-        LinearDamping::default(),
-        ConstantLinearAcceleration::default(),
-        Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
-        Restitution::ZERO.with_combine_rule(CoefficientCombine::Min),
-        LinearVelocity::default(),
-        OnGroundSensor,
-        Transform::from_translation(spawn_pos),
-        Visibility::default(),
-        DespawnOnExit(GameState::Game),
-    ));
+        commands
+            .entity(cam_entity)
+            .insert(Follow::new(player_entity, Vec3::Y * PLAYER_EYE_HEIGHT));
+    }
 
     commands.spawn_scene(bsn! {
         Node {
@@ -242,17 +249,6 @@ fn spawn_player(
         Transform::from_xyz(250.0, 350.0, 250.0).looking_at(Vec3::ZERO, Vec3::Y),
         DespawnOnExit(GameState::Game),
     ));
-}
-
-fn sync_camera_position(
-    player_query: Query<&Transform, With<Player>>,
-    mut camera_query: Query<&mut Transform, (With<PlayerCamera>, Without<Player>)>,
-) {
-    if let Ok(player_transform) = player_query.single()
-        && let Ok(mut camera_transform) = camera_query.single_mut()
-    {
-        camera_transform.translation = player_transform.translation + Vec3::Y * PLAYER_EYE_HEIGHT;
-    }
 }
 
 fn mouse_look(
