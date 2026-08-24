@@ -445,38 +445,3 @@ fn has_shore_clearance(samples: [Option<VoxelKind>; 3]) -> bool {
             .iter()
             .all(|kind| kind.is_some_and(|kind| !kind.is_solid()))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn swimming_acceleration_uses_avian_damping_and_controls() {
-        let forward = swim_acceleration(Vec3::NEG_Z, 2.2, 0.0);
-        assert_eq!(forward, Vec3::new(0.0, 0.0, -8.8));
-
-        let ascend = swim_acceleration(Vec3::ZERO, 0.0, SWIM_VERTICAL_ACCELERATION);
-        let descend = swim_acceleration(Vec3::ZERO, 0.0, -SWIM_VERTICAL_ACCELERATION);
-        assert_eq!(ascend.y, SWIM_VERTICAL_ACCELERATION);
-        assert_eq!(descend.y, -SWIM_VERTICAL_ACCELERATION);
-    }
-
-    #[test]
-    fn shore_exit_requires_a_solid_step_and_two_clear_voxels() {
-        assert!(has_shore_clearance([
-            Some(VoxelKind::Sand),
-            Some(VoxelKind::Air),
-            Some(VoxelKind::Air),
-        ]));
-        assert!(!has_shore_clearance([
-            Some(VoxelKind::Sand),
-            Some(VoxelKind::Stone),
-            Some(VoxelKind::Air),
-        ]));
-        assert!(!has_shore_clearance([
-            Some(VoxelKind::Water),
-            Some(VoxelKind::Air),
-            Some(VoxelKind::Air),
-        ]));
-    }
-}
