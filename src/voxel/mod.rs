@@ -5,6 +5,7 @@ mod generation;
 mod material;
 mod meshing;
 mod rebuild;
+mod regions;
 mod streaming;
 use crate::{game::GameState, settings::GraphicsSettings};
 use bevy::{
@@ -24,6 +25,7 @@ use rebuild::{
     apply_texture_pack, cleanup_removed_chunk, poll_builds, prepare_assets, set_voxel,
     start_changed_builds,
 };
+use regions::{RenderRegions, rebuild_render_regions};
 use streaming::{
     ChunkIndex, PendingChunks, StoredChunks, StreamOffsets, StreamState, poll_chunk_generations,
     stream_chunks, sync_spawned_halos,
@@ -97,6 +99,7 @@ impl Plugin for VoxelPlugin {
         .init_resource::<ChunkIndex>()
         .init_resource::<StoredChunks>()
         .init_resource::<PendingChunks>()
+        .init_resource::<RenderRegions>()
         .init_resource::<StreamState>()
         .add_observer(apply_view_distance)
         .add_observer(apply_texture_pack)
@@ -111,6 +114,7 @@ impl Plugin for VoxelPlugin {
                 sync_spawned_halos,
                 start_changed_builds,
                 poll_builds,
+                rebuild_render_regions,
             )
                 .chain()
                 .run_if(in_state(GameState::Game)),
@@ -177,14 +181,20 @@ fn update_underwater_effect(
     }
 }
 
+#[derive(SystemParam)]
+struct VoxelCleanup<'w> {
+    chunk_index: ResMut<'w, ChunkIndex>,
+    pending_chunks: ResMut<'w, PendingChunks>,
+    stored_chunks: ResMut<'w, StoredChunks>,
+    render_regions: ResMut<'w, RenderRegions>,
+    stream_state: ResMut<'w, StreamState>,
+}
+
 fn cleanup_voxel_world(
     mut commands: Commands,
     chunks: Query<Entity, With<VoxelChunk>>,
     generations: Query<Entity, With<streaming::ChunkGeneration>>,
-    mut chunk_index: ResMut<ChunkIndex>,
-    mut pending_chunks: ResMut<PendingChunks>,
-    mut stored_chunks: ResMut<StoredChunks>,
-    mut stream_state: ResMut<StreamState>,
+    mut voxel: VoxelCleanup,
 ) {
     for entity in &chunks {
         commands.entity(entity).despawn();
@@ -192,10 +202,11 @@ fn cleanup_voxel_world(
     for entity in &generations {
         commands.entity(entity).despawn();
     }
-    chunk_index.clear();
-    pending_chunks.clear();
-    stored_chunks.clear();
-    *stream_state = StreamState::default();
+    voxel.chunk_index.clear();
+    voxel.pending_chunks.clear();
+    voxel.stored_chunks.clear();
+    voxel.render_regions.clear(&mut commands);
+    *voxel.stream_state = StreamState::default();
 }
 
 #[derive(Resource, Clone, Debug)]

@@ -4,11 +4,11 @@ use super::{
     generation::WorldGenerator,
     material::{TexturePack, VoxelMaterial, WaterMaterial, WaterMaterialExtension, block_texture},
     meshing::{ChunkMeshes, build_chunk_mesh},
+    regions::RenderRegions,
     streaming::{ChunkIndex, StoredChunks},
 };
 use avian3d::prelude::*;
 use bevy::{
-    light::{NotShadowCaster, NotShadowReceiver},
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 #[derive(Resource)]
 pub(crate) struct VoxelAssets {
     pub(crate) terrain: Handle<VoxelMaterial>,
-    water: Handle<WaterMaterial>,
+    pub(crate) water: Handle<WaterMaterial>,
 }
 
 pub(crate) fn prepare_assets(
@@ -93,10 +93,6 @@ struct BuildOutput {
     triangles: usize,
 }
 #[derive(Component)]
-pub(crate) struct ChunkWater {
-    entity: Entity,
-}
-#[derive(Component)]
 pub(crate) struct ChunkBuild {
     task: Task<BuildOutput>,
     revision: u64,
@@ -167,9 +163,11 @@ pub(crate) fn cleanup_removed_chunk(
     chunks: Query<(&super::VoxelChunk, &ChunkVoxels)>,
     mut index: ResMut<ChunkIndex>,
     mut stored: ResMut<StoredChunks>,
+    mut render_regions: ResMut<RenderRegions>,
 ) {
     if let Ok((chunk, voxels)) = chunks.get(event.entity) {
         index.remove(&chunk.position);
+        render_regions.remove(chunk.position);
         if voxels.modified {
             stored.insert(chunk.position, voxels.clone());
         }
@@ -234,19 +232,18 @@ pub(crate) fn start_changed_builds(
 
 pub(crate) fn poll_builds(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    assets: Res<VoxelAssets>,
     settings: Res<VoxelSettings>,
     mut chunks: Query<(
         Entity,
+        &super::VoxelChunk,
         &mut ChunkVoxels,
         &mut ChunkBuild,
-        Option<&ChunkWater>,
     )>,
+    mut render_regions: ResMut<RenderRegions>,
     #[cfg(feature = "dev")] mut diagnostics: Option<ResMut<super::diagnostics::VoxelDiagnostics>>,
 ) {
     let mut completed = 0;
-    for (entity, mut voxels, mut build, water) in &mut chunks {
+    for (entity, chunk, mut voxels, mut build) in &mut chunks {
         if completed >= settings.spawn_budget_per_frame {
             break;
         }
@@ -275,32 +272,7 @@ pub(crate) fn poll_builds(
         if let Some(diagnostics) = diagnostics.as_deref_mut() {
             diagnostics.record_build(meshing_elapsed, collider_elapsed, vertices, triangles);
         }
-        commands.entity(entity).insert(Mesh3d(meshes.add(terrain)));
-        match (next_water, water) {
-            (Some(mesh), Some(water)) => {
-                commands
-                    .entity(water.entity)
-                    .insert(Mesh3d(meshes.add(mesh)));
-            }
-            (Some(mesh), None) => {
-                let mesh = meshes.add(mesh);
-                let child = commands
-                    .spawn((
-                        Mesh3d(mesh.clone()),
-                        MeshMaterial3d(assets.water.clone()),
-                        ChildOf(entity),
-                        NotShadowCaster,
-                        NotShadowReceiver,
-                    ))
-                    .id();
-                commands.entity(entity).insert(ChunkWater { entity: child });
-            }
-            (None, Some(water)) => {
-                commands.entity(water.entity).despawn();
-                commands.entity(entity).remove::<ChunkWater>();
-            }
-            (None, None) => {}
-        }
+        render_regions.insert(chunk.position, ChunkMeshes(terrain, next_water));
         match collider {
             ColliderUpdate::Keep => {}
             ColliderUpdate::Replace(collider) => {

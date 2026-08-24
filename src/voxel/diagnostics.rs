@@ -1,5 +1,11 @@
-use super::{ChunkVoxels, VoxelChunk, rebuild::ChunkBuild, streaming::PendingChunks};
+use super::{
+    ChunkVoxels, VoxelChunk,
+    rebuild::ChunkBuild,
+    regions::{RenderRegions, VoxelRenderRegion},
+    streaming::PendingChunks,
+};
 use avian3d::{prelude::Physics, schedule::PhysicsTime};
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::window::{MonitorSelection, PresentMode, WindowMode};
 use std::{collections::VecDeque, time::Duration};
@@ -66,6 +72,16 @@ struct VoxelBenchmark {
     elapsed: f64,
 }
 
+#[derive(SystemParam)]
+struct VoxelBenchmarkWorld<'w, 's> {
+    offsets: Res<'w, StreamOffsets>,
+    pending: Res<'w, PendingChunks>,
+    render_regions: Res<'w, RenderRegions>,
+    chunks: Query<'w, 's, (), With<VoxelChunk>>,
+    builds: Query<'w, 's, (), With<ChunkBuild>>,
+    player: Query<'w, 's, &'static mut Transform, With<Player>>,
+}
+
 #[derive(Default, PartialEq, Eq)]
 enum BenchmarkPhase {
     #[default]
@@ -121,16 +137,15 @@ fn configure_voxel_benchmark(
 
 fn run_voxel_benchmark(
     time: Res<Time<Real>>,
-    offsets: Res<StreamOffsets>,
-    pending: Res<PendingChunks>,
-    chunks: Query<(), With<VoxelChunk>>,
-    builds: Query<(), With<ChunkBuild>>,
-    mut player: Query<&mut Transform, With<Player>>,
+    mut world: VoxelBenchmarkWorld,
     mut benchmark: ResMut<VoxelBenchmark>,
     mut diagnostics: ResMut<VoxelDiagnostics>,
 ) {
-    let loaded = chunks.iter().count();
-    let settled = loaded == offsets.len() && pending.is_empty() && builds.is_empty();
+    let loaded = world.chunks.iter().count();
+    let settled = loaded == world.offsets.len()
+        && world.pending.is_empty()
+        && world.builds.is_empty()
+        && world.render_regions.is_settled();
     let delta = time.delta_secs_f64();
 
     match benchmark.phase {
@@ -164,7 +179,7 @@ fn run_voxel_benchmark(
         }
         BenchmarkPhase::Moving => {
             benchmark.elapsed += delta;
-            if let Some(mut transform) = player.iter_mut().next() {
+            if let Some(mut transform) = world.player.iter_mut().next() {
                 transform.translation.x += 8.0 * delta as f32;
             }
             if benchmark.elapsed >= 20.0 {
@@ -182,7 +197,9 @@ fn report_voxel_diagnostics(
     mut diagnostics: ResMut<VoxelDiagnostics>,
     chunks: Query<&ChunkVoxels, With<VoxelChunk>>,
     builds: Query<(), With<ChunkBuild>>,
+    rendered_regions: Query<(), With<VoxelRenderRegion>>,
     pending: Res<PendingChunks>,
+    render_regions: Res<RenderRegions>,
 ) {
     diagnostics.elapsed += time.delta_secs_f64();
     diagnostics
@@ -211,8 +228,10 @@ fn report_voxel_diagnostics(
         .unwrap_or(0);
 
     info!(
-        "voxel: loaded={loaded} ready={ready} pending={} building={building} modified={modified} frame_ms[p50={:.2} p95={:.2} p99={:.2}] generation_ms[p50={:.2} p95={:.2}] meshing_ms[p50={:.2} p95={:.2}] collider_ms[p50={:.2} p95={:.2}] generated={} built={} avg_vertices={} avg_triangles={}",
+        "voxel: loaded={loaded} ready={ready} pending={} building={building} render_regions={} dirty_regions={} modified={modified} frame_ms[p50={:.2} p95={:.2} p99={:.2}] generation_ms[p50={:.2} p95={:.2}] meshing_ms[p50={:.2} p95={:.2}] collider_ms[p50={:.2} p95={:.2}] generated={} built={} avg_vertices={} avg_triangles={}",
         pending.len(),
+        rendered_regions.iter().count(),
+        render_regions.dirty_len(),
         percentile(&frames, 0.50),
         percentile(&frames, 0.95),
         percentile(&frames, 0.99),

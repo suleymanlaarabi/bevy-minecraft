@@ -1,7 +1,6 @@
 use super::{
     ChunkVoxels, VoxelChunk, VoxelSettings, VoxelViewer,
     generation::{WorldGenerator, generate_chunk},
-    rebuild::VoxelAssets,
 };
 use crate::{game::GameState, spatial::GameLayer};
 use avian3d::prelude::*;
@@ -76,7 +75,6 @@ pub(crate) fn stream_chunks(
     offsets: Res<StreamOffsets>,
     mut stored: ResMut<StoredChunks>,
     mut pending: ResMut<PendingChunks>,
-    assets: Res<VoxelAssets>,
     mut index: ResMut<ChunkIndex>,
     mut state: ResMut<StreamState>,
 ) {
@@ -119,14 +117,7 @@ pub(crate) fn stream_chunks(
             continue;
         }
         if let Some(voxels) = stored.remove(&position) {
-            spawn_chunk(
-                &mut commands,
-                &settings,
-                &assets,
-                &mut index,
-                position,
-                voxels,
-            );
+            spawn_chunk(&mut commands, &settings, &mut index, position, voxels);
         } else {
             let settings = settings.clone();
             let generator = generator.clone();
@@ -158,7 +149,6 @@ pub(crate) fn poll_chunk_generations(
     mut generations: Query<(Entity, &mut ChunkGeneration)>,
     mut stored: ResMut<StoredChunks>,
     mut pending: ResMut<PendingChunks>,
-    assets: Res<VoxelAssets>,
     mut index: ResMut<ChunkIndex>,
     #[cfg(feature = "dev")] mut diagnostics: Option<ResMut<super::diagnostics::VoxelDiagnostics>>,
 ) {
@@ -181,14 +171,7 @@ pub(crate) fn poll_chunk_generations(
             continue;
         }
         let voxels = stored.remove(&position).unwrap_or(generated.voxels);
-        spawn_chunk(
-            &mut commands,
-            &settings,
-            &assets,
-            &mut index,
-            position,
-            voxels,
-        );
+        spawn_chunk(&mut commands, &settings, &mut index, position, voxels);
         completed += 1;
     }
 }
@@ -196,7 +179,6 @@ pub(crate) fn poll_chunk_generations(
 fn spawn_chunk(
     commands: &mut Commands,
     settings: &VoxelSettings,
-    assets: &VoxelAssets,
     index: &mut ChunkIndex,
     position: IVec2,
     mut voxels: ChunkVoxels,
@@ -210,7 +192,6 @@ fn spawn_chunk(
         .spawn((
             VoxelChunk { position },
             voxels,
-            MeshMaterial3d(assets.terrain.clone()),
             Transform::from_xyz(origin.x as f32, 0.0, origin.y as f32),
             RigidBody::Static,
             CollisionLayers::new(

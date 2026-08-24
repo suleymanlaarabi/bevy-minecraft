@@ -5,21 +5,63 @@ use bevy::{
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Face(VoxelKind, bool);
-pub(crate) struct ChunkMeshes(pub(crate) Mesh, pub(crate) Option<Mesh>);
+pub(crate) struct ChunkMeshes(pub(crate) VoxelGeometry, pub(crate) Option<VoxelGeometry>);
+
+#[derive(Default)]
+pub(crate) struct VoxelGeometry {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    colors: Vec<[f32; 4]>,
+    uvs: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+}
+
+impl VoxelGeometry {
+    pub(crate) fn append(&mut self, geometry: &Self, offset: Vec3) {
+        let first = self.positions.len() as u32;
+        self.positions
+            .extend(geometry.positions.iter().map(|position| {
+                [
+                    position[0] + offset.x,
+                    position[1] + offset.y,
+                    position[2] + offset.z,
+                ]
+            }));
+        self.normals.extend_from_slice(&geometry.normals);
+        self.colors.extend_from_slice(&geometry.colors);
+        self.uvs.extend_from_slice(&geometry.uvs);
+        self.indices
+            .extend(geometry.indices.iter().map(|index| first + index));
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+
+    pub(crate) fn into_mesh(self) -> Mesh {
+        Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::RENDER_WORLD,
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, self.colors)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs)
+        .with_inserted_indices(Indices::U32(self.indices))
+    }
+
+    #[cfg(feature = "dev")]
+    fn counts(&self) -> (usize, usize) {
+        (self.positions.len(), self.indices.len() / 3)
+    }
+}
 
 #[cfg(feature = "dev")]
 impl ChunkMeshes {
     pub(crate) fn geometry_counts(&self) -> (usize, usize) {
-        let terrain_vertices = self.0.count_vertices();
-        let water_vertices = self.1.as_ref().map_or(0, Mesh::count_vertices);
-        let terrain_triangles = self.0.indices().map_or(0, |indices| indices.len() / 3);
-        let water_triangles = self
-            .1
-            .as_ref()
-            .and_then(Mesh::indices)
-            .map_or(0, |indices| indices.len() / 3);
-        let triangles = terrain_triangles + water_triangles;
-        (terrain_vertices + water_vertices, triangles)
+        let terrain = self.0.counts();
+        let water = self.1.as_ref().map_or((0, 0), VoxelGeometry::counts);
+        (terrain.0 + water.0, terrain.1 + water.1)
     }
 }
 
@@ -48,6 +90,7 @@ pub(crate) fn build_block_item_mesh(kind: VoxelKind, texture_pack: &TexturePack)
         },
         texture_pack,
     )
+    .into_mesh()
     .translated_by(Vec3::splat(-0.5))
 }
 
@@ -56,7 +99,7 @@ fn greedy_mesh(
     height: i32,
     sample: impl Fn(IVec3) -> VoxelKind,
     texture_pack: &TexturePack,
-) -> Mesh {
+) -> VoxelGeometry {
     let dimensions = [size, height, size];
     let mut positions = Vec::new();
     let mut normals = Vec::new();
@@ -122,7 +165,7 @@ fn greedy_mesh(
     finish_mesh(positions, normals, colors, uvs, indices)
 }
 
-fn water_mesh(voxels: &ChunkVoxels, texture_pack: &TexturePack) -> Option<Mesh> {
+fn water_mesh(voxels: &ChunkVoxels, texture_pack: &TexturePack) -> Option<VoxelGeometry> {
     let size = voxels.size as usize;
     let mut positions = Vec::new();
     let mut normals = Vec::new();
@@ -204,16 +247,14 @@ fn finish_mesh(
     colors: Vec<[f32; 4]>,
     uvs: Vec<[f32; 2]>,
     indices: Vec<u32>,
-) -> Mesh {
-    Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD,
-    )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-    .with_inserted_indices(Indices::U32(indices))
+) -> VoxelGeometry {
+    VoxelGeometry {
+        positions,
+        normals,
+        colors,
+        uvs,
+        indices,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -273,5 +314,29 @@ fn quad_uvs(axis: usize, du: [i32; 3], dv: [i32; 3]) -> [[f32; 2]; 4] {
             let (width, height) = (du[0] as f32, dv[1] as f32);
             [[0.0, height], [width, height], [width, 0.0], [0.0, 0.0]]
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn append_offsets_vertices_and_rebases_indices() {
+        let geometry = VoxelGeometry {
+            positions: vec![[0.0, 1.0, 2.0], [1.0, 1.0, 2.0], [1.0, 2.0, 2.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            colors: vec![[1.0; 4]; 3],
+            uvs: vec![[0.0; 2]; 3],
+            indices: vec![0, 1, 2],
+        };
+        let mut combined = VoxelGeometry::default();
+
+        combined.append(&geometry, Vec3::new(4.0, 0.0, -2.0));
+        combined.append(&geometry, Vec3::new(8.0, 0.0, -2.0));
+
+        assert_eq!(combined.positions[0], [4.0, 1.0, 0.0]);
+        assert_eq!(combined.positions[3], [8.0, 1.0, 0.0]);
+        assert_eq!(combined.indices, [0, 1, 2, 3, 4, 5]);
     }
 }
