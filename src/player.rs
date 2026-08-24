@@ -1,30 +1,27 @@
 #![allow(clippy::type_complexity)]
 
+mod interaction;
+
 use std::f32::consts::FRAC_PI_2;
 
 use avian3d::prelude::*;
 use bevy::{
-    color::palettes::css::BLACK,
     input::mouse::AccumulatedMouseMotion,
     pbr::{DistanceFog, FogFalloff},
     prelude::*,
-    transform::TransformSystems,
 };
 
 use crate::{
     character::{AutoJump, CHARACTER_GRAVITY_SCALE, CharacterMovement, GameCharacter},
     game::GameState,
-    inventory::{InventoryState, ItemKind, PlayerInventory},
-    spatial::{FollowOffset, FollowedBy},
-    voxel::{VoxelChunk, VoxelCommandsExt, VoxelKind, VoxelSettings, VoxelViewer, VoxelWorld},
+    inventory::{InventoryState, PlayerInventory},
+    spatial::{FollowOffset, FollowedBy, GameLayer},
+    voxel::{VoxelSettings, VoxelViewer},
 };
 
 const PLAYER_RADIUS: f32 = 0.3;
 const PLAYER_CAPSULE_LENGTH: f32 = 1.2;
 const PLAYER_EYE_HEIGHT: f32 = 0.65;
-const BLOCK_REACH: f32 = 5.0;
-const BLOCK_OUTLINE_SIZE: f32 = 1.01;
-const HIT_EPSILON: f32 = 0.001;
 
 pub struct PlayerPlugin;
 
@@ -38,19 +35,8 @@ impl Plugin for PlayerPlugin {
                     .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
                     .run_if(in_state(GameState::Game))
                     .run_if(in_state(InventoryState::Closed)),
-            )
-            .add_systems(
-                PostUpdate,
-                (
-                    update_block_target,
-                    handle_block_interaction,
-                    draw_targeted_block,
-                )
-                    .chain()
-                    .after(TransformSystems::Propagate)
-                    .run_if(in_state(GameState::Game))
-                    .run_if(in_state(InventoryState::Closed)),
             );
+        interaction::register(app);
     }
 }
 
@@ -74,6 +60,7 @@ fn default_restitution() -> Restitution {
     LinearDamping::default(),
     Friction = default_friction(),
     Restitution = default_restitution(),
+    CollisionLayers::new(GameLayer::Player, [GameLayer::Default, GameLayer::World]),
     Visibility::default(),
     DespawnOnExit::<GameState>(GameState::Game)
 )]
@@ -82,7 +69,8 @@ pub struct Player;
 #[derive(Debug, Component, Default, Clone)]
 #[require(
     CameraSensitivity,
-    BlockTargetState,
+    interaction::BlockTargetState,
+    interaction::BreakingState,
     Camera3d,
     IsDefaultUiCamera,
     AmbientLight {
@@ -110,15 +98,6 @@ pub struct Player;
 pub struct PlayerCamera {
     pub pitch: f32,
 }
-
-#[derive(Debug, Clone, Copy)]
-struct BlockTarget {
-    destroy: IVec3,
-    place: IVec3,
-}
-
-#[derive(Component, Default)]
-struct BlockTargetState(Option<BlockTarget>);
 
 #[derive(Debug, Component, Deref, DerefMut)]
 pub struct CameraSensitivity(pub Vec2);
@@ -232,115 +211,6 @@ fn player_input(
     movement.jump = keyboard.pressed(KeyCode::Space);
     movement.sneak = keyboard.pressed(KeyCode::ShiftLeft);
     movement.sprint = keyboard.pressed(KeyCode::ControlLeft);
-}
-
-fn update_block_target(
-    spatial_query: SpatialQuery,
-    camera: Single<(&GlobalTransform, &mut BlockTargetState), With<PlayerCamera>>,
-    chunks: Query<(), With<VoxelChunk>>,
-) {
-    let (transform, mut target) = camera.into_inner();
-    target.0 = targeted_voxel(
-        &spatial_query,
-        &chunks,
-        transform.translation(),
-        transform.forward(),
-    );
-}
-
-fn handle_block_interaction(
-    mut commands: Commands,
-    mouse: Res<ButtonInput<MouseButton>>,
-    target: Single<&BlockTargetState, With<PlayerCamera>>,
-    voxel_world: VoxelWorld,
-    spatial_query: SpatialQuery,
-    players: Query<(), With<Player>>,
-    mut inventory: Single<&mut PlayerInventory, With<Player>>,
-) {
-    let Some(target) = target.0 else {
-        return;
-    };
-
-    if mouse.just_pressed(MouseButton::Left)
-        && voxel_world
-            .get(target.destroy)
-            .is_some_and(|kind| kind != VoxelKind::Air)
-    {
-        commands.set_voxel(target.destroy, VoxelKind::Air);
-    }
-
-    if !mouse.just_pressed(MouseButton::Right)
-        || voxel_world.get(target.place) != Some(VoxelKind::Air)
-    {
-        return;
-    }
-
-    let Some(ItemKind::Block(kind)) = inventory.selected_stack().map(|stack| stack.item()) else {
-        return;
-    };
-    if block_contains_player(&spatial_query, &players, target.place) {
-        return;
-    }
-    if inventory.consume_selected(1) {
-        commands.set_voxel(target.place, kind);
-    }
-}
-
-fn block_contains_player(
-    spatial_query: &SpatialQuery,
-    players: &Query<(), With<Player>>,
-    position: IVec3,
-) -> bool {
-    let mut contains_player = false;
-    spatial_query.shape_intersections_callback(
-        &Collider::cuboid(0.999, 0.999, 0.999),
-        position.as_vec3() + Vec3::splat(0.5),
-        Quat::IDENTITY,
-        &SpatialQueryFilter::DEFAULT,
-        |entity| {
-            contains_player = players.contains(entity);
-            !contains_player
-        },
-    );
-    contains_player
-}
-
-fn draw_targeted_block(mut gizmos: Gizmos, target: Single<&BlockTargetState, With<PlayerCamera>>) {
-    let Some(target) = target.0 else {
-        return;
-    };
-
-    gizmos.cube(
-        Transform::from_translation(target.destroy.as_vec3() + Vec3::splat(0.5))
-            .with_scale(Vec3::splat(BLOCK_OUTLINE_SIZE)),
-        BLACK,
-    );
-}
-
-fn targeted_voxel(
-    spatial_query: &SpatialQuery,
-    chunks: &Query<(), With<VoxelChunk>>,
-    origin: Vec3,
-    direction: Dir3,
-) -> Option<BlockTarget> {
-    let hit = spatial_query.cast_ray_predicate(
-        origin,
-        direction,
-        BLOCK_REACH,
-        false,
-        &SpatialQueryFilter::DEFAULT,
-        &|entity| chunks.contains(entity),
-    )?;
-    let hit_point = origin + direction * hit.distance;
-
-    Some(BlockTarget {
-        destroy: voxel_from_hit(hit_point, hit.normal),
-        place: (hit_point + hit.normal * HIT_EPSILON).floor().as_ivec3(),
-    })
-}
-
-fn voxel_from_hit(hit_point: Vec3, normal: Vec3) -> IVec3 {
-    (hit_point - normal * HIT_EPSILON).floor().as_ivec3()
 }
 
 fn axis(input: &ButtonInput<KeyCode>, positive: KeyCode, negative: KeyCode) -> f32 {

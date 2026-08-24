@@ -14,7 +14,10 @@ pub(crate) use data::{ChunkVoxels, VoxelChunk};
 pub use data::{SetVoxel, VoxelKind, VoxelViewer};
 use generation::WorldGenerator;
 pub use material::TexturePackId;
-use material::{VoxelMaterial, WaterMaterial};
+use material::WaterMaterial;
+pub(crate) use material::{TexturePack, VoxelMaterial};
+pub(crate) use meshing::build_block_item_mesh;
+pub(crate) use rebuild::VoxelAssets;
 use rebuild::{
     apply_texture_pack, cleanup_removed_chunk, poll_builds, prepare_assets, set_voxel,
     start_changed_builds,

@@ -19,6 +19,22 @@ pub(crate) fn build_chunk_mesh(voxels: &ChunkVoxels, texture_pack: &TexturePack)
     )
 }
 
+pub(crate) fn build_block_item_mesh(kind: VoxelKind, texture_pack: &TexturePack) -> Mesh {
+    greedy_mesh(
+        1,
+        1,
+        |position| {
+            if position == IVec3::ZERO {
+                kind
+            } else {
+                VoxelKind::Air
+            }
+        },
+        texture_pack,
+    )
+    .translated_by(Vec3::splat(-0.5))
+}
+
 fn greedy_mesh(
     size: i32,
     height: i32,

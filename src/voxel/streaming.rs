@@ -3,7 +3,7 @@ use super::{
     generation::{WorldGenerator, generate_chunk},
     rebuild::VoxelAssets,
 };
-use crate::game::GameState;
+use crate::{game::GameState, spatial::GameLayer};
 use avian3d::prelude::*;
 use bevy::{
     platform::collections::{HashMap, hash_map::Entry},
@@ -101,6 +101,14 @@ pub(crate) fn stream_chunks(
                 MeshMaterial3d(assets.terrain.clone()),
                 Transform::from_xyz(origin.x as f32, 0.0, origin.y as f32),
                 RigidBody::Static,
+                CollisionLayers::new(
+                    GameLayer::World,
+                    [
+                        GameLayer::Default,
+                        GameLayer::Player,
+                        GameLayer::DroppedItem,
+                    ],
+                ),
                 Friction::new(0.8),
                 DespawnOnExit(GameState::Game),
             ))

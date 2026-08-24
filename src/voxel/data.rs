@@ -18,6 +18,41 @@ pub enum VoxelKind {
     Water,
 }
 impl VoxelKind {
+    pub const ITEMIZABLE: [Self; 7] = [
+        Self::Grass,
+        Self::Dirt,
+        Self::Stone,
+        Self::Sand,
+        Self::Snow,
+        Self::Wood,
+        Self::Leaves,
+    ];
+
+    pub const fn is_itemizable(self) -> bool {
+        matches!(
+            self,
+            Self::Grass
+                | Self::Dirt
+                | Self::Stone
+                | Self::Sand
+                | Self::Snow
+                | Self::Wood
+                | Self::Leaves
+        )
+    }
+
+    pub const fn break_duration(self) -> Option<f32> {
+        match self {
+            Self::Grass => Some(0.6),
+            Self::Dirt | Self::Sand => Some(0.5),
+            Self::Stone => Some(1.5),
+            Self::Snow => Some(0.3),
+            Self::Wood => Some(1.2),
+            Self::Leaves => Some(0.25),
+            Self::Air | Self::Water => None,
+        }
+    }
+
     pub const fn is_solid(self) -> bool {
         !matches!(self, Self::Air | Self::Leaves | Self::Water)
     }

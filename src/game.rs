@@ -4,8 +4,8 @@ use bevy::{
 };
 
 use crate::{
-    character::CharacterPlugin, inventory::InventoryPlugin, menu::GameMenuPlugin,
-    player::PlayerPlugin, spatial::GameSpatialPlugin,
+    character::CharacterPlugin, dropped_item::DroppedItemPlugin, inventory::InventoryPlugin,
+    menu::GameMenuPlugin, player::PlayerPlugin, spatial::GameSpatialPlugin,
 };
 
 #[derive(Clone, Copy, Default, Eq, PartialEq, Debug, Hash, States)]
@@ -27,6 +27,7 @@ impl Plugin for GamePlugin {
                 GameMenuPlugin,
                 CharacterPlugin,
                 GameSpatialPlugin,
+                DroppedItemPlugin,
             ))
             .add_systems(OnEnter(GameState::Menu), setup_menu_environment)
             .add_systems(OnEnter(GameState::Settings), setup_menu_environment)

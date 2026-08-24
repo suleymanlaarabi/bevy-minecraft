@@ -1,4 +1,5 @@
 pub mod character;
+pub mod dropped_item;
 pub mod game;
 pub mod inventory;
 pub mod menu;

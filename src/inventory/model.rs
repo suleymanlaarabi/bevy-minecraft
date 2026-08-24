@@ -20,7 +20,17 @@ impl ItemKind {
     }
 
     pub const fn is_valid(self) -> bool {
-        !matches!(self, Self::Block(VoxelKind::Air | VoxelKind::Water))
+        match self {
+            Self::Block(kind) => kind.is_itemizable(),
+        }
+    }
+
+    pub const fn from_voxel(kind: VoxelKind) -> Option<Self> {
+        if kind.is_itemizable() {
+            Some(Self::Block(kind))
+        } else {
+            None
+        }
     }
 }
 
