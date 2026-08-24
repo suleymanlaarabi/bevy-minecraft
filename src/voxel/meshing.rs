@@ -1,4 +1,4 @@
-use super::{ChunkVoxels, VoxelKind};
+use super::{ChunkVoxels, VoxelKind, material::TexturePack};
 use bevy::{
     asset::RenderAssetUsages, mesh::Indices, prelude::*, render::render_resource::PrimitiveTopology,
 };
@@ -7,16 +7,24 @@ use bevy::{
 struct Face(VoxelKind, bool);
 pub(crate) struct ChunkMeshes(pub(crate) Mesh, pub(crate) Option<Mesh>);
 
-pub(crate) fn build_chunk_mesh(voxels: &ChunkVoxels) -> ChunkMeshes {
+pub(crate) fn build_chunk_mesh(voxels: &ChunkVoxels, texture_pack: &TexturePack) -> ChunkMeshes {
     ChunkMeshes(
-        greedy_mesh(voxels.size, voxels.height, |position| {
-            voxels.sample(position)
-        }),
-        water_mesh(voxels),
+        greedy_mesh(
+            voxels.size,
+            voxels.height,
+            |position| voxels.sample(position),
+            texture_pack,
+        ),
+        water_mesh(voxels, texture_pack),
     )
 }
 
-fn greedy_mesh(size: i32, height: i32, sample: impl Fn(IVec3) -> VoxelKind) -> Mesh {
+fn greedy_mesh(
+    size: i32,
+    height: i32,
+    sample: impl Fn(IVec3) -> VoxelKind,
+    texture_pack: &TexturePack,
+) -> Mesh {
     let dimensions = [size, height, size];
     let mut positions = Vec::new();
     let mut normals = Vec::new();
@@ -72,6 +80,7 @@ fn greedy_mesh(size: i32, height: i32, sample: impl Fn(IVec3) -> VoxelKind) -> M
                         axis,
                         face,
                         true,
+                        texture_pack,
                     );
                 },
             );
@@ -81,7 +90,7 @@ fn greedy_mesh(size: i32, height: i32, sample: impl Fn(IVec3) -> VoxelKind) -> M
     finish_mesh(positions, normals, colors, uvs, indices)
 }
 
-fn water_mesh(voxels: &ChunkVoxels) -> Option<Mesh> {
+fn water_mesh(voxels: &ChunkVoxels, texture_pack: &TexturePack) -> Option<Mesh> {
     let size = voxels.size as usize;
     let mut positions = Vec::new();
     let mut normals = Vec::new();
@@ -111,6 +120,7 @@ fn water_mesh(voxels: &ChunkVoxels) -> Option<Mesh> {
                 1,
                 Face(VoxelKind::Water, true),
                 false,
+                texture_pack,
             );
         });
     }
@@ -187,6 +197,7 @@ fn push_quad(
     axis: usize,
     face: Face,
     textured: bool,
+    texture_pack: &TexturePack,
 ) {
     let add = |a: [i32; 3], b: [i32; 3]| [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
     let vertices = [
@@ -200,8 +211,8 @@ fn push_quad(
     normal[axis] = if face.1 { 1.0 } else { -1.0 };
     normals.extend([normal; 4]);
     if textured {
-        let tint = face.0.texture_tint(axis, face.1);
-        let layer = face.0.texture_layer(axis, face.1) as f32;
+        let tint = texture_pack.texture_tint(face.0, axis, face.1);
+        let layer = texture_pack.texture_layer(face.0, axis, face.1) as f32;
         colors.extend([[tint[0], tint[1], tint[2], layer]; 4]);
     } else {
         colors.extend([face.0.color(); 4]);

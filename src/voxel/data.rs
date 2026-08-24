@@ -43,30 +43,6 @@ impl VoxelKind {
             Self::Water => [0.08, 0.35, 0.72, 0.62],
         }
     }
-
-    pub(crate) const fn texture_layer(self, axis: usize, positive: bool) -> u32 {
-        match self {
-            Self::Grass if axis == 1 && positive => 0,
-            Self::Grass if axis == 1 => 2,
-            Self::Grass => 1,
-            Self::Wood if axis == 1 => 7,
-            Self::Wood => 6,
-            Self::Dirt => 2,
-            Self::Stone => 3,
-            Self::Sand => 4,
-            Self::Snow => 5,
-            Self::Leaves => 8,
-            Self::Air | Self::Water => 0,
-        }
-    }
-
-    pub(crate) const fn texture_tint(self, axis: usize, positive: bool) -> [f32; 3] {
-        match (self, axis, positive) {
-            (Self::Grass, 1, true) => [0.42, 0.72, 0.24],
-            (Self::Leaves, _, _) => [0.20, 0.64, 0.16],
-            _ => [1.0, 1.0, 1.0],
-        }
-    }
 }
 /// Dense chunk data. Cloning it is O(1); edits use copy-on-write while a build reads it.
 #[derive(Component, Clone, Debug)]

@@ -8,9 +8,147 @@ use bevy::{
     render::render_resource::{AsBindGroup, ShaderType},
     shader::ShaderRef,
 };
+use serde::Deserialize;
+
+use super::data::VoxelKind;
 
 pub(crate) const TEXTURE_LAYERS: u32 = 9;
-pub(crate) const BLOCK_TEXTURE: &str = "voxel/replete/blocks_array.png";
+
+#[derive(Component, Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TexturePackId {
+    #[default]
+    Replete,
+    Meadow,
+    Twilight,
+}
+
+impl TexturePackId {
+    pub const fn all() -> [Self; 3] {
+        [Self::Replete, Self::Meadow, Self::Twilight]
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Replete => "Replete",
+            Self::Meadow => "Meadow",
+            Self::Twilight => "Twilight",
+        }
+    }
+
+    const fn directory(self) -> &'static str {
+        match self {
+            Self::Replete => "replete",
+            Self::Meadow => "meadow",
+            Self::Twilight => "twilight",
+        }
+    }
+
+    const fn manifest_source(self) -> &'static str {
+        match self {
+            Self::Replete => include_str!("../../assets/voxel/packs/replete/pack.ron"),
+            Self::Meadow => include_str!("../../assets/voxel/packs/meadow/pack.ron"),
+            Self::Twilight => include_str!("../../assets/voxel/packs/twilight/pack.ron"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct BlockTextureConfig {
+    top: u32,
+    side: u32,
+    bottom: u32,
+    tint_top: (f32, f32, f32),
+    tint_side: (f32, f32, f32),
+    tint_bottom: (f32, f32, f32),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct BlockTextures {
+    grass: BlockTextureConfig,
+    dirt: BlockTextureConfig,
+    stone: BlockTextureConfig,
+    sand: BlockTextureConfig,
+    snow: BlockTextureConfig,
+    wood: BlockTextureConfig,
+    leaves: BlockTextureConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct TexturePackManifest {
+    name: String,
+    texture: String,
+    blocks: BlockTextures,
+}
+
+#[derive(Resource, Clone, Debug)]
+pub(crate) struct TexturePack {
+    pub(crate) texture_path: String,
+    blocks: BlockTextures,
+}
+
+impl TexturePack {
+    pub(crate) fn load(id: TexturePackId) -> Self {
+        let manifest =
+            ron::from_str::<TexturePackManifest>(id.manifest_source()).unwrap_or_else(|error| {
+                warn!("Unable to load texture pack {}: {error}", id.label());
+                ron::from_str(TexturePackId::Replete.manifest_source())
+                    .expect("the built-in Replete texture pack manifest must be valid")
+            });
+        debug!("Loaded texture pack {} ({})", id.label(), manifest.name);
+        Self {
+            texture_path: format!("voxel/packs/{}/{}", id.directory(), manifest.texture),
+            blocks: manifest.blocks,
+        }
+    }
+
+    fn config(&self, kind: VoxelKind) -> Option<&BlockTextureConfig> {
+        match kind {
+            VoxelKind::Grass => Some(&self.blocks.grass),
+            VoxelKind::Dirt => Some(&self.blocks.dirt),
+            VoxelKind::Stone => Some(&self.blocks.stone),
+            VoxelKind::Sand => Some(&self.blocks.sand),
+            VoxelKind::Snow => Some(&self.blocks.snow),
+            VoxelKind::Wood => Some(&self.blocks.wood),
+            VoxelKind::Leaves => Some(&self.blocks.leaves),
+            VoxelKind::Air | VoxelKind::Water => None,
+        }
+    }
+
+    pub(crate) fn texture_layer(self: &Self, kind: VoxelKind, axis: usize, positive: bool) -> u32 {
+        let config = self
+            .config(kind)
+            .expect("opaque voxels have texture configuration");
+        if axis == 1 {
+            if positive { config.top } else { config.bottom }
+        } else {
+            config.side
+        }
+    }
+
+    pub(crate) fn texture_tint(
+        self: &Self,
+        kind: VoxelKind,
+        axis: usize,
+        positive: bool,
+    ) -> [f32; 3] {
+        let config = self
+            .config(kind)
+            .expect("opaque voxels have texture configuration");
+        if axis == 1 {
+            if positive {
+                [config.tint_top.0, config.tint_top.1, config.tint_top.2]
+            } else {
+                [
+                    config.tint_bottom.0,
+                    config.tint_bottom.1,
+                    config.tint_bottom.2,
+                ]
+            }
+        } else {
+            [config.tint_side.0, config.tint_side.1, config.tint_side.2]
+        }
+    }
+}
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 pub(crate) struct VoxelMaterialExtension {
@@ -56,7 +194,7 @@ pub(crate) struct WaterMaterialExtension {
 
 pub(crate) type WaterMaterial = ExtendedMaterial<StandardMaterial, WaterMaterialExtension>;
 
-pub(crate) fn block_texture(asset_server: &AssetServer) -> Handle<Image> {
+pub(crate) fn block_texture(asset_server: &AssetServer, path: &str) -> Handle<Image> {
     asset_server
         .load_builder()
         .with_settings(|settings: &mut ImageLoaderSettings| {
@@ -72,7 +210,7 @@ pub(crate) fn block_texture(asset_server: &AssetServer) -> Handle<Image> {
                 ..default()
             });
         })
-        .load(BLOCK_TEXTURE)
+        .load(path.to_owned())
 }
 
 impl MaterialExtension for VoxelMaterialExtension {
@@ -84,5 +222,21 @@ impl MaterialExtension for VoxelMaterialExtension {
 impl MaterialExtension for WaterMaterialExtension {
     fn fragment_shader() -> ShaderRef {
         "shaders/water_material.wgsl".into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn built_in_texture_packs_have_the_expected_layout() {
+        for id in TexturePackId::all() {
+            let pack = TexturePack::load(id);
+            assert!(pack.texture_path.ends_with("blocks_array.png"));
+            assert_eq!(pack.texture_layer(VoxelKind::Grass, 1, true), 0);
+            assert_eq!(pack.texture_layer(VoxelKind::Wood, 1, false), 6);
+            assert_eq!(pack.texture_layer(VoxelKind::Leaves, 0, true), 8);
+        }
     }
 }

@@ -1,0 +1,13 @@
+(
+    name: "Twilight",
+    texture: "blocks_array.png",
+    blocks: (
+        grass: (top: 0, side: 1, bottom: 2, tint_top: (0.55, 0.92, 0.78), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
+        dirt: (top: 2, side: 2, bottom: 2, tint_top: (0.82, 0.70, 0.72), tint_side: (0.82, 0.70, 0.72), tint_bottom: (0.82, 0.70, 0.72)),
+        stone: (top: 3, side: 3, bottom: 3, tint_top: (0.82, 0.86, 1.0), tint_side: (0.82, 0.86, 1.0), tint_bottom: (0.82, 0.86, 1.0)),
+        sand: (top: 4, side: 4, bottom: 4, tint_top: (0.94, 0.82, 0.62), tint_side: (0.94, 0.82, 0.62), tint_bottom: (0.94, 0.82, 0.62)),
+        snow: (top: 5, side: 5, bottom: 5, tint_top: (0.92, 0.88, 1.0), tint_side: (0.92, 0.88, 1.0), tint_bottom: (0.92, 0.88, 1.0)),
+        wood: (top: 7, side: 6, bottom: 6, tint_top: (1.0, 0.60, 0.72), tint_side: (0.82, 0.70, 0.92), tint_bottom: (0.82, 0.70, 0.92)),
+        leaves: (top: 8, side: 8, bottom: 8, tint_top: (0.50, 0.86, 1.0), tint_side: (0.50, 0.86, 1.0), tint_bottom: (0.50, 0.86, 1.0)),
+    ),
+)

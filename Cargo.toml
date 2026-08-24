@@ -11,6 +11,8 @@ dev = ["bevy/bevy_dev_tools", "avian3d/bevy_diagnostic"]
 avian3d = { version = "0.7", default-features = false, features = ["3d", "parry-f32", "parallel"] }
 bevy = { version = "=0.19.1", default-features = false, features = ["ui", "3d", "bevy_feathers", "bevy_settings"] }
 noiz = "0.5"
+ron = "0.10"
+serde = { version = "1.0", features = ["derive"] }
 
 [profile.dev]
 opt-level = 1

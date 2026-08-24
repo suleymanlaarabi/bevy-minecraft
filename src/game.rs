@@ -34,9 +34,13 @@ impl Plugin for GamePlugin {
 }
 
 fn setup_menu_environment(
+    state: Res<State<GameState>>,
     mut cursors: Query<&mut CursorOptions>,
     mut clear_color: ResMut<ClearColor>,
+    mut commands: Commands,
 ) {
+    commands.spawn((Camera2d, IsDefaultUiCamera, DespawnOnExit(*state.get())));
+
     for mut cursor in &mut cursors {
         cursor.visible = true;
         cursor.grab_mode = CursorGrabMode::None;

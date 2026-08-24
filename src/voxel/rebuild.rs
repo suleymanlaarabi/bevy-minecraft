@@ -3,7 +3,8 @@ use super::{
     data::COLLIDER_CHANGED,
     generation::WorldGenerator,
     material::{
-        VoxelMaterial, VoxelMaterialExtension, WaterMaterial, WaterMaterialExtension, block_texture,
+        TexturePack, VoxelMaterial, VoxelMaterialExtension, WaterMaterial, WaterMaterialExtension,
+        block_texture,
     },
     meshing::{ChunkMeshes, build_chunk_mesh},
     streaming::{ChunkIndex, StoredChunks},
@@ -23,10 +24,19 @@ pub(crate) struct VoxelAssets {
 pub(crate) fn prepare_assets(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
+    settings: Option<Res<crate::settings::GraphicsSettings>>,
     mut voxel_materials: ResMut<Assets<VoxelMaterial>>,
     mut water_materials: ResMut<Assets<WaterMaterial>>,
 ) {
-    let blocks = block_texture(&asset_server);
+    let pack = TexturePack::load(
+        settings
+            .as_deref()
+            .map_or(crate::voxel::TexturePackId::default(), |settings| {
+                settings.texture_pack
+            }),
+    );
+    let blocks = block_texture(&asset_server, &pack.texture_path);
+    commands.insert_resource(pack);
     commands.insert_resource(VoxelAssets {
         terrain: voxel_materials.add(VoxelMaterial {
             base: StandardMaterial {
@@ -47,6 +57,29 @@ pub(crate) fn prepare_assets(
             extension: WaterMaterialExtension::default(),
         }),
     });
+}
+
+pub(crate) fn apply_texture_pack(
+    _insert: On<Insert, crate::settings::GraphicsSettings>,
+    settings: Res<crate::settings::GraphicsSettings>,
+    asset_server: Res<AssetServer>,
+    mut texture_pack: Option<ResMut<TexturePack>>,
+    voxel_assets: Option<ResMut<VoxelAssets>>,
+    mut voxel_materials: ResMut<Assets<VoxelMaterial>>,
+) {
+    let (Some(texture_pack), Some(voxel_assets)) = (texture_pack.as_deref_mut(), voxel_assets)
+    else {
+        return;
+    };
+    if texture_pack.texture_path == TexturePack::load(settings.texture_pack).texture_path {
+        return;
+    }
+
+    let next_pack = TexturePack::load(settings.texture_pack);
+    if let Some(mut material) = voxel_materials.get_mut(&voxel_assets.terrain) {
+        material.extension.blocks = block_texture(&asset_server, &next_pack.texture_path);
+    }
+    *texture_pack = next_pack;
 }
 
 enum ColliderUpdate {
@@ -104,6 +137,7 @@ pub(crate) fn cleanup_removed_chunk(
 
 pub(crate) fn start_changed_builds(
     mut commands: Commands,
+    texture_pack: Res<TexturePack>,
     mut chunks: Query<(Entity, &mut ChunkVoxels, Option<&ChunkBuild>), Changed<ChunkVoxels>>,
 ) {
     let pool = AsyncComputeTaskPool::get();
@@ -113,9 +147,10 @@ pub(crate) fn start_changed_builds(
             continue;
         }
         let snapshot = voxels.bypass_change_detection().clone();
+        let texture_pack = texture_pack.clone();
         let flags = changes | build.map_or(0, |build| build.flags);
         let task = pool.spawn(async move {
-            let meshes = build_chunk_mesh(&snapshot);
+            let meshes = build_chunk_mesh(&snapshot, &texture_pack);
             let collider = if flags & COLLIDER_CHANGED == 0 {
                 ColliderUpdate::Keep
             } else {

@@ -22,7 +22,7 @@ use bevy::{
     window::WindowCloseRequested,
 };
 
-use crate::game::GameState;
+use crate::{game::GameState, voxel::TexturePackId};
 
 mod apply;
 
@@ -89,6 +89,7 @@ pub struct GraphicsSettings {
     pub anti_aliasing: AntiAliasingMode,
     pub vsync: bool,
     pub shadow_quality: ShadowQuality,
+    pub texture_pack: TexturePackId,
     pub field_of_view: f32,
     pub view_distance: u32,
     pub display_mode: DisplayMode,
@@ -100,6 +101,7 @@ impl Default for GraphicsSettings {
             anti_aliasing: AntiAliasingMode::Msaa4x,
             vsync: true,
             shadow_quality: ShadowQuality::Medium,
+            texture_pack: TexturePackId::Replete,
             field_of_view: 85.0,
             view_distance: 10,
             display_mode: DisplayMode::BorderlessFullscreen,
@@ -127,6 +129,7 @@ impl Plugin for GameSettingsPlugin {
         app.register_type::<AntiAliasingMode>()
             .register_type::<ShadowQuality>()
             .register_type::<DisplayMode>()
+            .register_type::<TexturePackId>()
             .register_type::<GraphicsSettings>();
         apply::register(app);
         app.add_plugins(SettingsPlugin::new(SETTINGS_APP_NAME))
@@ -157,6 +160,12 @@ impl GraphicsChoice for AntiAliasingMode {
 impl GraphicsChoice for ShadowQuality {
     fn set(self, settings: &mut GraphicsSettings) {
         settings.shadow_quality = self;
+    }
+}
+
+impl GraphicsChoice for TexturePackId {
+    fn set(self, settings: &mut GraphicsSettings) {
+        settings.texture_pack = self;
     }
 }
 
@@ -199,6 +208,7 @@ fn settings_page(settings: GraphicsSettings) -> impl Scene {
                     setting_row("Anti-Aliasing", anti_aliasing_control(settings.anti_aliasing)),
                     setting_row("VSync", vsync_control(settings.vsync)),
                     setting_row("Shadow Quality", shadow_quality_control(settings.shadow_quality)),
+                    setting_row("Texture Pack", texture_pack_control(settings.texture_pack)),
                     setting_row("Field of View", fov_control(settings.field_of_view)),
                     setting_row("View Distance", view_distance_control(settings.view_distance)),
                     setting_row("Display Mode", display_mode_control(settings.display_mode)),
@@ -289,6 +299,18 @@ fn shadow_quality_control(selected: ShadowQuality) -> impl Scene {
             radio_choice("Low", ShadowQuality::Low, selected),
             radio_choice("Medium", ShadowQuality::Medium, selected),
             radio_choice("High", ShadowQuality::High, selected),
+        ]
+    }
+}
+
+fn texture_pack_control(selected: TexturePackId) -> impl Scene {
+    bsn! {
+        radio_group()
+        on(set_choice::<TexturePackId>)
+        Children [
+            radio_choice("Replete", TexturePackId::Replete, selected),
+            radio_choice("Meadow", TexturePackId::Meadow, selected),
+            radio_choice("Twilight", TexturePackId::Twilight, selected),
         ]
     }
 }

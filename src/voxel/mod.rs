@@ -13,9 +13,11 @@ use bevy::{
 pub(crate) use data::{ChunkVoxels, VoxelChunk};
 pub use data::{SetVoxel, VoxelKind, VoxelViewer};
 use generation::WorldGenerator;
+pub use material::TexturePackId;
 use material::{VoxelMaterial, WaterMaterial};
 use rebuild::{
-    cleanup_removed_chunk, poll_builds, prepare_assets, set_voxel, start_changed_builds,
+    apply_texture_pack, cleanup_removed_chunk, poll_builds, prepare_assets, set_voxel,
+    start_changed_builds,
 };
 use streaming::{ChunkIndex, StoredChunks, StreamOffsets, StreamState, stream_chunks};
 
@@ -88,6 +90,7 @@ impl Plugin for VoxelPlugin {
         .init_resource::<StoredChunks>()
         .init_resource::<StreamState>()
         .add_observer(apply_view_distance)
+        .add_observer(apply_texture_pack)
         .add_observer(set_voxel)
         .add_observer(cleanup_removed_chunk)
         .add_systems(PreStartup, prepare_assets)

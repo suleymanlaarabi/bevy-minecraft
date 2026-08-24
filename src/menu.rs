@@ -49,10 +49,7 @@ fn menu() -> impl SceneList {
             }
             Node { width: px(250), height: px(52) }
             on(exit),
-        ],
-        Camera2d::default(),
-        DespawnOnExit::<GameState>(GameState::Menu),
-        IsDefaultUiCamera
+        ]
     ]
 }
 

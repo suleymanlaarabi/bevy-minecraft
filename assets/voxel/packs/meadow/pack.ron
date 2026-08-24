@@ -1,0 +1,13 @@
+(
+    name: "Meadow",
+    texture: "blocks_array.png",
+    blocks: (
+        grass: (top: 0, side: 1, bottom: 2, tint_top: (0.76, 1.0, 0.50), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
+        dirt: (top: 2, side: 2, bottom: 2, tint_top: (1.0, 0.92, 0.82), tint_side: (1.0, 0.92, 0.82), tint_bottom: (1.0, 0.92, 0.82)),
+        stone: (top: 3, side: 3, bottom: 3, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
+        sand: (top: 4, side: 4, bottom: 4, tint_top: (1.0, 0.96, 0.78), tint_side: (1.0, 0.96, 0.78), tint_bottom: (1.0, 0.96, 0.78)),
+        snow: (top: 5, side: 5, bottom: 5, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
+        wood: (top: 7, side: 6, bottom: 6, tint_top: (1.0, 0.86, 0.58), tint_side: (1.0, 0.86, 0.58), tint_bottom: (1.0, 0.86, 0.58)),
+        leaves: (top: 8, side: 8, bottom: 8, tint_top: (0.70, 1.0, 0.52), tint_side: (0.70, 1.0, 0.52), tint_bottom: (0.70, 1.0, 0.52)),
+    ),
+)
