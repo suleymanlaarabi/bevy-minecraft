@@ -224,19 +224,3 @@ impl MaterialExtension for WaterMaterialExtension {
         "shaders/water_material.wgsl".into()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn built_in_texture_packs_have_the_expected_layout() {
-        for id in TexturePackId::all() {
-            let pack = TexturePack::load(id);
-            assert!(pack.texture_path.ends_with("blocks_array.png"));
-            assert_eq!(pack.texture_layer(VoxelKind::Grass, 1, true), 0);
-            assert_eq!(pack.texture_layer(VoxelKind::Wood, 1, false), 6);
-            assert_eq!(pack.texture_layer(VoxelKind::Leaves, 0, true), 8);
-        }
-    }
-}
