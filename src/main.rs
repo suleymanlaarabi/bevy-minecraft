@@ -9,7 +9,7 @@ use bevy::{
 use hollow::{
     game::{GamePlugin, GameState},
     settings::GameSettingsPlugin,
-    voxel::{VoxelPlugin, VoxelSettings},
+    voxel::VoxelPlugin,
 };
 
 fn main() {
@@ -31,10 +31,7 @@ fn main() {
         FeathersPlugins,
         GameSettingsPlugin,
         PhysicsPlugins::default(),
-        VoxelPlugin::new(VoxelSettings {
-            view_distance: 20,
-            ..default()
-        }),
+        VoxelPlugin::default(),
         GamePlugin,
     ));
     add_dev_tools(&mut app);

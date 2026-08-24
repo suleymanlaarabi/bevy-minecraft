@@ -4,7 +4,7 @@ mod material;
 mod meshing;
 mod rebuild;
 mod streaming;
-use crate::game::GameState;
+use crate::{game::GameState, settings::GraphicsSettings};
 use bevy::{
     pbr::{DistanceFog, FogFalloff},
     prelude::*,
@@ -35,16 +35,22 @@ impl Default for VoxelPlugin {
 
 impl Plugin for VoxelPlugin {
     fn build(&self, app: &mut App) {
+        let view_distance = app.world().get_resource::<GraphicsSettings>().map_or_else(
+            || GraphicsSettings::default().effective_view_distance(),
+            GraphicsSettings::effective_view_distance,
+        );
+
         app.add_plugins((
             MaterialPlugin::<VoxelMaterial>::default(),
             MaterialPlugin::<WaterMaterial>::default(),
         ))
         .insert_resource(self.settings.clone())
         .insert_resource(WorldGenerator::new(self.settings.seed))
-        .insert_resource(StreamOffsets::new(self.settings.view_distance))
+        .insert_resource(StreamOffsets::new(view_distance))
         .init_resource::<ChunkIndex>()
         .init_resource::<StoredChunks>()
         .init_resource::<StreamState>()
+        .add_observer(apply_view_distance)
         .add_observer(set_voxel)
         .add_observer(cleanup_removed_chunk)
         .add_systems(PreStartup, prepare_assets)
@@ -61,6 +67,20 @@ impl Plugin for VoxelPlugin {
         )
         .add_systems(OnExit(GameState::Game), cleanup_voxel_world);
     }
+}
+
+fn apply_view_distance(
+    _insert: On<Insert, GraphicsSettings>,
+    settings: Res<GraphicsSettings>,
+    mut offsets: ResMut<StreamOffsets>,
+    mut state: ResMut<StreamState>,
+) {
+    let view_distance = settings.effective_view_distance();
+    if offsets.radius == view_distance {
+        return;
+    }
+    *offsets = StreamOffsets::new(view_distance);
+    state.center = None;
 }
 
 fn update_underwater_effect(
@@ -127,7 +147,6 @@ pub struct VoxelSettings {
     pub base_height: f32,
     pub max_height: i32,
     pub seed: u32,
-    pub view_distance: u32,
     pub spawn_budget_per_frame: usize,
     pub despawn_budget_per_frame: usize,
 }
@@ -139,7 +158,6 @@ impl Default for VoxelSettings {
             base_height: 8.0,
             max_height: 40,
             seed: 42,
-            view_distance: 8,
             spawn_budget_per_frame: 4,
             despawn_budget_per_frame: 8,
         }
@@ -172,5 +190,35 @@ impl VoxelSettings {
                 world.z.rem_euclid(self.chunk_size),
             ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn view_distance_change_restarts_streaming() {
+        let mut app = App::new();
+        app.insert_resource(StreamOffsets::new(10))
+            .insert_resource(StreamState {
+                center: Some(IVec2::ZERO),
+                ..default()
+            })
+            .add_observer(apply_view_distance);
+
+        app.insert_resource(GraphicsSettings::default());
+        assert_eq!(app.world().resource::<StreamOffsets>().radius, 10);
+        assert_eq!(
+            app.world().resource::<StreamState>().center,
+            Some(IVec2::ZERO)
+        );
+
+        app.insert_resource(GraphicsSettings {
+            view_distance: u32::MAX,
+            ..default()
+        });
+        assert_eq!(app.world().resource::<StreamOffsets>().radius, 32);
+        assert_eq!(app.world().resource::<StreamState>().center, None);
     }
 }

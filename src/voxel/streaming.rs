@@ -16,7 +16,11 @@ pub(crate) struct ChunkIndex(HashMap<IVec2, Entity>);
 pub(crate) struct StoredChunks(HashMap<IVec2, ChunkVoxels>);
 
 #[derive(Resource, Deref)]
-pub(crate) struct StreamOffsets(Vec<IVec2>);
+pub(crate) struct StreamOffsets {
+    pub radius: u32,
+    #[deref]
+    offsets: Vec<IVec2>,
+}
 
 impl StreamOffsets {
     pub(crate) fn new(radius: u32) -> Self {
@@ -26,7 +30,10 @@ impl StreamOffsets {
             .filter(|offset| offset.length_squared() <= radius * radius)
             .collect();
         offsets.sort_unstable_by_key(|offset| offset.length_squared());
-        Self(offsets)
+        Self {
+            radius: radius as u32,
+            offsets,
+        }
     }
 }
 
@@ -51,7 +58,7 @@ pub(crate) fn stream_chunks(
 ) {
     let center = settings.chunk_at(viewer.translation());
     if state.center != Some(center) {
-        let radius_squared = (settings.view_distance * settings.view_distance) as i32;
+        let radius_squared = (offsets.radius * offsets.radius) as i32;
         state.pending_despawns.clear();
         state.pending_despawns.extend(
             index

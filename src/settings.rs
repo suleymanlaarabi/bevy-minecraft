@@ -29,6 +29,8 @@ mod apply;
 const SETTINGS_APP_NAME: &str = "org.hollow.game";
 const FOV_MIN: f32 = 60.0;
 const FOV_MAX: f32 = 110.0;
+const VIEW_DISTANCE_MIN: u32 = 4;
+const VIEW_DISTANCE_MAX: u32 = 32;
 const SAVE_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Component, Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -88,6 +90,7 @@ pub struct GraphicsSettings {
     pub vsync: bool,
     pub shadow_quality: ShadowQuality,
     pub field_of_view: f32,
+    pub view_distance: u32,
     pub display_mode: DisplayMode,
 }
 
@@ -98,6 +101,7 @@ impl Default for GraphicsSettings {
             vsync: true,
             shadow_quality: ShadowQuality::Medium,
             field_of_view: 85.0,
+            view_distance: 10,
             display_mode: DisplayMode::BorderlessFullscreen,
         }
     }
@@ -106,7 +110,13 @@ impl Default for GraphicsSettings {
 impl GraphicsSettings {
     fn normalized(mut self) -> Self {
         self.field_of_view = normalized_fov(self.field_of_view);
+        self.view_distance = self.effective_view_distance();
         self
+    }
+
+    pub(crate) fn effective_view_distance(&self) -> u32 {
+        self.view_distance
+            .clamp(VIEW_DISTANCE_MIN, VIEW_DISTANCE_MAX)
     }
 }
 
@@ -190,6 +200,7 @@ fn settings_page(settings: GraphicsSettings) -> impl Scene {
                     setting_row("VSync", vsync_control(settings.vsync)),
                     setting_row("Shadow Quality", shadow_quality_control(settings.shadow_quality)),
                     setting_row("Field of View", fov_control(settings.field_of_view)),
+                    setting_row("View Distance", view_distance_control(settings.view_distance)),
                     setting_row("Display Mode", display_mode_control(settings.display_mode)),
                     Node {
                         width: percent(100),
@@ -318,6 +329,21 @@ fn fov_control(value: f32) -> impl Scene {
     }
 }
 
+fn view_distance_control(value: u32) -> impl Scene {
+    bsn! {
+        @FeathersSlider {
+            @value: {value as f32},
+            @min: {VIEW_DISTANCE_MIN as f32},
+            @max: {VIEW_DISTANCE_MAX as f32},
+        }
+        Node { width: px(320) }
+        SliderStep(1.0)
+        SliderPrecision(0)
+        on(slider_self_update)
+        on(set_view_distance)
+    }
+}
+
 fn reset_button() -> impl Scene {
     bsn! {
         @FeathersButton {
@@ -367,6 +393,17 @@ fn set_field_of_view(
 ) {
     let mut updated = *settings;
     updated.field_of_view = normalized_fov(change.value.round());
+    store_settings(*settings, updated, &mut commands);
+}
+
+fn set_view_distance(
+    change: On<ValueChange<f32>>,
+    settings: Res<GraphicsSettings>,
+    mut commands: Commands,
+) {
+    let mut updated = *settings;
+    updated.view_distance =
+        (change.value.round() as u32).clamp(VIEW_DISTANCE_MIN, VIEW_DISTANCE_MAX);
     store_settings(*settings, updated, &mut commands);
 }
 
