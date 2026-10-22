@@ -1,5 +1,6 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
+use bevy::transform::TransformSystems;
 
 #[derive(PhysicsLayer, Clone, Copy, Debug, Default)]
 pub(crate) enum GameLayer {
@@ -15,15 +16,14 @@ pub(crate) enum GameLayer {
 pub struct Follow {
     #[relationship]
     pub entity: Entity,
-    pub offset: Vec3,
 }
 
 #[derive(Component, Default, Clone)]
 pub struct FollowOffset(pub Vec3);
 
 impl Follow {
-    pub fn new(entity: Entity, offset: Vec3) -> Self {
-        Self { entity, offset }
+    pub fn new(entity: Entity) -> Self {
+        Self { entity }
     }
 }
 
@@ -33,9 +33,15 @@ pub struct FollowedBy(Vec<Entity>);
 
 pub struct GameSpatialPlugin;
 
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct FollowSystems;
+
 impl Plugin for GameSpatialPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, follow_system);
+        app.add_systems(
+            PostUpdate,
+            follow_system.in_set(FollowSystems).before(TransformSystems::Propagate),
+        );
     }
 }
 
@@ -46,8 +52,11 @@ fn follow_system(
     for (followed_transform, followed_by) in followed.iter() {
         for follower_entity in followed_by.0.iter() {
             if let Ok((mut follower_transform, follow)) = follower.get_mut(*follower_entity) {
-                follower_transform.translation =
+                let translation =
                     followed_transform.translation + follow.map(|f| f.0).unwrap_or_default();
+                if follower_transform.translation != translation {
+                    follower_transform.translation = translation;
+                }
             }
         }
     }

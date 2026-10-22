@@ -28,6 +28,7 @@ pub struct PlayerPlugin;
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(GameState::Game), spawn_player)
+            .add_systems(OnEnter(InventoryState::Open), clear_player_input)
             .add_systems(
                 RunFixedMainLoop,
                 (mouse_look, player_input)
@@ -37,6 +38,12 @@ impl Plugin for PlayerPlugin {
                     .run_if(in_state(InventoryState::Closed)),
             );
         interaction::register(app);
+    }
+}
+
+fn clear_player_input(mut players: Query<&mut CharacterMovement, With<Player>>) {
+    for mut movement in &mut players {
+        *movement = CharacterMovement::default();
     }
 }
 

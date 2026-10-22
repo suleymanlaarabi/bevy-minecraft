@@ -17,6 +17,20 @@ pub(crate) struct VoxelGeometry {
 }
 
 impl VoxelGeometry {
+    pub(crate) fn with_capacity(vertices: usize, indices: usize) -> Self {
+        Self {
+            positions: Vec::with_capacity(vertices),
+            normals: Vec::with_capacity(vertices),
+            colors: Vec::with_capacity(vertices),
+            uvs: Vec::with_capacity(vertices),
+            indices: Vec::with_capacity(indices),
+        }
+    }
+
+    pub(crate) fn buffer_lengths(&self) -> (usize, usize) {
+        (self.positions.len(), self.indices.len())
+    }
+
     pub(crate) fn append(&mut self, geometry: &Self, offset: Vec3) {
         let first = self.positions.len() as u32;
         self.positions
@@ -123,8 +137,8 @@ fn greedy_mesh(
                     cell[axis] += 1;
                     let b = sample(IVec3::from_array(cell));
                     mask[i + j * width] = match (a.is_opaque(), b.is_opaque()) {
-                        (true, false) => Some(Face(a, true)),
-                        (false, true) => Some(Face(b, false)),
+                        (true, false) if layer >= 0 => Some(Face(a, true)),
+                        (false, true) if layer + 1 < dimensions[axis] => Some(Face(b, false)),
                         _ => None,
                     };
                 }

@@ -7,7 +7,7 @@ use bevy::{
     },
     light::{NotShadowCaster, NotShadowReceiver},
     prelude::*,
-    transform::TransformSystems,
+    transform::{TransformHelper, TransformSystems},
 };
 
 use crate::{
@@ -15,12 +15,12 @@ use crate::{
     game::GameState,
     inventory::{InventoryState, ItemKind, ItemStack},
     player::{Player, PlayerCamera},
-    voxel::{VoxelChunk, VoxelCommandsExt, VoxelKind, VoxelWorld},
+    spatial::FollowSystems,
+    voxel::{VoxelCommandsExt, VoxelKind, VoxelWorld},
 };
 
 const BLOCK_REACH: f32 = 5.0;
 const BLOCK_OUTLINE_SIZE: f32 = 1.01;
-const HIT_EPSILON: f32 = 0.001;
 
 #[derive(Debug, Clone, Copy)]
 struct BlockTarget {
@@ -65,7 +65,8 @@ pub(super) fn register(app: &mut App) {
                 draw_targeted_block,
             )
                 .chain()
-                .after(TransformSystems::Propagate)
+                .after(FollowSystems)
+                .before(TransformSystems::Propagate)
                 .run_if(in_state(GameState::Game))
                 .run_if(in_state(InventoryState::Closed)),
         );
@@ -124,17 +125,16 @@ fn spawn_breaking_overlay(mut commands: Commands, assets: Res<BreakingAssets>) {
 }
 
 fn update_block_target(
-    spatial_query: SpatialQuery,
-    camera: Single<(&GlobalTransform, &mut BlockTargetState), With<PlayerCamera>>,
-    chunks: Query<(), With<VoxelChunk>>,
+    transforms: TransformHelper,
+    camera: Single<(Entity, &mut BlockTargetState), With<PlayerCamera>>,
+    voxel_world: VoxelWorld,
 ) {
-    let (transform, mut target) = camera.into_inner();
-    target.0 = targeted_voxel(
-        &spatial_query,
-        &chunks,
-        transform.translation(),
-        transform.forward(),
-    );
+    let (entity, mut target) = camera.into_inner();
+    target.0 = transforms.compute_global_transform(entity).ok().and_then(|transform| {
+        targeted_voxel(transform.translation(), transform.forward(), |position| {
+            voxel_world.get(position)
+        })
+    });
 }
 
 fn update_breaking(
@@ -232,11 +232,14 @@ fn sync_breaking_overlay(
 ) {
     let (mut transform, mut visibility, mut material) = overlay.into_inner();
     let Some(progress) = breaking.0 else {
-        *visibility = Visibility::Hidden;
+        visibility.set_if_neq(Visibility::Hidden);
         return;
     };
-    *visibility = Visibility::Visible;
-    transform.translation = progress.position.as_vec3() + Vec3::splat(0.5);
+    visibility.set_if_neq(Visibility::Visible);
+    let translation = progress.position.as_vec3() + Vec3::splat(0.5);
+    if transform.translation != translation {
+        transform.translation = translation;
+    }
     let duration = progress
         .kind
         .break_duration()
@@ -288,27 +291,43 @@ fn draw_targeted_block(mut gizmos: Gizmos, target: Single<&BlockTargetState, Wit
 }
 
 fn targeted_voxel(
-    spatial_query: &SpatialQuery,
-    chunks: &Query<(), With<VoxelChunk>>,
     origin: Vec3,
     direction: Dir3,
+    mut sample: impl FnMut(IVec3) -> Option<VoxelKind>,
 ) -> Option<BlockTarget> {
-    let hit = spatial_query.cast_ray_predicate(
-        origin,
-        direction,
-        BLOCK_REACH,
-        false,
-        &SpatialQueryFilter::DEFAULT,
-        &|entity| chunks.contains(entity),
-    )?;
-    let hit_point = origin + direction * hit.distance;
-    Some(BlockTarget {
-        destroy: voxel_from_hit(hit_point, hit.normal),
-        place: (hit_point + hit.normal * HIT_EPSILON).floor().as_ivec3(),
-        normal: hit.normal,
-    })
-}
-
-fn voxel_from_hit(hit_point: Vec3, normal: Vec3) -> IVec3 {
-    (hit_point - normal * HIT_EPSILON).floor().as_ivec3()
+    let direction = direction.as_vec3();
+    let mut cell = origin.floor().as_ivec3();
+    let step = direction.signum().as_ivec3();
+    let delta = direction.recip().abs();
+    let mut next = Vec3::splat(f32::INFINITY);
+    for axis in 0..3 {
+        if direction[axis] != 0.0 {
+            let boundary = cell[axis] as f32 + if step[axis] > 0 { 1.0 } else { 0.0 };
+            next[axis] = (boundary - origin[axis]) / direction[axis];
+        }
+    }
+    let mut normal = IVec3::ZERO;
+    loop {
+        if sample(cell)?.break_duration().is_some() {
+            return Some(BlockTarget {
+                destroy: cell,
+                place: cell + normal,
+                normal: normal.as_vec3(),
+            });
+        }
+        let axis = if next.x <= next.y && next.x <= next.z {
+            0
+        } else if next.y <= next.z {
+            1
+        } else {
+            2
+        };
+        if next[axis] > BLOCK_REACH {
+            return None;
+        }
+        cell[axis] += step[axis];
+        next[axis] += delta[axis];
+        normal = IVec3::ZERO;
+        normal[axis] = -step[axis];
+    }
 }
