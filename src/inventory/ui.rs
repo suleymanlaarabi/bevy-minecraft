@@ -63,30 +63,27 @@ fn hud_slot(index: usize) -> impl Scene {
         BorderColor::all(SLOT_BORDER)
         Pickable::IGNORE
         Children [
-            (
-                Node {
-                    width: px(30),
-                    height: px(30),
-                }
-                SlotIcon { index }
-                BackgroundColor(Color::NONE)
-                Visibility::Hidden
-                Pickable::IGNORE
-            ),
-            (
-                Text("")
-                TextFont {
-                    font_size: FontSize::Px(14.0),
-                }
-                TextColor(Color::WHITE)
-                Node {
-                    position_type: PositionType::Absolute,
-                    right: px(3),
-                    bottom: px(1),
-                }
-                SlotCount { index }
-                Pickable::IGNORE
-            )
+            Node {
+                width: px(30),
+                height: px(30),
+            }
+            SlotIcon { index }
+            BackgroundColor(Color::NONE)
+            Visibility::Hidden
+            Pickable::IGNORE
+            --
+            Text("")
+            TextFont {
+                font_size: FontSize::Px(14.0),
+            }
+            TextColor(Color::WHITE)
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(3),
+                bottom: px(1),
+            }
+            SlotCount { index }
+            Pickable::IGNORE
         ]
     }
 }
@@ -104,7 +101,6 @@ fn inventory_slot(index: usize) -> impl Scene {
         InventorySlotView { index }
         BackgroundColor(SLOT_BG)
         BorderColor::all(SLOT_BORDER)
-
         on(slot_click)
         on(slot_over)
         on(slot_out)
@@ -112,94 +108,132 @@ fn inventory_slot(index: usize) -> impl Scene {
         on(slot_drag_enter)
         on(slot_drag_over)
         on(slot_drag_end)
-
         Children [
-            (
-                Node {
-                    width: px(30),
-                    height: px(30),
-                }
-                SlotIcon { index }
-                BackgroundColor(Color::NONE)
-                Visibility::Hidden
-                Pickable::IGNORE
-            ),
-            (
-                Text("")
-                TextFont {
-                    font_size: FontSize::Px(14.0),
-                }
-                TextColor(Color::WHITE)
-                Node {
-                    position_type: PositionType::Absolute,
-                    right: px(3),
-                    bottom: px(1),
-                }
-                SlotCount { index }
-                Pickable::IGNORE
-            )
+            Node {
+                width: px(30),
+                height: px(30),
+            }
+            SlotIcon { index }
+            BackgroundColor(Color::NONE)
+            Visibility::Hidden
+            Pickable::IGNORE
+            --
+            Text("")
+            TextFont {
+                font_size: FontSize::Px(14.0),
+            }
+            TextColor(Color::WHITE)
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(3),
+                bottom: px(1),
+            }
+            SlotCount { index }
+            Pickable::IGNORE
         ]
     }
 }
 
 fn hud_hotbar_slots() -> impl SceneList {
-    bsn_list![
-        hud_slot(0),
-        hud_slot(1),
-        hud_slot(2),
-        hud_slot(3),
-        hud_slot(4),
-        hud_slot(5),
-        hud_slot(6),
-        hud_slot(7),
-        hud_slot(8),
-    ]
+    bsn_list! {
+        @hud_slot(0)
+        --
+        @hud_slot(1)
+        --
+        @hud_slot(2)
+        --
+        @hud_slot(3)
+        --
+        @hud_slot(4)
+        --
+        @hud_slot(5)
+        --
+        @hud_slot(6)
+        --
+        @hud_slot(7)
+        --
+        @hud_slot(8)
+    }
 }
 
 fn inventory_hotbar_slots() -> impl SceneList {
-    bsn_list![
-        inventory_slot(0),
-        inventory_slot(1),
-        inventory_slot(2),
-        inventory_slot(3),
-        inventory_slot(4),
-        inventory_slot(5),
-        inventory_slot(6),
-        inventory_slot(7),
-        inventory_slot(8),
-    ]
+    bsn_list! {
+        @inventory_slot(0)
+        --
+        @inventory_slot(1)
+        --
+        @inventory_slot(2)
+        --
+        @inventory_slot(3)
+        --
+        @inventory_slot(4)
+        --
+        @inventory_slot(5)
+        --
+        @inventory_slot(6)
+        --
+        @inventory_slot(7)
+        --
+        @inventory_slot(8)
+    }
 }
 
 fn main_inventory_slots() -> impl SceneList {
-    bsn_list![
-        inventory_slot(9),
-        inventory_slot(10),
-        inventory_slot(11),
-        inventory_slot(12),
-        inventory_slot(13),
-        inventory_slot(14),
-        inventory_slot(15),
-        inventory_slot(16),
-        inventory_slot(17),
-        inventory_slot(18),
-        inventory_slot(19),
-        inventory_slot(20),
-        inventory_slot(21),
-        inventory_slot(22),
-        inventory_slot(23),
-        inventory_slot(24),
-        inventory_slot(25),
-        inventory_slot(26),
-        inventory_slot(27),
-        inventory_slot(28),
-        inventory_slot(29),
-        inventory_slot(30),
-        inventory_slot(31),
-        inventory_slot(32),
-        inventory_slot(33),
-        inventory_slot(34),
-        inventory_slot(35),
-    ]
+    bsn_list! {
+        @inventory_slot(9)
+        --
+        @inventory_slot(10)
+        --
+        @inventory_slot(11)
+        --
+        @inventory_slot(12)
+        --
+        @inventory_slot(13)
+        --
+        @inventory_slot(14)
+        --
+        @inventory_slot(15)
+        --
+        @inventory_slot(16)
+        --
+        @inventory_slot(17)
+        --
+        @inventory_slot(18)
+        --
+        @inventory_slot(19)
+        --
+        @inventory_slot(20)
+        --
+        @inventory_slot(21)
+        --
+        @inventory_slot(22)
+        --
+        @inventory_slot(23)
+        --
+        @inventory_slot(24)
+        --
+        @inventory_slot(25)
+        --
+        @inventory_slot(26)
+        --
+        @inventory_slot(27)
+        --
+        @inventory_slot(28)
+        --
+        @inventory_slot(29)
+        --
+        @inventory_slot(30)
+        --
+        @inventory_slot(31)
+        --
+        @inventory_slot(32)
+        --
+        @inventory_slot(33)
+        --
+        @inventory_slot(34)
+        --
+        @inventory_slot(35)
+    }
 }
 
 fn hotbar_hud_scene() -> impl Scene {
@@ -218,21 +252,19 @@ fn hotbar_hud_scene() -> impl Scene {
         Pickable::IGNORE
         DespawnOnExit::<GameState>(GameState::Game)
         Children [
-            (
-                Node {
-                    display: Display::Grid,
-                    grid_template_columns: RepeatedGridTrack::px::<Vec<RepeatedGridTrack>>(
-                        9_u16, SLOT_SIZE,
-                    ),
-                    column_gap: px(SLOT_GAP),
-                    padding: UiRect::all(px(4)),
-                }
-                BackgroundColor(Color::srgba(0.03, 0.03, 0.04, 0.55))
-                Pickable::IGNORE
-                Children [
-                    { hud_hotbar_slots() }
-                ]
-            )
+            Node {
+                display: Display::Grid,
+                grid_template_columns: RepeatedGridTrack::px::<Vec<RepeatedGridTrack>>(
+                    9_u16, SLOT_SIZE,
+                ),
+                column_gap: px(SLOT_GAP),
+                padding: UiRect::all(px(4)),
+            }
+            BackgroundColor(Color::srgba(0.03, 0.03, 0.04, 0.55))
+            Pickable::IGNORE
+            Children [
+                { hud_hotbar_slots() }
+            ]
         ]
     }
 }
@@ -258,83 +290,74 @@ fn inventory_overlay_scene() -> impl Scene {
         }
         DespawnOnExit::<InventoryState>(InventoryState::Open)
         Children [
-            (
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    row_gap: px(14),
-                    padding: UiRect::all(px(18)),
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: px(14),
+                padding: UiRect::all(px(18)),
+            }
+            BackgroundColor(PANEL_BG)
+            Children [
+                Text("Inventory")
+                TextFont {
+                    font_size: FontSize::Px(20.0),
                 }
-                BackgroundColor(PANEL_BG)
-                Children [
-                    (
-                        Text("Inventory")
-                        TextFont {
-                            font_size: FontSize::Px(20.0),
-                        }
-                        TextColor(Color::WHITE)
-                        Pickable::IGNORE
-                    ),
-                    (
-                        Node {
-                            display: Display::Grid,
-                            grid_template_columns: RepeatedGridTrack::px::<Vec<RepeatedGridTrack>>(
-                                9_u16, SLOT_SIZE,
-                            ),
-                            grid_template_rows: RepeatedGridTrack::px::<Vec<RepeatedGridTrack>>(
-                                3_u16, SLOT_SIZE,
-                            ),
-                            column_gap: px(SLOT_GAP),
-                            row_gap: px(SLOT_GAP),
-                        }
-                        Children [
-                            { main_inventory_slots() }
-                        ]
-                    ),
-                    (
-                        Node {
-                            display: Display::Grid,
-                            grid_template_columns: RepeatedGridTrack::px::<Vec<RepeatedGridTrack>>(
-                                9_u16, SLOT_SIZE,
-                            ),
-                            column_gap: px(SLOT_GAP),
-                            margin: UiRect {
-                                top: px(6),
-                            },
-                        }
-                        Children [
-                            { inventory_hotbar_slots() }
-                        ]
-                    )
-                ]
-            ),
-            (
-                Node {
-                    width: px(36),
-                    height: px(36),
-                    position_type: PositionType::Absolute,
-                }
-                CursorStackView
-                Visibility::Hidden
-                BackgroundColor(Color::NONE)
+                TextColor(Color::WHITE)
                 Pickable::IGNORE
-                GlobalZIndex(200)
+                --
+                Node {
+                    display: Display::Grid,
+                    grid_template_columns: RepeatedGridTrack::px::<Vec<RepeatedGridTrack>>(
+                        9_u16, SLOT_SIZE,
+                    ),
+                    grid_template_rows: RepeatedGridTrack::px::<Vec<RepeatedGridTrack>>(
+                        3_u16, SLOT_SIZE,
+                    ),
+                    column_gap: px(SLOT_GAP),
+                    row_gap: px(SLOT_GAP),
+                }
                 Children [
-                    (
-                        Text("")
-                        TextFont {
-                            font_size: FontSize::Px(14.0),
-                        }
-                        TextColor(Color::WHITE)
-                        Node {
-                            position_type: PositionType::Absolute,
-                            right: px(1),
-                            bottom: px(0),
-                        }
-                        CursorStackCount
-                        Pickable::IGNORE
-                    )
+                    { main_inventory_slots() }
                 ]
-            )
+                --
+                Node {
+                    display: Display::Grid,
+                    grid_template_columns: RepeatedGridTrack::px::<Vec<RepeatedGridTrack>>(
+                        9_u16, SLOT_SIZE,
+                    ),
+                    column_gap: px(SLOT_GAP),
+                    margin: UiRect {
+                        top: px(6),
+                    },
+                }
+                Children [
+                    { inventory_hotbar_slots() }
+                ]
+            ]
+            --
+            Node {
+                width: px(36),
+                height: px(36),
+                position_type: PositionType::Absolute,
+            }
+            CursorStackView
+            Visibility::Hidden
+            BackgroundColor(Color::NONE)
+            Pickable::IGNORE
+            GlobalZIndex(200)
+            Children [
+                Text("")
+                TextFont {
+                    font_size: FontSize::Px(14.0),
+                }
+                TextColor(Color::WHITE)
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: px(1),
+                    bottom: px(0),
+                }
+                CursorStackCount
+                Pickable::IGNORE
+            ]
         ]
     }
 }
@@ -454,7 +477,7 @@ pub(crate) fn refresh_slots(
 }
 
 fn slot_over(
-    event: On<Pointer<Over>>,
+    event: On<PointerOver>,
     slots: Query<&InventorySlotView>,
     mut cursor: ResMut<InventoryCursor>,
 ) {
@@ -466,7 +489,7 @@ fn slot_over(
 }
 
 fn slot_out(
-    event: On<Pointer<Out>>,
+    event: On<PointerOut>,
     slots: Query<&InventorySlotView>,
     mut cursor: ResMut<InventoryCursor>,
 ) {
@@ -480,7 +503,7 @@ fn slot_out(
 }
 
 fn slot_click(
-    mut event: On<Pointer<Click>>,
+    mut event: On<PointerClick>,
     slots: Query<&InventorySlotView>,
     keyboard: Res<ButtonInput<KeyCode>>,
     mut inventory: Single<&mut PlayerInventory, With<Player>>,
@@ -498,7 +521,7 @@ fn slot_click(
 
     let index = slot.index;
 
-    match event.event.button {
+    match event.button {
         PointerButton::Primary => {
             let shift =
                 keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
@@ -508,7 +531,7 @@ fn slot_click(
                 return;
             }
 
-            if event.event.count >= 2 && cursor.stack.is_some() {
+            if event.count >= 2 && cursor.stack.is_some() {
                 inventory.collect_matching(&mut cursor.stack);
                 return;
             }
@@ -523,7 +546,7 @@ fn slot_click(
 }
 
 fn slot_drag_start(
-    mut event: On<Pointer<DragStart>>,
+    mut event: On<PointerDragStart>,
     slots: Query<&InventorySlotView>,
     mut inventory: Single<&mut PlayerInventory, With<Player>>,
     mut cursor: ResMut<InventoryCursor>,
@@ -536,14 +559,14 @@ fn slot_drag_start(
 
     let had_stack_before_drag = cursor.stack.is_some();
 
-    let mode = match event.event.button {
+    let mode = match event.button {
         PointerButton::Primary => DragMode::Even,
         PointerButton::Secondary => DragMode::OneEach,
         PointerButton::Middle => return,
     };
 
     if !had_stack_before_drag {
-        match event.event.button {
+        match event.button {
             PointerButton::Primary => inventory.left_click(slot.index, &mut cursor.stack),
             PointerButton::Secondary => inventory.right_click(slot.index, &mut cursor.stack),
             PointerButton::Middle => return,
@@ -568,7 +591,7 @@ fn slot_drag_start(
 }
 
 fn slot_drag_enter(
-    mut event: On<Pointer<DragEnter>>,
+    mut event: On<PointerDragEnter>,
     slots: Query<&InventorySlotView>,
     mut cursor: ResMut<InventoryCursor>,
 ) {
@@ -582,7 +605,7 @@ fn slot_drag_enter(
         return;
     };
 
-    if event.event.dragged != drag.source_entity {
+    if event.dragged != drag.source_entity {
         return;
     }
 
@@ -590,7 +613,7 @@ fn slot_drag_enter(
 }
 
 fn slot_drag_over(
-    mut event: On<Pointer<DragOver>>,
+    mut event: On<PointerDragOver>,
     slots: Query<&InventorySlotView>,
     mut cursor: ResMut<InventoryCursor>,
 ) {
@@ -604,7 +627,7 @@ fn slot_drag_over(
         return;
     };
 
-    if event.event.dragged != drag.source_entity {
+    if event.dragged != drag.source_entity {
         return;
     }
 
@@ -612,7 +635,7 @@ fn slot_drag_over(
 }
 
 fn slot_drag_end(
-    mut event: On<Pointer<DragEnd>>,
+    mut event: On<PointerDragEnd>,
     mut inventory: Single<&mut PlayerInventory, With<Player>>,
     mut cursor: ResMut<InventoryCursor>,
 ) {
@@ -661,4 +684,33 @@ pub(crate) fn follow_cursor_stack(
     } else {
         String::new()
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inventory_scenes_preserve_all_slot_indices() {
+        for (scene, expected_count) in [
+            (Box::new(hotbar_hud_scene()) as Box<dyn Scene>, HOTBAR_SIZE),
+            (Box::new(inventory_overlay_scene()), INVENTORY_SIZE),
+        ] {
+            let mut app = App::new();
+            app.add_plugins((
+                TaskPoolPlugin::default(),
+                AssetPlugin::default(),
+                bevy::scene::ScenePlugin,
+            ));
+            let world = app.world_mut();
+            world.spawn_scene(scene).unwrap();
+            let mut indices: Vec<_> = world
+                .query::<&InventorySlotView>()
+                .iter(&world)
+                .map(|slot| slot.index)
+                .collect();
+            indices.sort_unstable();
+            assert_eq!(indices, (0..expected_count).collect::<Vec<_>>());
+        }
+    }
 }

@@ -53,7 +53,7 @@ pub(crate) fn prepare_assets(
 }
 
 pub(crate) fn apply_texture_pack(
-    _insert: On<Insert, crate::settings::GraphicsSettings>,
+    _insert: On<Insert<crate::settings::GraphicsSettings>>,
     settings: Res<crate::settings::GraphicsSettings>,
     asset_server: Res<AssetServer>,
     mut texture_pack: Option<ResMut<TexturePack>>,
@@ -159,7 +159,7 @@ fn border_halos(local: IVec3, size: i32) -> impl Iterator<Item = (IVec2, IVec3)>
 }
 
 pub(crate) fn cleanup_removed_chunk(
-    event: On<Remove, ChunkVoxels>,
+    event: On<Remove<ChunkVoxels>>,
     chunks: Query<(&super::VoxelChunk, &ChunkVoxels)>,
     mut index: ResMut<ChunkIndex>,
     mut stored: ResMut<StoredChunks>,

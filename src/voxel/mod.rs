@@ -131,7 +131,7 @@ impl Plugin for VoxelPlugin {
 }
 
 fn apply_view_distance(
-    _insert: On<Insert, GraphicsSettings>,
+    _insert: On<Insert<GraphicsSettings>>,
     settings: Res<GraphicsSettings>,
     mut offsets: ResMut<StreamOffsets>,
     mut state: ResMut<StreamState>,

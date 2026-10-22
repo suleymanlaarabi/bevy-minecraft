@@ -1,4 +1,4 @@
-#import bevy_pbr::{
+import bevy_pbr::render::{
     forward_io::{VertexOutput, FragmentOutput},
     mesh_view_bindings as view_bindings,
     mesh_view_types::{
@@ -8,15 +8,15 @@
         FOG_MODE_LINEAR,
     },
     shadows,
-}
+};
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(0)
+@group(constants::MATERIAL_BIND_GROUP) @binding(0)
 var blocks: texture_2d_array<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1)
+@group(constants::MATERIAL_BIND_GROUP) @binding(1)
 var blocks_sampler: sampler;
 
 fn apply_voxel_fog(color: vec4<f32>, world_position: vec3<f32>) -> vec4<f32> {
-#ifdef DISTANCE_FOG
+@if(DISTANCE_FOG) {
     let fog = view_bindings::fog;
     let distance = length(world_position - view_bindings::view.world_position.xyz);
     var amount = 0.0;
@@ -29,22 +29,23 @@ fn apply_voxel_fog(color: vec4<f32>, world_position: vec3<f32>) -> vec4<f32> {
         amount = 1.0 - 1.0 / exp(density * density);
     }
     return vec4<f32>(mix(color.rgb, fog.base_color.rgb, amount * fog.base_color.a), color.a);
-#else
+} @else {
     return color;
-#endif
+}
 }
 
 @fragment
 fn fragment(
     in: VertexOutput,
 ) -> FragmentOutput {
-#ifdef VERTEX_COLORS
+@if(VERTEX_COLORS)
     let layer = u32(in.color.a + 0.5);
+@if(VERTEX_COLORS)
     let tint = in.color.rgb;
-#else
+@if(!VERTEX_COLORS)
     let layer = 0u;
+@if(!VERTEX_COLORS)
     let tint = vec3<f32>(1.0);
-#endif
 
     var texture_color = textureSample(blocks, blocks_sampler, in.uv, layer);
     if layer == 8u {

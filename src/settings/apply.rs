@@ -17,7 +17,7 @@ pub(super) fn register(app: &mut App) {
 }
 
 fn apply_graphics_settings(
-    _insert: On<Insert, GraphicsSettings>,
+    _insert: On<Insert<GraphicsSettings>>,
     settings: Res<GraphicsSettings>,
     mut windows: Query<&mut Window>,
     mut cameras: Query<(Entity, &mut Projection), With<PlayerCamera>>,
@@ -43,7 +43,7 @@ fn apply_graphics_settings(
 }
 
 fn apply_settings_to_new_target(
-    add: On<Add, (Window, PlayerCamera, DirectionalLight)>,
+    add: On<Add<(Window, PlayerCamera, DirectionalLight)>>,
     settings: Res<GraphicsSettings>,
     mut windows: Query<&mut Window>,
     mut cameras: Query<&mut Projection, With<PlayerCamera>>,

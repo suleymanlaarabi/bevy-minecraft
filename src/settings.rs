@@ -16,8 +16,8 @@ use bevy::{
     },
     ui::Checked,
     ui_widgets::{
-        Activate, RadioGroup, SliderPrecision, SliderStep, ValueChange, checkbox_self_update,
-        radio_self_update, slider_self_update,
+        Activate, RadioGroup, SliderPrecision, SliderStep, SliderValue, ValueChange,
+        checkbox_self_update, radio_self_update, slider_self_update,
     },
     window::WindowCloseRequested,
 };
@@ -192,26 +192,34 @@ fn settings_page(settings: GraphicsSettings) -> impl Scene {
         ThemeBackgroundColor(tokens::WINDOW_BG)
         GlobalZIndex(200)
         DespawnOnExit::<GameState>(GameState::Settings)
-        Children [(
-            pane()
+        Children [
+            @pane()
             Node {
                 width: percent(100),
                 max_width: px(780),
             }
             Children [
-                pane_header()
-                Children [(Text("Graphics Settings") ThemedText)],
-                pane_body()
+                @pane_header()
+                Children [Text("Graphics Settings") ThemedText]
+                --
+                @pane_body()
                 Node { row_gap: px(8) }
                 InheritableThemeTextColor(tokens::TEXT_MAIN)
                 Children [
-                    setting_row("Anti-Aliasing", anti_aliasing_control(settings.anti_aliasing)),
-                    setting_row("VSync", vsync_control(settings.vsync)),
-                    setting_row("Shadow Quality", shadow_quality_control(settings.shadow_quality)),
-                    setting_row("Texture Pack", texture_pack_control(settings.texture_pack)),
-                    setting_row("Field of View", fov_control(settings.field_of_view)),
-                    setting_row("View Distance", view_distance_control(settings.view_distance)),
-                    setting_row("Display Mode", display_mode_control(settings.display_mode)),
+                    @setting_row("Anti-Aliasing", anti_aliasing_control(settings.anti_aliasing))
+                    --
+                    @setting_row("VSync", vsync_control(settings.vsync))
+                    --
+                    @setting_row("Shadow Quality", shadow_quality_control(settings.shadow_quality))
+                    --
+                    @setting_row("Texture Pack", texture_pack_control(settings.texture_pack))
+                    --
+                    @setting_row("Field of View", fov_control(settings.field_of_view))
+                    --
+                    @setting_row("View Distance", view_distance_control(settings.view_distance))
+                    --
+                    @setting_row("Display Mode", display_mode_control(settings.display_mode))
+                    --
                     Node {
                         width: percent(100),
                         justify_content: JustifyContent::SpaceBetween,
@@ -219,12 +227,13 @@ fn settings_page(settings: GraphicsSettings) -> impl Scene {
                         margin: UiRect::top(px(4)),
                     }
                     Children [
-                        reset_button(),
-                        back_button(),
+                        @reset_button()
+                        --
+                        @back_button()
                     ]
                 ]
             ]
-        )]
+        ]
     }
 }
 
@@ -242,13 +251,14 @@ fn setting_row(label: &'static str, control: impl Scene) -> impl Scene {
         }
         Children [
             Node { width: px(170), min_width: px(170), display: Display::Flex, align_items: AlignItems::Center }
-            Children [(Text(label) ThemedText)],
+            Children [Text(label) ThemedText]
+            --
             Node {
                 flex_grow: 1.0,
                 justify_content: JustifyContent::FlexEnd,
                 align_items: AlignItems::Center,
             }
-            Children [control]
+            Children [@control]
         ]
     }
 }
@@ -269,14 +279,18 @@ fn radio_group() -> impl Scene {
 
 fn anti_aliasing_control(selected: AntiAliasingMode) -> impl Scene {
     bsn! {
-        radio_group()
+        @radio_group()
         on(set_choice::<AntiAliasingMode>)
         Children [
-            radio_choice("Off", AntiAliasingMode::Off, selected),
-            radio_choice("FXAA", AntiAliasingMode::Fxaa, selected),
-            radio_choice("MSAA 2x", AntiAliasingMode::Msaa2x, selected),
-            radio_choice("MSAA 4x", AntiAliasingMode::Msaa4x, selected),
-            radio_choice("MSAA 8x", AntiAliasingMode::Msaa8x, selected),
+            @radio_choice("Off", AntiAliasingMode::Off, selected)
+            --
+            @radio_choice("FXAA", AntiAliasingMode::Fxaa, selected)
+            --
+            @radio_choice("MSAA 2x", AntiAliasingMode::Msaa2x, selected)
+            --
+            @radio_choice("MSAA 4x", AntiAliasingMode::Msaa4x, selected)
+            --
+            @radio_choice("MSAA 8x", AntiAliasingMode::Msaa8x, selected)
         ]
     }
 }
@@ -285,43 +299,49 @@ fn radio_choice<T: GraphicsChoice>(label: &'static str, value: T, selected: T) -
     let checked = (value == selected).then_some(bsn! { Checked });
     bsn! {
         @FeathersRadio { @caption: bsn! { Text(label) ThemedText } }
-        template_value(value)
-        checked
+        value
+        @checked
     }
 }
 
 fn shadow_quality_control(selected: ShadowQuality) -> impl Scene {
     bsn! {
-        radio_group()
+        @radio_group()
         on(set_choice::<ShadowQuality>)
         Children [
-            radio_choice("Off", ShadowQuality::Off, selected),
-            radio_choice("Low", ShadowQuality::Low, selected),
-            radio_choice("Medium", ShadowQuality::Medium, selected),
-            radio_choice("High", ShadowQuality::High, selected),
+            @radio_choice("Off", ShadowQuality::Off, selected)
+            --
+            @radio_choice("Low", ShadowQuality::Low, selected)
+            --
+            @radio_choice("Medium", ShadowQuality::Medium, selected)
+            --
+            @radio_choice("High", ShadowQuality::High, selected)
         ]
     }
 }
 
 fn texture_pack_control(selected: TexturePackId) -> impl Scene {
     bsn! {
-        radio_group()
+        @radio_group()
         on(set_choice::<TexturePackId>)
         Children [
-            radio_choice("Replete", TexturePackId::Replete, selected),
-            radio_choice("Meadow", TexturePackId::Meadow, selected),
-            radio_choice("Twilight", TexturePackId::Twilight, selected),
+            @radio_choice("Replete", TexturePackId::Replete, selected)
+            --
+            @radio_choice("Meadow", TexturePackId::Meadow, selected)
+            --
+            @radio_choice("Twilight", TexturePackId::Twilight, selected)
         ]
     }
 }
 
 fn display_mode_control(selected: DisplayMode) -> impl Scene {
     bsn! {
-        radio_group()
+        @radio_group()
         on(set_choice::<DisplayMode>)
         Children [
-            radio_choice("Windowed", DisplayMode::Windowed, selected),
-            radio_choice("Borderless", DisplayMode::BorderlessFullscreen, selected),
+            @radio_choice("Windowed", DisplayMode::Windowed, selected)
+            --
+            @radio_choice("Borderless", DisplayMode::BorderlessFullscreen, selected)
         ]
     }
 }
@@ -330,7 +350,7 @@ fn vsync_control(enabled: bool) -> impl Scene {
     let checked = enabled.then_some(bsn! { Checked });
     bsn! {
         @FeathersToggleSwitch
-        checked
+        @checked
         on(checkbox_self_update)
         on(set_vsync)
     }
@@ -339,11 +359,11 @@ fn vsync_control(enabled: bool) -> impl Scene {
 fn fov_control(value: f32) -> impl Scene {
     bsn! {
         @FeathersSlider {
-            @value: value,
             @min: FOV_MIN,
             @max: FOV_MAX,
         }
         Node { width: px(320) }
+        SliderValue(value)
         SliderStep(1.0)
         SliderPrecision(0)
         on(slider_self_update)
@@ -354,11 +374,11 @@ fn fov_control(value: f32) -> impl Scene {
 fn view_distance_control(value: u32) -> impl Scene {
     bsn! {
         @FeathersSlider {
-            @value: {value as f32},
             @min: {VIEW_DISTANCE_MIN as f32},
             @max: {VIEW_DISTANCE_MAX as f32},
         }
         Node { width: px(320) }
+        SliderValue({value as f32})
         SliderStep(1.0)
         SliderPrecision(0)
         on(slider_self_update)
@@ -474,5 +494,26 @@ fn handle_window_close(
     if close_events.read().next().is_some() {
         commands.queue(SaveSettingsSync::IfChanged);
         commands.write_message(AppExit::Success);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sliders_preserve_the_configured_initial_values() {
+        let mut app = App::new();
+        app.add_plugins((
+            TaskPoolPlugin::default(),
+            AssetPlugin::default(),
+            bevy::scene::ScenePlugin,
+        ));
+        app.init_asset::<Font>();
+        let world = app.world_mut();
+        let fov = world.spawn_scene(fov_control(97.0)).unwrap().id();
+        let distance = world.spawn_scene(view_distance_control(17)).unwrap().id();
+        assert_eq!(world.get::<SliderValue>(fov).unwrap().0, 97.0);
+        assert_eq!(world.get::<SliderValue>(distance).unwrap().0, 17.0);
     }
 }

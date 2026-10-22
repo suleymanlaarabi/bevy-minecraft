@@ -124,7 +124,7 @@ fn spawn_player(mut commands: Commands, voxel_settings: Option<Res<VoxelSettings
         Transform::from_translation(spawn_pos)
         FollowedBy [
             PlayerCamera
-            FollowOffset({Vec3::Y * PLAYER_EYE_HEIGHT}),
+            FollowOffset({Vec3::Y * PLAYER_EYE_HEIGHT})
         ]
     });
 
@@ -151,7 +151,8 @@ fn spawn_player(mut commands: Commands, voxel_settings: Option<Res<VoxelSettings
                     left: px(15),
                     top: px(7)
                 }
-                BackgroundColor(Color::WHITE),
+                BackgroundColor(Color::WHITE)
+                --
 
                 Node {
                     width: px(18),

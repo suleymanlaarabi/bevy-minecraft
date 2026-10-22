@@ -1,20 +1,19 @@
-#import bevy_pbr::{
+import bevy_pbr::render::{
     mesh_view_bindings::globals,
     pbr_fragment::pbr_input_from_standard_material,
-}
-
-#ifdef PREPASS_PIPELINE
-#import bevy_pbr::{
-    prepass_io::{VertexOutput, FragmentOutput},
-    pbr_deferred_functions::deferred_output,
-}
-#else
-#import bevy_pbr::{
+};
+@if(PREPASS_PIPELINE)
+import bevy_pbr::{
+    prepass::io::{VertexOutput, FragmentOutput},
+    deferred::functions::deferred_output,
+};
+@if(!PREPASS_PIPELINE)
+import bevy_pbr::render::{
     forward_io::{VertexOutput, FragmentOutput},
     pbr_functions::main_pass_post_lighting_processing,
-}
-#import "shaders/voxel_lighting.wgsl"::apply_voxel_lighting
-#endif
+};
+@if(!PREPASS_PIPELINE)
+import super::voxel_lighting::apply_voxel_lighting;
 
 struct WaterSettings {
     directions: vec4<f32>,
@@ -22,7 +21,7 @@ struct WaterSettings {
     strength: vec4<f32>,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(100)
+@group(constants::MATERIAL_BIND_GROUP) @binding(100)
 var<uniform> water: WaterSettings;
 
 @fragment
@@ -68,12 +67,12 @@ fn fragment(
         fresnel,
     );
 
-#ifdef PREPASS_PIPELINE
+@if(PREPASS_PIPELINE) {
     return deferred_output(in, pbr_input);
-#else
+} @else {
     var out: FragmentOutput;
     out.color = apply_voxel_lighting(pbr_input);
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
     return out;
-#endif
+}
 }

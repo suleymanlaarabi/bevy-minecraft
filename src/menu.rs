@@ -20,7 +20,7 @@ impl Plugin for GameMenuPlugin {
 }
 
 fn menu() -> impl SceneList {
-    bsn_list! [
+    bsn_list! {
         Node {
             width: percent(100),
             height: percent(100),
@@ -37,20 +37,22 @@ fn menu() -> impl SceneList {
                 @variant: ButtonVariant::Primary,
             }
             Node { width: px(250), height: px(52) }
-            on(play),
+            on(play)
+            --
             @FeathersButton {
                 @caption: bsn! { Text("Settings") ThemedText }
             }
             Node { width: px(250), height: px(52) }
-            on(open_settings),
+            on(open_settings)
+            --
             @FeathersButton {
                 @caption: bsn! { Text("Exit") ThemedText },
                 @variant: ButtonVariant::Plain,
             }
             Node { width: px(250), height: px(52) }
-            on(exit),
+            on(exit)
         ]
-    ]
+    }
 }
 
 fn play(_activate: On<Activate>, mut next_state: ResMut<NextState<GameState>>) {

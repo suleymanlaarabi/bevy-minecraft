@@ -1,14 +1,14 @@
-#import bevy_pbr::{
-    ambient,
-    lighting,
-    lighting::LAYER_BASE,
+import bevy_pbr::render::{
+    pbr_ambient as ambient,
+    pbr_lighting as lighting,
+    pbr_lighting::LAYER_BASE,
     mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
     mesh_view_bindings as view_bindings,
     mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
     pbr_functions::{calculate_F0, calculate_F0_dielectric},
     pbr_types::PbrInput,
     shadows,
-}
+};
 
 // The water still uses the StandardMaterial input. Keep its specialized
 // ambient-and-sun lighting path separate from the lean opaque voxel material.

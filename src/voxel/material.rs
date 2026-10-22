@@ -215,12 +215,12 @@ pub(crate) fn block_texture(asset_server: &AssetServer, path: &str) -> Handle<Im
 
 impl Material for VoxelMaterial {
     fn fragment_shader() -> ShaderRef {
-        "shaders/voxel_material.wgsl".into()
+        "shaders/voxel_material.wesl".into()
     }
 }
 
 impl MaterialExtension for WaterMaterialExtension {
     fn fragment_shader() -> ShaderRef {
-        "shaders/water_material.wgsl".into()
+        "shaders/water_material.wesl".into()
     }
 }
