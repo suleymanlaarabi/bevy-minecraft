@@ -38,6 +38,7 @@ impl Plugin for InventoryPlugin {
     fn build(&self, app: &mut App) {
         app.add_sub_state::<InventoryState>()
             .init_resource::<InventoryCursor>()
+            .add_systems(OnExit(GameState::Game), reset_inventory_cursor)
             .add_systems(OnEnter(GameState::Game), ui::spawn_hotbar_hud)
             .add_systems(
                 OnEnter(InventoryState::Open),
@@ -56,6 +57,7 @@ impl Plugin for InventoryPlugin {
             .add_systems(
                 Update,
                 (handle_number_keys, handle_hotbar_scroll, ui::refresh_slots)
+                    .chain()
                     .run_if(in_state(GameState::Game)),
             )
             .add_systems(
@@ -142,4 +144,8 @@ fn handle_hotbar_scroll(
     };
 
     inventory.set_selected_hotbar(next);
+}
+
+fn reset_inventory_cursor(mut cursor: ResMut<InventoryCursor>) {
+    *cursor = InventoryCursor::default();
 }

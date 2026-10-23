@@ -1,5 +1,5 @@
 use super::{
-    ChunkVoxels, VoxelChunk,
+    ChunkVoxels, VoxelChunk, VoxelCommandsExt, VoxelKind, VoxelWorld,
     rebuild::ChunkBuild,
     regions::{RenderRegions, VoxelRenderRegion},
     streaming::PendingChunks,
@@ -11,6 +11,7 @@ use bevy::window::{MonitorSelection, PresentMode, WindowMode};
 use std::{collections::VecDeque, time::Duration};
 
 use crate::{
+    character::CharacterMovement,
     game::GameState,
     player::{Player, PlayerCamera},
 };
@@ -25,6 +26,7 @@ pub(crate) struct VoxelDiagnostics {
     generation_ms: Vec<f64>,
     meshing_ms: Vec<f64>,
     collider_ms: Vec<f64>,
+    region_ms: Vec<f64>,
     generated_chunks: u64,
     built_chunks: u64,
     built_vertices: u64,
@@ -52,8 +54,22 @@ impl VoxelDiagnostics {
         self.collider_ms.push(collider.as_secs_f64() * 1_000.0);
     }
 
+    pub(crate) fn record_region(&mut self, elapsed: Duration) {
+        self.region_ms.push(elapsed.as_secs_f64() * 1_000.0);
+    }
+
     fn reset_frames(&mut self) {
         self.frames_ms.clear();
+        self.region_ms.clear();
+    }
+
+    fn log_region_sample(&self, phase: &str) {
+        info!(
+            "voxel benchmark {phase} merges: count={} merge_ms[p50={:.3} p95={:.3}]",
+            self.region_ms.len(),
+            percentile(&self.region_ms, 0.50),
+            percentile(&self.region_ms, 0.95)
+        );
     }
 
     fn frame_percentiles(&self) -> (f64, f64, f64) {
@@ -70,6 +86,13 @@ impl VoxelDiagnostics {
 struct VoxelBenchmark {
     phase: BenchmarkPhase,
     elapsed: f64,
+    configured: bool,
+    edit_timer: f64,
+    edited: Option<(IVec3, VoxelKind)>,
+    removed: bool,
+    edits: usize,
+    movement_start: Vec3,
+    generated_at_start: u64,
 }
 
 #[derive(SystemParam)]
@@ -77,9 +100,9 @@ struct VoxelBenchmarkWorld<'w, 's> {
     offsets: Res<'w, StreamOffsets>,
     pending: Res<'w, PendingChunks>,
     render_regions: Res<'w, RenderRegions>,
-    chunks: Query<'w, 's, (), With<VoxelChunk>>,
+    chunks: Query<'w, 's, &'static ChunkVoxels, With<VoxelChunk>>,
     builds: Query<'w, 's, (), With<ChunkBuild>>,
-    player: Query<'w, 's, &'static mut Transform, With<Player>>,
+    player: Query<'w, 's, &'static Transform, With<Player>>,
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -89,27 +112,76 @@ enum BenchmarkPhase {
     Warmup,
     Stationary,
     Moving,
+    Editing,
     Done,
 }
 
 pub(crate) fn register(app: &mut App) {
-    if std::env::var_os("HOLLOW_DIAGNOSTICS").is_some() {
-        app.init_resource::<VoxelDiagnostics>().add_systems(
+    let report = std::env::var_os("HOLLOW_DIAGNOSTICS").is_some();
+    let benchmark = std::env::var_os("HOLLOW_VOXEL_BENCH").is_some();
+    if report || benchmark {
+        app.init_resource::<VoxelDiagnostics>()
+            .add_systems(Update, record_voxel_frame.run_if(in_state(GameState::Game)));
+    }
+    if report {
+        app.add_systems(
             Update,
-            report_voxel_diagnostics.run_if(in_state(GameState::Game)),
+            report_voxel_diagnostics
+                .after(record_voxel_frame)
+                .run_if(in_state(GameState::Game)),
         );
     }
-    if std::env::var_os("HOLLOW_VOXEL_BENCH").is_some() {
-        app.init_resource::<VoxelDiagnostics>()
-            .init_resource::<VoxelBenchmark>()
-            .add_systems(OnEnter(GameState::Game), configure_voxel_benchmark)
+    if benchmark {
+        app.init_resource::<VoxelBenchmark>()
             .add_systems(
                 Update,
-                run_voxel_benchmark.run_if(in_state(GameState::Game)),
+                (configure_voxel_benchmark, run_voxel_benchmark)
+                    .chain()
+                    .after(record_voxel_frame)
+                    .run_if(in_state(GameState::Game)),
+            )
+            .add_systems(
+                FixedUpdate,
+                benchmark_movement.run_if(in_state(GameState::Game)),
             );
+        if std::env::var_os("HOLLOW_BENCH_HEADLESS").is_some() {
+            app.add_systems(
+                PostUpdate,
+                setup_headless_targets.before(bevy::camera::CameraUpdateSystems),
+            );
+        }
     }
 }
 
+fn setup_headless_targets(
+    mut commands: Commands,
+    cameras: Query<Entity, Added<PlayerCamera>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    for entity in &cameras {
+        let target = images.add(Image::new_target_texture(
+            1920,
+            1080,
+            bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+            None,
+        ));
+        commands
+            .entity(entity)
+            .insert(bevy::camera::RenderTarget::Image(target.into()));
+        info!("voxel benchmark: rendering offscreen at 1920x1080");
+    }
+}
+
+fn record_voxel_frame(time: Res<Time<Real>>, mut diagnostics: ResMut<VoxelDiagnostics>) {
+    diagnostics
+        .frames_ms
+        .push_back(time.delta_secs_f64() * 1_000.0);
+    if diagnostics.frames_ms.len() > MAX_FRAME_SAMPLES {
+        diagnostics.frames_ms.pop_front();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn configure_voxel_benchmark(
     mut windows: Query<&mut Window>,
     cameras: Query<Entity, With<PlayerCamera>>,
@@ -117,35 +189,72 @@ fn configure_voxel_benchmark(
     mut physics_time: ResMut<Time<Physics>>,
     mut offsets: ResMut<StreamOffsets>,
     mut stream_state: ResMut<StreamState>,
+    mut benchmark: ResMut<VoxelBenchmark>,
+    settings: Res<crate::settings::GraphicsSettings>,
     mut commands: Commands,
 ) {
-    for mut window in &mut windows {
-        window.mode = WindowMode::BorderlessFullscreen(MonitorSelection::Primary);
-        window.present_mode = PresentMode::AutoNoVsync;
+    if benchmark.configured {
+        return;
     }
-    for entity in &cameras {
-        commands.entity(entity).insert(Msaa::Off);
+    benchmark.configured = true;
+    info!("voxel benchmark graphics: {:?}", *settings);
+    if std::env::var_os("HOLLOW_VOXEL_BENCH_SIMPLIFIED").is_some() {
+        for mut window in &mut windows {
+            window.mode = WindowMode::BorderlessFullscreen(MonitorSelection::Primary);
+            window.present_mode = PresentMode::AutoNoVsync;
+        }
+        for entity in &cameras {
+            commands.entity(entity).insert(Msaa::Off);
+        }
+        for mut light in &mut lights {
+            light.shadow_maps_enabled = false;
+        }
+        physics_time.pause();
+        *offsets = StreamOffsets::new(21);
+        stream_state.center = None;
+        info!("voxel benchmark simplified: radius=21, AA=off, shadows=off, physics=paused");
+    } else {
+        info!(
+            "voxel benchmark gameplay: current graphics settings and active physics, radius={}",
+            offsets.radius
+        );
     }
-    for mut light in &mut lights {
-        light.shadow_maps_enabled = false;
+}
+
+fn benchmark_movement(
+    benchmark: Res<VoxelBenchmark>,
+    time: Res<Time<Fixed>>,
+    mut players: Query<(&mut CharacterMovement, &mut Transform), With<Player>>,
+) {
+    for (mut movement, mut transform) in &mut players {
+        *movement = CharacterMovement::default();
+        if benchmark.phase == BenchmarkPhase::Moving {
+            if std::env::var_os("HOLLOW_VOXEL_BENCH_SIMPLIFIED").is_some() {
+                transform.translation.x += 8.0 * time.delta_secs();
+            } else {
+                movement.direction = Vec3::X;
+                movement.look_direction = Vec3::X;
+                movement.sprint = true;
+            }
+        }
     }
-    physics_time.pause();
-    *offsets = StreamOffsets::new(21);
-    stream_state.center = None;
-    info!("voxel benchmark: native fullscreen, radius=21, AA=off, shadows=off, physics=paused");
 }
 
 fn run_voxel_benchmark(
     time: Res<Time<Real>>,
-    mut world: VoxelBenchmarkWorld,
+    world: VoxelBenchmarkWorld,
     mut benchmark: ResMut<VoxelBenchmark>,
     mut diagnostics: ResMut<VoxelDiagnostics>,
+    voxel_world: VoxelWorld,
+    mut commands: Commands,
 ) {
     let loaded = world.chunks.iter().count();
-    let settled = loaded == world.offsets.len()
+    let settled = benchmark.phase == BenchmarkPhase::Waiting
+        && loaded == world.offsets.len()
         && world.pending.is_empty()
         && world.builds.is_empty()
-        && world.render_regions.is_settled();
+        && world.render_regions.is_settled()
+        && world.chunks.iter().all(|chunk| chunk.changes == 0);
     let delta = time.delta_secs_f64();
 
     match benchmark.phase {
@@ -172,20 +281,84 @@ fn run_voxel_benchmark(
                     "voxel benchmark stationary: frame_ms[p50={p50:.2} p95={p95:.2} p99={p99:.2}]"
                 );
                 benchmark.phase = BenchmarkPhase::Moving;
+                benchmark.movement_start = world
+                    .player
+                    .iter()
+                    .next()
+                    .map_or(Vec3::ZERO, |transform| transform.translation);
+                benchmark.generated_at_start = diagnostics.generated_chunks;
                 benchmark.elapsed = 0.0;
                 diagnostics.reset_frames();
-                info!("voxel benchmark: movement sample started at 8 world units/second");
+                info!("voxel benchmark: movement sample started");
             }
         }
         BenchmarkPhase::Moving => {
             benchmark.elapsed += delta;
-            if let Some(mut transform) = world.player.iter_mut().next() {
-                transform.translation.x += 8.0 * delta as f32;
-            }
             if benchmark.elapsed >= 20.0 {
                 let (p50, p95, p99) = diagnostics.frame_percentiles();
                 info!("voxel benchmark movement: frame_ms[p50={p50:.2} p95={p95:.2} p99={p99:.2}]");
+                diagnostics.log_region_sample("movement");
+                let displacement = world.player.iter().next().map_or(Vec3::ZERO, |transform| {
+                    transform.translation - benchmark.movement_start
+                });
+                info!(
+                    "voxel benchmark movement workload: distance={:.2} generated={}",
+                    Vec2::new(displacement.x, displacement.z).length(),
+                    diagnostics.generated_chunks - benchmark.generated_at_start
+                );
+                benchmark.phase = BenchmarkPhase::Editing;
+                benchmark.elapsed = 0.0;
+                diagnostics.reset_frames();
+                info!("voxel benchmark: mining/placement sample started");
+            }
+        }
+        BenchmarkPhase::Editing => {
+            benchmark.elapsed += delta;
+            benchmark.edit_timer += delta;
+            if benchmark.edit_timer >= 0.25 {
+                benchmark.edit_timer -= 0.25;
+                if benchmark.edited.is_none()
+                    && let Some(transform) = world.player.iter().next()
+                {
+                    for depth in 1..=4 {
+                        let position =
+                            transform.translation.floor().as_ivec3() + IVec3::new(3, -depth, 0);
+                        if let Some(kind) = voxel_world
+                            .get(position)
+                            .filter(|kind| kind.break_duration().is_some())
+                        {
+                            benchmark.edited = Some((position, kind));
+                            break;
+                        }
+                    }
+                }
+                if let Some((position, kind)) = benchmark.edited {
+                    commands.set_voxel(
+                        position,
+                        if benchmark.removed {
+                            kind
+                        } else {
+                            VoxelKind::Air
+                        },
+                    );
+                    benchmark.removed = !benchmark.removed;
+                    benchmark.edits += 1;
+                }
+            }
+            if benchmark.elapsed >= 20.0 {
+                if let Some((position, kind)) = benchmark.edited {
+                    commands.set_voxel(position, kind);
+                }
+                let (p50, p95, p99) = diagnostics.frame_percentiles();
+                info!(
+                    "voxel benchmark editing: edits={} frame_ms[p50={p50:.2} p95={p95:.2} p99={p99:.2}]",
+                    benchmark.edits
+                );
+                diagnostics.log_region_sample("editing");
                 benchmark.phase = BenchmarkPhase::Done;
+                if std::env::var_os("HOLLOW_BENCH_EXIT").is_some() {
+                    commands.write_message(AppExit::Success);
+                }
             }
         }
         BenchmarkPhase::Waiting | BenchmarkPhase::Done => {}
@@ -202,12 +375,6 @@ fn report_voxel_diagnostics(
     render_regions: Res<RenderRegions>,
 ) {
     diagnostics.elapsed += time.delta_secs_f64();
-    diagnostics
-        .frames_ms
-        .push_back(time.delta_secs_f64() * 1_000.0);
-    if diagnostics.frames_ms.len() > MAX_FRAME_SAMPLES {
-        diagnostics.frames_ms.pop_front();
-    }
     if diagnostics.elapsed < 5.0 {
         return;
     }
@@ -216,7 +383,9 @@ fn report_voxel_diagnostics(
     let loaded = chunks.iter().count();
     let building = builds.iter().count();
     let modified = chunks.iter().filter(|chunk| chunk.modified).count();
-    let ready = loaded.saturating_sub(building);
+    let dirty_chunks = chunks.iter().filter(|chunk| chunk.changes != 0).count();
+    let queued = dirty_chunks.saturating_sub(building);
+    let ready = loaded.saturating_sub(dirty_chunks);
     let frames: Vec<_> = diagnostics.frames_ms.iter().copied().collect();
     let average_vertices = diagnostics
         .built_vertices
@@ -228,7 +397,13 @@ fn report_voxel_diagnostics(
         .unwrap_or(0);
 
     info!(
-        "voxel: loaded={loaded} ready={ready} pending={} building={building} render_regions={} dirty_regions={} modified={modified} frame_ms[p50={:.2} p95={:.2} p99={:.2}] generation_ms[p50={:.2} p95={:.2}] meshing_ms[p50={:.2} p95={:.2}] collider_ms[p50={:.2} p95={:.2}] generated={} built={} avg_vertices={} avg_triangles={}",
+        "voxel region merges: pending={} merge_ms[p50={:.2} p95={:.2}]",
+        render_regions.pending_len(),
+        percentile(&diagnostics.region_ms, 0.50),
+        percentile(&diagnostics.region_ms, 0.95)
+    );
+    info!(
+        "voxel: loaded={loaded} ready={ready} pending={} building={building} queued={queued} render_regions={} dirty_regions={} modified={modified} frame_ms[p50={:.2} p95={:.2} p99={:.2}] generation_ms[p50={:.2} p95={:.2}] meshing_ms[p50={:.2} p95={:.2}] collider_ms[p50={:.2} p95={:.2}] generated={} built={} avg_vertices={} avg_triangles={}",
         pending.len(),
         rendered_regions.iter().count(),
         render_regions.dirty_len(),
@@ -250,6 +425,7 @@ fn report_voxel_diagnostics(
     diagnostics.generation_ms.clear();
     diagnostics.meshing_ms.clear();
     diagnostics.collider_ms.clear();
+    diagnostics.region_ms.clear();
 }
 
 fn percentile(samples: &[f64], percentile: f64) -> f64 {
@@ -265,6 +441,23 @@ fn percentile(samples: &[f64], percentile: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::percentile;
+
+    #[test]
+    fn frame_collection_produces_nonzero_percentiles_without_logging() {
+        use super::{VoxelDiagnostics, record_voxel_frame};
+        use bevy::ecs::system::RunSystemOnce;
+        use bevy::prelude::*;
+        let mut world = World::new();
+        let mut time = Time::<Real>::default();
+        time.advance_by(core::time::Duration::from_millis(8));
+        world.insert_resource(time);
+        world.init_resource::<VoxelDiagnostics>();
+        world.run_system_once(record_voxel_frame).unwrap();
+        assert_eq!(
+            world.resource::<VoxelDiagnostics>().frame_percentiles(),
+            (8.0, 8.0, 8.0)
+        );
+    }
 
     #[test]
     fn percentile_handles_unsorted_and_empty_samples() {

@@ -13,7 +13,6 @@ use bevy::{
     },
 };
 use bevy::{
-    ecs::schedule::ScheduleLabel,
     feathers::{FeathersPlugins, dark_theme::create_dark_theme, theme::UiTheme},
     prelude::*,
     window::{CursorGrabMode, CursorOptions, ExitCondition, WindowMode},
@@ -25,25 +24,30 @@ use hollow::{
     voxel::VoxelPlugin,
 };
 
-#[derive(ScheduleLabel, Debug, Clone, PartialEq, Eq, Hash)]
-struct NoPhysics;
-
 fn main() {
     let mut app = App::new();
-    app.add_plugins((
-        DefaultPlugins.set(WindowPlugin {
-            exit_condition: ExitCondition::DontExit,
-            primary_window: Some(Window {
-                mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
-                ..default()
-            }),
-            primary_cursor_options: Some(CursorOptions {
-                visible: true,
-                grab_mode: CursorGrabMode::None,
-                ..default()
-            }),
+    let headless = cfg!(feature = "dev") && std::env::var_os("HOLLOW_BENCH_HEADLESS").is_some();
+    let mut plugins = DefaultPlugins.set(WindowPlugin {
+        exit_condition: ExitCondition::DontExit,
+        primary_window: (!headless).then(|| Window {
+            mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
             ..default()
         }),
+        primary_cursor_options: Some(CursorOptions {
+            visible: true,
+            grab_mode: CursorGrabMode::None,
+            ..default()
+        }),
+        ..default()
+    });
+    if headless {
+        plugins = plugins.disable::<bevy::winit::WinitPlugin>();
+        app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(
+            core::time::Duration::ZERO,
+        ));
+    }
+    app.add_plugins((
+        plugins,
         FeathersPlugins,
         GameSettingsPlugin,
         PhysicsPlugins::default(),

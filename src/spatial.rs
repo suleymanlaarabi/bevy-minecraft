@@ -40,7 +40,9 @@ impl Plugin for GameSpatialPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             PostUpdate,
-            follow_system.in_set(FollowSystems).before(TransformSystems::Propagate),
+            follow_system
+                .in_set(FollowSystems)
+                .before(TransformSystems::Propagate),
         );
     }
 }
@@ -59,5 +61,36 @@ fn follow_system(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relationship_offset_is_applied_before_transform_propagation() {
+        let mut app = App::new();
+        app.add_plugins((TransformPlugin, GameSpatialPlugin));
+        let target = app
+            .world_mut()
+            .spawn(Transform::from_xyz(10.0, 20.0, 30.0))
+            .id();
+        let follower = app
+            .world_mut()
+            .spawn((
+                Follow::new(target),
+                FollowOffset(Vec3::Y),
+                Transform::default(),
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<GlobalTransform>(follower)
+                .unwrap()
+                .translation(),
+            Vec3::new(10.0, 21.0, 30.0)
+        );
     }
 }

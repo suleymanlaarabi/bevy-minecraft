@@ -75,7 +75,9 @@ impl Plugin for DroppedItemPlugin {
             )
             .add_systems(
                 PostUpdate,
-                pickup_dropped_items.run_if(in_state(GameState::Game)),
+                pickup_dropped_items
+                    .after(bevy::transform::TransformSystems::Propagate)
+                    .run_if(in_state(GameState::Game)),
             )
             .add_systems(
                 Update,
@@ -190,7 +192,12 @@ fn pickup_dropped_items(
             if now.saturating_sub(drop.spawned_at) < PICKUP_DELAY {
                 return true;
             }
-            match inventory.insert(drop.stack) {
+            let original = drop.stack;
+            let remaining = inventory.bypass_change_detection().insert(original);
+            if remaining != Some(original) {
+                inventory.set_changed();
+            }
+            match remaining {
                 None => commands.entity(entity).despawn(),
                 Some(remaining) => drop.stack = remaining,
             }

@@ -5,6 +5,7 @@ use bevy::{
 };
 
 use crate::{
+    dropped_item::DroppedItemCommandsExt,
     game::GameState,
     inventory::{
         DragMode, DragState, HOTBAR_SIZE, INVENTORY_SIZE, InventoryCursor, InventoryState,
@@ -48,59 +49,9 @@ pub(crate) struct CursorStackView;
 #[derive(Component, Clone, Default)]
 pub(crate) struct CursorStackCount;
 
-fn hud_slot(index: usize) -> impl Scene {
-    bsn! {
-        Node {
-            width: px(SLOT_SIZE),
-            height: px(SLOT_SIZE),
-            border: UiRect::all(px(2)),
-            position_type: PositionType::Relative,
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-        }
-        InventorySlotView { index }
-        BackgroundColor(SLOT_BG)
-        BorderColor::all(SLOT_BORDER)
-        Pickable::IGNORE
-        Children [
-            Node {
-                width: px(30),
-                height: px(30),
-            }
-            SlotIcon { index }
-            BackgroundColor(Color::NONE)
-            Visibility::Hidden
-            Pickable::IGNORE
-            --
-            Text("")
-            TextFont {
-                font_size: FontSize::Px(14.0),
-            }
-            TextColor(Color::WHITE)
-            Node {
-                position_type: PositionType::Absolute,
-                right: px(3),
-                bottom: px(1),
-            }
-            SlotCount { index }
-            Pickable::IGNORE
-        ]
-    }
-}
-
-fn inventory_slot(index: usize) -> impl Scene {
-    bsn! {
-        Node {
-            width: px(SLOT_SIZE),
-            height: px(SLOT_SIZE),
-            border: UiRect::all(px(2)),
-            position_type: PositionType::Relative,
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-        }
-        InventorySlotView { index }
-        BackgroundColor(SLOT_BG)
-        BorderColor::all(SLOT_BORDER)
+fn slot(index: usize, interactive: bool) -> impl Scene {
+    let picking = (!interactive).then_some(bsn! { Pickable::IGNORE });
+    let interactions = interactive.then_some(bsn! {
         on(slot_click)
         on(slot_over)
         on(slot_out)
@@ -108,20 +59,30 @@ fn inventory_slot(index: usize) -> impl Scene {
         on(slot_drag_enter)
         on(slot_drag_over)
         on(slot_drag_end)
+    });
+    bsn! {
+        Node {
+            width: px(SLOT_SIZE),
+            height: px(SLOT_SIZE),
+            border: UiRect::all(px(2)),
+            position_type: PositionType::Relative,
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+        }
+        InventorySlotView { index }
+        BackgroundColor(SLOT_BG)
+        BorderColor::all(SLOT_BORDER)
+        @picking
+        @interactions
         Children [
-            Node {
-                width: px(30),
-                height: px(30),
-            }
+            Node { width: px(30), height: px(30) }
             SlotIcon { index }
             BackgroundColor(Color::NONE)
             Visibility::Hidden
             Pickable::IGNORE
             --
             Text("")
-            TextFont {
-                font_size: FontSize::Px(14.0),
-            }
+            TextFont { font_size: FontSize::Px(14.0) }
             TextColor(Color::WHITE)
             Node {
                 position_type: PositionType::Absolute,
@@ -134,106 +95,10 @@ fn inventory_slot(index: usize) -> impl Scene {
     }
 }
 
-fn hud_hotbar_slots() -> impl SceneList {
-    bsn_list! {
-        @hud_slot(0)
-        --
-        @hud_slot(1)
-        --
-        @hud_slot(2)
-        --
-        @hud_slot(3)
-        --
-        @hud_slot(4)
-        --
-        @hud_slot(5)
-        --
-        @hud_slot(6)
-        --
-        @hud_slot(7)
-        --
-        @hud_slot(8)
-    }
-}
-
-fn inventory_hotbar_slots() -> impl SceneList {
-    bsn_list! {
-        @inventory_slot(0)
-        --
-        @inventory_slot(1)
-        --
-        @inventory_slot(2)
-        --
-        @inventory_slot(3)
-        --
-        @inventory_slot(4)
-        --
-        @inventory_slot(5)
-        --
-        @inventory_slot(6)
-        --
-        @inventory_slot(7)
-        --
-        @inventory_slot(8)
-    }
-}
-
-fn main_inventory_slots() -> impl SceneList {
-    bsn_list! {
-        @inventory_slot(9)
-        --
-        @inventory_slot(10)
-        --
-        @inventory_slot(11)
-        --
-        @inventory_slot(12)
-        --
-        @inventory_slot(13)
-        --
-        @inventory_slot(14)
-        --
-        @inventory_slot(15)
-        --
-        @inventory_slot(16)
-        --
-        @inventory_slot(17)
-        --
-        @inventory_slot(18)
-        --
-        @inventory_slot(19)
-        --
-        @inventory_slot(20)
-        --
-        @inventory_slot(21)
-        --
-        @inventory_slot(22)
-        --
-        @inventory_slot(23)
-        --
-        @inventory_slot(24)
-        --
-        @inventory_slot(25)
-        --
-        @inventory_slot(26)
-        --
-        @inventory_slot(27)
-        --
-        @inventory_slot(28)
-        --
-        @inventory_slot(29)
-        --
-        @inventory_slot(30)
-        --
-        @inventory_slot(31)
-        --
-        @inventory_slot(32)
-        --
-        @inventory_slot(33)
-        --
-        @inventory_slot(34)
-        --
-        @inventory_slot(35)
-    }
+fn slot_list(range: core::ops::Range<usize>, interactive: bool) -> impl SceneList {
+    range
+        .map(|index| slot(index, interactive))
+        .collect::<Vec<_>>()
 }
 
 fn hotbar_hud_scene() -> impl Scene {
@@ -255,7 +120,7 @@ fn hotbar_hud_scene() -> impl Scene {
             Node {
                 display: Display::Grid,
                 grid_template_columns: RepeatedGridTrack::px::<Vec<RepeatedGridTrack>>(
-                    9_u16, SLOT_SIZE,
+                    HOTBAR_SIZE as u16, SLOT_SIZE,
                 ),
                 column_gap: px(SLOT_GAP),
                 padding: UiRect::all(px(4)),
@@ -263,7 +128,7 @@ fn hotbar_hud_scene() -> impl Scene {
             BackgroundColor(Color::srgba(0.03, 0.03, 0.04, 0.55))
             Pickable::IGNORE
             Children [
-                { hud_hotbar_slots() }
+                { slot_list(0..HOTBAR_SIZE, false) }
             ]
         ]
     }
@@ -307,7 +172,7 @@ fn inventory_overlay_scene() -> impl Scene {
                 Node {
                     display: Display::Grid,
                     grid_template_columns: RepeatedGridTrack::px::<Vec<RepeatedGridTrack>>(
-                        9_u16, SLOT_SIZE,
+                        HOTBAR_SIZE as u16, SLOT_SIZE,
                     ),
                     grid_template_rows: RepeatedGridTrack::px::<Vec<RepeatedGridTrack>>(
                         3_u16, SLOT_SIZE,
@@ -316,13 +181,13 @@ fn inventory_overlay_scene() -> impl Scene {
                     row_gap: px(SLOT_GAP),
                 }
                 Children [
-                    { main_inventory_slots() }
+                    { slot_list(HOTBAR_SIZE..INVENTORY_SIZE, true) }
                 ]
                 --
                 Node {
                     display: Display::Grid,
                     grid_template_columns: RepeatedGridTrack::px::<Vec<RepeatedGridTrack>>(
-                        9_u16, SLOT_SIZE,
+                        HOTBAR_SIZE as u16, SLOT_SIZE,
                     ),
                     column_gap: px(SLOT_GAP),
                     margin: UiRect {
@@ -330,7 +195,7 @@ fn inventory_overlay_scene() -> impl Scene {
                     },
                 }
                 Children [
-                    { inventory_hotbar_slots() }
+                    { slot_list(0..HOTBAR_SIZE, true) }
                 ]
             ]
             --
@@ -407,27 +272,30 @@ pub(crate) fn show_game_hud(
 }
 
 pub(crate) fn return_cursor_stack(
-    mut players: Query<&mut PlayerInventory, With<Player>>,
+    mut players: Query<(&mut PlayerInventory, &GlobalTransform), With<Player>>,
     mut cursor: ResMut<InventoryCursor>,
+    state: Res<State<GameState>>,
+    mut commands: Commands,
 ) {
     cursor.hovered_slot = None;
     cursor.drag = None;
-
     let Some(stack) = cursor.stack.take() else {
         return;
     };
-
-    let Ok(mut inventory) = players.single_mut() else {
-        cursor.stack = Some(stack);
+    if *state.get() != GameState::Game {
+        return;
+    }
+    let Ok((mut inventory, transform)) = players.single_mut() else {
+        // The session may already have despawned its player.
         return;
     };
-
-    cursor.stack = inventory.insert(stack);
-
-    debug_assert!(
-        cursor.stack.is_none(),
-        "a stack taken from the player inventory must fit back into it"
-    );
+    if let Some(remaining) = inventory.insert(stack) {
+        commands.spawn_dropped_item(
+            remaining,
+            transform.translation() + Vec3::Y * 0.5,
+            Vec3::Y * 1.2,
+        );
+    }
 }
 
 fn item_color(item: ItemKind) -> Color {
@@ -440,39 +308,44 @@ fn item_color(item: ItemKind) -> Color {
 }
 
 pub(crate) fn refresh_slots(
-    inventory: Single<&PlayerInventory, With<Player>>,
+    inventory: Single<Ref<PlayerInventory>, With<Player>>,
+    new_views: Query<(), Added<InventorySlotView>>,
     mut icons: Query<(&SlotIcon, &mut BackgroundColor, &mut Visibility)>,
     mut counts: Query<(&SlotCount, &mut Text)>,
     mut slots: Query<(&InventorySlotView, &mut BorderColor)>,
 ) {
+    if !inventory.is_changed() && new_views.is_empty() {
+        return;
+    }
     for (view, mut color, mut visibility) in &mut icons {
         match inventory.slot(view.index) {
             Some(stack) => {
-                color.0 = item_color(stack.item());
-                *visibility = Visibility::Inherited;
+                color.set_if_neq(BackgroundColor(item_color(stack.item())));
+                visibility.set_if_neq(Visibility::Inherited);
             }
             None => {
-                color.0 = Color::NONE;
-                *visibility = Visibility::Hidden;
+                color.set_if_neq(BackgroundColor(Color::NONE));
+                visibility.set_if_neq(Visibility::Hidden);
             }
         }
     }
 
     for (view, mut text) in &mut counts {
-        text.0 = match inventory.slot(view.index) {
+        let value = match inventory.slot(view.index) {
             Some(stack) if stack.count() > 1 => stack.count().to_string(),
             _ => String::new(),
         };
+        text.set_if_neq(Text(value));
     }
 
     for (view, mut border) in &mut slots {
         let selected = view.index < HOTBAR_SIZE && view.index == inventory.selected_hotbar();
 
-        *border = BorderColor::all(if selected {
+        border.set_if_neq(BorderColor::all(if selected {
             SELECTED_BORDER
         } else {
             SLOT_BORDER
-        });
+        }));
     }
 }
 
@@ -662,33 +535,207 @@ pub(crate) fn follow_cursor_stack(
     let (mut node, mut color, mut visibility) = view.into_inner();
 
     let Some(stack) = cursor.stack else {
-        *visibility = Visibility::Hidden;
-        count.0.clear();
+        visibility.set_if_neq(Visibility::Hidden);
+        if !count.0.is_empty() {
+            count.0.clear();
+        }
         return;
     };
 
     let Some(position) = window.cursor_position() else {
-        *visibility = Visibility::Hidden;
+        visibility.set_if_neq(Visibility::Hidden);
         return;
     };
 
-    *visibility = Visibility::Inherited;
-
-    node.left = px(position.x + 12.0);
-    node.top = px(position.y + 12.0);
-
-    color.0 = item_color(stack.item());
-
-    count.0 = if stack.count() > 1 {
+    visibility.set_if_neq(Visibility::Inherited);
+    let left = px(position.x + 12.0);
+    let top = px(position.y + 12.0);
+    if node.left != left || node.top != top {
+        node.left = left;
+        node.top = top;
+    }
+    color.set_if_neq(BackgroundColor(item_color(stack.item())));
+    let text = if stack.count() > 1 {
         stack.count().to_string()
     } else {
         String::new()
     };
+    count.set_if_neq(Text(text));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Resource, Default)]
+    struct RecordedDrops(Vec<crate::inventory::ItemStack>);
+
+    #[test]
+    fn ending_session_clears_cursor_without_spawning_orphaned_drops() {
+        use crate::{dropped_item::SpawnDroppedItem, inventory::ItemStack, voxel::VoxelKind};
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.insert_resource(State::new(GameState::Menu));
+        world.init_resource::<InventoryCursor>();
+        world.init_resource::<RecordedDrops>();
+        world.add_observer(
+            |event: On<SpawnDroppedItem>, mut drops: ResMut<RecordedDrops>| {
+                drops.0.push(event.stack)
+            },
+        );
+        world.spawn(Player);
+        world.resource_mut::<InventoryCursor>().stack =
+            Some(ItemStack::new(ItemKind::Block(VoxelKind::Dirt), 1));
+        world.run_system_once(return_cursor_stack).unwrap();
+        assert!(world.resource::<InventoryCursor>().stack.is_none());
+        assert!(world.resource::<RecordedDrops>().0.is_empty());
+    }
+
+    #[test]
+    fn closing_full_inventory_drops_remainder_without_losing_items() {
+        use crate::{dropped_item::SpawnDroppedItem, inventory::ItemStack, voxel::VoxelKind};
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.insert_resource(State::new(GameState::Game));
+        world.init_resource::<InventoryCursor>();
+        world.init_resource::<RecordedDrops>();
+        world.add_observer(
+            |event: On<SpawnDroppedItem>, mut drops: ResMut<RecordedDrops>| {
+                drops.0.push(event.stack)
+            },
+        );
+        let mut inventory = PlayerInventory::default();
+        inventory.insert(ItemStack::new(ItemKind::Block(VoxelKind::Dirt), 62));
+        for _ in 1..INVENTORY_SIZE {
+            assert!(
+                inventory
+                    .insert(ItemStack::new(ItemKind::Block(VoxelKind::Stone), 64))
+                    .is_none()
+            );
+        }
+        let mut held = None;
+        inventory.left_click(0, &mut held);
+        inventory.insert(ItemStack::new(ItemKind::Block(VoxelKind::Wood), 1));
+        let player = world
+            .spawn((
+                Player,
+                inventory,
+                GlobalTransform::from_translation(Vec3::Y),
+            ))
+            .id();
+        world.resource_mut::<InventoryCursor>().stack = held;
+        let before: usize = (0..INVENTORY_SIZE)
+            .filter_map(|i| world.get::<PlayerInventory>(player).unwrap().slot(i))
+            .map(|s| s.count() as usize)
+            .sum::<usize>()
+            + held.unwrap().count() as usize;
+        world.run_system_once(return_cursor_stack).unwrap();
+        assert!(world.resource::<InventoryCursor>().stack.is_none());
+        assert_eq!(
+            world.resource::<RecordedDrops>().0.as_slice(),
+            &[held.unwrap()]
+        );
+        let after: usize = (0..INVENTORY_SIZE)
+            .filter_map(|i| world.get::<PlayerInventory>(player).unwrap().slot(i))
+            .map(|s| s.count() as usize)
+            .sum::<usize>()
+            + world
+                .resource::<RecordedDrops>()
+                .0
+                .iter()
+                .map(|s| s.count() as usize)
+                .sum::<usize>();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn slots_initialize_when_opened_and_remain_unchanged_at_rest() {
+        let mut app = App::new();
+        app.add_systems(Update, refresh_slots);
+        app.world_mut().spawn(Player);
+        let view = app
+            .world_mut()
+            .spawn((
+                InventorySlotView { index: 0 },
+                BorderColor::all(Color::NONE),
+            ))
+            .id();
+        let icon = app
+            .world_mut()
+            .spawn((
+                SlotIcon { index: 0 },
+                BackgroundColor(Color::NONE),
+                Visibility::Hidden,
+            ))
+            .id();
+        let count = app
+            .world_mut()
+            .spawn((SlotCount { index: 0 }, Text::new("")))
+            .id();
+        app.update();
+        assert_eq!(app.world().get::<Text>(count).unwrap().0, "2");
+        let text_tick = app
+            .world()
+            .entity(count)
+            .get_change_ticks::<Text>()
+            .unwrap()
+            .changed;
+        let icon_tick = app
+            .world()
+            .entity(icon)
+            .get_change_ticks::<BackgroundColor>()
+            .unwrap()
+            .changed;
+        let border_tick = app
+            .world()
+            .entity(view)
+            .get_change_ticks::<BorderColor>()
+            .unwrap()
+            .changed;
+        app.update();
+        assert_eq!(
+            app.world()
+                .entity(count)
+                .get_change_ticks::<Text>()
+                .unwrap()
+                .changed,
+            text_tick
+        );
+        assert_eq!(
+            app.world()
+                .entity(icon)
+                .get_change_ticks::<BackgroundColor>()
+                .unwrap()
+                .changed,
+            icon_tick
+        );
+        assert_eq!(
+            app.world()
+                .entity(view)
+                .get_change_ticks::<BorderColor>()
+                .unwrap()
+                .changed,
+            border_tick
+        );
+        let new_count = app
+            .world_mut()
+            .spawn((SlotCount { index: 0 }, Text::new("")))
+            .id();
+        app.world_mut().spawn((
+            InventorySlotView { index: 0 },
+            BorderColor::all(Color::NONE),
+        ));
+        app.update();
+        assert_eq!(app.world().get::<Text>(new_count).unwrap().0, "2");
+        assert_eq!(
+            app.world()
+                .entity(count)
+                .get_change_ticks::<Text>()
+                .unwrap()
+                .changed,
+            text_tick
+        );
+    }
 
     #[test]
     fn inventory_scenes_preserve_all_slot_indices() {
@@ -706,7 +753,7 @@ mod tests {
             world.spawn_scene(scene).unwrap();
             let mut indices: Vec<_> = world
                 .query::<&InventorySlotView>()
-                .iter(&world)
+                .iter(world)
                 .map(|slot| slot.index)
                 .collect();
             indices.sort_unstable();

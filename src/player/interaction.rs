@@ -7,7 +7,7 @@ use bevy::{
     },
     light::{NotShadowCaster, NotShadowReceiver},
     prelude::*,
-    transform::{TransformHelper, TransformSystems},
+    transform::TransformSystems,
 };
 
 use crate::{
@@ -130,11 +130,14 @@ fn update_block_target(
     voxel_world: VoxelWorld,
 ) {
     let (entity, mut target) = camera.into_inner();
-    target.0 = transforms.compute_global_transform(entity).ok().and_then(|transform| {
-        targeted_voxel(transform.translation(), transform.forward(), |position| {
-            voxel_world.get(position)
-        })
-    });
+    target.0 = transforms
+        .compute_global_transform(entity)
+        .ok()
+        .and_then(|transform| {
+            targeted_voxel(transform.translation(), transform.forward(), |position| {
+                voxel_world.get(position)
+            })
+        });
 }
 
 fn update_breaking(
@@ -329,5 +332,99 @@ fn targeted_voxel(
         next[axis] += delta[axis];
         normal = IVec3::ZERO;
         normal[axis] = -step[axis];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn voxel_ray_targets_leaves_through_water_and_keeps_the_entry_face() {
+        let target = targeted_voxel(Vec3::splat(0.5), Dir3::X, |cell| {
+            Some(match cell.x {
+                1 => VoxelKind::Water,
+                2 => VoxelKind::Leaves,
+                _ => VoxelKind::Air,
+            })
+        })
+        .unwrap();
+        assert_eq!(target.destroy, IVec3::new(2, 0, 0));
+        assert_eq!(target.place, IVec3::new(1, 0, 0));
+        assert_eq!(target.normal, Vec3::NEG_X);
+    }
+
+    #[test]
+    fn voxel_ray_handles_negative_boundary_origins_and_axis_aligned_rays() {
+        let target = targeted_voxel(Vec3::new(0.0, 0.5, 0.5), Dir3::NEG_X, |cell| {
+            Some(if cell.x == -1 {
+                VoxelKind::Stone
+            } else {
+                VoxelKind::Air
+            })
+        })
+        .unwrap();
+        assert_eq!(target.destroy, IVec3::new(-1, 0, 0));
+        assert_eq!(target.place, IVec3::ZERO);
+        assert_eq!(target.normal, Vec3::X);
+        assert!(
+            targeted_voxel(Vec3::splat(0.5), Dir3::Y, |cell| {
+                Some(if cell.y == 6 {
+                    VoxelKind::Stone
+                } else {
+                    VoxelKind::Air
+                })
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn voxel_ray_stops_at_unavailable_chunks() {
+        let hit = targeted_voxel(Vec3::splat(0.5), Dir3::X, |cell| match cell.x {
+            1 => None,
+            2 => Some(VoxelKind::Stone),
+            _ => Some(VoxelKind::Air),
+        });
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn overlay_global_transform_is_current_in_the_render_frame() {
+        let mut app = App::new();
+        app.add_plugins(TransformPlugin);
+        app.insert_resource(BreakingAssets {
+            mesh: default(),
+            materials: default(),
+        });
+        app.add_systems(
+            PostUpdate,
+            sync_breaking_overlay.before(TransformSystems::Propagate),
+        );
+        app.world_mut().spawn((
+            PlayerCamera::default(),
+            BreakingState(Some(BreakProgress {
+                position: IVec3::new(3, 4, 5),
+                kind: VoxelKind::Stone,
+                elapsed: 0.1,
+            })),
+        ));
+        let overlay = app
+            .world_mut()
+            .spawn((
+                BreakingOverlay,
+                Transform::default(),
+                Visibility::Hidden,
+                MeshMaterial3d::<StandardMaterial>::default(),
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<GlobalTransform>(overlay)
+                .unwrap()
+                .translation(),
+            Vec3::new(3.5, 4.5, 5.5)
+        );
     }
 }

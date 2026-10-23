@@ -224,3 +224,30 @@ fn player_input(
 fn axis(input: &ButtonInput<KeyCode>, positive: KeyCode, negative: KeyCode) -> f32 {
     (input.pressed(positive) as i8 - input.pressed(negative) as i8) as f32
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    #[test]
+    fn opening_inventory_clears_all_movement_commands() {
+        let mut world = World::new();
+        let player = world
+            .spawn((
+                Player,
+                CharacterMovement {
+                    direction: Vec3::X,
+                    look_direction: Vec3::X,
+                    jump: true,
+                    sprint: true,
+                    sneak: true,
+                },
+            ))
+            .id();
+        world.run_system_once(clear_player_input).unwrap();
+        let movement = world.get::<CharacterMovement>(player).unwrap();
+        assert_eq!(movement.direction, Vec3::ZERO);
+        assert!(!movement.jump && !movement.sprint && !movement.sneak);
+    }
+}

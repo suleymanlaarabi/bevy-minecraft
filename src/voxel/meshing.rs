@@ -336,6 +336,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn halos_never_emit_neighbor_owned_faces() {
+        let pack = TexturePack::load(super::super::TexturePackId::default());
+        for direction in [IVec3::NEG_X, IVec3::X, IVec3::NEG_Z, IVec3::Z] {
+            let mut empty =
+                ChunkVoxels::generated(1, 1, vec![VoxelKind::Air], vec![VoxelKind::Air; 4]);
+            empty.set_halo(direction, VoxelKind::Stone);
+            assert!(build_chunk_mesh(&empty, &pack).0.is_empty());
+            let mut solid =
+                ChunkVoxels::generated(1, 1, vec![VoxelKind::Stone], vec![VoxelKind::Air; 4]);
+            solid.set_halo(direction, VoxelKind::Stone);
+            assert_eq!(build_chunk_mesh(&solid, &pack).0.indices.len(), 5 * 6);
+        }
+    }
+
+    #[test]
     fn append_offsets_vertices_and_rebases_indices() {
         let geometry = VoxelGeometry {
             positions: vec![[0.0, 1.0, 2.0], [1.0, 1.0, 2.0], [1.0, 2.0, 2.0]],

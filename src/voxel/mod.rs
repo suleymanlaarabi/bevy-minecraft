@@ -22,8 +22,8 @@ pub(crate) use material::{TexturePack, VoxelMaterial};
 pub(crate) use meshing::build_block_item_mesh;
 pub(crate) use rebuild::VoxelAssets;
 use rebuild::{
-    apply_texture_pack, cleanup_removed_chunk, poll_builds, prepare_assets, set_voxel,
-    start_changed_builds,
+    apply_texture_pack, cleanup_removed_chunk, mark_changed_chunks, poll_builds, prepare_assets,
+    set_voxel, start_changed_builds,
 };
 use regions::{RenderRegions, rebuild_render_regions};
 use streaming::{
@@ -112,11 +112,13 @@ impl Plugin for VoxelPlugin {
             (
                 poll_chunk_generations,
                 sync_spawned_halos,
+                mark_changed_chunks,
                 start_changed_builds,
                 poll_builds,
                 rebuild_render_regions,
             )
                 .chain()
+                .before(bevy::transform::TransformSystems::Propagate)
                 .run_if(in_state(GameState::Game)),
         )
         .add_systems(
