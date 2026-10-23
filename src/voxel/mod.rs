@@ -183,20 +183,10 @@ fn update_underwater_effect(
     }
 }
 
-#[derive(SystemParam)]
-struct VoxelCleanup<'w> {
-    chunk_index: ResMut<'w, ChunkIndex>,
-    pending_chunks: ResMut<'w, PendingChunks>,
-    stored_chunks: ResMut<'w, StoredChunks>,
-    render_regions: ResMut<'w, RenderRegions>,
-    stream_state: ResMut<'w, StreamState>,
-}
-
 fn cleanup_voxel_world(
     mut commands: Commands,
     chunks: Query<Entity, With<VoxelChunk>>,
     generations: Query<Entity, With<streaming::ChunkGeneration>>,
-    mut voxel: VoxelCleanup,
 ) {
     for entity in &chunks {
         commands.entity(entity).despawn();
@@ -204,11 +194,16 @@ fn cleanup_voxel_world(
     for entity in &generations {
         commands.entity(entity).despawn();
     }
-    voxel.chunk_index.clear();
-    voxel.pending_chunks.clear();
-    voxel.stored_chunks.clear();
-    voxel.render_regions.clear(&mut commands);
-    *voxel.stream_state = StreamState::default();
+    // Despawn observers write back into these resources, so reset them afterwards.
+    commands.queue(|world: &mut World| {
+        world.resource_mut::<ChunkIndex>().clear();
+        world.resource_mut::<PendingChunks>().clear();
+        world.resource_mut::<StoredChunks>().clear();
+        world.resource_scope(|world, mut regions: Mut<RenderRegions>| {
+            regions.clear(&mut world.commands());
+        });
+        *world.resource_mut::<StreamState>() = StreamState::default();
+    });
 }
 
 #[derive(Resource, Clone, Debug)]

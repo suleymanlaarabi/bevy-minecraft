@@ -1,7 +1,7 @@
 use super::{
     VoxelSettings, VoxelViewer,
     meshing::{ChunkMeshes, VoxelGeometry},
-    rebuild::VoxelAssets,
+    rebuild::{ColliderUpdate, VoxelAssets},
 };
 use crate::game::GameState;
 use bevy::{
@@ -18,6 +18,9 @@ const REGION_SIZE: i32 = 4;
 const SETTLE_FRAMES: u8 = 4;
 const MAX_PENDING_REGIONS: usize = 2;
 
+/// Squared distance to the viewer, with coordinates as a deterministic tie-break.
+type DistanceKey = (i32, i32, i32);
+
 #[derive(Component)]
 pub(crate) struct VoxelRenderRegion;
 
@@ -29,6 +32,16 @@ struct RegionEntities {
 struct DirtyRegion {
     age: u8,
     revision: u64,
+    /// Merges started before this revision still contain a removed chunk.
+    floor: u64,
+    /// Player edits bypass the merge limits so they appear without delay.
+    urgent: bool,
+}
+
+struct DeferredCollider {
+    revision: u64,
+    entity: Entity,
+    update: ColliderUpdate,
 }
 
 struct PreparedRegion {
@@ -42,6 +55,7 @@ struct PreparedRegion {
 pub(crate) struct RegionBuild {
     position: IVec2,
     revision: u64,
+    urgent: bool,
     task: Task<PreparedRegion>,
 }
 
@@ -51,26 +65,39 @@ pub(crate) struct RenderRegions {
     entities: HashMap<IVec2, RegionEntities>,
     dirty: HashMap<IVec2, DirtyRegion>,
     pending: HashMap<IVec2, Entity>,
+    /// Edit colliders wait for the merge that shows the same edit.
+    colliders: HashMap<IVec2, Vec<DeferredCollider>>,
     next_revision: u64,
 }
 
 impl RenderRegions {
-    fn mark_dirty(&mut self, region: IVec2, age: u8) {
+    fn mark_dirty(&mut self, region: IVec2, age: u8, urgent: bool, removal: bool) {
         // A new token also distinguishes deletion followed by recreation.
         self.next_revision = self
             .next_revision
             .checked_add(1)
             .expect("region revision exhausted");
-        self.dirty.insert(
-            region,
-            DirtyRegion {
-                age,
-                revision: self.next_revision,
-            },
-        );
+        let revision = self.next_revision;
+        let dirty = self.dirty.entry(region).or_insert(DirtyRegion {
+            age,
+            revision,
+            floor: 0,
+            urgent,
+        });
+        dirty.age = age;
+        dirty.revision = revision;
+        dirty.urgent |= urgent;
+        if removal {
+            dirty.floor = revision;
+        }
     }
 
+    #[cfg(test)]
     pub(crate) fn insert(&mut self, chunk: IVec2, meshes: ChunkMeshes) {
+        self.insert_piece(chunk, meshes, false);
+    }
+
+    fn insert_piece(&mut self, chunk: IVec2, meshes: ChunkMeshes, urgent: bool) {
         let region = region_of(chunk);
         let replaced = self
             .pieces
@@ -78,7 +105,38 @@ impl RenderRegions {
             .or_default()
             .insert(chunk, Arc::new(meshes))
             .is_some();
-        self.mark_dirty(region, if replaced { SETTLE_FRAMES } else { 0 });
+        let age = if replaced || urgent { SETTLE_FRAMES } else { 0 };
+        self.mark_dirty(region, age, urgent, false);
+    }
+
+    /// Stores a rebuilt chunk and returns its collider when it may apply right away.
+    ///
+    /// Edit colliders, and any collider queued behind one, wait for the merge that
+    /// draws the same voxels so a block is never solid and invisible (or the reverse).
+    pub(crate) fn insert_with_collider(
+        &mut self,
+        chunk: IVec2,
+        meshes: ChunkMeshes,
+        urgent: bool,
+        entity: Entity,
+        collider: ColliderUpdate,
+    ) -> Option<ColliderUpdate> {
+        self.insert_piece(chunk, meshes, urgent);
+        let region = region_of(chunk);
+        if matches!(collider, ColliderUpdate::Keep)
+            || !(urgent || self.colliders.contains_key(&region))
+        {
+            return Some(collider);
+        }
+        self.colliders
+            .entry(region)
+            .or_default()
+            .push(DeferredCollider {
+                revision: self.next_revision,
+                entity,
+                update: collider,
+            });
+        None
     }
 
     pub(crate) fn remove(&mut self, chunk: IVec2) {
@@ -92,7 +150,15 @@ impl RenderRegions {
         if pieces.is_empty() {
             self.pieces.remove(&region);
         }
-        self.mark_dirty(region, SETTLE_FRAMES);
+        self.mark_dirty(region, SETTLE_FRAMES, false, true);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_idle(&self) -> bool {
+        self.pieces.is_empty()
+            && self.dirty.is_empty()
+            && self.pending.is_empty()
+            && self.colliders.is_empty()
     }
 
     #[cfg(feature = "dev")]
@@ -121,6 +187,21 @@ impl RenderRegions {
         *self = Self::default();
         self.next_revision = revision;
     }
+
+    fn apply_colliders(&mut self, commands: &mut Commands, region: IVec2, revision: u64) {
+        let Some(colliders) = self.colliders.remove(&region) else {
+            return;
+        };
+        let (ready, waiting): (Vec<_>, Vec<_>) = colliders
+            .into_iter()
+            .partition(|collider| collider.revision <= revision);
+        for collider in ready {
+            collider.update.apply(commands, collider.entity);
+        }
+        if !waiting.is_empty() {
+            self.colliders.insert(region, waiting);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -132,6 +213,7 @@ pub(crate) fn rebuild_render_regions(
     mut mesh_assets: ResMut<Assets<Mesh>>,
     mut regions: ResMut<RenderRegions>,
     mut builds: Query<(Entity, &mut RegionBuild)>,
+    mut ready: Local<Vec<(DistanceKey, IVec2)>>,
     #[cfg(feature = "dev")] mut diagnostics: Option<ResMut<super::diagnostics::VoxelDiagnostics>>,
 ) {
     for dirty in regions.dirty.values_mut() {
@@ -153,15 +235,20 @@ pub(crate) fn rebuild_render_regions(
             commands.entity(entities.terrain).try_despawn();
         }
         regions.dirty.remove(&position);
+        regions.colliders.remove(&position);
     }
 
+    // Streaming merges apply one per frame; edit merges apply as soon as they finish.
     let mut applied = false;
     for (entity, mut build) in &mut builds {
-        if regions.pending.get(&build.position) != Some(&entity) {
+        // A streaming merge still blocks an edit made after it started.
+        let urgent = build.urgent
+            || regions
+                .dirty
+                .get(&build.position)
+                .is_some_and(|dirty| dirty.urgent);
+        if regions.pending.get(&build.position) != Some(&entity) || (applied && !urgent) {
             continue;
-        }
-        if applied {
-            break;
         }
         let Some(output) = check_ready(&mut build.task) else {
             continue;
@@ -169,14 +256,18 @@ pub(crate) fn rebuild_render_regions(
         let position = build.position;
         regions.pending.remove(&position);
         commands.entity(entity).despawn();
-        if !regions
-            .dirty
-            .get(&position)
-            .is_some_and(|dirty| dirty.revision == build.revision)
-        {
+        let Some(dirty) = regions.dirty.get(&position) else {
+            continue;
+        };
+        let current = dirty.revision == build.revision;
+        // An edit merge outdated by later edits is still newer than what is drawn, so
+        // it is shown while the region stays dirty. Streaming waits for the next one.
+        if build.revision < dirty.floor || !(current || urgent) {
             continue;
         }
-        regions.dirty.remove(&position);
+        if current {
+            regions.dirty.remove(&position);
+        }
         #[cfg(feature = "dev")]
         if let Some(diagnostics) = diagnostics.as_deref_mut() {
             diagnostics.record_region(output.elapsed);
@@ -220,28 +311,43 @@ pub(crate) fn rebuild_render_regions(
             );
             regions.entities.insert(position, entities);
         }
-        applied = true;
+        regions.apply_colliders(&mut commands, position, build.revision);
+        applied |= !urgent;
     }
 
     let available = MAX_PENDING_REGIONS.saturating_sub(regions.pending.len());
-    if available == 0 {
-        return;
-    }
     let center = viewer.map_or(IVec2::ZERO, |viewer| {
         region_of(settings.chunk_at(viewer.translation))
     });
-    let mut ready: Vec<_> = regions
-        .dirty
+    ready.clear();
+    let mut urgent = Vec::new();
+    for (&position, dirty) in &regions.dirty {
+        if regions.pending.contains_key(&position) {
+            continue;
+        }
+        if dirty.urgent {
+            urgent.push((position, dirty.revision));
+        } else if available > 0 && dirty.age >= SETTLE_FRAMES {
+            ready.push((
+                (position.distance_squared(center), position.x, position.y),
+                position,
+            ));
+        }
+    }
+    // Only the nearest `available` regions start, so a partial selection is enough.
+    if available < ready.len() {
+        ready.select_nth_unstable_by_key(available, |&(key, _)| key);
+        ready.truncate(available);
+    }
+    let streaming = ready
         .iter()
-        .filter(|(position, dirty)| {
-            dirty.age >= SETTLE_FRAMES && !regions.pending.contains_key(*position)
-        })
-        .map(|(&position, dirty)| (position, dirty.revision))
+        .map(|&(_, position)| (position, regions.dirty[&position].revision, false));
+    let starts: Vec<_> = urgent
+        .into_iter()
+        .map(|(position, revision)| (position, revision, true))
+        .chain(streaming)
         .collect();
-    ready.sort_unstable_by_key(|(position, _)| {
-        (position.distance_squared(center), position.x, position.y)
-    });
-    for (position, revision) in ready.into_iter().take(available) {
+    for (position, revision, urgent) in starts {
         let pieces = regions.pieces[&position]
             .iter()
             .map(|(&chunk, geometry)| (chunk, Arc::clone(geometry)))
@@ -254,6 +360,7 @@ pub(crate) fn rebuild_render_regions(
                 RegionBuild {
                     position,
                     revision,
+                    urgent,
                     task,
                 },
                 DespawnOnExit(GameState::Game),
@@ -471,6 +578,115 @@ mod tests {
                 .into_iter()
                 .all(|entity| world.get_entity(entity).is_err())
         );
+    }
+
+    fn region_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(TaskPoolPlugin::default())
+            .insert_resource(VoxelSettings::default())
+            .insert_resource(VoxelAssets {
+                terrain: default(),
+                water: default(),
+            })
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<RenderRegions>();
+        app
+    }
+
+    fn run_until(world: &mut World, mut done: impl FnMut(&mut World) -> bool) {
+        use bevy::ecs::system::RunSystemOnce;
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            world.run_system_once(rebuild_render_regions).unwrap();
+            if done(world) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "region merge did not finish");
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn outdated_edit_merge_is_shown_while_the_region_stays_dirty() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = region_app();
+        let world = app.world_mut();
+        world.resource_mut::<RenderRegions>().insert_piece(
+            IVec2::ZERO,
+            ChunkMeshes(VoxelGeometry::default(), None),
+            true,
+        );
+        world.run_system_once(rebuild_render_regions).unwrap();
+        assert_eq!(world.resource::<RenderRegions>().pending.len(), 1);
+        world.resource_mut::<RenderRegions>().insert_piece(
+            IVec2::ZERO,
+            ChunkMeshes(VoxelGeometry::default(), None),
+            true,
+        );
+        run_until(world, |world| {
+            world
+                .resource::<RenderRegions>()
+                .entities
+                .contains_key(&IVec2::ZERO)
+        });
+        assert!(
+            world
+                .resource::<RenderRegions>()
+                .dirty
+                .contains_key(&IVec2::ZERO)
+        );
+        run_until(world, |world| {
+            world.resource::<RenderRegions>().dirty.is_empty()
+        });
+    }
+
+    #[test]
+    fn edit_merges_skip_the_pending_limit_and_carry_their_collider() {
+        use avian3d::prelude::Collider;
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = region_app();
+        let world = app.world_mut();
+        for x in 0..MAX_PENDING_REGIONS as i32 {
+            let position = IVec2::new(10 + x, 0);
+            let blocker = world
+                .spawn(RegionBuild {
+                    position,
+                    revision: 0,
+                    urgent: false,
+                    task: AsyncComputeTaskPool::get().spawn(std::future::pending()),
+                })
+                .id();
+            let mut regions = world.resource_mut::<RenderRegions>();
+            regions.insert(
+                position * REGION_SIZE,
+                ChunkMeshes(VoxelGeometry::default(), None),
+            );
+            regions.pending.insert(position, blocker);
+        }
+        let chunk = world.spawn_empty().id();
+        let deferred = world.resource_mut::<RenderRegions>().insert_with_collider(
+            IVec2::ZERO,
+            ChunkMeshes(VoxelGeometry::default(), None),
+            true,
+            chunk,
+            ColliderUpdate::Replace(Collider::cuboid(1.0, 1.0, 1.0)),
+        );
+        assert!(deferred.is_none());
+        world.run_system_once(rebuild_render_regions).unwrap();
+        assert_eq!(
+            world.resource::<RenderRegions>().pending.len(),
+            MAX_PENDING_REGIONS + 1
+        );
+        assert!(world.get::<Collider>(chunk).is_none());
+        run_until(world, |world| {
+            world
+                .resource::<RenderRegions>()
+                .entities
+                .contains_key(&IVec2::ZERO)
+        });
+        assert!(world.get::<Collider>(chunk).is_some());
+        assert!(world.resource::<RenderRegions>().colliders.is_empty());
     }
 
     #[test]

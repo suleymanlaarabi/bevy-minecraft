@@ -110,14 +110,18 @@ fn handle_number_keys(
 
     match state.get() {
         InventoryState::Closed => {
-            inventory.set_selected_hotbar(hotbar_index);
+            PlayerInventory::edit(&mut inventory, |inventory| {
+                inventory.set_selected_hotbar(hotbar_index)
+            });
         }
         InventoryState::Open => {
             let Some(slot_index) = cursor.hovered_slot else {
                 return;
             };
 
-            inventory.swap_slots(slot_index, hotbar_index);
+            PlayerInventory::edit(&mut inventory, |inventory| {
+                inventory.swap_slots(slot_index, hotbar_index)
+            });
         }
     }
 }

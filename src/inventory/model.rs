@@ -68,7 +68,7 @@ pub enum DragMode {
     OneEach,
 }
 
-#[derive(Component, Clone, Debug)]
+#[derive(Component, Clone, Debug, PartialEq, Eq)]
 pub struct PlayerInventory {
     slots: [Option<ItemStack>; INVENTORY_SIZE],
     selected_hotbar: usize,
@@ -88,6 +88,17 @@ impl Default for PlayerInventory {
 }
 
 impl PlayerInventory {
+    /// Applies `edit` and flags the inventory as changed only when its contents differ,
+    /// so no-op clicks and pickups do not refresh the slot views.
+    pub fn edit<R>(inventory: &mut Mut<Self>, edit: impl FnOnce(&mut Self) -> R) -> R {
+        let before = Self::clone(inventory);
+        let result = edit(inventory.bypass_change_detection());
+        if **inventory != before {
+            inventory.set_changed();
+        }
+        result
+    }
+
     pub fn slot(&self, index: usize) -> Option<ItemStack> {
         self.slots.get(index).copied().flatten()
     }

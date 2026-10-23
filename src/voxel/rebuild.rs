@@ -75,10 +75,24 @@ pub(crate) fn apply_texture_pack(
     *texture_pack = next_pack;
 }
 
-enum ColliderUpdate {
+pub(crate) enum ColliderUpdate {
     Keep,
     Replace(Collider),
     Remove,
+}
+
+impl ColliderUpdate {
+    pub(crate) fn apply(self, commands: &mut Commands, entity: Entity) {
+        match self {
+            Self::Keep => {}
+            Self::Replace(collider) => {
+                commands.entity(entity).try_insert(collider);
+            }
+            Self::Remove => {
+                commands.entity(entity).try_remove::<Collider>();
+            }
+        }
+    }
 }
 struct BuildOutput {
     meshes: ChunkMeshes,
@@ -100,16 +114,29 @@ pub(crate) struct ChunkBuild {
 
 const MAX_PENDING_BUILDS: usize = 16;
 
+/// Squared distance to the viewer, with coordinates as a deterministic tie-break.
+type DistanceKey = (i32, i32, i32);
+
 #[derive(Component)]
 #[component(storage = "SparseSet")]
 pub(crate) struct NeedsChunkBuild;
+
+/// Marks chunks rebuilt because of a player edit; they skip the streaming limits.
+#[derive(Component)]
+#[component(storage = "SparseSet")]
+pub(crate) struct EditedChunk;
 
 type ChangedChunks<'w, 's> =
     Query<'w, 's, (Entity, &'static ChunkVoxels), (Changed<ChunkVoxels>, Without<NeedsChunkBuild>)>;
 type WaitingChunks<'w, 's> = Query<
     'w,
     's,
-    (Entity, &'static super::VoxelChunk, &'static ChunkVoxels),
+    (
+        Entity,
+        &'static super::VoxelChunk,
+        &'static ChunkVoxels,
+        Has<EditedChunk>,
+    ),
     (With<NeedsChunkBuild>, Without<ChunkBuild>),
 >;
 
@@ -127,6 +154,7 @@ fn build_revision_is_current(build_revision: u64, voxel_revision: u64) -> bool {
 
 pub(crate) fn set_voxel(
     event: On<SetVoxel>,
+    mut commands: Commands,
     settings: Res<VoxelSettings>,
     generator: Res<WorldGenerator>,
     index: Res<ChunkIndex>,
@@ -141,6 +169,7 @@ pub(crate) fn set_voxel(
         let changed = voxels.bypass_change_detection().set(local, event.kind);
         if changed {
             voxels.set_changed();
+            commands.entity(*entity).try_insert(EditedChunk);
         }
         changed
     } else {
@@ -163,6 +192,7 @@ pub(crate) fn set_voxel(
                 .set_halo(neighbor_local, event.kind);
             if changed {
                 voxels.set_changed();
+                commands.entity(*entity).try_insert(EditedChunk);
             }
         } else if let Some(voxels) = stored.get_mut(&position) {
             voxels.set_halo(neighbor_local, event.kind);
@@ -187,12 +217,11 @@ pub(crate) fn cleanup_removed_chunk(
     mut index: ResMut<ChunkIndex>,
     mut stored: ResMut<StoredChunks>,
     mut render_regions: ResMut<RenderRegions>,
-    state: Res<State<crate::game::GameState>>,
 ) {
     if let Ok((chunk, voxels)) = chunks.get(event.entity) {
         index.remove(&chunk.position);
         render_regions.remove(chunk.position);
-        if voxels.modified && *state.get() == crate::game::GameState::Game {
+        if voxels.modified {
             stored.insert(chunk.position, voxels.clone());
         }
     }
@@ -205,71 +234,92 @@ pub(crate) fn start_changed_builds(
     viewer: Option<Single<&Transform, With<VoxelViewer>>>,
     builds: Query<(), With<ChunkBuild>>,
     chunks: WaitingChunks,
+    mut candidates: Local<Vec<(DistanceKey, Entity)>>,
 ) {
-    let available = MAX_PENDING_BUILDS.saturating_sub(builds.iter().count());
-    if available == 0 || chunks.is_empty() {
+    if chunks.is_empty() {
         return;
     }
+    let available = MAX_PENDING_BUILDS
+        .saturating_sub(builds.iter().count())
+        .min(settings.spawn_budget_per_frame);
     let center = viewer.map_or(IVec2::ZERO, |viewer| settings.chunk_at(viewer.translation));
-    let mut candidates: Vec<_> = chunks.iter().collect();
-    candidates.sort_unstable_by_key(|(_, chunk, _)| {
-        (
-            chunk.position.distance_squared(center),
-            chunk.position.x,
-            chunk.position.y,
-        )
-    });
     let pool = AsyncComputeTaskPool::get();
-    for (entity, _, voxels) in candidates
-        .into_iter()
-        .take(available.min(settings.spawn_budget_per_frame))
-    {
-        let changes = voxels.changes;
-        if changes == 0 {
+    candidates.clear();
+    for (entity, chunk, voxels, edited) in &chunks {
+        if voxels.changes == 0 {
             commands.entity(entity).remove::<NeedsChunkBuild>();
-            continue;
+        } else if edited {
+            // Edits are rare and visible right away, so they never wait for a slot.
+            commands
+                .entity(entity)
+                .insert(spawn_chunk_build(pool, voxels, &texture_pack));
+        } else if available > 0 {
+            let position = chunk.position;
+            candidates.push((
+                (position.distance_squared(center), position.x, position.y),
+                entity,
+            ));
         }
-        // Keep dirty outputs until a matching revision is actually applied.
-        let snapshot = voxels.clone();
-        let revision = snapshot.revision;
-        let texture_pack = texture_pack.clone();
-        let task = pool.spawn(async move {
-            #[cfg(feature = "dev")]
-            let meshing_started = Instant::now();
-            let meshes = build_chunk_mesh(&snapshot, &texture_pack);
-            #[cfg(feature = "dev")]
-            let meshing_elapsed = meshing_started.elapsed();
-            #[cfg(feature = "dev")]
-            let (vertices, triangles) = meshes.geometry_counts();
-            #[cfg(feature = "dev")]
-            let collider_started = Instant::now();
-            let collider = if changes & COLLIDER_CHANGED == 0 {
-                ColliderUpdate::Keep
-            } else {
-                let solids = snapshot.solid_positions();
-                if solids.is_empty() {
-                    ColliderUpdate::Remove
-                } else {
-                    ColliderUpdate::Replace(Collider::voxels(Vec3::ONE, &solids))
-                }
-            };
-            BuildOutput {
-                meshes,
-                collider,
-                #[cfg(feature = "dev")]
-                meshing_elapsed,
-                #[cfg(feature = "dev")]
-                collider_elapsed: collider_started.elapsed(),
-                #[cfg(feature = "dev")]
-                vertices,
-                #[cfg(feature = "dev")]
-                triangles,
-            }
-        });
+    }
+    // Only the nearest `available` chunks start, so a partial selection is enough.
+    if available < candidates.len() {
+        candidates.select_nth_unstable(available);
+        candidates.truncate(available);
+    }
+    for &(_, entity) in candidates.iter() {
+        let Ok((_, _, voxels, _)) = chunks.get(entity) else {
+            continue;
+        };
         commands
             .entity(entity)
-            .insert(ChunkBuild { task, revision });
+            .insert(spawn_chunk_build(pool, voxels, &texture_pack));
     }
+}
+
+fn spawn_chunk_build(
+    pool: &AsyncComputeTaskPool,
+    voxels: &ChunkVoxels,
+    texture_pack: &TexturePack,
+) -> ChunkBuild {
+    let changes = voxels.changes;
+    // Keep dirty outputs until a matching revision is actually applied.
+    let snapshot = voxels.clone();
+    let revision = snapshot.revision;
+    let texture_pack = texture_pack.clone();
+    let task = pool.spawn(async move {
+        #[cfg(feature = "dev")]
+        let meshing_started = Instant::now();
+        let meshes = build_chunk_mesh(&snapshot, &texture_pack);
+        #[cfg(feature = "dev")]
+        let meshing_elapsed = meshing_started.elapsed();
+        #[cfg(feature = "dev")]
+        let (vertices, triangles) = meshes.geometry_counts();
+        #[cfg(feature = "dev")]
+        let collider_started = Instant::now();
+        let collider = if changes & COLLIDER_CHANGED == 0 {
+            ColliderUpdate::Keep
+        } else {
+            let solids = snapshot.solid_positions();
+            if solids.is_empty() {
+                ColliderUpdate::Remove
+            } else {
+                ColliderUpdate::Replace(Collider::voxels(Vec3::ONE, &solids))
+            }
+        };
+        BuildOutput {
+            meshes,
+            collider,
+            #[cfg(feature = "dev")]
+            meshing_elapsed,
+            #[cfg(feature = "dev")]
+            collider_elapsed: collider_started.elapsed(),
+            #[cfg(feature = "dev")]
+            vertices,
+            #[cfg(feature = "dev")]
+            triangles,
+        }
+    });
+    ChunkBuild { task, revision }
 }
 
 pub(crate) fn poll_builds(
@@ -280,14 +330,15 @@ pub(crate) fn poll_builds(
         &super::VoxelChunk,
         &mut ChunkVoxels,
         &mut ChunkBuild,
+        Has<EditedChunk>,
     )>,
     mut render_regions: ResMut<RenderRegions>,
     #[cfg(feature = "dev")] mut diagnostics: Option<ResMut<super::diagnostics::VoxelDiagnostics>>,
 ) {
     let mut completed = 0;
-    for (entity, chunk, mut voxels, mut build) in &mut chunks {
-        if completed >= settings.spawn_budget_per_frame {
-            break;
+    for (entity, chunk, mut voxels, mut build, edited) in &mut chunks {
+        if completed >= settings.spawn_budget_per_frame && !edited {
+            continue;
         }
         let Some(output) = check_ready(&mut build.task) else {
             continue;
@@ -313,20 +364,16 @@ pub(crate) fn poll_builds(
         if let Some(diagnostics) = diagnostics.as_deref_mut() {
             diagnostics.record_build(meshing_elapsed, collider_elapsed, vertices, triangles);
         }
-        render_regions.insert(chunk.position, ChunkMeshes(terrain, next_water));
-        match collider {
-            ColliderUpdate::Keep => {}
-            ColliderUpdate::Replace(collider) => {
-                commands.entity(entity).insert(collider);
-            }
-            ColliderUpdate::Remove => {
-                commands.entity(entity).remove::<Collider>();
-            }
+        let meshes = ChunkMeshes(terrain, next_water);
+        if let Some(collider) =
+            render_regions.insert_with_collider(chunk.position, meshes, edited, entity, collider)
+        {
+            collider.apply(&mut commands, entity);
         }
         voxels.bypass_change_detection().changes = 0;
         commands
             .entity(entity)
-            .remove::<(ChunkBuild, NeedsChunkBuild)>();
+            .remove::<(ChunkBuild, NeedsChunkBuild, EditedChunk)>();
     }
 }
 
@@ -371,41 +418,93 @@ mod tests {
         }
     }
 
+    fn edited_chunk_world(world: &mut World) -> Entity {
+        world.init_resource::<ChunkIndex>();
+        world.init_resource::<StoredChunks>();
+        world.init_resource::<RenderRegions>();
+        world.init_resource::<super::super::streaming::PendingChunks>();
+        world.init_resource::<super::super::StreamState>();
+        world.add_observer(cleanup_removed_chunk);
+        let mut voxels = ChunkVoxels::generated(
+            1,
+            1,
+            vec![super::super::VoxelKind::Stone],
+            vec![super::super::VoxelKind::Air; 4],
+        );
+        voxels.set(IVec3::ZERO, super::super::VoxelKind::Air);
+        let entity = world
+            .spawn((
+                super::super::VoxelChunk {
+                    position: IVec2::ZERO,
+                },
+                voxels,
+            ))
+            .id();
+        world
+            .resource_mut::<ChunkIndex>()
+            .insert(IVec2::ZERO, entity);
+        entity
+    }
+
     #[test]
-    fn chunk_cleanup_keeps_edits_only_inside_the_active_session() {
-        use crate::game::GameState;
-        for state in [GameState::Game, GameState::Menu] {
-            let mut world = World::new();
-            world.insert_resource(State::new(state));
-            world.init_resource::<ChunkIndex>();
-            world.init_resource::<StoredChunks>();
-            world.init_resource::<RenderRegions>();
-            world.add_observer(cleanup_removed_chunk);
-            let mut voxels = ChunkVoxels::generated(
-                1,
-                1,
-                vec![super::super::VoxelKind::Stone],
-                vec![super::super::VoxelKind::Air; 4],
-            );
-            voxels.set(IVec3::ZERO, super::super::VoxelKind::Air);
-            let entity = world
-                .spawn((
-                    super::super::VoxelChunk {
-                        position: IVec2::ZERO,
-                    },
-                    voxels,
-                ))
-                .id();
-            world
-                .resource_mut::<ChunkIndex>()
-                .insert(IVec2::ZERO, entity);
-            world.despawn(entity);
-            assert!(world.resource::<ChunkIndex>().is_empty());
-            assert_eq!(
-                world.resource::<StoredChunks>().len(),
-                usize::from(state == GameState::Game)
-            );
+    fn unloading_an_edited_chunk_keeps_its_edits() {
+        let mut world = World::new();
+        let entity = edited_chunk_world(&mut world);
+        world.despawn(entity);
+        assert!(world.resource::<ChunkIndex>().is_empty());
+        assert_eq!(world.resource::<StoredChunks>().len(), 1);
+    }
+
+    #[test]
+    fn session_teardown_leaves_no_stored_edits_or_dirty_regions() {
+        let mut world = World::new();
+        edited_chunk_world(&mut world);
+        world
+            .resource_mut::<RenderRegions>()
+            .insert(IVec2::ZERO, ChunkMeshes(default(), None));
+        world
+            .run_system_once(super::super::cleanup_voxel_world)
+            .unwrap();
+        assert!(world.resource::<ChunkIndex>().is_empty());
+        assert!(world.resource::<StoredChunks>().is_empty());
+        assert!(world.resource::<RenderRegions>().is_idle());
+    }
+
+    #[test]
+    fn edited_chunks_skip_the_streaming_build_limit() {
+        let mut app = app();
+        let world = app.world_mut();
+        for _ in 0..MAX_PENDING_BUILDS {
+            world.spawn(ChunkBuild {
+                revision: 0,
+                task: AsyncComputeTaskPool::get().spawn(std::future::pending()),
+            });
         }
+        let streamed = chunk(world, IVec2::ZERO);
+        let edited = chunk(world, IVec2::X);
+        world.entity_mut(edited).insert(EditedChunk);
+        world.run_system_once(mark_changed_chunks).unwrap();
+        world.run_system_once(start_changed_builds).unwrap();
+        assert!(world.get::<ChunkBuild>(streamed).is_none());
+        assert!(world.get::<ChunkBuild>(edited).is_some());
+        poll_until_finished(world, edited);
+        assert!(world.get::<EditedChunk>(edited).is_none());
+        // The edit collider waits for the region merge that draws the same edit.
+        assert!(world.get::<Collider>(edited).is_none());
+    }
+
+    #[test]
+    fn unchanged_chunks_do_not_use_build_slots() {
+        let mut app = app();
+        let world = app.world_mut();
+        world.resource_mut::<VoxelSettings>().spawn_budget_per_frame = 1;
+        let near = chunk(world, IVec2::ZERO);
+        let far = chunk(world, IVec2::splat(20));
+        world.run_system_once(mark_changed_chunks).unwrap();
+        world.get_mut::<ChunkVoxels>(near).unwrap().changes = 0;
+        world.run_system_once(start_changed_builds).unwrap();
+        assert!(world.get::<NeedsChunkBuild>(near).is_none());
+        assert!(world.get::<ChunkBuild>(far).is_some());
     }
 
     #[test]

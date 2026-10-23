@@ -192,11 +192,8 @@ fn pickup_dropped_items(
             if now.saturating_sub(drop.spawned_at) < PICKUP_DELAY {
                 return true;
             }
-            let original = drop.stack;
-            let remaining = inventory.bypass_change_detection().insert(original);
-            if remaining != Some(original) {
-                inventory.set_changed();
-            }
+            let remaining =
+                PlayerInventory::edit(&mut inventory, |inventory| inventory.insert(drop.stack));
             match remaining {
                 None => commands.entity(entity).despawn(),
                 Some(remaining) => drop.stack = remaining,

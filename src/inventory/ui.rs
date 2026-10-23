@@ -277,19 +277,22 @@ pub(crate) fn return_cursor_stack(
     state: Res<State<GameState>>,
     mut commands: Commands,
 ) {
+    // Leaving the session discards the cursor through `reset_inventory_cursor`.
+    if *state.get() != GameState::Game {
+        return;
+    }
     cursor.hovered_slot = None;
     cursor.drag = None;
     let Some(stack) = cursor.stack.take() else {
         return;
     };
-    if *state.get() != GameState::Game {
-        return;
-    }
     let Ok((mut inventory, transform)) = players.single_mut() else {
         // The session may already have despawned its player.
         return;
     };
-    if let Some(remaining) = inventory.insert(stack) {
+    if let Some(remaining) =
+        PlayerInventory::edit(&mut inventory, |inventory| inventory.insert(stack))
+    {
         commands.spawn_dropped_item(
             remaining,
             transform.translation() + Vec3::Y * 0.5,
@@ -400,19 +403,25 @@ fn slot_click(
                 keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
 
             if shift && cursor.stack.is_none() {
-                inventory.quick_move(index);
+                PlayerInventory::edit(&mut inventory, |inventory| inventory.quick_move(index));
                 return;
             }
 
             if event.count >= 2 && cursor.stack.is_some() {
-                inventory.collect_matching(&mut cursor.stack);
+                PlayerInventory::edit(&mut inventory, |inventory| {
+                    inventory.collect_matching(&mut cursor.stack)
+                });
                 return;
             }
 
-            inventory.left_click(index, &mut cursor.stack);
+            PlayerInventory::edit(&mut inventory, |inventory| {
+                inventory.left_click(index, &mut cursor.stack)
+            });
         }
         PointerButton::Secondary => {
-            inventory.right_click(index, &mut cursor.stack);
+            PlayerInventory::edit(&mut inventory, |inventory| {
+                inventory.right_click(index, &mut cursor.stack)
+            });
         }
         PointerButton::Middle => {}
     }
@@ -439,11 +448,13 @@ fn slot_drag_start(
     };
 
     if !had_stack_before_drag {
-        match event.button {
-            PointerButton::Primary => inventory.left_click(slot.index, &mut cursor.stack),
-            PointerButton::Secondary => inventory.right_click(slot.index, &mut cursor.stack),
-            PointerButton::Middle => return,
-        }
+        PlayerInventory::edit(&mut inventory, |inventory| {
+            if event.button == PointerButton::Primary {
+                inventory.left_click(slot.index, &mut cursor.stack);
+            } else {
+                inventory.right_click(slot.index, &mut cursor.stack);
+            }
+        });
     }
 
     if cursor.stack.is_none() {
@@ -523,7 +534,9 @@ fn slot_drag_end(
         return;
     }
 
-    inventory.distribute_drag(&mut cursor.stack, &drag.visited, drag.mode);
+    PlayerInventory::edit(&mut inventory, |inventory| {
+        inventory.distribute_drag(&mut cursor.stack, &drag.visited, drag.mode)
+    });
 }
 
 pub(crate) fn follow_cursor_stack(
@@ -587,6 +600,9 @@ mod tests {
         world.resource_mut::<InventoryCursor>().stack =
             Some(ItemStack::new(ItemKind::Block(VoxelKind::Dirt), 1));
         world.run_system_once(return_cursor_stack).unwrap();
+        world
+            .run_system_once(super::super::reset_inventory_cursor)
+            .unwrap();
         assert!(world.resource::<InventoryCursor>().stack.is_none());
         assert!(world.resource::<RecordedDrops>().0.is_empty());
     }

@@ -84,6 +84,7 @@ impl VoxelDiagnostics {
 
 #[derive(Resource, Default)]
 struct VoxelBenchmark {
+    simplified: bool,
     phase: BenchmarkPhase,
     elapsed: f64,
     configured: bool,
@@ -132,18 +133,22 @@ pub(crate) fn register(app: &mut App) {
         );
     }
     if benchmark {
-        app.init_resource::<VoxelBenchmark>()
-            .add_systems(
-                Update,
-                (configure_voxel_benchmark, run_voxel_benchmark)
-                    .chain()
-                    .after(record_voxel_frame)
-                    .run_if(in_state(GameState::Game)),
-            )
-            .add_systems(
-                FixedUpdate,
-                benchmark_movement.run_if(in_state(GameState::Game)),
-            );
+        app.insert_resource(VoxelBenchmark {
+            simplified: std::env::var_os("HOLLOW_VOXEL_BENCH_SIMPLIFIED").is_some(),
+            ..default()
+        })
+        .add_systems(OnExit(GameState::Game), reset_voxel_benchmark)
+        .add_systems(
+            Update,
+            (configure_voxel_benchmark, run_voxel_benchmark)
+                .chain()
+                .after(record_voxel_frame)
+                .run_if(in_state(GameState::Game)),
+        )
+        .add_systems(
+            FixedUpdate,
+            benchmark_movement.run_if(in_state(GameState::Game)),
+        );
         if std::env::var_os("HOLLOW_BENCH_HEADLESS").is_some() {
             app.add_systems(
                 PostUpdate,
@@ -172,6 +177,13 @@ fn setup_headless_targets(
     }
 }
 
+fn reset_voxel_benchmark(mut benchmark: ResMut<VoxelBenchmark>) {
+    *benchmark = VoxelBenchmark {
+        simplified: benchmark.simplified,
+        ..default()
+    };
+}
+
 fn record_voxel_frame(time: Res<Time<Real>>, mut diagnostics: ResMut<VoxelDiagnostics>) {
     diagnostics
         .frames_ms
@@ -198,7 +210,7 @@ fn configure_voxel_benchmark(
     }
     benchmark.configured = true;
     info!("voxel benchmark graphics: {:?}", *settings);
-    if std::env::var_os("HOLLOW_VOXEL_BENCH_SIMPLIFIED").is_some() {
+    if benchmark.simplified {
         for mut window in &mut windows {
             window.mode = WindowMode::BorderlessFullscreen(MonitorSelection::Primary);
             window.present_mode = PresentMode::AutoNoVsync;
@@ -226,10 +238,14 @@ fn benchmark_movement(
     time: Res<Time<Fixed>>,
     mut players: Query<(&mut CharacterMovement, &mut Transform), With<Player>>,
 ) {
+    // The benchmark drives the player until it finishes, then hands control back.
+    if benchmark.phase == BenchmarkPhase::Done {
+        return;
+    }
     for (mut movement, mut transform) in &mut players {
         *movement = CharacterMovement::default();
         if benchmark.phase == BenchmarkPhase::Moving {
-            if std::env::var_os("HOLLOW_VOXEL_BENCH_SIMPLIFIED").is_some() {
+            if benchmark.simplified {
                 transform.translation.x += 8.0 * time.delta_secs();
             } else {
                 movement.direction = Vec3::X;
