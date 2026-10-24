@@ -7,13 +7,23 @@ use avian3d::prelude::*;
 use bevy::{
     platform::collections::{HashMap, hash_map::Entry},
     prelude::*,
-    tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
+    tasks::{Task, TaskPool, TaskPoolBuilder, futures::check_ready},
 };
 #[cfg(feature = "dev")]
 use std::time::{Duration, Instant};
 
 const CHUNK_DIRECTIONS: [IVec2; 4] = [IVec2::NEG_X, IVec2::X, IVec2::NEG_Y, IVec2::Y];
-const MAX_PENDING_GENERATIONS: usize = 16;
+const MAX_PENDING_GENERATIONS: usize = 4;
+
+fn generation_pool() -> &'static TaskPool {
+    static POOL: std::sync::OnceLock<TaskPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        TaskPoolBuilder::new()
+            .num_threads(2)
+            .thread_name("voxel-generation".into())
+            .build()
+    })
+}
 type AddedChunks<'w, 's> =
     Query<'w, 's, (Entity, &'static VoxelChunk, &'static ChunkVoxels), Added<ChunkVoxels>>;
 type MutableChunks<'w, 's> = Query<'w, 's, &'static mut ChunkVoxels>;
@@ -121,7 +131,7 @@ pub(crate) fn stream_chunks(
         } else {
             let settings = settings.clone();
             let generator = generator.clone();
-            let task = AsyncComputeTaskPool::get().spawn(async move {
+            let task = generation_pool().spawn(async move {
                 #[cfg(feature = "dev")]
                 let started = Instant::now();
                 let voxels = generate_chunk(position, &settings, &generator);
@@ -239,12 +249,10 @@ pub(crate) fn sync_spawned_halos(
 
         if let Ok(mut voxels) = chunks.p1().get_mut(entity) {
             for (direction, _, neighbor) in neighbors.iter().flatten() {
-                if neighbor.modified {
-                    voxels.sync_halo(*direction, neighbor);
-                }
+                voxels.sync_halo(*direction, neighbor);
             }
         }
-        if snapshot.modified {
+        {
             for (direction, neighbor, _) in neighbors.iter().flatten() {
                 if let Some(entity) = neighbor
                     && let Ok(mut neighbor) = chunks.p1().get_mut(*entity)
@@ -264,6 +272,61 @@ pub(crate) fn sync_spawned_halos(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn newly_loaded_unmodified_neighbors_fill_both_halos() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<ChunkIndex>();
+        world.init_resource::<StoredChunks>();
+        let left = world
+            .spawn((
+                VoxelChunk {
+                    position: IVec2::new(-1, 0),
+                },
+                ChunkVoxels::generated(
+                    1,
+                    1,
+                    vec![super::super::VoxelKind::Stone],
+                    vec![super::super::VoxelKind::Air; 4],
+                ),
+            ))
+            .id();
+        world
+            .resource_mut::<ChunkIndex>()
+            .insert(IVec2::new(-1, 0), left);
+        world.run_system_once(sync_spawned_halos).unwrap();
+        world.clear_trackers();
+        let right = world
+            .spawn((
+                VoxelChunk {
+                    position: IVec2::ZERO,
+                },
+                ChunkVoxels::generated(
+                    1,
+                    1,
+                    vec![super::super::VoxelKind::Dirt],
+                    vec![super::super::VoxelKind::Air; 4],
+                ),
+            ))
+            .id();
+        world
+            .resource_mut::<ChunkIndex>()
+            .insert(IVec2::ZERO, right);
+        world.run_system_once(sync_spawned_halos).unwrap();
+        assert_eq!(
+            world.get::<ChunkVoxels>(left).unwrap().sample(IVec3::X),
+            super::super::VoxelKind::Dirt
+        );
+        assert_eq!(
+            world
+                .get::<ChunkVoxels>(right)
+                .unwrap()
+                .sample(IVec3::NEG_X),
+            super::super::VoxelKind::Stone
+        );
+        assert!(!world.get::<ChunkVoxels>(left).unwrap().modified);
+    }
 
     #[test]
     fn stream_offsets_are_unique_nearest_first_and_inside_radius() {

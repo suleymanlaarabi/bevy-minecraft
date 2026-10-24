@@ -16,9 +16,19 @@ pub enum VoxelKind {
     Wood,
     Leaves,
     Water,
+    Deepslate,
+    Gravel,
+    CoalOre,
+    IronOre,
+    CopperOre,
+    GoldOre,
+    RedstoneOre,
+    DiamondOre,
+    EmeraldOre,
+    LapisOre,
 }
 impl VoxelKind {
-    pub const ITEMIZABLE: [Self; 7] = [
+    pub const ITEMIZABLE: [Self; 17] = [
         Self::Grass,
         Self::Dirt,
         Self::Stone,
@@ -26,19 +36,20 @@ impl VoxelKind {
         Self::Snow,
         Self::Wood,
         Self::Leaves,
+        Self::Deepslate,
+        Self::Gravel,
+        Self::CoalOre,
+        Self::IronOre,
+        Self::CopperOre,
+        Self::GoldOre,
+        Self::RedstoneOre,
+        Self::DiamondOre,
+        Self::EmeraldOre,
+        Self::LapisOre,
     ];
 
     pub const fn is_itemizable(self) -> bool {
-        matches!(
-            self,
-            Self::Grass
-                | Self::Dirt
-                | Self::Stone
-                | Self::Sand
-                | Self::Snow
-                | Self::Wood
-                | Self::Leaves
-        )
+        !matches!(self, Self::Air | Self::Water)
     }
 
     pub const fn break_duration(self) -> Option<f32> {
@@ -46,6 +57,16 @@ impl VoxelKind {
             Self::Grass => Some(0.6),
             Self::Dirt | Self::Sand => Some(0.5),
             Self::Stone => Some(1.5),
+            Self::Gravel => Some(0.6),
+            Self::Deepslate
+            | Self::CoalOre
+            | Self::IronOre
+            | Self::CopperOre
+            | Self::GoldOre
+            | Self::RedstoneOre
+            | Self::DiamondOre
+            | Self::EmeraldOre
+            | Self::LapisOre => Some(2.0),
             Self::Snow => Some(0.3),
             Self::Wood => Some(1.2),
             Self::Leaves => Some(0.25),
@@ -71,6 +92,16 @@ impl VoxelKind {
             Self::Grass => [0.25, 0.65, 0.18, 1.0],
             Self::Dirt => [0.40, 0.25, 0.12, 1.0],
             Self::Stone => [0.40, 0.40, 0.40, 1.0],
+            Self::Deepslate => [0.22, 0.22, 0.25, 1.0],
+            Self::Gravel
+            | Self::CoalOre
+            | Self::IronOre
+            | Self::CopperOre
+            | Self::GoldOre
+            | Self::RedstoneOre
+            | Self::DiamondOre
+            | Self::EmeraldOre
+            | Self::LapisOre => [0.48, 0.46, 0.43, 1.0],
             Self::Sand => [0.76, 0.68, 0.42, 1.0],
             Self::Snow => [0.92, 0.96, 1.0, 1.0],
             Self::Wood => [0.36, 0.20, 0.08, 1.0],

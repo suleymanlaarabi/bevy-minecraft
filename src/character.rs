@@ -176,6 +176,7 @@ fn remove_in_water_state(
 }
 
 fn character_land_movement(
+    voxel_world: crate::voxel::VoxelWorld,
     time: Res<Time>,
     spatial_query: SpatialQuery,
     mut characters: Query<
@@ -211,6 +212,11 @@ fn character_land_movement(
         auto_jump,
     ) in &mut characters
     {
+        if !voxel_world.collision_ready(position.0) {
+            gravity.0 = 0.0;
+            velocity.0 = Vec3::ZERO;
+            continue;
+        }
         gravity.0 = CHARACTER_GRAVITY_SCALE;
         damping.0 = 0.0;
 

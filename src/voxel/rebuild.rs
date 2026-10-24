@@ -34,7 +34,7 @@ pub(crate) fn prepare_assets(
                 settings.texture_pack
             }),
     );
-    let blocks = block_texture(&asset_server, &pack.texture_path);
+    let blocks = block_texture(&asset_server, &pack.texture_path, pack.layers);
     commands.insert_resource(pack);
     commands.insert_resource(VoxelAssets {
         terrain: voxel_materials.add(VoxelMaterial { blocks }),
@@ -59,6 +59,7 @@ pub(crate) fn apply_texture_pack(
     mut texture_pack: Option<ResMut<TexturePack>>,
     voxel_assets: Option<ResMut<VoxelAssets>>,
     mut voxel_materials: ResMut<Assets<VoxelMaterial>>,
+    mut chunks: Query<&mut ChunkVoxels>,
 ) {
     let (Some(texture_pack), Some(voxel_assets)) = (texture_pack.as_deref_mut(), voxel_assets)
     else {
@@ -70,9 +71,15 @@ pub(crate) fn apply_texture_pack(
 
     let next_pack = TexturePack::load(settings.texture_pack);
     if let Some(mut material) = voxel_materials.get_mut(&voxel_assets.terrain) {
-        material.blocks = block_texture(&asset_server, &next_pack.texture_path);
+        material.blocks = block_texture(&asset_server, &next_pack.texture_path, next_pack.layers);
     }
     *texture_pack = next_pack;
+    // Layer assignments can differ between Faithful and the legacy packs.
+    // Advance revisions so pending builds cannot restore the previous mapping.
+    for mut chunk in &mut chunks {
+        chunk.changes |= super::data::MESH_CHANGED;
+        chunk.revision = chunk.revision.wrapping_add(1);
+    }
 }
 
 pub(crate) enum ColliderUpdate {

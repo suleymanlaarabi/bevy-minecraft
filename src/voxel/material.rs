@@ -14,23 +14,27 @@ use serde::Deserialize;
 
 use super::data::VoxelKind;
 
-pub(crate) const TEXTURE_LAYERS: u32 = 9;
+fn default_texture_layers() -> u32 {
+    9
+}
 
 #[derive(Component, Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TexturePackId {
     #[default]
+    Faithful,
     Replete,
     Meadow,
     Twilight,
 }
 
 impl TexturePackId {
-    pub const fn all() -> [Self; 3] {
-        [Self::Replete, Self::Meadow, Self::Twilight]
+    pub const fn all() -> [Self; 4] {
+        [Self::Faithful, Self::Replete, Self::Meadow, Self::Twilight]
     }
 
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Faithful => "Faithful 32x",
             Self::Replete => "Replete",
             Self::Meadow => "Meadow",
             Self::Twilight => "Twilight",
@@ -39,6 +43,7 @@ impl TexturePackId {
 
     const fn directory(self) -> &'static str {
         match self {
+            Self::Faithful => "faithful",
             Self::Replete => "replete",
             Self::Meadow => "meadow",
             Self::Twilight => "twilight",
@@ -47,6 +52,7 @@ impl TexturePackId {
 
     const fn manifest_source(self) -> &'static str {
         match self {
+            Self::Faithful => include_str!("../../assets/voxel/packs/faithful/pack.ron"),
             Self::Replete => include_str!("../../assets/voxel/packs/replete/pack.ron"),
             Self::Meadow => include_str!("../../assets/voxel/packs/meadow/pack.ron"),
             Self::Twilight => include_str!("../../assets/voxel/packs/twilight/pack.ron"),
@@ -73,18 +79,41 @@ struct BlockTextures {
     snow: BlockTextureConfig,
     wood: BlockTextureConfig,
     leaves: BlockTextureConfig,
+    #[serde(default)]
+    deepslate: Option<BlockTextureConfig>,
+    #[serde(default)]
+    gravel: Option<BlockTextureConfig>,
+    #[serde(default)]
+    coal_ore: Option<BlockTextureConfig>,
+    #[serde(default)]
+    iron_ore: Option<BlockTextureConfig>,
+    #[serde(default)]
+    copper_ore: Option<BlockTextureConfig>,
+    #[serde(default)]
+    gold_ore: Option<BlockTextureConfig>,
+    #[serde(default)]
+    redstone_ore: Option<BlockTextureConfig>,
+    #[serde(default)]
+    diamond_ore: Option<BlockTextureConfig>,
+    #[serde(default)]
+    emerald_ore: Option<BlockTextureConfig>,
+    #[serde(default)]
+    lapis_ore: Option<BlockTextureConfig>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TexturePackManifest {
     name: String,
     texture: String,
+    #[serde(default = "default_texture_layers")]
+    layers: u32,
     blocks: BlockTextures,
 }
 
 #[derive(Resource, Clone, Debug)]
 pub(crate) struct TexturePack {
     pub(crate) texture_path: String,
+    pub(crate) layers: u32,
     blocks: BlockTextures,
 }
 
@@ -99,6 +128,7 @@ impl TexturePack {
         debug!("Loaded texture pack {} ({})", id.label(), manifest.name);
         Self {
             texture_path: format!("voxel/packs/{}/{}", id.directory(), manifest.texture),
+            layers: manifest.layers,
             blocks: manifest.blocks,
         }
     }
@@ -112,6 +142,40 @@ impl TexturePack {
             VoxelKind::Snow => Some(&self.blocks.snow),
             VoxelKind::Wood => Some(&self.blocks.wood),
             VoxelKind::Leaves => Some(&self.blocks.leaves),
+            VoxelKind::Deepslate => {
+                Some(self.blocks.deepslate.as_ref().unwrap_or(&self.blocks.stone))
+            }
+            VoxelKind::Gravel => Some(self.blocks.gravel.as_ref().unwrap_or(&self.blocks.stone)),
+            VoxelKind::CoalOre => Some(self.blocks.coal_ore.as_ref().unwrap_or(&self.blocks.stone)),
+            VoxelKind::IronOre => Some(self.blocks.iron_ore.as_ref().unwrap_or(&self.blocks.stone)),
+            VoxelKind::CopperOre => Some(
+                self.blocks
+                    .copper_ore
+                    .as_ref()
+                    .unwrap_or(&self.blocks.stone),
+            ),
+            VoxelKind::GoldOre => Some(self.blocks.gold_ore.as_ref().unwrap_or(&self.blocks.stone)),
+            VoxelKind::RedstoneOre => Some(
+                self.blocks
+                    .redstone_ore
+                    .as_ref()
+                    .unwrap_or(&self.blocks.stone),
+            ),
+            VoxelKind::DiamondOre => Some(
+                self.blocks
+                    .diamond_ore
+                    .as_ref()
+                    .unwrap_or(&self.blocks.stone),
+            ),
+            VoxelKind::EmeraldOre => Some(
+                self.blocks
+                    .emerald_ore
+                    .as_ref()
+                    .unwrap_or(&self.blocks.stone),
+            ),
+            VoxelKind::LapisOre => {
+                Some(self.blocks.lapis_ore.as_ref().unwrap_or(&self.blocks.stone))
+            }
             VoxelKind::Air | VoxelKind::Water => None,
         }
     }
@@ -194,13 +258,11 @@ pub(crate) struct WaterMaterialExtension {
 
 pub(crate) type WaterMaterial = ExtendedMaterial<StandardMaterial, WaterMaterialExtension>;
 
-pub(crate) fn block_texture(asset_server: &AssetServer, path: &str) -> Handle<Image> {
+pub(crate) fn block_texture(asset_server: &AssetServer, path: &str, layers: u32) -> Handle<Image> {
     asset_server
         .load_builder()
-        .with_settings(|settings: &mut ImageLoaderSettings| {
-            settings.array_layout = Some(ImageArrayLayout::RowCount {
-                rows: TEXTURE_LAYERS,
-            });
+        .with_settings(move |settings: &mut ImageLoaderSettings| {
+            settings.array_layout = Some(ImageArrayLayout::RowCount { rows: layers });
             settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
                 address_mode_u: ImageAddressMode::Repeat,
                 address_mode_v: ImageAddressMode::Repeat,
@@ -241,6 +303,27 @@ mod tests {
         winit::WinitPlugin,
     };
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn built_in_packs_have_valid_layers_and_assets() {
+        for id in TexturePackId::all() {
+            let pack = TexturePack::load(id);
+            assert!(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("assets")
+                    .join(&pack.texture_path)
+                    .is_file()
+            );
+            for kind in VoxelKind::ITEMIZABLE {
+                for axis in 0..3 {
+                    for positive in [false, true] {
+                        assert!(pack.texture_layer(kind, axis, positive) < pack.layers);
+                    }
+                }
+            }
+        }
+        assert_eq!(TexturePackId::default(), TexturePackId::Faithful);
+    }
 
     #[test]
     #[ignore = "requires a Vulkan/graphics adapter; runs without creating a window"]
@@ -289,7 +372,8 @@ mod tests {
             .load("shaders/water_material.wesl");
         let texture = block_texture(
             app.world().resource::<AssetServer>(),
-            "voxel/packs/replete/blocks_array.png",
+            "voxel/packs/faithful/blocks_array.png",
+            TexturePack::load(TexturePackId::Faithful).layers,
         );
         let terrain = app
             .world_mut()

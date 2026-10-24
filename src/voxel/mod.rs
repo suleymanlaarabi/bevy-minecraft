@@ -1,7 +1,7 @@
 mod data;
 #[cfg(feature = "dev")]
 mod diagnostics;
-mod generation;
+pub(crate) mod generation;
 mod material;
 mod meshing;
 mod rebuild;
@@ -36,9 +36,17 @@ pub struct VoxelWorld<'w, 's> {
     settings: Res<'w, VoxelSettings>,
     index: Res<'w, ChunkIndex>,
     chunks: Query<'w, 's, &'static ChunkVoxels>,
+    colliders: Query<'w, 's, (), With<avian3d::prelude::Collider>>,
 }
 
 impl VoxelWorld<'_, '_> {
+    /// Collision is installed after asynchronous terrain/mesh generation.
+    pub fn collision_ready(&self, position: Vec3) -> bool {
+        self.index
+            .get(&self.settings.chunk_at(position))
+            .is_some_and(|entity| self.colliders.contains(*entity))
+    }
+
     /// Returns the voxel at an integer world position, or `None` when it is unavailable.
     pub fn get(&self, world_position: IVec3) -> Option<VoxelKind> {
         let (chunk_position, local_position) = self.settings.split_world_position(world_position);
@@ -220,8 +228,8 @@ impl Default for VoxelSettings {
     fn default() -> Self {
         Self {
             chunk_size: 16,
-            base_height: 8.0,
-            max_height: 40,
+            base_height: 127.0,
+            max_height: 384,
             seed: 42,
             spawn_budget_per_frame: 4,
             despawn_budget_per_frame: 8,
@@ -255,5 +263,31 @@ impl VoxelSettings {
                 world.z.rem_euclid(self.chunk_size),
             ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use avian3d::prelude::Collider;
+    use bevy::ecs::system::RunSystemOnce;
+
+    #[test]
+    fn collision_readiness_waits_for_the_loaded_chunk_collider() {
+        let mut world = World::new();
+        world.insert_resource(VoxelSettings::default());
+        world.init_resource::<ChunkIndex>();
+        let chunk = world.spawn_empty().id();
+        world
+            .resource_mut::<ChunkIndex>()
+            .insert(IVec2::ZERO, chunk);
+        let ready = |voxels: VoxelWorld| voxels.collision_ready(Vec3::new(8.0, 130.0, 8.0));
+        assert!(!world.run_system_once(ready).unwrap());
+        world
+            .entity_mut(chunk)
+            .insert(Collider::cuboid(16.0, 1.0, 16.0));
+        assert!(world.run_system_once(ready).unwrap());
+        world.despawn(chunk);
+        assert!(!world.run_system_once(ready).unwrap());
     }
 }

@@ -260,9 +260,10 @@ pub(crate) fn rebuild_render_regions(
             continue;
         };
         let current = dirty.revision == build.revision;
-        // An edit merge outdated by later edits is still newer than what is drawn, so
-        // it is shown while the region stays dirty. Streaming waits for the next one.
-        if build.revision < dirty.floor || !(current || urgent) {
+        // Publish completed geometry even when more chunks arrived during the
+        // merge. Keep the region dirty for a follow-up instead of starving its
+        // first visible mesh. Removal floors still reject obsolete geometry.
+        if build.revision < dirty.floor {
             continue;
         }
         if current {
@@ -605,6 +606,44 @@ mod tests {
             assert!(Instant::now() < deadline, "region merge did not finish");
             std::thread::yield_now();
         }
+    }
+
+    #[test]
+    fn streaming_publishes_completed_geometry_while_new_chunks_arrive() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = region_app();
+        let world = app.world_mut();
+        {
+            let mut regions = world.resource_mut::<RenderRegions>();
+            regions.insert_piece(
+                IVec2::ZERO,
+                ChunkMeshes(VoxelGeometry::default(), None),
+                false,
+            );
+            regions.dirty.get_mut(&IVec2::ZERO).unwrap().age = SETTLE_FRAMES;
+        }
+        world.run_system_once(rebuild_render_regions).unwrap();
+        assert_eq!(world.resource::<RenderRegions>().pending.len(), 1);
+        world.resource_mut::<RenderRegions>().insert_piece(
+            IVec2::X,
+            ChunkMeshes(VoxelGeometry::default(), None),
+            false,
+        );
+        run_until(world, |world| {
+            world
+                .resource::<RenderRegions>()
+                .entities
+                .contains_key(&IVec2::ZERO)
+        });
+        assert!(
+            world
+                .resource::<RenderRegions>()
+                .dirty
+                .contains_key(&IVec2::ZERO)
+        );
+        run_until(world, |world| {
+            world.resource::<RenderRegions>().dirty.is_empty()
+        });
     }
 
     #[test]

@@ -118,10 +118,17 @@ impl Default for CameraSensitivity {
 #[derive(Component, Clone, Default)]
 pub(crate) struct Crosshair;
 
-fn spawn_player(mut commands: Commands, voxel_settings: Option<Res<VoxelSettings>>) {
+fn spawn_player(
+    mut commands: Commands,
+    voxel_settings: Option<Res<VoxelSettings>>,
+    generator: Option<Res<crate::voxel::generation::WorldGenerator>>,
+) {
     let spawn_pos = if let Some(settings) = voxel_settings {
         let center = settings.chunk_center(IVec2::ZERO);
-        Vec3::new(center.x, settings.base_height + 15.0, center.z)
+        generator.as_ref().map_or(
+            Vec3::new(center.x, settings.base_height + 15.0, center.z),
+            |generator| generator.spawn_position(),
+        )
     } else {
         Vec3::new(0.0, 30.0, 0.0)
     };

@@ -101,7 +101,7 @@ impl Default for GraphicsSettings {
             anti_aliasing: AntiAliasingMode::Msaa4x,
             vsync: true,
             shadow_quality: ShadowQuality::Medium,
-            texture_pack: TexturePackId::Replete,
+            texture_pack: TexturePackId::Faithful,
             field_of_view: 85.0,
             view_distance: 10,
             display_mode: DisplayMode::BorderlessFullscreen,
@@ -325,6 +325,8 @@ fn texture_pack_control(selected: TexturePackId) -> impl Scene {
         @radio_group()
         on(set_choice::<TexturePackId>)
         Children [
+            @radio_choice("Faithful 32x", TexturePackId::Faithful, selected)
+            --
             @radio_choice("Replete", TexturePackId::Replete, selected)
             --
             @radio_choice("Meadow", TexturePackId::Meadow, selected)

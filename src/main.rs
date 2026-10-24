@@ -24,22 +24,42 @@ use hollow::{
     voxel::VoxelPlugin,
 };
 
+fn asset_directory() -> std::path::PathBuf {
+    if let Some(root) = std::env::var_os("BEVY_ASSET_ROOT") {
+        return std::path::PathBuf::from(root).join("assets");
+    }
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(parent) = executable.parent()
+    {
+        let assets = parent.join("assets");
+        if assets.is_dir() {
+            return assets;
+        }
+    }
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets")
+}
+
 fn main() {
     let mut app = App::new();
     let headless = cfg!(feature = "dev") && std::env::var_os("HOLLOW_BENCH_HEADLESS").is_some();
-    let mut plugins = DefaultPlugins.set(WindowPlugin {
-        exit_condition: ExitCondition::DontExit,
-        primary_window: (!headless).then(|| Window {
-            mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+    let mut plugins = DefaultPlugins
+        .set(AssetPlugin {
+            file_path: asset_directory().to_string_lossy().into_owned(),
             ..default()
-        }),
-        primary_cursor_options: Some(CursorOptions {
-            visible: true,
-            grab_mode: CursorGrabMode::None,
+        })
+        .set(WindowPlugin {
+            exit_condition: ExitCondition::DontExit,
+            primary_window: (!headless).then(|| Window {
+                mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+                ..default()
+            }),
+            primary_cursor_options: Some(CursorOptions {
+                visible: true,
+                grab_mode: CursorGrabMode::None,
+                ..default()
+            }),
             ..default()
-        }),
-        ..default()
-    });
+        });
     if headless {
         plugins = plugins.disable::<bevy::winit::WinitPlugin>();
         app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(

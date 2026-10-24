@@ -180,38 +180,63 @@ fn greedy_mesh(
 }
 
 fn water_mesh(voxels: &ChunkVoxels, texture_pack: &TexturePack) -> Option<VoxelGeometry> {
-    let size = voxels.size as usize;
+    let dimensions = [voxels.size, voxels.height, voxels.size];
     let mut positions = Vec::new();
     let mut normals = Vec::new();
     let mut colors = Vec::new();
     let mut uvs = Vec::new();
     let mut indices = Vec::new();
-    let mut mask = vec![None; size * size];
-    for y in 0..voxels.height {
-        for z in 0..size {
-            for x in 0..size {
-                let position = IVec3::new(x as i32, y, z as i32);
-                mask[x + z * size] = (voxels.sample(position) == VoxelKind::Water
-                    && voxels.sample(position + IVec3::Y) != VoxelKind::Water)
-                    .then_some(());
+    for axis in 0..3 {
+        let u = (axis + 1) % 3;
+        let v = (axis + 2) % 3;
+        let (width, height) = (dimensions[u] as usize, dimensions[v] as usize);
+        let mut mask = vec![None; width * height];
+        for layer in -1..dimensions[axis] {
+            for j in 0..height {
+                for i in 0..width {
+                    let mut cell = [0; 3];
+                    cell[axis] = layer;
+                    cell[u] = i as i32;
+                    cell[v] = j as i32;
+                    let a = voxels.sample(IVec3::from_array(cell));
+                    cell[axis] += 1;
+                    let b = voxels.sample(IVec3::from_array(cell));
+                    // Only real air/fluid interfaces. No water plane inside a solid
+                    // ceiling, no interior faces, and no faces owned by the halo.
+                    mask[i + j * width] = match (a, b) {
+                        (VoxelKind::Water, VoxelKind::Air) if layer >= 0 => Some(true),
+                        (VoxelKind::Air, VoxelKind::Water) if layer + 1 < dimensions[axis] => {
+                            Some(false)
+                        }
+                        _ => None,
+                    };
+                }
             }
+            consume_mask(&mut mask, width, height, |i, j, w, h, positive| {
+                let mut corner = [0; 3];
+                corner[axis] = layer + 1;
+                corner[u] = i as i32;
+                corner[v] = j as i32;
+                let mut du = [0; 3];
+                let mut dv = [0; 3];
+                du[u] = w as i32;
+                dv[v] = h as i32;
+                push_quad(
+                    &mut positions,
+                    &mut normals,
+                    &mut colors,
+                    &mut uvs,
+                    &mut indices,
+                    corner,
+                    du,
+                    dv,
+                    axis,
+                    Face(VoxelKind::Water, positive),
+                    false,
+                    texture_pack,
+                );
+            });
         }
-        consume_mask(&mut mask, size, size, |x, z, width, depth, ()| {
-            push_quad(
-                &mut positions,
-                &mut normals,
-                &mut colors,
-                &mut uvs,
-                &mut indices,
-                [x as i32, y + 1, z as i32],
-                [0, 0, depth as i32],
-                [width as i32, 0, 0],
-                1,
-                Face(VoxelKind::Water, true),
-                false,
-                texture_pack,
-            );
-        });
     }
     (!indices.is_empty()).then(|| finish_mesh(positions, normals, colors, uvs, indices))
 }
@@ -348,6 +373,28 @@ mod tests {
             solid.set_halo(direction, VoxelKind::Stone);
             assert_eq!(build_chunk_mesh(&solid, &pack).0.indices.len(), 5 * 6);
         }
+    }
+
+    #[test]
+    fn water_has_side_faces_and_no_faces_inside_solid_ceilings() {
+        let pack = TexturePack::load(super::super::TexturePackId::default());
+        let mut water = ChunkVoxels::generated(
+            1,
+            2,
+            vec![VoxelKind::Water, VoxelKind::Air],
+            vec![VoxelKind::Air; 8],
+        );
+        let geometry = water_mesh(&water, &pack).unwrap();
+        assert_eq!(geometry.indices.len(), 6 * 6);
+        assert!(geometry.normals.contains(&[1.0, 0.0, 0.0]));
+        assert!(geometry.normals.contains(&[0.0, 1.0, 0.0]));
+        water.set(IVec3::Y, VoxelKind::Stone);
+        let geometry = water_mesh(&water, &pack).unwrap();
+        assert_eq!(geometry.indices.len(), 5 * 6);
+        assert!(!geometry.normals.contains(&[0.0, 1.0, 0.0]));
+        water.set(IVec3::Y, VoxelKind::Water);
+        let geometry = water_mesh(&water, &pack).unwrap();
+        assert_eq!(geometry.indices.len(), 6 * 6);
     }
 
     #[test]

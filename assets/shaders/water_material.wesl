@@ -46,7 +46,9 @@ fn fragment(
             * water.strength.y
             * water.frequency_speed.y;
 
-    var wave_normal = normalize(vec3<f32>(-slope.x, 1.0, -slope.y));
+    let normal = normalize(in.world_normal);
+    let wave_strength = max(normal.y, 0.0);
+    var wave_normal = normalize(normal + vec3<f32>(-slope.x, 0.0, -slope.y) * wave_strength);
     if !is_front {
         wave_normal = -wave_normal;
     }

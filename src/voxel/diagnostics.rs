@@ -132,6 +132,12 @@ pub(crate) fn register(app: &mut App) {
                 .run_if(in_state(GameState::Game)),
         );
     }
+    if std::env::var_os("HOLLOW_SCREENSHOT_PATH").is_some() {
+        app.add_systems(
+            Update,
+            capture_debug_frame.run_if(in_state(GameState::Game)),
+        );
+    }
     if benchmark {
         app.insert_resource(VoxelBenchmark {
             simplified: std::env::var_os("HOLLOW_VOXEL_BENCH_SIMPLIFIED").is_some(),
@@ -156,6 +162,30 @@ pub(crate) fn register(app: &mut App) {
             );
         }
     }
+}
+
+fn capture_debug_frame(
+    time: Res<Time<Real>>,
+    cameras: Query<(&bevy::camera::RenderTarget, &GlobalTransform), With<PlayerCamera>>,
+    mut captured: Local<bool>,
+    mut commands: Commands,
+) {
+    if *captured || time.elapsed_secs() < 12.0 {
+        return;
+    }
+    let Ok((target, transform)) = cameras.single() else {
+        return;
+    };
+    let Some(path) = std::env::var_os("HOLLOW_SCREENSHOT_PATH") else {
+        return;
+    };
+    info!("debug capture: camera at {:?}", transform.translation());
+    commands
+        .spawn(bevy::render::view::screenshot::Screenshot(target.clone()))
+        .observe(bevy::render::view::screenshot::save_to_disk(
+            std::path::PathBuf::from(path),
+        ));
+    *captured = true;
 }
 
 fn setup_headless_targets(

@@ -1,0 +1,25 @@
+{
+  "repository": "https://raw.githubusercontent.com/Faithful-Resource-Pack/Faithful-32x-Java",
+  "revision": "ee415a4109f341098ad7cd162af1be8307a7082a",
+  "sha256": {
+    "grass_block_top": "08f44ccdce1ce86d685c6b4ad1fed97fa91f30493b01874a8a819fbd0886f33b",
+    "grass_block_side": "db206a5ae7de02d36407d83838766df28328a84eccb6fb7b77d1e9aabce0ceee",
+    "dirt": "6d54a15f4fc34d9d0d94b9807f799266a27cebf47e5ad3c4db9a1013c245b969",
+    "stone": "47fa06d17143fd52bc2be5d913c002b688434ed6d7366174b0717e57fd1d8ef3",
+    "sand": "c2cfdcd96ec1e540be6ec20f8b05019a748cdf32f97956cfd8a64949b07298ec",
+    "snow": "e7601d94849b5c3902704bd45c05b362130a515f9a8afa4c375ff28925a557c6",
+    "oak_log": "2571b8b1f4e4c2eec2a4c699274670f16013b90aaed30b4920eae271b5054b53",
+    "oak_log_top": "a765e67cab62ea64ecb8d7d5c792dee071ad2c497fa117af0107f7423b72a872",
+    "oak_leaves": "4530aa99a39459f7ec4bd8dbbc80d2bca776c0288c60c65d52bebe6d08594037",
+    "deepslate": "2bcfdf8e17b1b3ad582ac79f3bf88f5b4eb1aa783b40c21109601ad2c240a608",
+    "gravel": "054544b6ad418e031070cc569766276b46ba2d972e03aee6ca62ca5461e4261f",
+    "coal_ore": "fba22bf5a70fea3d0cda24544736a679362ee26d319dca6e8a63ba7329a268c6",
+    "iron_ore": "7ce1c6a83f766f6033c66c010ca299f41e7d8591cff86c3ebc1474a83cba85dd",
+    "copper_ore": "3b1da4076824c04858e03524346e84b3b973765a9db85cb99af95500f68cdcb1",
+    "gold_ore": "bb2004bc8e9d9a41ebc5808173c744d136cdfe2dbbcc60aa19c0e812c1b42b52",
+    "redstone_ore": "20ed1e0f0ae4ab851d0437f78fe42ab27c33b99067e9878ddd1eeff5610045e5",
+    "diamond_ore": "6c1fa6f862457b0ea0a1c934af884b0761771da166cba4160fbb772436deb055",
+    "emerald_ore": "ab324771254e58f969a9d5680837a5227b657827b20785bf0875a2eec871ce1d",
+    "lapis_ore": "8b8a3b440cd2a779d71a7b659a089a369d3584b444063129b1529b95ab9501d1"
+  }
+}
