@@ -1,12 +1,19 @@
-//! Serialized Pumpkin updates run off the ECS thread; voxel edits remain immediate.
+//! Serialized Pumpkin light updates run off the ECS thread; voxel edits remain immediate.
+//!
+//! Streamed chunks keep the light Pumpkin computed during generation. Only the
+//! neighborhood of edited chunks is mirrored into the lighting context.
 use super::{ChunkVoxels, VoxelChunk, streaming::ChunkIndex};
 use bevy::{
-    platform::collections::HashMap,
+    platform::collections::{HashMap, HashSet},
     prelude::*,
     tasks::{Task, TaskPool, TaskPoolBuilder, futures::check_ready},
 };
 use pumpkin_worldgen::{Dimension, LightingChunk, LightingUpdate, LightingWorld};
 use std::sync::{Arc, OnceLock};
+
+/// Chebyshev radius around an edited chunk mirrored into the lighting context: the
+/// relit 3x3 area plus the ring that seeds light across its border.
+const CONTEXT_RADIUS: i32 = 2;
 
 type Version = (Entity, u64);
 struct Output {
@@ -36,6 +43,7 @@ pub(crate) fn update_lighting(
     mut state: ResMut<LightingState>,
     index: Res<ChunkIndex>,
     mut chunks: Query<(Entity, &VoxelChunk, &mut ChunkVoxels)>,
+    mut relevant: Local<HashSet<IVec2>>,
 ) {
     if let Some(task) = state.task.as_mut() {
         let Some(output) = check_ready(task) else {
@@ -49,34 +57,50 @@ pub(crate) fn update_lighting(
                 .insert(IVec2::new(update.x, update.z), update.light.into());
         }
     }
+    relevant.clear();
+    for (_, chunk, voxels) in &chunks {
+        if voxels.native_edits.is_empty() {
+            continue;
+        }
+        for z in -CONTEXT_RADIUS..=CONTEXT_RADIUS {
+            for x in -CONTEXT_RADIUS..=CONTEXT_RADIUS {
+                relevant.insert(chunk.position + IVec2::new(x, z));
+            }
+        }
+    }
     let removed: Vec<_> = state
         .submitted
         .keys()
-        .filter(|p| !index.contains_key(*p))
+        .filter(|p| !index.contains_key(*p) || !relevant.contains(*p))
         .copied()
         .collect();
     for position in &removed {
         state.submitted.remove(position);
         state.ready.remove(position);
     }
-    sync_borders(&index, &mut chunks, &removed);
     let mut snapshots = Vec::new();
-    for (entity, chunk, voxels) in &chunks {
+    for position in relevant.iter() {
+        let Some(&entity) = index.get(position) else {
+            continue;
+        };
+        let Ok((entity, _, voxels)) = chunks.get(entity) else {
+            continue;
+        };
         let Some(states) = &voxels.native_states else {
             continue;
         };
         let version = (entity, voxels.content_revision);
-        if state.submitted.get(&chunk.position) == Some(&version) {
+        if state.submitted.get(position) == Some(&version) {
             continue;
         }
         snapshots.push(LightingChunk {
-            x: chunk.position.x,
-            z: chunk.position.y,
+            x: position.x,
+            z: position.y,
             states: states.clone(),
             light: voxels.light.clone(),
             edits: voxels.native_edits.iter().copied().collect(),
         });
-        state.submitted.insert(chunk.position, version);
+        state.submitted.insert(*position, version);
     }
     if !snapshots.is_empty() || !removed.is_empty() {
         let context = state.context.take();
@@ -95,65 +119,27 @@ pub(crate) fn update_lighting(
     for (position, light) in state.ready.drain() {
         if let Some(&entity) = index.get(&position)
             && let Ok((_, _, mut voxels)) = chunks.get_mut(entity)
-            && voxels.bypass_change_detection().replace_light(light)
         {
-            voxels.set_changed();
-            changed.push(position);
-        }
-    }
-    // Center light and all eight border/corner samples are refreshed together.
-    sync_borders(&index, &mut chunks, &changed);
-}
-
-fn sync_borders(
-    index: &ChunkIndex,
-    chunks: &mut Query<(Entity, &VoxelChunk, &mut ChunkVoxels)>,
-    changed: &[IVec2],
-) {
-    let mut affected = bevy::platform::collections::HashSet::new();
-    for &position in changed {
-        for z in -1..=1 {
-            for x in -1..=1 {
-                affected.insert(position + IVec2::new(x, z));
+            let sections = voxels.bypass_change_detection().replace_light(light);
+            if sections != 0 {
+                voxels.set_changed();
+                changed.push((position, sections));
             }
         }
     }
-    for position in affected {
-        let Some(&entity) = index.get(&position) else {
-            continue;
-        };
+    // Neighbors sample this light at their border face corners.
+    for (position, sections) in changed {
         for z in -1..=1 {
             for x in -1..=1 {
-                if x == 0 && z == 0 {
+                if (x, z) == (0, 0) {
                     continue;
                 }
-                let direction = IVec2::new(x, z);
-                let neighbor = index
-                    .get(&(position + direction))
-                    .and_then(|&e| chunks.get(e).ok())
-                    .map(|(_, _, v)| v.clone());
-                if let Ok((_, _, mut voxels)) = chunks.get_mut(entity)
-                    && voxels
-                        .bypass_change_detection()
-                        .sync_light_halo(direction, neighbor.as_ref())
+                if let Some(&entity) = index.get(&(position + IVec2::new(x, z)))
+                    && let Ok((_, _, mut voxels)) = chunks.get_mut(entity)
                 {
-                    voxels.set_changed();
+                    voxels.mark_sections(sections);
                 }
             }
         }
     }
-}
-
-/// Refresh corners before building meshes for additions and player edits.
-pub(crate) fn initialize_light_borders(
-    index: Res<ChunkIndex>,
-    mut chunks: Query<(Entity, &VoxelChunk, &mut ChunkVoxels)>,
-) {
-    // Change-detection filters also access their component. Inspect Mut's change
-    // flag through this single query rather than adding a conflicting query.
-    let changed = chunks
-        .iter_mut()
-        .filter_map(|(_, chunk, voxels)| voxels.is_changed().then_some(chunk.position))
-        .collect::<Vec<_>>();
-    sync_borders(&index, &mut chunks, &changed);
 }

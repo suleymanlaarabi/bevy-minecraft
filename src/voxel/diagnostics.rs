@@ -1,8 +1,7 @@
 use super::{
     ChunkVoxels, VoxelChunk, VoxelCommandsExt, VoxelKind, VoxelWorld,
-    rebuild::ChunkBuild,
-    regions::{RenderRegions, VoxelRenderRegion},
-    streaming::PendingChunks,
+    rebuild::{ChunkBuild, ChunkSections},
+    streaming::{AwaitingNeighbors, PendingChunks},
 };
 use avian3d::{prelude::Physics, schedule::PhysicsTime};
 use bevy::ecs::system::SystemParam;
@@ -26,7 +25,6 @@ pub(crate) struct VoxelDiagnostics {
     generation_ms: Vec<f64>,
     meshing_ms: Vec<f64>,
     collider_ms: Vec<f64>,
-    region_ms: Vec<f64>,
     generated_chunks: u64,
     built_chunks: u64,
     built_vertices: u64,
@@ -54,22 +52,8 @@ impl VoxelDiagnostics {
         self.collider_ms.push(collider.as_secs_f64() * 1_000.0);
     }
 
-    pub(crate) fn record_region(&mut self, elapsed: Duration) {
-        self.region_ms.push(elapsed.as_secs_f64() * 1_000.0);
-    }
-
     fn reset_frames(&mut self) {
         self.frames_ms.clear();
-        self.region_ms.clear();
-    }
-
-    fn log_region_sample(&self, phase: &str) {
-        info!(
-            "voxel benchmark {phase} merges: count={} merge_ms[p50={:.3} p95={:.3}]",
-            self.region_ms.len(),
-            percentile(&self.region_ms, 0.50),
-            percentile(&self.region_ms, 0.95)
-        );
     }
 
     fn frame_percentiles(&self) -> (f64, f64, f64) {
@@ -100,8 +84,8 @@ struct VoxelBenchmark {
 struct VoxelBenchmarkWorld<'w, 's> {
     offsets: Res<'w, StreamOffsets>,
     pending: Res<'w, PendingChunks>,
-    render_regions: Res<'w, RenderRegions>,
     chunks: Query<'w, 's, &'static ChunkVoxels, With<VoxelChunk>>,
+    meshed: Query<'w, 's, &'static ChunkVoxels, (With<VoxelChunk>, Without<AwaitingNeighbors>)>,
     builds: Query<'w, 's, (), With<ChunkBuild>>,
     player: Query<'w, 's, &'static Transform, With<Player>>,
 }
@@ -299,8 +283,7 @@ fn run_voxel_benchmark(
         && loaded == world.offsets.len()
         && world.pending.is_empty()
         && world.builds.is_empty()
-        && world.render_regions.is_settled()
-        && world.chunks.iter().all(|chunk| chunk.changes == 0);
+        && world.meshed.iter().all(|chunk| chunk.dirty_sections == 0);
     let delta = time.delta_secs_f64();
 
     match benchmark.phase {
@@ -343,7 +326,6 @@ fn run_voxel_benchmark(
             if benchmark.elapsed >= 20.0 {
                 let (p50, p95, p99) = diagnostics.frame_percentiles();
                 info!("voxel benchmark movement: frame_ms[p50={p50:.2} p95={p95:.2} p99={p99:.2}]");
-                diagnostics.log_region_sample("movement");
                 let displacement = world.player.iter().next().map_or(Vec3::ZERO, |transform| {
                     transform.translation - benchmark.movement_start
                 });
@@ -400,7 +382,6 @@ fn run_voxel_benchmark(
                     "voxel benchmark editing: edits={} frame_ms[p50={p50:.2} p95={p95:.2} p99={p99:.2}]",
                     benchmark.edits
                 );
-                diagnostics.log_region_sample("editing");
                 benchmark.phase = BenchmarkPhase::Done;
                 if std::env::var_os("HOLLOW_BENCH_EXIT").is_some() {
                     commands.write_message(AppExit::Success);
@@ -416,9 +397,8 @@ fn report_voxel_diagnostics(
     mut diagnostics: ResMut<VoxelDiagnostics>,
     chunks: Query<&ChunkVoxels, With<VoxelChunk>>,
     builds: Query<(), With<ChunkBuild>>,
-    rendered_regions: Query<(), With<VoxelRenderRegion>>,
+    sections: Query<&ChunkSections>,
     pending: Res<PendingChunks>,
-    render_regions: Res<RenderRegions>,
 ) {
     diagnostics.elapsed += time.delta_secs_f64();
     if diagnostics.elapsed < 5.0 {
@@ -429,7 +409,7 @@ fn report_voxel_diagnostics(
     let loaded = chunks.iter().count();
     let building = builds.iter().count();
     let modified = chunks.iter().filter(|chunk| chunk.modified).count();
-    let dirty_chunks = chunks.iter().filter(|chunk| chunk.changes != 0).count();
+    let dirty_chunks = chunks.iter().filter(|chunk| chunk.dirty_sections != 0).count();
     let queued = dirty_chunks.saturating_sub(building);
     let ready = loaded.saturating_sub(dirty_chunks);
     let frames: Vec<_> = diagnostics.frames_ms.iter().copied().collect();
@@ -443,16 +423,9 @@ fn report_voxel_diagnostics(
         .unwrap_or(0);
 
     info!(
-        "voxel region merges: pending={} merge_ms[p50={:.2} p95={:.2}]",
-        render_regions.pending_len(),
-        percentile(&diagnostics.region_ms, 0.50),
-        percentile(&diagnostics.region_ms, 0.95)
-    );
-    info!(
-        "voxel: loaded={loaded} ready={ready} pending={} building={building} queued={queued} render_regions={} dirty_regions={} modified={modified} frame_ms[p50={:.2} p95={:.2} p99={:.2}] generation_ms[p50={:.2} p95={:.2}] meshing_ms[p50={:.2} p95={:.2}] collider_ms[p50={:.2} p95={:.2}] generated={} built={} avg_vertices={} avg_triangles={}",
+        "voxel: loaded={loaded} ready={ready} pending={} building={building} queued={queued} section_meshes={} modified={modified} frame_ms[p50={:.2} p95={:.2} p99={:.2}] generation_ms[p50={:.2} p95={:.2}] meshing_ms[p50={:.2} p95={:.2}] collider_ms[p50={:.2} p95={:.2}] generated={} built={} avg_vertices={} avg_triangles={}",
         pending.len(),
-        rendered_regions.iter().count(),
-        render_regions.dirty_len(),
+        sections.iter().map(ChunkSections::mesh_count).sum::<usize>(),
         percentile(&frames, 0.50),
         percentile(&frames, 0.95),
         percentile(&frames, 0.99),
@@ -471,7 +444,6 @@ fn report_voxel_diagnostics(
     diagnostics.generation_ms.clear();
     diagnostics.meshing_ms.clear();
     diagnostics.collider_ms.clear();
-    diagnostics.region_ms.clear();
 }
 
 fn percentile(samples: &[f64], percentile: f64) -> f64 {

@@ -1,19 +1,45 @@
 use super::{ChunkVoxels, VoxelKind, VoxelSettings};
 use bevy::prelude::*;
-use pumpkin_worldgen::{BlockInfo, World, block_info};
+use pumpkin_worldgen::{BlockInfo, GeneratedChunk, World, block_info};
 use std::{
-    collections::{HashSet, VecDeque},
-    sync::{Arc, Mutex, OnceLock},
+    collections::HashSet,
+    sync::{Arc, OnceLock},
 };
 
 pub(crate) const MIN_Y: i32 = -64;
 const HEIGHT: usize = 384;
-const CACHE_SIZE: usize = 64;
-type ChunkCache = VecDeque<(IVec2, Arc<ChunkSource>)>;
 struct ChunkSource {
     cells: Vec<VoxelKind>,
     states: Arc<[u16]>,
     light: Arc<[u8]>,
+}
+impl ChunkSource {
+    fn new(generated: &GeneratedChunk) -> Self {
+        let kinds = kinds();
+        Self {
+            cells: generated
+                .block_states()
+                .iter()
+                .map(|&state| kinds[state as usize])
+                .collect(),
+            states: generated.block_states().into(),
+            light: generated
+                .light()
+                .expect("full worldgen includes lighting")
+                .into(),
+        }
+    }
+
+    fn into_voxels(self, settings: &VoxelSettings) -> ChunkVoxels {
+        assert_eq!(settings.chunk_size, 16, "worldgen requires 16x16 chunks");
+        assert!((1..=384).contains(&settings.max_height));
+        let cells = (256 * settings.max_height) as usize;
+        let mut voxels = self.cells;
+        voxels.truncate(cells);
+        let light = self.light[..cells].into();
+        let states = self.states[..cells].into();
+        ChunkVoxels::generated(16, settings.max_height, voxels).with_lighting(states, light)
+    }
 }
 impl std::ops::Deref for ChunkSource {
     type Target = Vec<VoxelKind>;
@@ -44,26 +70,15 @@ pub(crate) fn native_state(kind: VoxelKind) -> u16 {
 }
 
 /// Vanilla chunks from `pumpkin-worldgen` (terrain, caves, ores, trees, structures).
+///
+/// Streaming keeps Pumpkin's chunk system loaded around the viewer with one ticket,
+/// so chunks sharing generation neighbors never regenerate or reload them.
 #[derive(Resource, Clone)]
 pub(crate) struct WorldGenerator {
     world: Arc<OnceLock<World>>,
     seed: u32,
-    shared_chunks: Arc<Mutex<ChunkCache>>,
 }
 
-fn cached<T>(cache: &mut VecDeque<(IVec2, Arc<T>)>, key: IVec2) -> Option<Arc<T>> {
-    let index = cache.iter().position(|(position, _)| *position == key)?;
-    let entry = cache.remove(index).unwrap();
-    let result = entry.1.clone();
-    cache.push_back(entry);
-    Some(result)
-}
-fn insert<T>(cache: &mut VecDeque<(IVec2, Arc<T>)>, key: IVec2, value: Arc<T>, limit: usize) {
-    cache.push_back((key, value));
-    if cache.len() > limit {
-        cache.pop_front();
-    }
-}
 /// Same Y-major layout as `GeneratedChunk::block_states`.
 fn index(x: usize, y: usize, z: usize) -> usize {
     x + 16 * (z + 16 * y)
@@ -97,7 +112,6 @@ impl WorldGenerator {
         Self {
             world: default(),
             seed,
-            shared_chunks: default(),
         }
     }
 
@@ -105,30 +119,45 @@ impl WorldGenerator {
         self.world.get_or_init(|| World::new(i64::from(self.seed)))
     }
 
-    fn chunk(&self, position: IVec2) -> Arc<ChunkSource> {
-        if let Some(chunk) = cached(&mut self.shared_chunks.lock().unwrap(), position) {
-            return chunk;
+    /// Keeps every chunk within `radius` of `center` generated (square area).
+    pub(crate) fn set_view(&self, center: IVec2, radius: u32) {
+        let radius = radius.min(u32::from(u8::MAX)) as u8;
+        self.world().set_view(center.x, center.y, radius);
+    }
+
+    pub(crate) fn clear_view(&self) {
+        if let Some(world) = self.world.get() {
+            world.clear_view();
         }
-        let kinds = kinds();
-        let generated = self.world().generate_chunk(position.x, position.y);
-        let chunk = Arc::new(ChunkSource {
-            cells: generated
-                .block_states()
-                .iter()
-                .map(|&state| kinds[state as usize])
-                .collect(),
-            states: generated.block_states().into(),
-            light: generated
-                .light()
-                .expect("full worldgen includes lighting")
-                .into(),
-        });
-        let mut shared = self.shared_chunks.lock().unwrap();
-        if let Some(existing) = cached(&mut shared, position) {
-            return existing;
-        }
-        insert(&mut shared, position, chunk.clone(), CACHE_SIZE);
-        chunk
+    }
+
+    /// Chunks finished since the last call.
+    pub(crate) fn finished_chunks(&self) -> impl Iterator<Item = IVec2> + '_ {
+        self.world()
+            .finished_chunks()
+            .map(|(x, z)| IVec2::new(x, z))
+    }
+
+    pub(crate) fn is_loaded(&self, position: IVec2) -> bool {
+        self.world().is_loaded(position.x, position.y)
+    }
+
+    /// Converts a chunk Pumpkin already holds; `None` once it was unloaded.
+    pub(crate) fn loaded_chunk(
+        &self,
+        position: IVec2,
+        settings: &VoxelSettings,
+    ) -> Option<ChunkVoxels> {
+        let generated = self.world().loaded_chunk(position.x, position.y)?;
+        Some(ChunkSource::new(&generated).into_voxels(settings))
+    }
+
+    fn chunk(&self, position: IVec2) -> ChunkSource {
+        let world = self.world();
+        let generated = world
+            .loaded_chunk(position.x, position.y)
+            .unwrap_or_else(|| world.generate_chunk(position.x, position.y));
+        ChunkSource::new(&generated)
     }
 
     pub(crate) fn spawn_position(&self) -> Vec3 {
@@ -155,7 +184,7 @@ impl WorldGenerator {
                     if (ground as i32) < 63 - MIN_Y || !terrain(index(8, ground, 8)).is_solid() {
                         continue;
                     }
-                    // Trees only exist in the full chunk; it stays cached for streaming.
+                    // Trees only exist in the full chunk.
                     let cells = self.chunk(IVec2::new(dx, dz));
                     let surface = top(&|i| cells[i]).unwrap_or(ground);
                     if surface + 2 >= HEIGHT {
@@ -173,47 +202,13 @@ impl WorldGenerator {
     }
 }
 
+/// Blocks until the chunk exists; streaming uses [`WorldGenerator::loaded_chunk`] instead.
 pub(crate) fn generate_chunk(
     position: IVec2,
     settings: &VoxelSettings,
     generator: &WorldGenerator,
 ) -> ChunkVoxels {
-    assert_eq!(settings.chunk_size, 16, "worldgen requires 16x16 chunks");
-    assert!((1..=384).contains(&settings.max_height));
-    let center = generator.chunk(position);
-    // Do not generate four extra chunks before showing the first one.
-    // Existing samples are reused; streaming fills both borders as neighbors arrive.
-    let neighbors = [IVec2::NEG_X, IVec2::X, IVec2::NEG_Y, IVec2::Y].map(|direction| {
-        cached(
-            &mut generator.shared_chunks.lock().unwrap(),
-            position + direction,
-        )
-    });
-    let mut halo = Vec::with_capacity((64 * settings.max_height) as usize);
-    for y in 0..settings.max_height as usize {
-        for (side, neighbor) in neighbors.iter().enumerate() {
-            for offset in 0..16 {
-                let (x, z) = match side {
-                    0 => (15, offset),
-                    1 => (0, offset),
-                    2 => (offset, 15),
-                    _ => (offset, 0),
-                };
-                halo.push(
-                    neighbor
-                        .as_ref()
-                        .map_or(VoxelKind::Air, |cells| cells[index(x, y, z)]),
-                );
-            }
-        }
-    }
-    ChunkVoxels::generated(
-        16,
-        settings.max_height,
-        center[..(256 * settings.max_height) as usize].to_vec(),
-        halo,
-    )
-    .with_lighting(center.states.clone(), center.light.clone())
+    generator.chunk(position).into_voxels(settings)
 }
 
 fn map_info(info: BlockInfo) -> VoxelKind {
@@ -363,27 +358,5 @@ mod tests {
                     | VoxelKind::DiamondOre
             )
         }));
-    }
-
-    #[test]
-    fn generated_halo_matches_neighbor_and_negative_coordinates() {
-        let settings = VoxelSettings::default();
-        let generator = WorldGenerator::new(settings.seed);
-        generator.chunk(IVec2::new(-1, 0));
-        generator.chunk(IVec2::ZERO);
-        let left = generate_chunk(IVec2::new(-1, 0), &settings, &generator);
-        let right = generate_chunk(IVec2::ZERO, &settings, &generator);
-        for y in 0..settings.max_height {
-            for z in 0..16 {
-                assert_eq!(
-                    left.sample(IVec3::new(16, y, z)),
-                    right.sample(IVec3::new(0, y, z))
-                );
-                assert_eq!(
-                    right.sample(IVec3::new(-1, y, z)),
-                    left.sample(IVec3::new(15, y, z))
-                );
-            }
-        }
     }
 }

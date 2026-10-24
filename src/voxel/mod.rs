@@ -6,7 +6,6 @@ mod lighting;
 mod material;
 mod meshing;
 mod rebuild;
-mod regions;
 mod streaming;
 use crate::{game::GameState, settings::GraphicsSettings};
 use bevy::{
@@ -23,13 +22,13 @@ pub(crate) use material::{TexturePack, VoxelMaterial};
 pub(crate) use meshing::build_block_item_mesh;
 pub(crate) use rebuild::VoxelAssets;
 use rebuild::{
-    apply_texture_pack, cleanup_removed_chunk, mark_changed_chunks, poll_builds, prepare_assets,
-    set_voxel, start_changed_builds,
+    apply_texture_pack, cleanup_removed_chunk, mark_changed_chunks, poll_builds,
+    poll_chunk_colliders, prepare_assets, request_chunk_colliders, set_voxel,
+    start_changed_builds,
 };
-use regions::{RenderRegions, rebuild_render_regions};
 use streaming::{
     ChunkIndex, PendingChunks, StoredChunks, StreamOffsets, StreamState, poll_chunk_generations,
-    stream_chunks, sync_spawned_halos,
+    refresh_neighbors_of_spawned, release_ready_chunks, stream_chunks,
 };
 
 #[derive(SystemParam)]
@@ -108,7 +107,6 @@ impl Plugin for VoxelPlugin {
         .init_resource::<ChunkIndex>()
         .init_resource::<StoredChunks>()
         .init_resource::<PendingChunks>()
-        .init_resource::<RenderRegions>()
         .init_resource::<StreamState>()
         .init_resource::<lighting::LightingState>()
         .add_observer(apply_view_distance)
@@ -121,13 +119,14 @@ impl Plugin for VoxelPlugin {
             PostUpdate,
             (
                 poll_chunk_generations,
-                sync_spawned_halos,
-                lighting::initialize_light_borders,
+                refresh_neighbors_of_spawned,
+                release_ready_chunks,
                 lighting::update_lighting,
                 mark_changed_chunks,
                 start_changed_builds,
                 poll_builds,
-                rebuild_render_regions,
+                request_chunk_colliders,
+                poll_chunk_colliders,
             )
                 .chain()
                 .before(bevy::transform::TransformSystems::Propagate)
@@ -151,7 +150,7 @@ fn apply_view_distance(
     mut state: ResMut<StreamState>,
 ) {
     let view_distance = settings.effective_view_distance();
-    if offsets.radius == view_distance {
+    if offsets.render_radius == view_distance {
         return;
     }
     *offsets = StreamOffsets::new(view_distance);
@@ -206,6 +205,7 @@ fn update_underwater_effect(
 
 fn cleanup_voxel_world(
     mut commands: Commands,
+    generator: Res<WorldGenerator>,
     chunks: Query<Entity, With<VoxelChunk>>,
     generations: Query<Entity, With<streaming::ChunkGeneration>>,
 ) {
@@ -215,6 +215,8 @@ fn cleanup_voxel_world(
     for entity in &generations {
         commands.entity(entity).despawn();
     }
+    // Let Pumpkin unload the area; the next session sets its own view.
+    generator.clear_view();
     // Despawn observers write back into these resources, so reset them afterwards.
     commands.queue(|world: &mut World| {
         world.resource_mut::<ChunkIndex>().clear();
@@ -229,9 +231,6 @@ fn cleanup_voxel_world(
                 .detach();
         }
         world.init_resource::<lighting::LightingState>();
-        world.resource_scope(|world, mut regions: Mut<RenderRegions>| {
-            regions.clear(&mut world.commands());
-        });
         *world.resource_mut::<StreamState>() = StreamState::default();
     });
 }
@@ -253,7 +252,7 @@ impl Default for VoxelSettings {
             base_height: 127.0,
             max_height: 384,
             seed: 42,
-            spawn_budget_per_frame: 4,
+            spawn_budget_per_frame: 16,
             despawn_budget_per_frame: 8,
         }
     }

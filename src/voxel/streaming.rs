@@ -1,37 +1,20 @@
 use super::{
     ChunkVoxels, VoxelChunk, VoxelSettings, VoxelViewer,
-    generation::{WorldGenerator, generate_chunk},
+    generation::WorldGenerator,
+    rebuild::{ChunkSections, NeedsChunkBuild, neighbor_slot},
 };
 use crate::{game::GameState, spatial::GameLayer};
 use avian3d::prelude::*;
 use bevy::{
     platform::collections::{HashMap, hash_map::Entry},
     prelude::*,
-    tasks::{Task, TaskPool, TaskPoolBuilder, futures::check_ready},
+    tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
 #[cfg(feature = "dev")]
 use std::time::{Duration, Instant};
 
-const CHUNK_DIRECTIONS: [IVec2; 4] = [IVec2::NEG_X, IVec2::X, IVec2::NEG_Y, IVec2::Y];
-/// Worldgen threads: every core but the main and render threads.
-fn generation_threads() -> usize {
-    std::thread::available_parallelism()
-        .map_or(2, |cores| cores.get().saturating_sub(2))
-        .max(2)
-}
-
-fn generation_pool() -> &'static TaskPool {
-    static POOL: std::sync::OnceLock<TaskPool> = std::sync::OnceLock::new();
-    POOL.get_or_init(|| {
-        TaskPoolBuilder::new()
-            .num_threads(generation_threads())
-            .thread_name("voxel-generation".into())
-            .build()
-    })
-}
-type AddedChunks<'w, 's> =
-    Query<'w, 's, (Entity, &'static VoxelChunk, &'static ChunkVoxels), Added<ChunkVoxels>>;
-type MutableChunks<'w, 's> = Query<'w, 's, &'static mut ChunkVoxels>;
+/// Copies of finished Pumpkin chunks in flight; Pumpkin itself does the generation.
+const MAX_PENDING_COPIES: usize = 16;
 
 #[derive(Resource, Default, Deref, DerefMut)]
 pub(crate) struct ChunkIndex(HashMap<IVec2, Entity>);
@@ -43,8 +26,14 @@ pub(crate) struct PendingChunks(HashMap<IVec2, Entity>);
 #[derive(Component)]
 pub(crate) struct ChunkGeneration {
     position: IVec2,
-    task: Task<GeneratedChunk>,
+    task: Task<Option<GeneratedChunk>>,
 }
+
+/// A spawned chunk that is not meshed until its four neighbors have filled its halo,
+/// so it is meshed once instead of once per arriving neighbor.
+#[derive(Component)]
+#[component(storage = "SparseSet")]
+pub(crate) struct AwaitingNeighbors;
 
 struct GeneratedChunk {
     voxels: ChunkVoxels,
@@ -52,16 +41,22 @@ struct GeneratedChunk {
     elapsed: Duration,
 }
 
+/// Chunks kept loaded around the viewer, nearest first.
+///
+/// Data extends one ring past the render radius so every rendered chunk can be
+/// meshed once with all its neighbors present.
 #[derive(Resource, Deref)]
 pub(crate) struct StreamOffsets {
+    /// Loading radius: the render radius plus one ring of data-only chunks.
     pub radius: u32,
+    pub render_radius: u32,
     #[deref]
     offsets: Vec<IVec2>,
 }
 
 impl StreamOffsets {
-    pub(crate) fn new(radius: u32) -> Self {
-        let radius = radius as i32;
+    pub(crate) fn new(render_radius: u32) -> Self {
+        let radius = render_radius as i32 + 1;
         let mut offsets: Vec<_> = (-radius..=radius)
             .flat_map(|x| (-radius..=radius).map(move |z| IVec2::new(x, z)))
             .filter(|offset| offset.length_squared() <= radius * radius)
@@ -69,6 +64,7 @@ impl StreamOffsets {
         offsets.sort_unstable_by_key(|offset| offset.length_squared());
         Self {
             radius: radius as u32,
+            render_radius,
             offsets,
         }
     }
@@ -112,6 +108,18 @@ pub(crate) fn stream_chunks(
         });
         state.center = Some(center);
         state.cursor = 0;
+        generator.set_view(center, offsets.radius);
+    }
+
+    // Newly finished chunks may fill positions the cursor already skipped.
+    let radius_squared = (offsets.radius * offsets.radius) as i32;
+    if generator
+        .finished_chunks()
+        .fold(false, |any, position| {
+            any | (position.distance_squared(center) <= radius_squared)
+        })
+    {
+        state.cursor = 0;
     }
 
     for _ in 0..settings.despawn_budget_per_frame {
@@ -123,29 +131,28 @@ pub(crate) fn stream_chunks(
 
     let mut spawned = 0;
     while spawned < settings.spawn_budget_per_frame
-        // Two queued chunks per thread keep workers busy without hoarding stale requests.
-        && pending.len() < 2 * generation_threads()
+        && pending.len() < MAX_PENDING_COPIES
         && state.cursor < offsets.len()
     {
         let position = center + offsets[state.cursor];
-        state.cursor += 1;
         if index.contains_key(&position) || pending.contains_key(&position) {
+            state.cursor += 1;
             continue;
         }
         if let Some(voxels) = stored.remove(&position) {
             spawn_chunk(&mut commands, &settings, &mut index, position, voxels);
-        } else {
+        } else if generator.is_loaded(position) {
             let settings = settings.clone();
             let generator = generator.clone();
-            let task = generation_pool().spawn(async move {
+            let task = AsyncComputeTaskPool::get().spawn(async move {
                 #[cfg(feature = "dev")]
                 let started = Instant::now();
-                let voxels = generate_chunk(position, &settings, &generator);
-                GeneratedChunk {
+                let voxels = generator.loaded_chunk(position, &settings)?;
+                Some(GeneratedChunk {
                     voxels,
                     #[cfg(feature = "dev")]
                     elapsed: started.elapsed(),
-                }
+                })
             });
             let entity = commands
                 .spawn((
@@ -154,7 +161,12 @@ pub(crate) fn stream_chunks(
                 ))
                 .id();
             pending.insert(position, entity);
+        } else {
+            // Still generating: its completion resets the cursor.
+            state.cursor += 1;
+            continue;
         }
+        state.cursor += 1;
         spawned += 1;
     }
 }
@@ -166,6 +178,7 @@ pub(crate) fn poll_chunk_generations(
     mut stored: ResMut<StoredChunks>,
     mut pending: ResMut<PendingChunks>,
     mut index: ResMut<ChunkIndex>,
+    mut state: ResMut<StreamState>,
     #[cfg(feature = "dev")] mut diagnostics: Option<ResMut<super::diagnostics::VoxelDiagnostics>>,
 ) {
     let mut completed = 0;
@@ -176,13 +189,18 @@ pub(crate) fn poll_chunk_generations(
         let Some(generated) = check_ready(&mut generation.task) else {
             continue;
         };
+        let position = generation.position;
+        pending.remove(&position);
+        commands.entity(task_entity).despawn();
+        let Some(generated) = generated else {
+            // Unloaded by Pumpkin before the copy: retry once it is back.
+            state.cursor = 0;
+            continue;
+        };
         #[cfg(feature = "dev")]
         if let Some(diagnostics) = diagnostics.as_deref_mut() {
             diagnostics.record_generation(generated.elapsed);
         }
-        let position = generation.position;
-        pending.remove(&position);
-        commands.entity(task_entity).despawn();
         if index.contains_key(&position) {
             continue;
         }
@@ -202,7 +220,8 @@ fn spawn_chunk(
     let Entry::Vacant(index_entry) = index.entry(position) else {
         return;
     };
-    voxels.changes = super::data::MESH_CHANGED | super::data::COLLIDER_CHANGED;
+    voxels.dirty_sections = voxels.all_sections();
+    voxels.collider_dirty = true;
     let origin = position * settings.chunk_size;
     let entity = commands
         .spawn((
@@ -219,57 +238,81 @@ fn spawn_chunk(
                 ],
             ),
             Friction::new(0.8),
+            Visibility::default(),
+            AwaitingNeighbors,
             DespawnOnExit(GameState::Game),
         ))
         .id();
     index_entry.insert(entity);
 }
 
-pub(crate) fn sync_spawned_halos(
+/// Starts the first mesh of rendered chunks once their eight neighbors are loaded
+/// (or outside the loaded area), so each is meshed once with complete borders.
+pub(crate) fn release_ready_chunks(
+    mut commands: Commands,
     index: Res<ChunkIndex>,
-    stored: Res<StoredChunks>,
-    mut chunks: ParamSet<(AddedChunks, MutableChunks)>,
+    offsets: Res<StreamOffsets>,
+    state: Res<StreamState>,
+    waiting: Query<(Entity, &VoxelChunk), With<AwaitingNeighbors>>,
 ) {
-    let spawned: Vec<_> = chunks
-        .p0()
-        .iter()
-        .map(|(entity, chunk, voxels)| (entity, chunk.position, voxels.clone()))
-        .collect();
-
-    for (entity, position, snapshot) in spawned {
-        let neighbors = CHUNK_DIRECTIONS.map(|direction| {
-            let neighbor_position = position + direction;
-            if let Some(entity) = index.get(&neighbor_position) {
-                chunks
-                    .p1()
-                    .get_mut(*entity)
-                    .ok()
-                    .map(|neighbor| (direction, Some(*entity), neighbor.clone()))
-            } else {
-                stored
-                    .get(&neighbor_position)
-                    .cloned()
-                    .map(|neighbor| (direction, None, neighbor))
-            }
-        });
-
-        if let Ok(mut voxels) = chunks.p1().get_mut(entity) {
-            for (direction, _, neighbor) in neighbors.iter().flatten() {
-                voxels.sync_halo(*direction, neighbor);
-            }
+    let Some(center) = state.center else {
+        return;
+    };
+    let render_squared = (offsets.render_radius * offsets.render_radius) as i32;
+    let loaded_squared = (offsets.radius * offsets.radius) as i32;
+    for (entity, chunk) in &waiting {
+        if chunk.position.distance_squared(center) > render_squared {
+            continue;
         }
-        {
-            for (direction, neighbor, _) in neighbors.iter().flatten() {
-                if let Some(entity) = neighbor
-                    && let Ok(mut neighbor) = chunks.p1().get_mut(*entity)
-                {
-                    let changed = neighbor
-                        .bypass_change_detection()
-                        .sync_halo(-*direction, &snapshot);
-                    if changed {
-                        neighbor.set_changed();
-                    }
-                }
+        let ready = NEIGHBOR_OFFSETS.iter().all(|&offset| {
+            let neighbor = chunk.position + offset;
+            index.contains_key(&neighbor) || neighbor.distance_squared(center) > loaded_squared
+        });
+        if ready {
+            commands
+                .entity(entity)
+                .remove::<AwaitingNeighbors>()
+                .insert(NeedsChunkBuild);
+        }
+    }
+}
+
+const NEIGHBOR_OFFSETS: [IVec2; 8] = [
+    IVec2::new(-1, -1),
+    IVec2::new(0, -1),
+    IVec2::new(1, -1),
+    IVec2::new(-1, 0),
+    IVec2::new(1, 0),
+    IVec2::new(-1, 1),
+    IVec2::new(0, 1),
+    IVec2::new(1, 1),
+];
+
+/// Remeshes chunks that were last built without a neighbor that just arrived.
+pub(crate) fn refresh_neighbors_of_spawned(
+    index: Res<ChunkIndex>,
+    mut chunks: Query<(&VoxelChunk, &mut ChunkVoxels, Option<&ChunkSections>)>,
+    mut spawned: Local<Vec<IVec2>>,
+) {
+    // One query: an `Added<ChunkVoxels>` filter would conflict with `&mut ChunkVoxels`.
+    spawned.clear();
+    spawned.extend(
+        chunks
+            .iter_mut()
+            .filter(|(_, voxels, _)| voxels.is_added())
+            .map(|(chunk, _, _)| chunk.position),
+    );
+    for &position in spawned.iter() {
+        for offset in NEIGHBOR_OFFSETS {
+            let Some(&entity) = index.get(&(position + offset)) else {
+                continue;
+            };
+            let Ok((_, mut voxels, Some(sections))) = chunks.get_mut(entity) else {
+                continue;
+            };
+            if sections.missing_neighbors & (1 << neighbor_slot(-offset)) != 0 {
+                let all = voxels.all_sections();
+                voxels.mark_sections(all);
             }
         }
     }
@@ -280,63 +323,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn newly_loaded_unmodified_neighbors_fill_both_halos() {
+    fn chunks_wait_for_all_loaded_neighbors_before_meshing() {
         use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
         world.init_resource::<ChunkIndex>();
-        world.init_resource::<StoredChunks>();
-        let left = world
-            .spawn((
-                VoxelChunk {
-                    position: IVec2::new(-1, 0),
-                },
-                ChunkVoxels::generated(
-                    1,
-                    1,
-                    vec![super::super::VoxelKind::Stone],
-                    vec![super::super::VoxelKind::Air; 4],
-                ),
-            ))
-            .id();
-        world
-            .resource_mut::<ChunkIndex>()
-            .insert(IVec2::new(-1, 0), left);
-        world.run_system_once(sync_spawned_halos).unwrap();
-        world.clear_trackers();
-        let right = world
-            .spawn((
-                VoxelChunk {
-                    position: IVec2::ZERO,
-                },
-                ChunkVoxels::generated(
-                    1,
-                    1,
-                    vec![super::super::VoxelKind::Dirt],
-                    vec![super::super::VoxelKind::Air; 4],
-                ),
-            ))
-            .id();
-        world
-            .resource_mut::<ChunkIndex>()
-            .insert(IVec2::ZERO, right);
-        world.run_system_once(sync_spawned_halos).unwrap();
-        assert_eq!(
-            world.get::<ChunkVoxels>(left).unwrap().sample(IVec3::X),
-            super::super::VoxelKind::Dirt
-        );
-        assert_eq!(
-            world
-                .get::<ChunkVoxels>(right)
-                .unwrap()
-                .sample(IVec3::NEG_X),
-            super::super::VoxelKind::Stone
-        );
-        assert!(!world.get::<ChunkVoxels>(left).unwrap().modified);
+        world.insert_resource(StreamOffsets::new(2));
+        world.insert_resource(StreamState {
+            center: Some(IVec2::ZERO),
+            ..default()
+        });
+        let spawn = |world: &mut World, position: IVec2| {
+            let entity = world
+                .spawn((VoxelChunk { position }, AwaitingNeighbors))
+                .id();
+            world.resource_mut::<ChunkIndex>().insert(position, entity);
+            entity
+        };
+        let center = spawn(&mut world, IVec2::ZERO);
+        for offset in &NEIGHBOR_OFFSETS[..7] {
+            spawn(&mut world, *offset);
+        }
+        world.run_system_once(release_ready_chunks).unwrap();
+        assert!(world.get::<AwaitingNeighbors>(center).is_some());
+        spawn(&mut world, NEIGHBOR_OFFSETS[7]);
+        world.run_system_once(release_ready_chunks).unwrap();
+        assert!(world.get::<AwaitingNeighbors>(center).is_none());
+        assert!(world.get::<NeedsChunkBuild>(center).is_some());
     }
 
     #[test]
     fn stream_offsets_are_unique_nearest_first_and_inside_radius() {
-        let offsets = StreamOffsets::new(2);
+        let offsets = StreamOffsets::new(1);
+        assert_eq!(offsets.radius, 2);
         assert_eq!(offsets.len(), 13);
         assert_eq!(offsets[0], IVec2::ZERO);
         assert!(

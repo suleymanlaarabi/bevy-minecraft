@@ -34,3 +34,7 @@ opt-level = 3
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# `[patch]` only applies at the root: use worldgen's vendored, in-memory Pumpkin chunk system.
+[patch."https://github.com/Pumpkin-MC/Pumpkin.git"]
+pumpkin-world = { path = "../worldgen/vendor/pumpkin/crates/pumpkin-world" }
