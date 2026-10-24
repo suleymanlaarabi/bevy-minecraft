@@ -6,10 +6,11 @@ use super::{
 use crate::{game::GameState, spatial::GameLayer};
 use avian3d::prelude::*;
 use bevy::{
-    platform::collections::{HashMap, hash_map::Entry},
+    platform::collections::{HashMap, HashSet, hash_map::Entry},
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
+use std::{cmp::Reverse, collections::BinaryHeap};
 #[cfg(feature = "dev")]
 use std::time::{Duration, Instant};
 
@@ -73,8 +74,33 @@ impl StreamOffsets {
 #[derive(Resource, Default)]
 pub(crate) struct StreamState {
     pub center: Option<IVec2>,
-    pub cursor: usize,
     pub pending_despawns: Vec<Entity>,
+    /// Positions in the loaded area with neither an entity nor a copy in flight.
+    missing: HashSet<IVec2>,
+    /// Missing positions whose data is available, nearest first (may hold duplicates).
+    ready: BinaryHeap<Reverse<(i32, i32, i32)>>,
+}
+
+impl StreamState {
+    fn push_ready(&mut self, position: IVec2) {
+        let center = self.center.unwrap_or_default();
+        self.ready.push(Reverse((
+            position.distance_squared(center),
+            position.x,
+            position.y,
+        )));
+    }
+
+    /// A copy that found its chunk unloaded waits for Pumpkin's next completion event.
+    fn retry_later(&mut self, position: IVec2, offsets: &StreamOffsets) {
+        let radius_squared = (offsets.radius * offsets.radius) as i32;
+        if self
+            .center
+            .is_some_and(|center| position.distance_squared(center) <= radius_squared)
+        {
+            self.missing.insert(position);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -88,10 +114,11 @@ pub(crate) fn stream_chunks(
     mut pending: ResMut<PendingChunks>,
     mut index: ResMut<ChunkIndex>,
     mut state: ResMut<StreamState>,
+    sections: Query<&ChunkSections>,
 ) {
     let center = settings.chunk_at(viewer.translation());
+    let radius_squared = (offsets.radius * offsets.radius) as i32;
     if state.center != Some(center) {
-        let radius_squared = (offsets.radius * offsets.radius) as i32;
         state.pending_despawns.clear();
         state.pending_despawns.extend(
             index
@@ -107,41 +134,49 @@ pub(crate) fn stream_chunks(
             keep
         });
         state.center = Some(center);
-        state.cursor = 0;
         generator.set_view(center, offsets.radius);
+        // One pass per crossed border; later frames only react to completion events.
+        state.missing.clear();
+        state.ready.clear();
+        for &offset in offsets.iter() {
+            let position = center + offset;
+            if index.contains_key(&position) || pending.contains_key(&position) {
+                continue;
+            }
+            state.missing.insert(position);
+            if stored.contains_key(&position) || generator.is_loaded(position) {
+                state.push_ready(position);
+            }
+        }
     }
 
-    // Newly finished chunks may fill positions the cursor already skipped.
-    let radius_squared = (offsets.radius * offsets.radius) as i32;
-    if generator
-        .finished_chunks()
-        .fold(false, |any, position| {
-            any | (position.distance_squared(center) <= radius_squared)
-        })
-    {
-        state.cursor = 0;
+    for position in generator.finished_chunks() {
+        if state.missing.contains(&position) {
+            state.push_ready(position);
+        }
     }
 
-    for _ in 0..settings.despawn_budget_per_frame {
+    let mut despawned = 0;
+    while despawned < settings.despawn_budget_per_frame {
         let Some(entity) = state.pending_despawns.pop() else {
             break;
         };
+        despawned += sections.get(entity).map_or(1, ChunkSections::mesh_count).max(1);
         commands.entity(entity).despawn();
     }
 
     let mut spawned = 0;
-    while spawned < settings.spawn_budget_per_frame
-        && pending.len() < MAX_PENDING_COPIES
-        && state.cursor < offsets.len()
-    {
-        let position = center + offsets[state.cursor];
-        if index.contains_key(&position) || pending.contains_key(&position) {
-            state.cursor += 1;
+    while spawned < settings.spawn_budget_per_frame && pending.len() < MAX_PENDING_COPIES {
+        let Some(Reverse((_, x, z))) = state.ready.pop() else {
+            break;
+        };
+        let position = IVec2::new(x, z);
+        if !state.missing.remove(&position) {
             continue;
         }
         if let Some(voxels) = stored.remove(&position) {
             spawn_chunk(&mut commands, &settings, &mut index, position, voxels);
-        } else if generator.is_loaded(position) {
+        } else {
             let settings = settings.clone();
             let generator = generator.clone();
             let task = AsyncComputeTaskPool::get().spawn(async move {
@@ -161,12 +196,7 @@ pub(crate) fn stream_chunks(
                 ))
                 .id();
             pending.insert(position, entity);
-        } else {
-            // Still generating: its completion resets the cursor.
-            state.cursor += 1;
-            continue;
         }
-        state.cursor += 1;
         spawned += 1;
     }
 }
@@ -179,6 +209,7 @@ pub(crate) fn poll_chunk_generations(
     mut pending: ResMut<PendingChunks>,
     mut index: ResMut<ChunkIndex>,
     mut state: ResMut<StreamState>,
+    offsets: Res<StreamOffsets>,
     #[cfg(feature = "dev")] mut diagnostics: Option<ResMut<super::diagnostics::VoxelDiagnostics>>,
 ) {
     let mut completed = 0;
@@ -194,7 +225,7 @@ pub(crate) fn poll_chunk_generations(
         commands.entity(task_entity).despawn();
         let Some(generated) = generated else {
             // Unloaded by Pumpkin before the copy: retry once it is back.
-            state.cursor = 0;
+            state.retry_later(position, &offsets);
             continue;
         };
         #[cfg(feature = "dev")]
@@ -228,7 +259,6 @@ fn spawn_chunk(
             VoxelChunk { position },
             voxels,
             Transform::from_xyz(origin.x as f32, 0.0, origin.y as f32),
-            RigidBody::Static,
             CollisionLayers::new(
                 GameLayer::World,
                 [

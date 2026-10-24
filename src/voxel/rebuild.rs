@@ -92,7 +92,6 @@ pub(crate) struct ChunkSections {
 }
 
 impl ChunkSections {
-    #[cfg(feature = "dev")]
     pub(crate) fn mesh_count(&self) -> usize {
         self.terrain.iter().chain(&self.water).flatten().count()
     }
@@ -108,6 +107,7 @@ struct BuiltSection {
 
 struct BuildOutput {
     sections: Vec<BuiltSection>,
+    bytes: usize,
     missing_neighbors: u16,
     #[cfg(feature = "dev")]
     meshing_elapsed: Duration,
@@ -129,7 +129,18 @@ pub(crate) struct ColliderBuild {
 
 /// Concurrent mesh tasks: enough to fill the compute pool without hoarding stale work.
 fn max_pending_builds() -> usize {
-    2 * bevy::tasks::available_parallelism().max(2)
+    2 * AsyncComputeTaskPool::get().thread_num().max(1)
+}
+
+/// Mesh bytes handed to the GPU per frame by streaming; edits are never delayed.
+/// Spreads the upload of newly visible terrain over several frames.
+const UPLOAD_BUDGET_BYTES: usize = 2 << 20;
+/// Section meshes applied per frame by streaming: each one is an asset to prepare
+/// and often an entity for the render world to extract and specialize.
+const UPLOAD_BUDGET_SECTIONS: usize = 64;
+
+fn mesh_bytes(mesh: &Mesh) -> usize {
+    mesh.get_vertex_buffer_size() + mesh.indices().map_or(0, |indices| indices.len() * 4)
 }
 
 /// Squared distance to the viewer, with coordinates as a deterministic tie-break.
@@ -340,9 +351,15 @@ fn spawn_chunk_build(
                 terrain: section.terrain.map(|geometry| geometry.into_mesh()),
                 water: section.water.map(|geometry| geometry.into_mesh()),
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let bytes = sections
+            .iter()
+            .flat_map(|section| section.terrain.iter().chain(&section.water))
+            .map(mesh_bytes)
+            .sum();
         BuildOutput {
             sections,
+            bytes,
             missing_neighbors: neighborhood.missing_neighbors(),
             #[cfg(feature = "dev")]
             meshing_elapsed: meshing_started.elapsed(),
@@ -356,7 +373,6 @@ fn spawn_chunk_build(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn poll_builds(
     mut commands: Commands,
-    settings: Res<VoxelSettings>,
     assets: Option<Res<VoxelAssets>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut chunks: Query<(
@@ -368,15 +384,19 @@ pub(crate) fn poll_builds(
     )>,
     #[cfg(feature = "dev")] mut diagnostics: Option<ResMut<super::diagnostics::VoxelDiagnostics>>,
 ) {
-    let mut completed = 0;
+    let (mut uploaded, mut meshes_applied) = (0, 0);
     for (entity, mut voxels, mut build, sections, edited) in &mut chunks {
-        if completed >= settings.spawn_budget_per_frame && !edited {
+        // Finished builds wait in their task until a later frame has budget.
+        if !edited
+            && (uploaded >= UPLOAD_BUDGET_BYTES || meshes_applied >= UPLOAD_BUDGET_SECTIONS)
+        {
             continue;
         }
         let Some(output) = check_ready(&mut build.task) else {
             continue;
         };
-        completed += 1;
+        uploaded += output.bytes;
+        meshes_applied += output.sections.len();
         commands.entity(entity).remove::<ChunkBuild>();
         if build.revision != voxels.revision {
             // Changed while meshing: its dirty sections stay queued for a retry.
@@ -506,7 +526,7 @@ pub(crate) fn request_chunk_colliders(
         if !keep.contains(&chunk.position) {
             commands
                 .entity(entity)
-                .try_remove::<(Collider, ColliderBuild)>();
+                .try_remove::<(Collider, RigidBody, ColliderBuild)>();
         }
     }
     let pool = AsyncComputeTaskPool::get();
@@ -531,23 +551,45 @@ pub(crate) fn request_chunk_colliders(
     }
 }
 
+/// New colliders applied per frame away from the viewer: the rest wait in their task.
+const COLLIDERS_PER_FRAME: usize = 1;
+
 pub(crate) fn poll_chunk_colliders(
     mut commands: Commands,
-    mut chunks: Query<(Entity, &mut ChunkVoxels, &mut ColliderBuild)>,
+    settings: Res<VoxelSettings>,
+    viewer: Option<Single<&GlobalTransform, With<VoxelViewer>>>,
+    mut chunks: Query<(
+        Entity,
+        &VoxelChunk,
+        &mut ChunkVoxels,
+        &mut ColliderBuild,
+        Has<Collider>,
+    )>,
 ) {
-    for (entity, mut voxels, mut build) in &mut chunks {
+    let viewer_chunk = viewer.map(|viewer| settings.chunk_at(viewer.translation()));
+    let mut applied = 0;
+    for (entity, chunk, mut voxels, mut build, has_collider) in &mut chunks {
+        // Edited colliders and the viewer's own chunk never wait: something may stand on them.
+        let urgent = has_collider || viewer_chunk == Some(chunk.position);
+        if !urgent && applied >= COLLIDERS_PER_FRAME {
+            continue;
+        }
         let Some(collider) = check_ready(&mut build.task) else {
             continue;
         };
+        if !urgent {
+            applied += 1;
+        }
         let mut entity_commands = commands.entity(entity);
         entity_commands.remove::<ColliderBuild>();
         if build.content_revision != voxels.content_revision {
             continue;
         }
         voxels.bypass_change_detection().collider_dirty = false;
+        // Only chunks with a collider are (static) bodies: avian skips the rest.
         match collider {
-            Some(collider) => entity_commands.try_insert(collider),
-            None => entity_commands.try_remove::<Collider>(),
+            Some(collider) => entity_commands.try_insert((RigidBody::Static, collider)),
+            None => entity_commands.try_remove::<(Collider, RigidBody)>(),
         };
     }
 }

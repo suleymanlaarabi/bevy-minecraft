@@ -29,6 +29,21 @@ fn main() {
     let mut app = App::new();
     let headless = cfg!(feature = "dev") && std::env::var_os("HOLLOW_BENCH_HEADLESS").is_some();
     let mut plugins = DefaultPlugins
+        .set(TaskPoolPlugin {
+            task_pool_options: TaskPoolOptions {
+                // Chunk meshing runs here; Bevy's default caps it at 4 threads.
+                // Meshing and colliders run here; the rest of the cores stay free for
+                // the main and render threads and Pumpkin's generation threads.
+                async_compute: bevy::app::TaskPoolThreadAssignmentPolicy {
+                    min_threads: 2,
+                    max_threads: 6,
+                    percent: 0.25,
+                    on_thread_spawn: None,
+                    on_thread_destroy: None,
+                },
+                ..default()
+            },
+        })
         .set(AssetPlugin {
             file_path: asset_directory().to_string_lossy().into_owned(),
             ..default()
@@ -130,3 +145,4 @@ fn handle_escape(
         next_game_state.set(GameState::Menu);
     }
 }
+

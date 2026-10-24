@@ -252,8 +252,9 @@ impl Default for VoxelSettings {
             base_height: 127.0,
             max_height: 384,
             seed: 42,
-            spawn_budget_per_frame: 16,
-            despawn_budget_per_frame: 8,
+            spawn_budget_per_frame: 8,
+            // Counted in section meshes: despawning a chunk frees all of them.
+            despawn_budget_per_frame: 96,
         }
     }
 }

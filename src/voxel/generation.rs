@@ -3,7 +3,7 @@ use bevy::prelude::*;
 use pumpkin_worldgen::{BlockInfo, GeneratedChunk, World, block_info};
 use std::{
     collections::HashSet,
-    sync::{Arc, OnceLock},
+    sync::{Arc, OnceLock, mpsc},
 };
 
 pub(crate) const MIN_Y: i32 = -64;
@@ -77,6 +77,32 @@ pub(crate) fn native_state(kind: VoxelKind) -> u16 {
 pub(crate) struct WorldGenerator {
     world: Arc<OnceLock<World>>,
     seed: u32,
+    /// View changes go to a dedicated thread: retargeting Pumpkin's tickets recomputes
+    /// thousands of chunk levels under a lock its scheduler also takes.
+    views: mpsc::Sender<Option<(IVec2, u8)>>,
+}
+
+fn init_world(world: &OnceLock<World>, seed: u32) -> &World {
+    world.get_or_init(|| World::new(i64::from(seed)))
+}
+
+/// Applies the latest requested view; older pending ones are skipped.
+fn run_view_thread(
+    world: Arc<OnceLock<World>>,
+    seed: u32,
+    views: mpsc::Receiver<Option<(IVec2, u8)>>,
+) {
+    while let Ok(mut view) = views.recv() {
+        view = views.try_iter().last().unwrap_or(view);
+        match view {
+            Some((center, radius)) => init_world(&world, seed).set_view(center.x, center.y, radius),
+            None => {
+                if let Some(world) = world.get() {
+                    world.clear_view();
+                }
+            }
+        }
+    }
 }
 
 /// Same Y-major layout as `GeneratedChunk::block_states`.
@@ -109,26 +135,28 @@ fn kinds() -> &'static [VoxelKind] {
 
 impl WorldGenerator {
     pub(crate) fn new(seed: u32) -> Self {
-        Self {
-            world: default(),
-            seed,
-        }
+        let world = Arc::<OnceLock<World>>::default();
+        let (views, receiver) = mpsc::channel();
+        let thread_world = world.clone();
+        std::thread::Builder::new()
+            .name("worldgen view".into())
+            .spawn(move || run_view_thread(thread_world, seed, receiver))
+            .expect("spawn worldgen view thread");
+        Self { world, seed, views }
     }
 
     fn world(&self) -> &World {
-        self.world.get_or_init(|| World::new(i64::from(self.seed)))
+        init_world(&self.world, self.seed)
     }
 
-    /// Keeps every chunk within `radius` of `center` generated (square area).
+    /// Keeps every chunk within `radius` of `center` generated (square area), without blocking.
     pub(crate) fn set_view(&self, center: IVec2, radius: u32) {
         let radius = radius.min(u32::from(u8::MAX)) as u8;
-        self.world().set_view(center.x, center.y, radius);
+        let _ = self.views.send(Some((center, radius)));
     }
 
     pub(crate) fn clear_view(&self) {
-        if let Some(world) = self.world.get() {
-            world.clear_view();
-        }
+        let _ = self.views.send(None);
     }
 
     /// Chunks finished since the last call.
