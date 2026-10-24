@@ -183,14 +183,15 @@ fn update_underwater_effect(
         ambient.brightness = 400.0;
         clear_color.0 = Color::srgb_u8(210, 80, 10);
     } else if liquid.is_some() {
-        fog.color = Color::srgb_u8(18, 72, 98);
+        // A darkened vanilla water tint (#3F76E4).
+        fog.color = Color::srgb_u8(24, 62, 138);
         fog.falloff = FogFalloff::Linear {
             start: 2.0,
-            end: 35.0,
+            end: 40.0,
         };
-        ambient.color = Color::srgb_u8(80, 145, 170);
-        ambient.brightness = 260.0;
-        clear_color.0 = Color::srgb_u8(18, 72, 98);
+        ambient.color = Color::srgb_u8(95, 140, 215);
+        ambient.brightness = 280.0;
+        clear_color.0 = Color::srgb_u8(24, 62, 138);
     } else {
         fog.color = Color::srgb_u8(195, 222, 255);
         fog.falloff = FogFalloff::Linear {

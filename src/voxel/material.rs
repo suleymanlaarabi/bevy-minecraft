@@ -240,35 +240,61 @@ pub(crate) struct VoxelMaterial {
 
 #[derive(Clone, Copy, Debug, Reflect, ShaderType)]
 pub(crate) struct WaterSettings {
-    /// Two normalized XZ wave directions packed as XY and ZW.
-    directions: Vec4,
-    /// Spatial frequencies packed as XY and animation speeds packed as ZW.
-    frequency_speed: Vec4,
-    /// Wave slopes packed as XY. ZW are reserved for future tuning.
-    strength: Vec4,
+    /// Linear water tint in RGB.
+    tint: Vec4,
+    /// Linear sky color reflected at grazing angles in RGB, maximum reflection in A.
+    sky_color: Vec4,
+    /// Opacity of shallow water, deep water, the underside and grazing views.
+    alpha: Vec4,
+    /// Flipbook frame count in X (0 without a texture) and frames per second in Y.
+    animation: Vec4,
 }
 
 impl Default for WaterSettings {
     fn default() -> Self {
-        let first_direction = Vec2::new(0.8, 0.6).normalize();
-        let second_direction = Vec2::new(-0.45, 0.89).normalize();
         Self {
-            directions: Vec4::new(
-                first_direction.x,
-                first_direction.y,
-                second_direction.x,
-                second_direction.y,
-            ),
-            frequency_speed: Vec4::new(0.32, 0.57, 0.75, -0.48),
-            strength: Vec4::new(0.10, 0.055, 0.0, 0.0),
+            // Vanilla's default biome water color, #3F76E4, multiplied by the grey flipbook.
+            tint: Color::srgb_u8(63, 118, 228).to_linear().to_vec4(),
+            sky_color: Color::srgb_u8(148, 195, 255)
+                .to_linear()
+                .with_alpha(0.25)
+                .to_vec4(),
+            alpha: Vec4::new(0.55, 0.8, 0.6, 0.9),
+            animation: Vec4::ZERO,
         }
     }
 }
+
+/// Vanilla's still water flipbook, imported by scripts/import_vanilla.py.
+const WATER_STILL_PATH: &str = "voxel/packs/vanilla/water_still.png";
+const WATER_STILL_FRAMES: u32 = 32;
+/// Vanilla advances the flipbook every 2 ticks.
+const WATER_STILL_FPS: f32 = 10.0;
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
 pub(crate) struct WaterMaterialExtension {
     #[uniform(100)]
     settings: WaterSettings,
+    #[texture(101, dimension = "2d_array")]
+    #[sampler(102)]
+    still: Option<Handle<Image>>,
+}
+
+impl WaterMaterialExtension {
+    /// Uses the vanilla flipbook when imported, otherwise the shader's procedural texture.
+    pub(crate) fn load(asset_server: &AssetServer) -> Self {
+        let mut extension = Self::default();
+        if crate::asset_directory().join(WATER_STILL_PATH).is_file() {
+            extension.still = Some(block_texture(
+                asset_server,
+                WATER_STILL_PATH,
+                WATER_STILL_FRAMES,
+            ));
+            extension.settings.animation =
+                Vec4::new(WATER_STILL_FRAMES as f32, WATER_STILL_FPS, 0.0, 0.0);
+        }
+        extension
+    }
 }
 
 pub(crate) type WaterMaterial = ExtendedMaterial<StandardMaterial, WaterMaterialExtension>;

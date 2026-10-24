@@ -83,6 +83,9 @@ def main():
             tile.alpha_composite(tinted)
         atlas.paste(tile, (0, layer * 16))
     atlas.save(DEST / 'blocks_array.png')
+    # Still water keeps all its flipbook frames: a 16x512 strip of grey frames
+    # tinted in the shader and cross-faded at the game's 10 frames per second.
+    Image.open(BytesIO(jar.read('assets/minecraft/textures/block/water_still.png'))).convert('RGBA').save(DEST / 'water_still.png')
     def tint(color):
         return '(1.0, 1.0, 1.0)' if color is None else '(' + ', '.join(f'{c / 255:.3f}' for c in color) + ')'
     entries = []

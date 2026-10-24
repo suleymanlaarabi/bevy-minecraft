@@ -295,7 +295,16 @@ pub(crate) fn build_sections(
                 terrain: opaque
                     .then(|| greedy_mesh(&padded, texture_pack, true))
                     .filter(|geometry| !geometry.is_empty()),
-                water: water.then(|| water_mesh(&padded, texture_pack)).flatten(),
+                water: water
+                    .then(|| {
+                        water_mesh(
+                            &padded,
+                            neighborhood,
+                            index as i32 * SECTION_HEIGHT,
+                            texture_pack,
+                        )
+                    })
+                    .flatten(),
             }
         })
         .collect()
@@ -391,7 +400,42 @@ fn greedy_mesh(padded: &Padded, texture_pack: &TexturePack, lit: bool) -> VoxelG
     finish_mesh(positions, normals, colors, uvs, light, indices)
 }
 
-fn water_mesh(padded: &Padded, texture_pack: &TexturePack) -> Option<VoxelGeometry> {
+/// Vanilla still water stops 2/16 below the top of its block.
+const WATER_SURFACE_DROP: f32 = 2.0 / 16.0;
+/// Water columns deeper than this read as fully deep in the shader.
+const WATER_DEPTH_CAP: usize = 8;
+/// Depth is packed in the bits above the 12 bits of corner light, as 0..=15.
+const WATER_DEPTH_SHIFT: u16 = 12;
+const WATER_DEPTH_MAX: u16 = 15;
+
+/// Water cells stacked downward from `top` (inclusive), capped at [`WATER_DEPTH_CAP`].
+fn water_depth(neighborhood: &ChunkNeighborhood, top: IVec3) -> u8 {
+    (0..WATER_DEPTH_CAP as i32)
+        .take_while(|&below| neighborhood.sample(top - IVec3::Y * below).kind == VoxelKind::Water)
+        .count() as u8
+}
+
+/// Corner depths of a surface face, averaged over the four columns around each
+/// corner so shores fade smoothly into shallow water.
+fn surface_depth(depths: &[u8], stride: i32, x: i32, z: i32) -> [u16; 4] {
+    // Axis 1 corners walk u = z then v = x, matching `face_light`.
+    [(0, 0), (1, 0), (1, 1), (0, 1)].map(|(cz, cx)| {
+        let mut sum = 0u32;
+        for dz in [cz - 1, cz] {
+            for dx in [cx - 1, cx] {
+                sum += u32::from(depths[((x + dx + 1) + stride * (z + dz + 1)) as usize]);
+            }
+        }
+        (sum as f32 * f32::from(WATER_DEPTH_MAX) / (4 * WATER_DEPTH_CAP) as f32).round() as u16
+    })
+}
+
+fn water_mesh(
+    padded: &Padded,
+    neighborhood: &ChunkNeighborhood,
+    base: i32,
+    texture_pack: &TexturePack,
+) -> Option<VoxelGeometry> {
     let dimensions = padded.dimensions;
     let mut positions = Vec::new();
     let mut normals = Vec::new();
@@ -399,12 +443,16 @@ fn water_mesh(padded: &Padded, texture_pack: &TexturePack) -> Option<VoxelGeomet
     let mut uvs = Vec::new();
     let mut light = Vec::new();
     let mut indices = Vec::new();
+    let stride = dimensions[0] + 2;
+    let mut depths = Vec::new();
     for axis in 0..3 {
         let u = (axis + 1) % 3;
         let v = (axis + 2) % 3;
         let (width, height) = (dimensions[u] as usize, dimensions[v] as usize);
         let mut mask = vec![None; width * height];
         for layer in -1..dimensions[axis] {
+            // Column depths of this layer, computed once and only if it has a surface.
+            depths.clear();
             for j in 0..height {
                 for i in 0..width {
                     let mut cell = [0; 3];
@@ -416,23 +464,53 @@ fn water_mesh(padded: &Padded, texture_pack: &TexturePack) -> Option<VoxelGeomet
                     let b = padded.get(IVec3::from_array(cell)).kind;
                     // Only real air/fluid interfaces. No water plane inside a solid
                     // ceiling, no interior faces, and no faces owned by a neighbor.
-                    mask[i + j * width] = match (a, b) {
-                        (VoxelKind::Water, VoxelKind::Air) if layer >= 0 => Some(LitFace::new(
-                            Face(VoxelKind::Water, true, face_light(padded, cell, axis)),
-                            i + j * width,
-                        )),
-                        (VoxelKind::Air, VoxelKind::Water) if layer + 1 < dimensions[axis] => {
-                            cell[axis] -= 1;
-                            Some(LitFace::new(
-                                Face(VoxelKind::Water, false, face_light(padded, cell, axis)),
-                                i + j * width,
-                            ))
+                    let (positive, water_cell, outside) = match (a, b) {
+                        (VoxelKind::Water, VoxelKind::Air) if layer >= 0 => {
+                            let mut water_cell = cell;
+                            water_cell[axis] -= 1;
+                            (true, water_cell, cell)
                         }
-                        _ => None,
+                        (VoxelKind::Air, VoxelKind::Water) if layer + 1 < dimensions[axis] => {
+                            let mut outside = cell;
+                            outside[axis] -= 1;
+                            (false, cell, outside)
+                        }
+                        _ => {
+                            mask[i + j * width] = None;
+                            continue;
+                        }
                     };
+                    let water_cell = IVec3::from_array(water_cell);
+                    let mut values = face_light(padded, outside, axis);
+                    let surface = axis == 1 && positive;
+                    let depth = if surface {
+                        if depths.is_empty() {
+                            depths.extend(
+                                (-1..=dimensions[2])
+                                    .flat_map(|z| (-1..=dimensions[0]).map(move |x| (x, z)))
+                                    .map(|(x, z)| {
+                                        water_depth(neighborhood, IVec3::new(x, base + layer, z))
+                                    }),
+                            );
+                        }
+                        surface_depth(&depths, stride, water_cell.x, water_cell.z)
+                    } else {
+                        [WATER_DEPTH_MAX; 4]
+                    };
+                    for (value, depth) in values.iter_mut().zip(depth) {
+                        *value |= depth << WATER_DEPTH_SHIFT;
+                    }
+                    // Top faces and the upper rim of exposed sides sit at the lowered level.
+                    let lowered = surface
+                        || (axis != 1
+                            && padded.get(water_cell + IVec3::Y).kind != VoxelKind::Water);
+                    mask[i + j * width] = Some((
+                        LitFace::new(Face(VoxelKind::Water, positive, values), i + j * width),
+                        lowered,
+                    ));
                 }
             }
-            consume_mask(&mut mask, width, height, |i, j, w, h, face| {
+            consume_mask(&mut mask, width, height, |i, j, w, h, (face, lowered)| {
                 let mut corner = [0; 3];
                 corner[axis] = layer + 1;
                 corner[u] = i as i32;
@@ -456,6 +534,17 @@ fn water_mesh(padded: &Padded, texture_pack: &TexturePack) -> Option<VoxelGeomet
                     false,
                     texture_pack,
                 );
+                if lowered {
+                    // A lowered side never merges vertically: the cell above it is
+                    // not water, so the next cell up has no side face to join.
+                    let top = (corner[1] + du[1] + dv[1]) as f32;
+                    let start = positions.len() - 4;
+                    for position in &mut positions[start..] {
+                        if position[1] == top {
+                            position[1] -= WATER_SURFACE_DROP;
+                        }
+                    }
+                }
             });
         }
     }
@@ -551,13 +640,23 @@ fn push_quad(
         let layer = texture_pack.texture_layer(face.0, axis, face.1) as f32;
         colors.extend([[tint[0], tint[1], tint[2], layer]; 4]);
     } else {
-        colors.extend([face.0.color(); 4]);
+        // Untextured faces are water: red carries the normalized column depth.
+        colors.extend(face.2.map(|value| {
+            [
+                f32::from(value >> WATER_DEPTH_SHIFT) / f32::from(WATER_DEPTH_MAX),
+                0.0,
+                0.0,
+                1.0,
+            ]
+        }));
     }
     uvs.extend(quad_uvs(axis, du, dv));
-    light.extend(
-        face.2
-            .map(|value| [f32::from(value & 63) / 60.0, f32::from(value >> 6) / 60.0]),
-    );
+    light.extend(face.2.map(|value| {
+        [
+            f32::from(value & 63) / 60.0,
+            f32::from((value >> 6) & 63) / 60.0,
+        ]
+    }));
     let first = positions.len() as u32 - 4;
     let order = if face.1 {
         [0, 1, 2, 0, 2, 3]

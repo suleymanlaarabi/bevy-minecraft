@@ -3,6 +3,7 @@
 - Pour les optimisations de performances, ne pas chercher à les valider avec des benchmarks ou des tests. L'inspection du code et le raisonnement suffisent.
 - Toujours exploiter au mieux **Bevy** et ses fonctionnalités modernes.
 - Privilégier autant que possible les principes de l'**ECS**, le **parallélisme** et le **data-oriented design**.
+- Les performance sont primordiale
 
 ## Systèmes Bevy et conflits de requêtes
 
