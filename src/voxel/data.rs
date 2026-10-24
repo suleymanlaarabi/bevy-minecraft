@@ -219,6 +219,11 @@ pub struct ChunkVoxels {
     pub(crate) height: i32,
     cells: Arc<[VoxelKind]>,
     halo: Arc<[VoxelKind]>,
+    pub(crate) native_states: Option<Arc<[u16]>>,
+    pub(crate) light: Arc<[u8]>,
+    light_halo: Arc<[u16]>,
+    pub(crate) native_edits: Arc<std::collections::BTreeSet<usize>>,
+    pub(crate) content_revision: u64,
     pub(crate) changes: u8,
     pub(crate) revision: u64,
     pub(crate) modified: bool,
@@ -230,10 +235,106 @@ impl ChunkVoxels {
             height,
             cells: cells.into(),
             halo: halo.into(),
+            native_states: None,
+            light: vec![0xf0; (size * size * height) as usize].into(),
+            light_halo: vec![0xf0; ((size + 2) * (size + 2) * height) as usize].into(),
+            content_revision: 0,
+            native_edits: default(),
             changes: MESH_CHANGED | COLLIDER_CHANGED,
             revision: 0,
             modified: false,
         }
+    }
+
+    pub(crate) fn with_lighting(mut self, states: Arc<[u16]>, light: Arc<[u8]>) -> Self {
+        self.native_states = Some(states);
+        self.light = light;
+        self
+    }
+
+    pub(crate) fn replace_light(&mut self, light: Arc<[u8]>) -> bool {
+        if self.light == light {
+            return false;
+        }
+        self.light = light;
+        self.revision = self.revision.wrapping_add(1);
+        self.changes |= MESH_CHANGED;
+        true
+    }
+
+    /// Sky and block light, including the diagonal one-cell border used by corners.
+    pub(crate) fn sample_light(&self, local: IVec3) -> [f32; 2] {
+        let value = if local.y >= self.height {
+            0xf0
+        } else if local.y < 0 {
+            0
+        } else if let Some(index) = self.index(local) {
+            self.light[index]
+        } else if (-1..=self.size).contains(&local.x) && (-1..=self.size).contains(&local.z) {
+            self.light_halo[self.light_halo_index(local)] as u8
+        } else {
+            0
+        };
+        [f32::from(value >> 4) / 15.0, f32::from(value & 15) / 15.0]
+    }
+
+    pub(crate) fn light_occludes(&self, local: IVec3) -> bool {
+        if let Some(kind) = self.get(local) {
+            return kind.is_opaque();
+        }
+        if local.y < 0 || local.y >= self.height {
+            return local.y < 0;
+        }
+        if (-1..=self.size).contains(&local.x) && (-1..=self.size).contains(&local.z) {
+            return self.light_halo[self.light_halo_index(local)] & 256 != 0;
+        }
+        false
+    }
+
+    fn light_halo_index(&self, local: IVec3) -> usize {
+        let width = (self.size + 2) as usize;
+        (local.x + 1) as usize + width * ((local.z + 1) as usize + width * local.y as usize)
+    }
+
+    pub(crate) fn sync_light_halo(&mut self, direction: IVec2, neighbor: Option<&Self>) -> bool {
+        let mut changed = false;
+        for y in 0..self.height {
+            let range = |offset| match offset {
+                -1 => -1..=-1,
+                0 => 0..=self.size - 1,
+                _ => self.size..=self.size,
+            };
+            for z in range(direction.y) {
+                for x in range(direction.x) {
+                    let local = IVec3::new(x, y, z);
+                    let value = if let Some(neighbor) = neighbor {
+                        let source =
+                            IVec3::new(x.rem_euclid(self.size), y, z.rem_euclid(self.size));
+                        let index = neighbor.index(source).unwrap();
+                        u16::from(neighbor.light[index])
+                            | (u16::from(neighbor.cells[index].is_opaque()) << 8)
+                    } else {
+                        // Extend the last known edge until a neighbor is available.
+                        // No artificial skylight is injected into dark chunk borders.
+                        let source =
+                            IVec3::new(x.clamp(0, self.size - 1), y, z.clamp(0, self.size - 1));
+                        let index = self.index(source).unwrap();
+                        u16::from(self.light[index])
+                            | (u16::from(self.cells[index].is_opaque()) << 8)
+                    };
+                    let index = self.light_halo_index(local);
+                    if self.light_halo[index] != value {
+                        Arc::make_mut(&mut self.light_halo)[index] = value;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            self.revision = self.revision.wrapping_add(1);
+            self.changes |= MESH_CHANGED;
+        }
+        changed
     }
 
     pub fn get(&self, local: IVec3) -> Option<VoxelKind> {
@@ -256,6 +357,11 @@ impl ChunkVoxels {
             return false;
         }
         Arc::make_mut(&mut self.cells)[index] = kind;
+        if let Some(states) = &mut self.native_states {
+            Arc::make_mut(states)[index] = super::generation::native_state(kind);
+            Arc::make_mut(&mut self.native_edits).insert(index);
+        }
+        self.content_revision = self.content_revision.wrapping_add(1);
         self.revision = self.revision.wrapping_add(1);
         self.changes |= MESH_CHANGED;
         if old.is_solid() != kind.is_solid() {
@@ -375,6 +481,38 @@ impl SetVoxel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lighting_updates_preserve_collision_and_voxel_edits() {
+        let mut chunk = ChunkVoxels::generated(1, 1, vec![VoxelKind::Air], vec![VoxelKind::Air; 4]);
+        chunk.changes = 0;
+        let snapshot = chunk.clone();
+        assert!(chunk.replace_light(vec![0x5c].into()));
+        assert_eq!(chunk.changes, MESH_CHANGED);
+        assert_eq!(chunk.content_revision, 0);
+        assert!(!chunk.modified);
+        assert_eq!(chunk.revision, 1);
+        assert_eq!(chunk.sample_light(IVec3::ZERO), [5.0 / 15.0, 12.0 / 15.0]);
+        assert_eq!(snapshot.sample_light(IVec3::ZERO), [1.0, 0.0]);
+        assert!(!chunk.replace_light(vec![0x5c].into()));
+        assert_eq!(chunk.revision, 1);
+    }
+
+    #[test]
+    fn diagonal_light_halos_preserve_both_channels_and_occlusion() {
+        let mut chunk = ChunkVoxels::generated(1, 1, vec![VoxelKind::Air], vec![VoxelKind::Air; 4]);
+        let neighbor =
+            ChunkVoxels::generated(1, 1, vec![VoxelKind::Stone], vec![VoxelKind::Air; 4])
+                .with_lighting(vec![0].into(), vec![0x37].into());
+        let direction = IVec2::new(-1, -1);
+        let local = IVec3::new(-1, 0, -1);
+        assert!(chunk.sync_light_halo(direction, Some(&neighbor)));
+        assert_eq!(chunk.sample_light(local), [3.0 / 15.0, 7.0 / 15.0]);
+        assert!(chunk.light_occludes(local));
+        assert!(!chunk.sync_light_halo(direction, Some(&neighbor)));
+        assert_eq!(chunk.sample_light(IVec3::Y), [1.0, 0.0]);
+        assert_eq!(chunk.sample_light(IVec3::NEG_Y), [0.0, 0.0]);
+    }
 
     #[test]
     fn edits_advance_revision_and_only_dirty_required_outputs() {

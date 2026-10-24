@@ -11,10 +11,8 @@ les solides non représentés restent en pierre.
 
 Les chunks font 16×16×384. Le stockage du jeu reste à Y positif :
 `Y jeu = Y Minecraft + 64`, niveau marin à Y=127. La seed reste un `u32`.
-La génération utilise deux workers dédiés pour laisser les tâches de mesh et de
-rendu disponibles. Un cache partagé borné réutilise notamment le chunk calculé
-au choix du point d'apparition. Les contextes de terrain restent propres à chaque
-worker, avec leurs caches bornés.
+La génération utilise un pool dédié et un contexte Pumpkin partagé. Un cache
+borné réutilise notamment le chunk calculé au choix du point d'apparition.
 Un chunk peut être affiché avant ses voisins : les bordures absentes sont
 provisoirement de l'air, puis synchronisées dans les deux sens au chargement.
 Les coordonnées négatives et les chunks modifiés suivent le même chemin. Le joueur attend le collider du chunk avant de tomber.
@@ -50,6 +48,22 @@ Le mesh d'eau dessine toutes les interfaces avec l'air, y compris les côtés et
 le dessous ; aucune surface n'est émise dans un plafond solide. Les normales des
 côtés sont conservées dans le shader et les vaguelettes concernent le dessus.
 
+## Éclairage
+
+Les chunks conservent la lumière du ciel et des blocs calculée par Pumpkin.
+Les shaders du terrain et de l'eau combinent ces niveaux interpolés avec le soleil
+et les ombres de Bevy. Les endroits abrités s'assombrissent et les sources lumineuses
+existantes éclairent leur environnement avec une teinte légèrement chaude.
+L'éclairage est toujours actif ; aucune option graphique supplémentaire n'est ajoutée.
+
+Les poses et destructions mettent à jour les états Minecraft d'un contexte séparé,
+via un worker dédié. Les propriétés lumineuses modifiées déclenchent un recalcul
+local (chunk concerné et voisins chargés), sans régénération du terrain. Les bordures,
+y compris diagonales, suivent les mises à jour ; les meshes conservent les gradients
+lors des fusions. Une modification de lumière seule ne reconstruit pas les collisions.
+Les résultats en retard ne remplacent pas les éditions plus récentes. Les chunks
+modifiés conservent leurs données et leurs éditions lumineuses lors du déchargement.
+
 ## Limites actuelles
 
 - Rendu en cubes uniquement : plantes, barrières, torches, vitres… sont omises ;
@@ -59,9 +73,9 @@ côtés sont conservées dans le shader et les vaguelettes concernent le dessus.
   (journalisé en `debug`). Pas de ticks de fluides/feuilles.
 - Teintes de biome fixes (plaines) ; orientations des troncs non conservées.
   La lave est un bloc opaque où l'on s'enfonce comme dans l'eau, sans dégâts.
-- Chaque chunk place aussi les décorations de ses 8 voisins (arbres complets aux
-  frontières) : un chunk coûte environ neuf générations de terrain.
-- L'éclairage souterrain et l'occlusion ambiante restent à améliorer.
+- Pumpkin partage les dépendances entre chunks voisins pour générer les décorations
+  aux frontières. Les premiers chunks nécessitent aussi ces voisins.
+- L'occlusion ambiante reste à améliorer.
 
 Vérification : `cargo check --all-targets --features dev`, `cargo test --lib`.
 Le test GPU peut être lancé avec

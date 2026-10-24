@@ -4,7 +4,51 @@ use bevy::{
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct Face(VoxelKind, bool);
+struct Face(VoxelKind, bool, [u16; 4]);
+
+// Nonuniform quads remain one cell wide: repeating the same corner pattern on
+// several cells is not equivalent to interpolating once across the merged quad.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct LitFace {
+    face: Face,
+    cell: Option<usize>,
+}
+impl LitFace {
+    fn new(face: Face, cell: usize) -> Self {
+        Self {
+            cell: (!face.2.iter().all(|&value| value == face.2[0])).then_some(cell),
+            face,
+        }
+    }
+}
+
+fn face_light(voxels: &ChunkVoxels, outside: [i32; 3], axis: usize) -> [u16; 4] {
+    let u = (axis + 1) % 3;
+    let v = (axis + 2) % 3;
+    [(0, 0), (1, 0), (1, 1), (0, 1)].map(|(cu, cv)| {
+        let mut sum = [0.0; 2];
+        let mut count: f32 = 0.0;
+        for du in [cu - 1, cu] {
+            for dv in [cv - 1, cv] {
+                let mut cell = outside;
+                cell[u] += du;
+                cell[v] += dv;
+                let local = IVec3::from_array(cell);
+                // Solid neighbors must not darken an exposed surface corner.
+                if (du != 0 || dv != 0) && voxels.light_occludes(local) {
+                    continue;
+                }
+                let light = voxels.sample_light(local);
+                sum[0] += light[0];
+                sum[1] += light[1];
+                count += 1.0;
+            }
+        }
+        let sky = (sum[0] / count.max(1.0) * 60.0).round() as u16;
+        let block = (sum[1] / count.max(1.0) * 60.0).round() as u16;
+        sky | (block << 6)
+    })
+}
 pub(crate) struct ChunkMeshes(pub(crate) VoxelGeometry, pub(crate) Option<VoxelGeometry>);
 
 #[derive(Default)]
@@ -13,6 +57,7 @@ pub(crate) struct VoxelGeometry {
     normals: Vec<[f32; 3]>,
     colors: Vec<[f32; 4]>,
     uvs: Vec<[f32; 2]>,
+    light: Vec<[f32; 2]>,
     indices: Vec<u32>,
 }
 
@@ -23,6 +68,7 @@ impl VoxelGeometry {
             normals: Vec::with_capacity(vertices),
             colors: Vec::with_capacity(vertices),
             uvs: Vec::with_capacity(vertices),
+            light: Vec::with_capacity(vertices),
             indices: Vec::with_capacity(indices),
         }
     }
@@ -44,6 +90,7 @@ impl VoxelGeometry {
         self.normals.extend_from_slice(&geometry.normals);
         self.colors.extend_from_slice(&geometry.colors);
         self.uvs.extend_from_slice(&geometry.uvs);
+        self.light.extend_from_slice(&geometry.light);
         self.indices
             .extend(geometry.indices.iter().map(|index| first + index));
     }
@@ -61,6 +108,7 @@ impl VoxelGeometry {
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals)
         .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, self.colors)
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_1, self.light)
         .with_inserted_indices(Indices::U32(self.indices))
     }
 
@@ -86,6 +134,7 @@ pub(crate) fn build_chunk_mesh(voxels: &ChunkVoxels, texture_pack: &TexturePack)
             voxels.height,
             |position| voxels.sample(position),
             texture_pack,
+            Some(voxels),
         ),
         water_mesh(voxels, texture_pack),
     )
@@ -103,6 +152,7 @@ pub(crate) fn build_block_item_mesh(kind: VoxelKind, texture_pack: &TexturePack)
             }
         },
         texture_pack,
+        None,
     )
     .into_mesh()
     .translated_by(Vec3::splat(-0.5))
@@ -113,12 +163,14 @@ fn greedy_mesh(
     height: i32,
     sample: impl Fn(IVec3) -> VoxelKind,
     texture_pack: &TexturePack,
+    lighting: Option<&ChunkVoxels>,
 ) -> VoxelGeometry {
     let dimensions = [size, height, size];
     let mut positions = Vec::new();
     let mut normals = Vec::new();
     let mut colors = Vec::new();
     let mut uvs = Vec::new();
+    let mut light = Vec::new();
     let mut indices = Vec::new();
     let mut mask = vec![None; (size * height).max(size * size) as usize];
     for axis in 0..3 {
@@ -137,8 +189,17 @@ fn greedy_mesh(
                     cell[axis] += 1;
                     let b = sample(IVec3::from_array(cell));
                     mask[i + j * width] = match (a.is_opaque(), b.is_opaque()) {
-                        (true, false) if layer >= 0 => Some(Face(a, true)),
-                        (false, true) if layer + 1 < dimensions[axis] => Some(Face(b, false)),
+                        (true, false) if layer >= 0 => {
+                            let values =
+                                lighting.map_or([60; 4], |voxels| face_light(voxels, cell, axis));
+                            Some(LitFace::new(Face(a, true, values), i + j * width))
+                        }
+                        (false, true) if layer + 1 < dimensions[axis] => {
+                            cell[axis] -= 1;
+                            let values =
+                                lighting.map_or([60; 4], |voxels| face_light(voxels, cell, axis));
+                            Some(LitFace::new(Face(b, false, values), i + j * width))
+                        }
                         _ => None,
                     };
                 }
@@ -162,12 +223,13 @@ fn greedy_mesh(
                         &mut normals,
                         &mut colors,
                         &mut uvs,
+                        &mut light,
                         &mut indices,
                         corner,
                         du,
                         dv,
                         axis,
-                        face,
+                        face.face,
                         true,
                         texture_pack,
                     );
@@ -176,7 +238,7 @@ fn greedy_mesh(
         }
     }
 
-    finish_mesh(positions, normals, colors, uvs, indices)
+    finish_mesh(positions, normals, colors, uvs, light, indices)
 }
 
 fn water_mesh(voxels: &ChunkVoxels, texture_pack: &TexturePack) -> Option<VoxelGeometry> {
@@ -185,6 +247,7 @@ fn water_mesh(voxels: &ChunkVoxels, texture_pack: &TexturePack) -> Option<VoxelG
     let mut normals = Vec::new();
     let mut colors = Vec::new();
     let mut uvs = Vec::new();
+    let mut light = Vec::new();
     let mut indices = Vec::new();
     for axis in 0..3 {
         let u = (axis + 1) % 3;
@@ -204,15 +267,22 @@ fn water_mesh(voxels: &ChunkVoxels, texture_pack: &TexturePack) -> Option<VoxelG
                     // Only real air/fluid interfaces. No water plane inside a solid
                     // ceiling, no interior faces, and no faces owned by the halo.
                     mask[i + j * width] = match (a, b) {
-                        (VoxelKind::Water, VoxelKind::Air) if layer >= 0 => Some(true),
+                        (VoxelKind::Water, VoxelKind::Air) if layer >= 0 => Some(LitFace::new(
+                            Face(VoxelKind::Water, true, face_light(voxels, cell, axis)),
+                            i + j * width,
+                        )),
                         (VoxelKind::Air, VoxelKind::Water) if layer + 1 < dimensions[axis] => {
-                            Some(false)
+                            cell[axis] -= 1;
+                            Some(LitFace::new(
+                                Face(VoxelKind::Water, false, face_light(voxels, cell, axis)),
+                                i + j * width,
+                            ))
                         }
                         _ => None,
                     };
                 }
             }
-            consume_mask(&mut mask, width, height, |i, j, w, h, positive| {
+            consume_mask(&mut mask, width, height, |i, j, w, h, face| {
                 let mut corner = [0; 3];
                 corner[axis] = layer + 1;
                 corner[u] = i as i32;
@@ -226,19 +296,20 @@ fn water_mesh(voxels: &ChunkVoxels, texture_pack: &TexturePack) -> Option<VoxelG
                     &mut normals,
                     &mut colors,
                     &mut uvs,
+                    &mut light,
                     &mut indices,
                     corner,
                     du,
                     dv,
                     axis,
-                    Face(VoxelKind::Water, positive),
+                    face.face,
                     false,
                     texture_pack,
                 );
             });
         }
     }
-    (!indices.is_empty()).then(|| finish_mesh(positions, normals, colors, uvs, indices))
+    (!indices.is_empty()).then(|| finish_mesh(positions, normals, colors, uvs, light, indices))
 }
 
 fn consume_mask<T: Copy + Eq>(
@@ -285,6 +356,7 @@ fn finish_mesh(
     normals: Vec<[f32; 3]>,
     colors: Vec<[f32; 4]>,
     uvs: Vec<[f32; 2]>,
+    light: Vec<[f32; 2]>,
     indices: Vec<u32>,
 ) -> VoxelGeometry {
     VoxelGeometry {
@@ -292,6 +364,7 @@ fn finish_mesh(
         normals,
         colors,
         uvs,
+        light,
         indices,
     }
 }
@@ -302,6 +375,7 @@ fn push_quad(
     normals: &mut Vec<[f32; 3]>,
     colors: &mut Vec<[f32; 4]>,
     uvs: &mut Vec<[f32; 2]>,
+    light: &mut Vec<[f32; 2]>,
     indices: &mut Vec<u32>,
     corner: [i32; 3],
     du: [i32; 3],
@@ -330,6 +404,10 @@ fn push_quad(
         colors.extend([face.0.color(); 4]);
     }
     uvs.extend(quad_uvs(axis, du, dv));
+    light.extend(
+        face.2
+            .map(|value| [f32::from(value & 63) / 60.0, f32::from(value >> 6) / 60.0]),
+    );
     let first = positions.len() as u32 - 4;
     let order = if face.1 {
         [0, 1, 2, 0, 2, 3]
@@ -359,6 +437,18 @@ fn quad_uvs(axis: usize, du: [i32; 3], dv: [i32; 3]) -> [[f32; 2]; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn light_gradients_are_not_collapsed_across_greedy_faces() {
+        let uniform = Face(VoxelKind::Stone, true, [60; 4]);
+        let gradient = Face(VoxelKind::Stone, true, [0, 20, 40, 60]);
+        for (face, expected) in [(uniform, 1), (gradient, 2)] {
+            let mut mask = vec![Some(LitFace::new(face, 0)), Some(LitFace::new(face, 1))];
+            let mut count = 0;
+            consume_mask(&mut mask, 2, 1, |_, _, _, _, _| count += 1);
+            assert_eq!(count, expected);
+        }
+    }
 
     #[test]
     fn halos_never_emit_neighbor_owned_faces() {
@@ -403,6 +493,7 @@ mod tests {
             positions: vec![[0.0, 1.0, 2.0], [1.0, 1.0, 2.0], [1.0, 2.0, 2.0]],
             normals: vec![[0.0, 0.0, 1.0]; 3],
             colors: vec![[1.0; 4]; 3],
+            light: vec![[1.0, 0.0]; 3],
             uvs: vec![[0.0; 2]; 3],
             indices: vec![0, 1, 2],
         };
@@ -414,5 +505,6 @@ mod tests {
         assert_eq!(combined.positions[0], [4.0, 1.0, 0.0]);
         assert_eq!(combined.positions[3], [8.0, 1.0, 0.0]);
         assert_eq!(combined.indices, [0, 1, 2, 3, 4, 5]);
+        assert_eq!(combined.light, vec![[1.0, 0.0]; 6]);
     }
 }

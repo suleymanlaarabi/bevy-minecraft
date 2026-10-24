@@ -73,7 +73,11 @@ fn fragment(
     return deferred_output(in, pbr_input);
 } @else {
     var out: FragmentOutput;
-    out.color = apply_voxel_lighting(pbr_input);
+@if(VERTEX_UVS_B)
+    let voxel_light = in.uv_b;
+@if(!VERTEX_UVS_B)
+    let voxel_light = vec2<f32>(1.0, 0.0);
+    out.color = apply_voxel_lighting(pbr_input, voxel_light);
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
     return out;
 }

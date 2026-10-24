@@ -1,3 +1,4 @@
+import super::block_lighting::{sky_visibility, block_irradiance};
 import bevy_pbr::render::{
     forward_io::{VertexOutput, FragmentOutput},
     mesh_view_bindings as view_bindings,
@@ -57,7 +58,13 @@ fn fragment(
     }
     let albedo = texture_color.rgb * tint;
     let normal = normalize(in.world_normal);
-    var irradiance = view_bindings::lights.ambient_color.rgb;
+@if(VERTEX_UVS_B)
+    let voxel_light = in.uv_b;
+@if(!VERTEX_UVS_B)
+    let voxel_light = vec2<f32>(1.0, 0.0);
+    let sky = sky_visibility(voxel_light);
+    var irradiance = view_bindings::lights.ambient_color.rgb * sky
+        + block_irradiance(voxel_light);
 
     if view_bindings::lights.n_directional_lights > 0u {
         let light = &view_bindings::lights.directional_lights[0u];
@@ -81,7 +88,7 @@ fn fragment(
                 in.position.xy,
             );
         }
-        irradiance += (*light).color.rgb * (ndotl * shadow * 0.318309886);
+        irradiance += (*light).color.rgb * (ndotl * shadow * sky * 0.318309886);
     }
 
     var out: FragmentOutput;

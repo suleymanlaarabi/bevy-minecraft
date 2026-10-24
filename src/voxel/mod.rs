@@ -2,6 +2,7 @@ mod data;
 #[cfg(feature = "dev")]
 mod diagnostics;
 pub(crate) mod generation;
+mod lighting;
 mod material;
 mod meshing;
 mod rebuild;
@@ -109,6 +110,7 @@ impl Plugin for VoxelPlugin {
         .init_resource::<PendingChunks>()
         .init_resource::<RenderRegions>()
         .init_resource::<StreamState>()
+        .init_resource::<lighting::LightingState>()
         .add_observer(apply_view_distance)
         .add_observer(apply_texture_pack)
         .add_observer(set_voxel)
@@ -120,6 +122,8 @@ impl Plugin for VoxelPlugin {
             (
                 poll_chunk_generations,
                 sync_spawned_halos,
+                lighting::initialize_light_borders,
+                lighting::update_lighting,
                 mark_changed_chunks,
                 start_changed_builds,
                 poll_builds,
@@ -216,6 +220,15 @@ fn cleanup_voxel_world(
         world.resource_mut::<ChunkIndex>().clear();
         world.resource_mut::<PendingChunks>().clear();
         world.resource_mut::<StoredChunks>().clear();
+        // Drop the context on its own worker: Pumpkin shutdown must not stall ECS.
+        if let Some(state) = world.remove_resource::<lighting::LightingState>() {
+            bevy::tasks::IoTaskPool::get()
+                .spawn(async move {
+                    drop(state);
+                })
+                .detach();
+        }
+        world.init_resource::<lighting::LightingState>();
         world.resource_scope(|world, mut regions: Mut<RenderRegions>| {
             regions.clear(&mut world.commands());
         });

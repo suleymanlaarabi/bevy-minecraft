@@ -1,3 +1,4 @@
+import super::block_lighting::{sky_visibility, block_irradiance};
 import bevy_pbr::render::{
     pbr_ambient as ambient,
     pbr_lighting as lighting,
@@ -12,7 +13,7 @@ import bevy_pbr::render::{
 
 // The water still uses the StandardMaterial input. Keep its specialized
 // ambient-and-sun lighting path separate from the lean opaque voxel material.
-fn apply_voxel_lighting(in: PbrInput) -> vec4<f32> {
+fn apply_voxel_lighting(in: PbrInput, voxel_light: vec2<f32>) -> vec4<f32> {
     let base_color = in.material.base_color;
     let metallic = in.material.metallic;
     let perceptual_roughness = in.material.perceptual_roughness;
@@ -80,7 +81,10 @@ fn apply_voxel_lighting(in: PbrInput) -> vec4<f32> {
         * mix(1.0, view_bindings::view.exposure, emissive.a);
 
     return vec4<f32>(
-        view_bindings::view.exposure * (direct_light + indirect_light) + emissive_light,
+        view_bindings::view.exposure * (
+            (direct_light + indirect_light) * sky_visibility(voxel_light)
+            + diffuse_color * block_irradiance(voxel_light)
+        ) + emissive_light,
         base_color.a,
     );
 }

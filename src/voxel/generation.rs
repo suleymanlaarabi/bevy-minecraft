@@ -9,7 +9,39 @@ use std::{
 pub(crate) const MIN_Y: i32 = -64;
 const HEIGHT: usize = 384;
 const CACHE_SIZE: usize = 64;
-type ChunkCache = VecDeque<(IVec2, Arc<Vec<VoxelKind>>)>;
+type ChunkCache = VecDeque<(IVec2, Arc<ChunkSource>)>;
+struct ChunkSource {
+    cells: Vec<VoxelKind>,
+    states: Arc<[u16]>,
+    light: Arc<[u8]>,
+}
+impl std::ops::Deref for ChunkSource {
+    type Target = Vec<VoxelKind>;
+    fn deref(&self) -> &Self::Target {
+        &self.cells
+    }
+}
+
+/// Resolve aliases used by the game's full-cube material catalogue once.
+pub(crate) fn native_state(kind: VoxelKind) -> u16 {
+    static STATES: OnceLock<Box<[u16]>> = OnceLock::new();
+    STATES.get_or_init(|| {
+        VoxelKind::ALL
+            .iter()
+            .map(|kind| {
+                let name = match kind {
+                    VoxelKind::Grass => "grass_block",
+                    VoxelKind::Wood => "oak_log",
+                    VoxelKind::Leaves => "oak_leaves",
+                    VoxelKind::Snow => "snow_block",
+                    _ => kind.key(),
+                };
+                pumpkin_worldgen::default_block_state(name)
+                    .expect("voxel material has a Minecraft block")
+            })
+            .collect()
+    })[kind as usize]
+}
 
 /// Vanilla chunks from `pumpkin-worldgen` (terrain, caves, ores, trees, structures).
 #[derive(Resource, Clone)]
@@ -73,19 +105,24 @@ impl WorldGenerator {
         self.world.get_or_init(|| World::new(i64::from(self.seed)))
     }
 
-    fn chunk(&self, position: IVec2) -> Arc<Vec<VoxelKind>> {
+    fn chunk(&self, position: IVec2) -> Arc<ChunkSource> {
         if let Some(chunk) = cached(&mut self.shared_chunks.lock().unwrap(), position) {
             return chunk;
         }
         let kinds = kinds();
         let generated = self.world().generate_chunk(position.x, position.y);
-        let chunk = Arc::new(
-            generated
+        let chunk = Arc::new(ChunkSource {
+            cells: generated
                 .block_states()
                 .iter()
                 .map(|&state| kinds[state as usize])
-                .collect::<Vec<_>>(),
-        );
+                .collect(),
+            states: generated.block_states().into(),
+            light: generated
+                .light()
+                .expect("full worldgen includes lighting")
+                .into(),
+        });
         let mut shared = self.shared_chunks.lock().unwrap();
         if let Some(existing) = cached(&mut shared, position) {
             return existing;
@@ -176,6 +213,7 @@ pub(crate) fn generate_chunk(
         center[..(256 * settings.max_height) as usize].to_vec(),
         halo,
     )
+    .with_lighting(center.states.clone(), center.light.clone())
 }
 
 fn map_info(info: BlockInfo) -> VoxelKind {
@@ -240,9 +278,13 @@ fn similar_block(name: &str) -> Option<VoxelKind> {
     // Shapes take their material: "stone_brick_stairs" -> "stone_bricks", "oak_slab" -> "oak_planks".
     for suffix in ["_slab", "_stairs", "_wall"] {
         if let Some(base) = name.strip_suffix(suffix) {
-            return [base.to_owned(), format!("{base}s"), format!("{base}_planks")]
-                .iter()
-                .find_map(|base| map_block(base));
+            return [
+                base.to_owned(),
+                format!("{base}s"),
+                format!("{base}_planks"),
+            ]
+            .iter()
+            .find_map(|base| map_block(base));
         }
     }
     for prefix in ["polished_", "chiseled_", "cracked_", "cut_", "smooth_"] {
@@ -284,7 +326,10 @@ mod tests {
         assert_eq!(map_block("oak_stairs"), Some(VoxelKind::OakPlanks));
         assert_eq!(map_block("stone_brick_slab"), Some(VoxelKind::StoneBricks));
         assert_eq!(map_block("cherry_planks"), Some(VoxelKind::OakPlanks));
-        assert_eq!(map_block("deepslate_tile_stairs"), Some(VoxelKind::Deepslate));
+        assert_eq!(
+            map_block("deepslate_tile_stairs"),
+            Some(VoxelKind::Deepslate)
+        );
         assert_eq!(map_block("lava"), Some(VoxelKind::Lava));
         assert_eq!(map_block("moss_carpet"), None);
         assert_eq!(map_block("white_carpet"), None);
