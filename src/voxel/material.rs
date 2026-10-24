@@ -11,6 +11,7 @@ use bevy::{
     shader::ShaderRef,
 };
 use serde::Deserialize;
+use std::collections::HashMap;
 
 use super::data::VoxelKind;
 
@@ -18,9 +19,9 @@ fn default_texture_layers() -> u32 {
     9
 }
 
-#[derive(Component, Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Component, Reflect, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TexturePackId {
-    #[default]
+    Vanilla,
     Faithful,
     Replete,
     Meadow,
@@ -28,12 +29,19 @@ pub enum TexturePackId {
 }
 
 impl TexturePackId {
-    pub const fn all() -> [Self; 4] {
-        [Self::Faithful, Self::Replete, Self::Meadow, Self::Twilight]
+    pub const fn all() -> [Self; 5] {
+        [
+            Self::Vanilla,
+            Self::Faithful,
+            Self::Replete,
+            Self::Meadow,
+            Self::Twilight,
+        ]
     }
 
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Vanilla => "Minecraft",
             Self::Faithful => "Faithful 32x",
             Self::Replete => "Replete",
             Self::Meadow => "Meadow",
@@ -41,8 +49,18 @@ impl TexturePackId {
         }
     }
 
+    /// Vanilla textures are not redistributable: they exist only after running
+    /// scripts/import_vanilla.py. Every other pack ships with the game.
+    pub fn is_available(self) -> bool {
+        self != Self::Vanilla
+            || crate::asset_directory()
+                .join(format!("voxel/packs/{}/blocks_array.png", self.directory()))
+                .is_file()
+    }
+
     const fn directory(self) -> &'static str {
         match self {
+            Self::Vanilla => "vanilla",
             Self::Faithful => "faithful",
             Self::Replete => "replete",
             Self::Meadow => "meadow",
@@ -52,6 +70,7 @@ impl TexturePackId {
 
     const fn manifest_source(self) -> &'static str {
         match self {
+            Self::Vanilla => include_str!("../../assets/voxel/packs/vanilla/pack.ron"),
             Self::Faithful => include_str!("../../assets/voxel/packs/faithful/pack.ron"),
             Self::Replete => include_str!("../../assets/voxel/packs/replete/pack.ron"),
             Self::Meadow => include_str!("../../assets/voxel/packs/meadow/pack.ron"),
@@ -60,46 +79,36 @@ impl TexturePackId {
     }
 }
 
+/// Minecraft textures when imported, otherwise the bundled Faithful pack.
+impl Default for TexturePackId {
+    fn default() -> Self {
+        if Self::Vanilla.is_available() {
+            Self::Vanilla
+        } else {
+            Self::Faithful
+        }
+    }
+}
+
+fn white() -> (f32, f32, f32) {
+    (1.0, 1.0, 1.0)
+}
+
 #[derive(Clone, Copy, Debug, Deserialize)]
 struct BlockTextureConfig {
     top: u32,
     side: u32,
     bottom: u32,
+    #[serde(default = "white")]
     tint_top: (f32, f32, f32),
+    #[serde(default = "white")]
     tint_side: (f32, f32, f32),
+    #[serde(default = "white")]
     tint_bottom: (f32, f32, f32),
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
-struct BlockTextures {
-    grass: BlockTextureConfig,
-    dirt: BlockTextureConfig,
-    stone: BlockTextureConfig,
-    sand: BlockTextureConfig,
-    snow: BlockTextureConfig,
-    wood: BlockTextureConfig,
-    leaves: BlockTextureConfig,
-    #[serde(default)]
-    deepslate: Option<BlockTextureConfig>,
-    #[serde(default)]
-    gravel: Option<BlockTextureConfig>,
-    #[serde(default)]
-    coal_ore: Option<BlockTextureConfig>,
-    #[serde(default)]
-    iron_ore: Option<BlockTextureConfig>,
-    #[serde(default)]
-    copper_ore: Option<BlockTextureConfig>,
-    #[serde(default)]
-    gold_ore: Option<BlockTextureConfig>,
-    #[serde(default)]
-    redstone_ore: Option<BlockTextureConfig>,
-    #[serde(default)]
-    diamond_ore: Option<BlockTextureConfig>,
-    #[serde(default)]
-    emerald_ore: Option<BlockTextureConfig>,
-    #[serde(default)]
-    lapis_ore: Option<BlockTextureConfig>,
-}
+/// Textures keyed by `VoxelKind::key`; missing blocks use their fallback chain.
+type BlockTextures = HashMap<String, BlockTextureConfig>;
 
 #[derive(Debug, Deserialize)]
 struct TexturePackManifest {
@@ -114,70 +123,76 @@ struct TexturePackManifest {
 pub(crate) struct TexturePack {
     pub(crate) texture_path: String,
     pub(crate) layers: u32,
-    blocks: BlockTextures,
+    /// Fallbacks resolved at load, indexed by `VoxelKind as usize`; `None` when not opaque.
+    blocks: Box<[Option<BlockTextureConfig>]>,
+}
+
+/// Blocks still recognizable when drawn with their fallback's texture, tinted by their color.
+const TINTED_FALLBACKS: [VoxelKind; 2] = [VoxelKind::Lava, VoxelKind::MagmaBlock];
+
+fn resolve(blocks: &BlockTextures, kind: VoxelKind) -> Option<BlockTextureConfig> {
+    if !kind.is_opaque() {
+        return None;
+    }
+    let mut source = kind;
+    let mut config = loop {
+        if let Some(config) = blocks.get(source.key()) {
+            break *config;
+        }
+        let fallback = source.fallback();
+        if fallback == source {
+            break blocks[VoxelKind::Stone.key()];
+        }
+        source = fallback;
+    };
+    if source != kind && TINTED_FALLBACKS.contains(&kind) {
+        let [r, g, b, _] = kind.color();
+        let [base_r, base_g, base_b, _] = source.color();
+        let tint = (
+            (r / base_r).min(2.0),
+            (g / base_g).min(2.0),
+            (b / base_b).min(2.0),
+        );
+        (config.tint_top, config.tint_side, config.tint_bottom) = (tint, tint, tint);
+    }
+    Some(config)
 }
 
 impl TexturePack {
     pub(crate) fn load(id: TexturePackId) -> Self {
-        let manifest =
-            ron::from_str::<TexturePackManifest>(id.manifest_source()).unwrap_or_else(|error| {
-                warn!("Unable to load texture pack {}: {error}", id.label());
-                ron::from_str(TexturePackId::Replete.manifest_source())
-                    .expect("the built-in Replete texture pack manifest must be valid")
-            });
-        debug!("Loaded texture pack {} ({})", id.label(), manifest.name);
-        Self {
-            texture_path: format!("voxel/packs/{}/{}", id.directory(), manifest.texture),
-            layers: manifest.layers,
-            blocks: manifest.blocks,
+        Self::try_load(id).unwrap_or_else(|error| {
+            // Vanilla textures are not redistributable: they exist only after
+            // running scripts/import_vanilla.py.
+            warn!("Unable to load texture pack {}: {error}", id.label());
+            // Bundled and checked by tests: no filesystem access can make this fail.
+            Self::try_load(TexturePackId::Faithful)
+                .expect("the built-in Faithful texture pack must be valid")
+        })
+    }
+
+    fn try_load(id: TexturePackId) -> Result<Self, String> {
+        let manifest = ron::from_str::<TexturePackManifest>(id.manifest_source())
+            .map_err(|error| error.to_string())?;
+        if !manifest.blocks.contains_key(VoxelKind::Stone.key()) {
+            return Err("no \"stone\" entry, the fallback of every block".into());
         }
+        let texture_path = format!("voxel/packs/{}/{}", id.directory(), manifest.texture);
+        if !id.is_available() {
+            return Err(format!("missing {texture_path}"));
+        }
+        debug!("Loaded texture pack {} ({})", id.label(), manifest.name);
+        Ok(Self {
+            texture_path,
+            layers: manifest.layers,
+            blocks: VoxelKind::ALL
+                .iter()
+                .map(|&kind| resolve(&manifest.blocks, kind))
+                .collect(),
+        })
     }
 
     fn config(&self, kind: VoxelKind) -> Option<&BlockTextureConfig> {
-        match kind {
-            VoxelKind::Grass => Some(&self.blocks.grass),
-            VoxelKind::Dirt => Some(&self.blocks.dirt),
-            VoxelKind::Stone => Some(&self.blocks.stone),
-            VoxelKind::Sand => Some(&self.blocks.sand),
-            VoxelKind::Snow => Some(&self.blocks.snow),
-            VoxelKind::Wood => Some(&self.blocks.wood),
-            VoxelKind::Leaves => Some(&self.blocks.leaves),
-            VoxelKind::Deepslate => {
-                Some(self.blocks.deepslate.as_ref().unwrap_or(&self.blocks.stone))
-            }
-            VoxelKind::Gravel => Some(self.blocks.gravel.as_ref().unwrap_or(&self.blocks.stone)),
-            VoxelKind::CoalOre => Some(self.blocks.coal_ore.as_ref().unwrap_or(&self.blocks.stone)),
-            VoxelKind::IronOre => Some(self.blocks.iron_ore.as_ref().unwrap_or(&self.blocks.stone)),
-            VoxelKind::CopperOre => Some(
-                self.blocks
-                    .copper_ore
-                    .as_ref()
-                    .unwrap_or(&self.blocks.stone),
-            ),
-            VoxelKind::GoldOre => Some(self.blocks.gold_ore.as_ref().unwrap_or(&self.blocks.stone)),
-            VoxelKind::RedstoneOre => Some(
-                self.blocks
-                    .redstone_ore
-                    .as_ref()
-                    .unwrap_or(&self.blocks.stone),
-            ),
-            VoxelKind::DiamondOre => Some(
-                self.blocks
-                    .diamond_ore
-                    .as_ref()
-                    .unwrap_or(&self.blocks.stone),
-            ),
-            VoxelKind::EmeraldOre => Some(
-                self.blocks
-                    .emerald_ore
-                    .as_ref()
-                    .unwrap_or(&self.blocks.stone),
-            ),
-            VoxelKind::LapisOre => {
-                Some(self.blocks.lapis_ore.as_ref().unwrap_or(&self.blocks.stone))
-            }
-            VoxelKind::Air | VoxelKind::Water => None,
-        }
+        self.blocks[kind as usize].as_ref()
     }
 
     pub(crate) fn texture_layer(self: &Self, kind: VoxelKind, axis: usize, positive: bool) -> u32 {
@@ -322,7 +337,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(TexturePackId::default(), TexturePackId::Faithful);
+        assert!(TexturePackId::default().is_available());
     }
 
     #[test]
@@ -372,8 +387,8 @@ mod tests {
             .load("shaders/water_material.wesl");
         let texture = block_texture(
             app.world().resource::<AssetServer>(),
-            "voxel/packs/faithful/blocks_array.png",
-            TexturePack::load(TexturePackId::Faithful).layers,
+            &TexturePack::load(TexturePackId::Vanilla).texture_path,
+            TexturePack::load(TexturePackId::Vanilla).layers,
         );
         let terrain = app
             .world_mut()

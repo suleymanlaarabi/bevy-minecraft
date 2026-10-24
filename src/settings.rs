@@ -101,7 +101,7 @@ impl Default for GraphicsSettings {
             anti_aliasing: AntiAliasingMode::Msaa4x,
             vsync: true,
             shadow_quality: ShadowQuality::Medium,
-            texture_pack: TexturePackId::Faithful,
+            texture_pack: TexturePackId::default(),
             field_of_view: 85.0,
             view_distance: 10,
             display_mode: DisplayMode::BorderlessFullscreen,
@@ -113,6 +113,9 @@ impl GraphicsSettings {
     fn normalized(mut self) -> Self {
         self.field_of_view = normalized_fov(self.field_of_view);
         self.view_distance = self.effective_view_distance();
+        if !self.texture_pack.is_available() {
+            self.texture_pack = TexturePackId::Faithful;
+        }
         self
     }
 
@@ -325,6 +328,8 @@ fn texture_pack_control(selected: TexturePackId) -> impl Scene {
         @radio_group()
         on(set_choice::<TexturePackId>)
         Children [
+            @radio_choice("Minecraft", TexturePackId::Vanilla, selected)
+            --
             @radio_choice("Faithful 32x", TexturePackId::Faithful, selected)
             --
             @radio_choice("Replete", TexturePackId::Replete, selected)

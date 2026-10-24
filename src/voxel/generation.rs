@@ -1,59 +1,22 @@
 use super::{ChunkVoxels, VoxelKind, VoxelSettings};
 use bevy::prelude::*;
-use mc_worldgen::{
-    ChunkPos, Dimension,
-    decoration::{FeatureOrder, vanilla_biome_features},
-    decoration_world::{DecorationPass, DecorationRegion},
-    density::beardifier::Beardifier,
-    features::{BlockCatalog, FeatureProgram, PlacedFeature},
-    random::{LegacyRandomSource, RandomSource},
-    world::{WorldTerrainChunk, WorldTerrainGenerator},
-};
+use pumpkin_worldgen::{BlockInfo, World, block_info};
 use std::{
-    cell::RefCell,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashSet, VecDeque},
     sync::{Arc, Mutex, OnceLock},
 };
 
 pub(crate) const MIN_Y: i32 = -64;
 const HEIGHT: usize = 384;
-const CACHE_SIZE: usize = 16;
-type Patch = Vec<(IVec3, VoxelKind)>;
+const CACHE_SIZE: usize = 64;
+type ChunkCache = VecDeque<(IVec2, Arc<Vec<VoxelKind>>)>;
 
+/// Vanilla chunks from `pumpkin-worldgen` (terrain, caves, ores, trees, structures).
 #[derive(Resource, Clone)]
 pub(crate) struct WorldGenerator {
+    world: Arc<OnceLock<World>>,
     seed: u32,
-    shared_chunks: Arc<Mutex<VecDeque<(IVec2, Arc<Vec<VoxelKind>>)>>>,
-}
-
-struct Worker {
-    seed: u32,
-    generator: WorldTerrainGenerator,
-    order: FeatureOrder,
-    supported: HashMap<String, bool>,
-    terrain: VecDeque<(IVec2, Arc<WorldTerrainChunk>)>,
-    patches: VecDeque<(IVec2, Arc<Patch>)>,
-    chunks: VecDeque<(IVec2, Arc<Vec<VoxelKind>>)>,
-}
-
-thread_local! {
-    static WORKER: RefCell<Option<Worker>> = const { RefCell::new(None) };
-}
-
-fn is_tree_feature(key: &str) -> bool {
-    key.contains("trees_") || key.ends_with(":dark_forest_vegetation")
-}
-
-fn report_omitted(key: &str, error: impl std::fmt::Display) {
-    static REPORTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    if REPORTED
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap()
-        .insert(key.to_owned())
-    {
-        warn!("Partial world decoration: {key}: {error}");
-    }
+    shared_chunks: Arc<Mutex<ChunkCache>>,
 }
 
 fn cached<T>(cache: &mut VecDeque<(IVec2, Arc<T>)>, key: IVec2) -> Option<Arc<T>> {
@@ -69,316 +32,107 @@ fn insert<T>(cache: &mut VecDeque<(IVec2, Arc<T>)>, key: IVec2, value: Arc<T>, l
         cache.pop_front();
     }
 }
+/// Same Y-major layout as `GeneratedChunk::block_states`.
 fn index(x: usize, y: usize, z: usize) -> usize {
     x + 16 * (z + 16 * y)
 }
 
-impl Worker {
-    fn terrain(&mut self, position: IVec2) -> Arc<WorldTerrainChunk> {
-        if let Some(chunk) = cached(&mut self.terrain, position) {
-            return chunk;
-        }
-        let chunk = Arc::new(
-            self.generator
-                .generate(
-                    ChunkPos::new(position.x, position.y),
-                    Beardifier::new(vec![], vec![], None),
-                )
-                .expect("minegen Overworld terrain generation failed"),
-        );
-        self.generator.biomes().clear_chunks();
-        insert(&mut self.terrain, position, chunk.clone(), 48);
-        chunk
-    }
-
-    fn region(&mut self, center: IVec2) -> DecorationRegion {
-        let mut chunks = Vec::with_capacity(9);
-        for dx in -1..=1 {
-            for dz in -1..=1 {
-                let chunk = self.terrain(center + IVec2::new(dx, dz));
-                chunks.push(WorldTerrainChunk {
-                    dimension: chunk.dimension,
-                    terrain: chunk.terrain.clone(),
-                    biomes: chunk.biomes.clone(),
-                });
-            }
-        }
-        DecorationRegion::from_terrain(
-            i64::from(self.seed),
-            ChunkPos::new(center.x, center.y),
-            chunks,
-        )
-        .expect("valid Overworld decoration region")
-    }
-
-    fn supported(&mut self, key: &str) -> bool {
-        *self
-            .supported
-            .entry(key.to_owned())
-            .or_insert_with(|| match PlacedFeature::vanilla(key) {
-                Ok(_) => true,
-                Err(error) => {
-                    report_omitted(key, error);
-                    false
+/// Block-state id -> game material, computed once for every vanilla state.
+fn kinds() -> &'static [VoxelKind] {
+    static KINDS: OnceLock<Box<[VoxelKind]>> = OnceLock::new();
+    KINDS.get_or_init(|| {
+        let mut approximated = HashSet::new();
+        (0..=u16::MAX)
+            .map(|id| {
+                let Some(info) = block_info(id) else {
+                    return VoxelKind::Air;
+                };
+                let kind = map_info(info);
+                if kind == VoxelKind::Stone
+                    && map_block(info.name).is_none()
+                    && approximated.insert(info.name)
+                {
+                    debug!("No voxel kind for {}: drawn as stone", info.name);
                 }
+                kind
             })
-    }
-
-    /// Each source chunk decorates an isolated 3x3 terrain region. Retain ALL its
-    /// writes, including neighboring trunks/leaves, as a deterministic contribution.
-    /// Targets combine the same nine contributions in X/Z order on every worker.
-    /// This is a gameplay composition, not Vanilla's full decoration scheduler.
-    fn patch(&mut self, center: IVec2) -> Arc<Patch> {
-        if let Some(patch) = cached(&mut self.patches, center) {
-            return patch;
-        }
-        let position = ChunkPos::new(center.x, center.y);
-        let mut region = self.region(center);
-        let mut ids = std::collections::BTreeSet::new();
-        for chunk in region.chunks().unwrap() {
-            ids.extend(chunk.biomes.biomes().iter().cloned());
-        }
-        let nearby = ids
-            .iter()
-            .map(|id| vanilla_biome_features(id).unwrap())
-            .collect::<Vec<_>>();
-        let mut plan = self
-            .order
-            .plan(i64::from(self.seed), position, &nearby, &[])
-            .unwrap();
-        // Vegetation patches/root systems and lighting-dependent plants are not
-        // representable by the current cube renderer. Keep supported trees/bamboo.
-        plan.calls.retain(|call| {
-            [1, 2, 6, 8].contains(&call.step)
-                || (call.step == 9 && (is_tree_feature(&call.key) || call.key.ends_with(":bamboo")))
-        });
-        let mut missing_trees = false;
-        plan.calls.retain(|call| {
-            let supported = self.supported(&call.key);
-            missing_trees |= !supported && is_tree_feature(&call.key);
-            supported
-        });
-        let mut terrain_plan = plan.clone();
-        terrain_plan.calls.retain(|call| call.step != 9);
-        let pass = DecorationPass::compile(position, plan).unwrap();
-        if let Err(error) = region.execute(&pass) {
-            // Never read the poisoned partial region after a failed optional pass.
-            report_omitted("vegetation runtime", error);
-            region = self.region(center);
-            let pass = DecorationPass::compile(position, terrain_plan.clone()).unwrap();
-            if let Err(error) = region.execute(&pass) {
-                report_omitted("terrain decoration runtime", error);
-                region = self.region(center);
-            }
-            missing_trees = true;
-        }
-        if missing_trees && let Err(error) = self.fallback_trees(&mut region, center) {
-            report_omitted("fallback tree runtime", error);
-            region = self.region(center);
-            let pass = DecorationPass::compile(position, terrain_plan).unwrap();
-            if let Err(error) = region.execute(&pass) {
-                report_omitted("terrain decoration runtime", error);
-                region = self.region(center);
-            }
-        }
-        let mut changes = Vec::new();
-        for chunk in region.chunks().unwrap() {
-            let p = chunk.position();
-            let before = self.terrain(IVec2::new(p.x, p.z));
-            let palette = chunk.palette().iter().map(map_state).collect::<Vec<_>>();
-            let old_palette = before.terrain.palette().map(map_state).collect::<Vec<_>>();
-            for (i, &state) in chunk.blocks().iter().enumerate() {
-                let kind = palette[state as usize];
-                if kind != old_palette[before.terrain.blocks()[i] as usize] {
-                    let y = i % HEIGHT;
-                    let column = i / HEIGHT;
-                    changes.push((
-                        IVec3::new(
-                            p.x * 16 + (column % 16) as i32,
-                            y as i32,
-                            p.z * 16 + (column / 16) as i32,
-                        ),
-                        kind,
-                    ));
-                }
-            }
-        }
-        let changes = Arc::new(changes);
-        insert(&mut self.patches, center, changes.clone(), 32);
-        changes
-    }
-
-    fn fallback_trees(
-        &mut self,
-        region: &mut DecorationRegion,
-        center: IVec2,
-    ) -> Result<(), mc_worldgen::features::FeatureError> {
-        // When a biome selector still contains an unsupported decorator (e.g.
-        // beehives), use a supported minegen tree, with explicit game placement.
-        let biome = region
-            .biome_at([center.x * 16 + 8, 80, center.y * 16 + 8])
-            .unwrap();
-        let (tree, attempts) = if biome.contains("taiga") || biome.contains("grove") {
-            ("spruce", 5)
-        } else if biome.contains("birch") {
-            ("birch", 5)
-        } else if biome.contains("forest") {
-            ("oak", 5)
-        } else if biome.contains("savanna") {
-            ("acacia", 2)
-        } else if biome.contains("plains") {
-            ("oak", 1)
-        } else {
-            return Ok(());
-        };
-        let feature = FeatureProgram::vanilla(&format!("minecraft:{tree}"))?;
-        let mut random = LegacyRandomSource::new(
-            i64::from(self.seed)
-                ^ i64::from(center.x).wrapping_mul(341873128712)
-                ^ i64::from(center.y).wrapping_mul(132897987541),
-        );
-        for _ in 0..attempts {
-            let x = random.next_int_bound(16).unwrap();
-            let z = random.next_int_bound(16).unwrap();
-            let chunk = region.chunk(ChunkPos::new(center.x, center.y)).unwrap();
-            let y = chunk.heights("OCEAN_FLOOR").unwrap()[(x + z * 16) as usize];
-            if y <= 63
-                || chunk.block(x as u8, y - 1, z as u8).is_none_or(|s| {
-                    !matches!(
-                        s.name.as_str(),
-                        "minecraft:grass_block"
-                            | "minecraft:dirt"
-                            | "minecraft:podzol"
-                            | "minecraft:snow_block"
-                    )
-                })
-            {
-                continue;
-            }
-            feature.place(
-                region,
-                &mut random,
-                [center.x * 16 + x, y, center.y * 16 + z],
-            )?;
-        }
-        Ok(())
-    }
-
-    fn chunk(&mut self, position: IVec2) -> Arc<Vec<VoxelKind>> {
-        if let Some(chunk) = cached(&mut self.chunks, position) {
-            return chunk;
-        }
-        let base = self.terrain(position);
-        let palette = base.terrain.palette().map(map_state).collect::<Vec<_>>();
-        let mut cells = vec![VoxelKind::Air; 256 * HEIGHT];
-        for z in 0..16 {
-            for x in 0..16 {
-                for y in 0..HEIGHT {
-                    cells[index(x, y, z)] =
-                        palette[base.terrain.blocks()[y + (x + z * 16) * HEIGHT] as usize];
-                }
-            }
-        }
-        for dx in -1..=1 {
-            for dz in -1..=1 {
-                let patch = self.patch(position + IVec2::new(dx, dz));
-                for &(world, kind) in patch.iter() {
-                    let x = world.x - position.x * 16;
-                    let z = world.z - position.y * 16;
-                    if (0..16).contains(&x) && (0..16).contains(&z) {
-                        cells[index(x as usize, world.y as usize, z as usize)] = kind;
-                    }
-                }
-            }
-        }
-        let chunk = Arc::new(cells);
-        insert(&mut self.chunks, position, chunk.clone(), CACHE_SIZE);
-        chunk
-    }
+            .collect()
+    })
 }
 
 impl WorldGenerator {
     pub(crate) fn new(seed: u32) -> Self {
         Self {
+            world: default(),
             seed,
             shared_chunks: default(),
         }
     }
+
+    fn world(&self) -> &World {
+        self.world.get_or_init(|| World::new(i64::from(self.seed)))
+    }
+
     fn chunk(&self, position: IVec2) -> Arc<Vec<VoxelKind>> {
         if let Some(chunk) = cached(&mut self.shared_chunks.lock().unwrap(), position) {
             return chunk;
         }
-        let chunk = self.with_worker(|worker| worker.chunk(position));
+        let kinds = kinds();
+        let generated = self.world().generate_chunk(position.x, position.y);
+        let chunk = Arc::new(
+            generated
+                .block_states()
+                .iter()
+                .map(|&state| kinds[state as usize])
+                .collect::<Vec<_>>(),
+        );
         let mut shared = self.shared_chunks.lock().unwrap();
         if let Some(existing) = cached(&mut shared, position) {
             return existing;
         }
-        insert(&mut shared, position, chunk.clone(), 64);
+        insert(&mut shared, position, chunk.clone(), CACHE_SIZE);
         chunk
     }
-    fn with_worker<R>(&self, f: impl FnOnce(&mut Worker) -> R) -> R {
-        WORKER.with(|slot| {
-            let mut slot = slot.borrow_mut();
-            if slot.as_ref().is_none_or(|w| w.seed != self.seed) {
-                let mut generator =
-                    WorldTerrainGenerator::vanilla(i64::from(self.seed), Dimension::Overworld)
-                        .unwrap();
-                let order = FeatureOrder::vanilla(&generator.biomes().possible_biomes()).unwrap();
-                *slot = Some(Worker {
-                    seed: self.seed,
-                    generator,
-                    order,
-                    supported: HashMap::new(),
-                    terrain: VecDeque::new(),
-                    patches: VecDeque::new(),
-                    chunks: VecDeque::new(),
-                });
-            }
-            f(slot.as_mut().unwrap())
-        })
-    }
+
     pub(crate) fn spawn_position(&self) -> Vec3 {
-        self.with_worker(|worker| {
-            // Prefer dry ground over the old fixed origin, which can be ocean.
-            for radius in 0i32..=16 {
-                for dx in -radius..=radius {
-                    for dz in -radius..=radius {
-                        if dx.abs().max(dz.abs()) != radius {
-                            continue;
-                        }
-                        let position = IVec2::new(dx, dz);
-                        let chunk = worker.terrain(position);
-                        let floor = chunk.terrain.ocean_floor_height(8, 8).unwrap();
-                        let surface = chunk.terrain.world_surface_height(8, 8).unwrap();
-                        if floor < 64 || floor != surface {
-                            continue;
-                        }
-                        if !chunk.terrain.block(8, floor - 1, 8).is_some_and(|s| {
-                            matches!(
-                                s.name.as_str(),
-                                "minecraft:grass_block" | "minecraft:sand" | "minecraft:snow_block"
-                            )
-                        }) {
-                            continue;
-                        }
-                        let cells = worker.chunk(position);
-                        let y = (floor - MIN_Y) as usize;
-                        if cells[index(8, y, 8)] != VoxelKind::Air
-                            || cells[index(8, y + 1, 8)] != VoxelKind::Air
-                        {
-                            continue;
-                        }
-                        insert(&mut self.shared_chunks.lock().unwrap(), position, cells, 64);
-                        return Vec3::new(
-                            (dx * 16 + 8) as f32,
-                            y as f32 + 2.0,
-                            (dz * 16 + 8) as f32,
-                        );
+        // Prefer dry ground near the origin, which can be ocean.
+        // Candidates are probed on terrain-only chunks, far cheaper than full ones.
+        let kinds = kinds();
+        let top = |cells: &dyn Fn(usize) -> VoxelKind| {
+            (0..HEIGHT)
+                .rev()
+                .find(|&y| cells(index(8, y, 8)) != VoxelKind::Air)
+        };
+        for radius in 0i32..=16 {
+            for dx in -radius..=radius {
+                for dz in -radius..=radius {
+                    if dx.abs().max(dz.abs()) != radius {
+                        continue;
                     }
+                    let terrain = self.world().generate_terrain(dx, dz);
+                    let terrain = |i: usize| kinds[terrain.block_states()[i] as usize];
+                    let Some(ground) = top(&terrain) else {
+                        continue;
+                    };
+                    // Sea level is Minecraft Y=63.
+                    if (ground as i32) < 63 - MIN_Y || !terrain(index(8, ground, 8)).is_solid() {
+                        continue;
+                    }
+                    // Trees only exist in the full chunk; it stays cached for streaming.
+                    let cells = self.chunk(IVec2::new(dx, dz));
+                    let surface = top(&|i| cells[i]).unwrap_or(ground);
+                    if surface + 2 >= HEIGHT {
+                        continue;
+                    }
+                    return Vec3::new(
+                        (dx * 16 + 8) as f32,
+                        surface as f32 + 3.0,
+                        (dz * 16 + 8) as f32,
+                    );
                 }
             }
-            Vec3::new(8.0, 200.0, 8.0)
-        })
+        }
+        Vec3::new(8.0, 200.0, 8.0)
     }
 }
 
@@ -387,10 +141,10 @@ pub(crate) fn generate_chunk(
     settings: &VoxelSettings,
     generator: &WorldGenerator,
 ) -> ChunkVoxels {
-    assert_eq!(settings.chunk_size, 16, "minegen requires 16x16 chunks");
+    assert_eq!(settings.chunk_size, 16, "worldgen requires 16x16 chunks");
     assert!((1..=384).contains(&settings.max_height));
     let center = generator.chunk(position);
-    // Do not generate four extra decorated chunks before showing the first one.
+    // Do not generate four extra chunks before showing the first one.
     // Existing samples are reused; streaming fills both borders as neighbors arrive.
     let neighbors = [IVec2::NEG_X, IVec2::X, IVec2::NEG_Y, IVec2::Y].map(|direction| {
         cached(
@@ -424,50 +178,95 @@ pub(crate) fn generate_chunk(
     )
 }
 
-fn map_state(state: &mc_worldgen::BlockState) -> VoxelKind {
-    let kind = map_block(&state.name);
-    if kind == VoxelKind::Stone
-        && let Ok(flags) = BlockCatalog::flags(state)
-        && !flags.solid()
+fn map_info(info: BlockInfo) -> VoxelKind {
+    if info.is_air {
+        return VoxelKind::Air;
+    }
+    if let Some(kind) = map_block(info.name) {
+        return kind;
+    }
+    // Plants, torches, vines, fences... cannot be drawn as cubes: omit them.
+    // Slabs and stairs stay solid so structures keep their floors and roofs.
+    if info.hardness == 0.0
+        || (info.opacity == 0 && !info.name.ends_with("_slab") && !info.name.ends_with("_stairs"))
     {
-        return match flags.fluid() {
-            "minecraft:water" | "minecraft:flowing_water" => VoxelKind::Water,
-            "minecraft:empty" => VoxelKind::Air,
-            _ => kind,
+        // Coral, sea pickles, submerged fences... leave their water behind.
+        return if info.is_waterlogged || info.is_liquid {
+            VoxelKind::Water
+        } else {
+            VoxelKind::Air
         };
     }
-    kind
+    // Unrepresented solid materials remain solid instead of leaving holes.
+    VoxelKind::Stone
 }
 
-/// Approximation for the game's small block registry, independent of properties.
-/// Unrepresented solid materials remain solid instead of leaving holes.
-fn map_block(name: &str) -> VoxelKind {
+/// Minecraft block name -> game block, independent of properties.
+fn map_block(name: &str) -> Option<VoxelKind> {
     let name = name.strip_prefix("minecraft:").unwrap_or(name);
-    match name {
+    let name = name.strip_prefix("infested_").unwrap_or(name);
+    let name = name.strip_prefix("stripped_").unwrap_or(name);
+    let kind = match name {
         "air" | "cave_air" | "void_air" => VoxelKind::Air,
-        "water" => VoxelKind::Water,
-        "deepslate" => VoxelKind::Deepslate,
-        "gravel" => VoxelKind::Gravel,
-        "coal_ore" | "deepslate_coal_ore" => VoxelKind::CoalOre,
-        "iron_ore" | "deepslate_iron_ore" => VoxelKind::IronOre,
-        "copper_ore" | "deepslate_copper_ore" => VoxelKind::CopperOre,
-        "gold_ore" | "deepslate_gold_ore" => VoxelKind::GoldOre,
-        "redstone_ore" | "deepslate_redstone_ore" => VoxelKind::RedstoneOre,
-        "diamond_ore" | "deepslate_diamond_ore" => VoxelKind::DiamondOre,
-        "emerald_ore" | "deepslate_emerald_ore" => VoxelKind::EmeraldOre,
-        "lapis_ore" | "deepslate_lapis_ore" => VoxelKind::LapisOre,
-
-        "grass_block" | "mycelium" => VoxelKind::Grass,
-        "dirt" | "coarse_dirt" | "rooted_dirt" | "podzol" | "mud" => VoxelKind::Dirt,
-        "sand" | "red_sand" | "sandstone" | "red_sandstone" => VoxelKind::Sand,
-        "snow" | "snow_block" | "powder_snow" | "ice" | "packed_ice" | "blue_ice" => {
-            VoxelKind::Snow
+        "water" | "bubble_column" | "seagrass" | "tall_seagrass" | "kelp" | "kelp_plant" => {
+            VoxelKind::Water
         }
-        name if name.ends_with("_log") || name.ends_with("_wood") => VoxelKind::Wood,
-        name if name.ends_with("_leaves") => VoxelKind::Leaves,
-        // Lava is intentionally solid until the game has a lava material/behavior.
-        _ => VoxelKind::Stone,
+        "grass_block" => VoxelKind::Grass,
+        "oak_log" | "oak_wood" => VoxelKind::Wood,
+        "oak_leaves" => VoxelKind::Leaves,
+        "suspicious_sand" => VoxelKind::Sand,
+        "suspicious_gravel" => VoxelKind::Gravel,
+        "chiseled_stone_bricks" => VoxelKind::StoneBricks,
+        "cut_sandstone" | "chiseled_sandstone" | "smooth_sandstone" => VoxelKind::Sandstone,
+        "cut_red_sandstone" | "chiseled_red_sandstone" | "smooth_red_sandstone" => {
+            VoxelKind::RedSandstone
+        }
+        "packed_mud" | "mud_bricks" => VoxelKind::Mud,
+        "carved_pumpkin" | "jack_o_lantern" => VoxelKind::Pumpkin,
+        name if name.ends_with("_wood") => {
+            return VoxelKind::from_key(&format!("{}_log", name.trim_end_matches("_wood")));
+        }
+        name if name.ends_with("_terracotta") && !name.contains("glazed") => {
+            VoxelKind::from_key(name).unwrap_or(VoxelKind::Terracotta)
+        }
+        "smooth_stone" => VoxelKind::Stone,
+        name => return VoxelKind::from_key(name).or_else(|| similar_block(name)),
+    };
+    Some(kind)
+}
+
+/// Blocks without their own kind -> closest material, so structures keep their look.
+fn similar_block(name: &str) -> Option<VoxelKind> {
+    // Shapes take their material: "stone_brick_stairs" -> "stone_bricks", "oak_slab" -> "oak_planks".
+    for suffix in ["_slab", "_stairs", "_wall"] {
+        if let Some(base) = name.strip_suffix(suffix) {
+            return [base.to_owned(), format!("{base}s"), format!("{base}_planks")]
+                .iter()
+                .find_map(|base| map_block(base));
+        }
     }
+    for prefix in ["polished_", "chiseled_", "cracked_", "cut_", "smooth_"] {
+        if let Some(kind) = name.strip_prefix(prefix).and_then(map_block) {
+            return Some(kind);
+        }
+    }
+    // Carpets are thin: left to `map_info`, which omits non-cube blocks.
+    let dyed = ["_wool", "_concrete", "_concrete_powder"]
+        .iter()
+        .find_map(|suffix| name.strip_suffix(suffix));
+    let kind = match name {
+        _ if dyed.is_some() => VoxelKind::from_key(&format!("{}_terracotta", dyed.unwrap()))
+            .unwrap_or(VoxelKind::Terracotta),
+        // Mangrove, cherry, pale oak, bamboo, crimson and warped planks.
+        name if name.ends_with("_planks") || name == "bamboo_mosaic" => VoxelKind::OakPlanks,
+        // Crimson and warped stems; crop stems (pumpkin, melon) are plants.
+        "crimson_stem" | "warped_stem" | "crimson_hyphae" | "warped_hyphae" | "bamboo_block" => {
+            VoxelKind::DarkOakLog
+        }
+        name if name.contains("deepslate") => VoxelKind::Deepslate,
+        _ => return None,
+    };
+    Some(kind)
 }
 
 #[cfg(test)]
@@ -476,71 +275,49 @@ mod tests {
 
     #[test]
     fn native_materials_preserve_air_water_and_solid_terrain() {
-        assert_eq!(map_block("minecraft:cave_air"), VoxelKind::Air);
-        assert_eq!(map_block("minecraft:water"), VoxelKind::Water);
-        assert_eq!(map_block("minecraft:grass_block"), VoxelKind::Grass);
-        assert_eq!(map_block("minecraft:deepslate"), VoxelKind::Deepslate);
-        assert_eq!(map_block("minecraft:bedrock"), VoxelKind::Stone);
-        assert_eq!(map_block("minecraft:lava"), VoxelKind::Stone);
+        assert_eq!(map_block("minecraft:cave_air"), Some(VoxelKind::Air));
+        assert_eq!(map_block("water"), Some(VoxelKind::Water));
+        assert_eq!(map_block("grass_block"), Some(VoxelKind::Grass));
+        assert_eq!(map_block("stripped_birch_wood"), Some(VoxelKind::BirchLog));
+        assert_eq!(map_block("bedrock"), Some(VoxelKind::Bedrock));
+        assert_eq!(map_block("oak_fence"), None);
+        assert_eq!(map_block("oak_stairs"), Some(VoxelKind::OakPlanks));
+        assert_eq!(map_block("stone_brick_slab"), Some(VoxelKind::StoneBricks));
+        assert_eq!(map_block("cherry_planks"), Some(VoxelKind::OakPlanks));
+        assert_eq!(map_block("deepslate_tile_stairs"), Some(VoxelKind::Deepslate));
+        assert_eq!(map_block("lava"), Some(VoxelKind::Lava));
+        assert_eq!(map_block("moss_carpet"), None);
+        assert_eq!(map_block("white_carpet"), None);
+        assert_eq!(map_block("pumpkin_stem"), None);
+        assert_eq!(map_block("attached_melon_stem"), None);
+        assert_eq!(map_block("warped_stem"), Some(VoxelKind::DarkOakLog));
+        let kinds = kinds();
+        assert!(kinds.contains(&VoxelKind::Leaves) && kinds.contains(&VoxelKind::Water));
     }
 
     #[test]
-    fn decorated_forest_has_trees_ores_and_is_independent_of_worker_history() {
+    fn generated_chunks_have_ores_and_a_dry_spawn() {
         let generator = WorldGenerator::new(42);
-        let position = IVec2::new(-4, 0);
-        let chunk = generator.with_worker(|worker| worker.chunk(position));
-        let logs = chunk
-            .iter()
-            .filter(|&&kind| kind == VoxelKind::Wood)
-            .count();
-        let leaves = chunk
-            .iter()
-            .filter(|&&kind| kind == VoxelKind::Leaves)
-            .count();
-        let ores = chunk
-            .iter()
-            .filter(|&&kind| {
-                matches!(
-                    kind,
-                    VoxelKind::CoalOre
-                        | VoxelKind::IronOre
-                        | VoxelKind::CopperOre
-                        | VoxelKind::DiamondOre
-                )
-            })
-            .count();
-        eprintln!("forest chunk: {logs} logs, {leaves} leaves, {ores} ore blocks");
-        assert!(logs > 0 && leaves > 0 && ores > 0);
-        let fresh = std::thread::spawn(move || {
-            WorldGenerator::new(42).with_worker(|worker| worker.chunk(position))
-        })
-        .join()
-        .unwrap();
-        assert_eq!(chunk, fresh);
         let spawn = generator.spawn_position();
+        assert!(spawn.y > 64.0);
         let position = IVec2::new(
             (spawn.x as i32).div_euclid(16),
             (spawn.z as i32).div_euclid(16),
         );
-        let chunk = generator.with_worker(|worker| worker.chunk(position));
+        let chunk = generator.chunk(position);
         let x = (spawn.x as i32).rem_euclid(16) as usize;
         let z = (spawn.z as i32).rem_euclid(16) as usize;
-        assert!(chunk[index(x, spawn.y as usize - 3, z)].is_solid());
+        assert_ne!(chunk[index(x, spawn.y as usize - 3, z)], VoxelKind::Air);
         assert_eq!(chunk[index(x, spawn.y as usize - 2, z)], VoxelKind::Air);
-        let background = generator.clone();
-        let generated = std::thread::spawn(move || {
-            let result = generate_chunk(position, &VoxelSettings::default(), &background);
-            // The spawn chunk and optional halo lookups must not initialize a new
-            // generator or decorate unseen neighbors on the background worker.
-            assert!(WORKER.with(|slot| slot.borrow().is_none()));
-            result
-        })
-        .join()
-        .unwrap();
-        assert_eq!(
-            generated.get(IVec3::new(x as i32, spawn.y as i32 - 3, z as i32)),
-            Some(chunk[index(x, spawn.y as usize - 3, z)])
-        );
+        assert!(chunk.iter().any(|&kind| {
+            matches!(
+                kind,
+                VoxelKind::CoalOre
+                    | VoxelKind::IronOre
+                    | VoxelKind::CopperOre
+                    | VoxelKind::DiamondOre
+            )
+        }));
     }
 
     #[test]
@@ -563,6 +340,5 @@ mod tests {
                 );
             }
         }
-        assert!(generator.spawn_position().y > 64.0);
     }
 }

@@ -158,19 +158,28 @@ fn update_underwater_effect(
     voxel_world: VoxelWorld,
     mut camera: Single<(&Transform, &mut DistanceFog, &mut AmbientLight), With<VoxelViewer>>,
     mut clear_color: ResMut<ClearColor>,
-    mut previous: Local<Option<bool>>,
+    mut previous: Local<Option<Option<VoxelKind>>>,
 ) {
-    let underwater = voxel_world
+    let liquid = voxel_world
         .get_at(camera.0.translation)
-        .is_some_and(VoxelKind::is_liquid);
+        .filter(|kind| kind.is_liquid());
 
-    if *previous == Some(underwater) {
+    if *previous == Some(liquid) {
         return;
     }
-    *previous = Some(underwater);
+    *previous = Some(liquid);
 
     let (_, fog, ambient) = &mut *camera;
-    if underwater {
+    if liquid == Some(VoxelKind::Lava) {
+        fog.color = Color::srgb_u8(210, 80, 10);
+        fog.falloff = FogFalloff::Linear {
+            start: 0.0,
+            end: 1.5,
+        };
+        ambient.color = Color::srgb_u8(255, 140, 60);
+        ambient.brightness = 400.0;
+        clear_color.0 = Color::srgb_u8(210, 80, 10);
+    } else if liquid.is_some() {
         fog.color = Color::srgb_u8(18, 72, 98);
         fog.falloff = FogFalloff::Linear {
             start: 2.0,

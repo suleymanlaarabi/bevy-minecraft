@@ -48,7 +48,8 @@ fn fragment(
     let tint = vec3<f32>(1.0);
 
     var texture_color = textureSample(blocks, blocks_sampler, in.uv, layer);
-    if layer == 8u {
+    // Terrain is opaque: close leaf cutouts (any layer with alpha) with a dark tone.
+    if texture_color.a < 1.0 {
         texture_color = vec4<f32>(
             mix(vec3<f32>(0.32), texture_color.rgb, texture_color.a),
             1.0,

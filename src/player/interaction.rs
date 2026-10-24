@@ -311,7 +311,8 @@ fn targeted_voxel(
     }
     let mut normal = IVec3::ZERO;
     loop {
-        if sample(cell)?.break_duration().is_some() {
+        // Unbreakable blocks (bedrock, lava) still stop the ray: nothing is mined through them.
+        if sample(cell)?.is_opaque() {
             return Some(BlockTarget {
                 destroy: cell,
                 place: cell + normal,
@@ -377,6 +378,21 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    #[test]
+    fn voxel_ray_stops_at_unbreakable_blocks() {
+        for blocker in [VoxelKind::Bedrock, VoxelKind::Lava] {
+            let target = targeted_voxel(Vec3::splat(0.5), Dir3::X, |cell| {
+                Some(match cell.x {
+                    1 => blocker,
+                    2 => VoxelKind::Stone,
+                    _ => VoxelKind::Air,
+                })
+            })
+            .unwrap();
+            assert_eq!(target.destroy, IVec3::new(1, 0, 0));
+        }
     }
 
     #[test]

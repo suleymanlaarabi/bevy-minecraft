@@ -13,13 +13,18 @@ use bevy::{
 use std::time::{Duration, Instant};
 
 const CHUNK_DIRECTIONS: [IVec2; 4] = [IVec2::NEG_X, IVec2::X, IVec2::NEG_Y, IVec2::Y];
-const MAX_PENDING_GENERATIONS: usize = 4;
+/// Worldgen threads: every core but the main and render threads.
+fn generation_threads() -> usize {
+    std::thread::available_parallelism()
+        .map_or(2, |cores| cores.get().saturating_sub(2))
+        .max(2)
+}
 
 fn generation_pool() -> &'static TaskPool {
     static POOL: std::sync::OnceLock<TaskPool> = std::sync::OnceLock::new();
     POOL.get_or_init(|| {
         TaskPoolBuilder::new()
-            .num_threads(2)
+            .num_threads(generation_threads())
             .thread_name("voxel-generation".into())
             .build()
     })
@@ -118,7 +123,8 @@ pub(crate) fn stream_chunks(
 
     let mut spawned = 0;
     while spawned < settings.spawn_budget_per_frame
-        && pending.len() < MAX_PENDING_GENERATIONS
+        // Two queued chunks per thread keep workers busy without hoarding stale requests.
+        && pending.len() < 2 * generation_threads()
         && state.cursor < offsets.len()
     {
         let position = center + offsets[state.cursor];
