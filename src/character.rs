@@ -480,6 +480,28 @@ fn character_physics(
             .is_none_or(|written| written.distance_squared(position.0) > 1e-6)
         {
             motion.position = position.0.as_dvec3();
+            if world.collision_ready(position.0) {
+                // Saved positions use f32. Restoring them as f64 can put the feet
+                // just inside a supporting face, which axis clipping cannot stop.
+                // Recover only penetration within one f32 rounding interval.
+                let tolerance = (position.y.abs().next_up() - position.y.abs()) as f64;
+                let aabb = body.aabb(motion.position, state.pose);
+                terrain.gather(&world, aabb);
+                let support = terrain
+                    .boxes
+                    .iter()
+                    .filter(|obstacle| {
+                        let penetration = obstacle.max.y - aabb.min.y;
+                        penetration > 0.0
+                            && penetration <= tolerance
+                            && aabb.intersects(obstacle)
+                    })
+                    .map(|obstacle| obstacle.max.y)
+                    .max_by(f64::total_cmp);
+                if let Some(support) = support {
+                    motion.position.y = support + body.origin_height as f64;
+                }
+            }
             motion.previous = motion.position;
             motion.velocity = DVec3::ZERO;
             motion.elapsed = 0.0;
