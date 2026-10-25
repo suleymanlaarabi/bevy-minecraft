@@ -1,7 +1,9 @@
 use bevy::{
     anti_alias::fxaa::Fxaa,
+    core_pipeline::prepass::DepthPrepass,
     light::DirectionalLightShadowMap,
     prelude::*,
+    render::occlusion_culling::OcclusionCulling,
     window::{MonitorSelection, PresentMode, WindowMode},
 };
 
@@ -21,7 +23,7 @@ fn apply_graphics_settings(
     settings: Res<GraphicsSettings>,
     mut windows: Query<&mut Window>,
     mut cameras: Query<(Entity, &mut Projection), With<PlayerCamera>>,
-    mut lights: Query<&mut DirectionalLight>,
+    mut lights: Query<(Entity, &mut DirectionalLight)>,
     shadow_map: Option<ResMut<DirectionalLightShadowMap>>,
     mut commands: Commands,
 ) {
@@ -34,8 +36,8 @@ fn apply_graphics_settings(
     for (entity, mut projection) in &mut cameras {
         apply_camera_settings(&settings, entity, &mut projection, &mut commands);
     }
-    for mut light in &mut lights {
-        light.shadow_maps_enabled = settings.shadow_quality != ShadowQuality::Off;
+    for (entity, mut light) in &mut lights {
+        apply_light_settings(&settings, entity, &mut light, &mut commands);
     }
     if let (Some(size), Some(mut shadow_map)) = (settings.shadow_quality.map_size(), shadow_map) {
         shadow_map.size = size;
@@ -58,7 +60,23 @@ fn apply_settings_to_new_target(
         apply_camera_settings(&settings, add.entity, &mut projection, &mut commands);
     }
     if let Ok(mut light) = lights.get_mut(add.entity) {
-        light.shadow_maps_enabled = settings.shadow_quality != ShadowQuality::Off;
+        apply_light_settings(&settings, add.entity, &mut light, &mut commands);
+    }
+}
+
+fn apply_light_settings(
+    settings: &GraphicsSettings,
+    entity: Entity,
+    light: &mut DirectionalLight,
+    commands: &mut Commands,
+) {
+    light.shadow_maps_enabled = settings.shadow_quality != ShadowQuality::Off;
+    // Also culls shadow casters hidden from the sun in every cascade.
+    let mut light = commands.entity(entity);
+    if settings.occlusion_culling {
+        light.insert(OcclusionCulling);
+    } else {
+        light.remove::<OcclusionCulling>();
     }
 }
 
@@ -94,6 +112,14 @@ fn apply_camera_settings(
 
     let mut camera = commands.entity(entity);
     camera.insert(settings.anti_aliasing.msaa());
+    // Depth first: the costly terrain shading then runs once per pixel, and the
+    // depth pyramid lets occlusion culling skip whole sections hidden by terrain.
+    camera.insert(DepthPrepass);
+    if settings.occlusion_culling {
+        camera.insert(OcclusionCulling);
+    } else {
+        camera.remove::<OcclusionCulling>();
+    }
     if settings.anti_aliasing == AntiAliasingMode::Fxaa {
         camera.insert(Fxaa::default());
     } else {

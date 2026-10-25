@@ -7,7 +7,7 @@ use super::{
 };
 use avian3d::prelude::*;
 use bevy::{
-    camera::visibility::RenderLayers,
+    camera::visibility::{NoCpuCulling, RenderLayers},
     light::{NotShadowCaster, NotShadowReceiver},
     mesh::Indices,
     platform::collections::HashSet,
@@ -449,6 +449,8 @@ pub(crate) fn poll_builds(
                                 Transform::from_xyz(0.0, y, 0.0),
                                 // The shadow entity below casts its shadow.
                                 NotShadowCaster,
+                                // Culled on GPU only: no per-frame CPU work for static terrain.
+                                NoCpuCulling,
                                 ChildOf(entity),
                             ))
                             .id()
@@ -465,6 +467,7 @@ pub(crate) fn poll_builds(
                                 MeshMaterial3d(assets.terrain.clone()),
                                 Transform::from_xyz(0.0, y, 0.0),
                                 RenderLayers::layer(SHADOW_LAYER),
+                                NoCpuCulling,
                                 ChildOf(entity),
                             ))
                             .id()

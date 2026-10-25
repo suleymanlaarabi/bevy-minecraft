@@ -88,6 +88,8 @@ pub enum DisplayMode {
 pub struct GraphicsSettings {
     pub anti_aliasing: AntiAliasingMode,
     pub vsync: bool,
+    /// GPU occlusion culling (experimental in Bevy): skips terrain hidden behind terrain.
+    pub occlusion_culling: bool,
     pub shadow_quality: ShadowQuality,
     pub texture_pack: TexturePackId,
     pub field_of_view: f32,
@@ -100,6 +102,7 @@ impl Default for GraphicsSettings {
         Self {
             anti_aliasing: AntiAliasingMode::Msaa4x,
             vsync: true,
+            occlusion_culling: true,
             shadow_quality: ShadowQuality::Medium,
             texture_pack: TexturePackId::default(),
             field_of_view: 85.0,
@@ -212,6 +215,8 @@ fn settings_page(settings: GraphicsSettings) -> impl Scene {
                     @setting_row("Anti-Aliasing", anti_aliasing_control(settings.anti_aliasing))
                     --
                     @setting_row("VSync", vsync_control(settings.vsync))
+                    --
+                    @setting_row("Occlusion Culling", occlusion_culling_control(settings.occlusion_culling))
                     --
                     @setting_row("Shadow Quality", shadow_quality_control(settings.shadow_quality))
                     --
@@ -423,6 +428,26 @@ fn set_choice<T: GraphicsChoice>(
         choice.set(&mut updated);
         store_settings(*settings, updated, &mut commands);
     }
+}
+
+fn occlusion_culling_control(enabled: bool) -> impl Scene {
+    let checked = enabled.then_some(bsn! { Checked });
+    bsn! {
+        @FeathersToggleSwitch
+        @checked
+        on(checkbox_self_update)
+        on(set_occlusion_culling)
+    }
+}
+
+fn set_occlusion_culling(
+    change: On<ValueChange<bool>>,
+    settings: Res<GraphicsSettings>,
+    mut commands: Commands,
+) {
+    let mut updated = *settings;
+    updated.occlusion_culling = change.value;
+    store_settings(*settings, updated, &mut commands);
 }
 
 fn set_vsync(

@@ -15,7 +15,7 @@ ron = "0.10"
 serde = { version = "1.0", features = ["derive"] }
 
 [profile.dev]
-opt-level = 1
+opt-level = 2
 debug = 0
 incremental = true
 codegen-units = 256
@@ -34,6 +34,10 @@ opt-level = 3
 
 [profile.dev.package."*"]
 opt-level = 3
+# Without these, wgpu enables Vulkan validation and Bevy validates every indirect draw.
+# Re-enable GPU validation when debugging shaders: `env WGPU_VALIDATION=1 cargo run`.
+debug-assertions = false
+overflow-checks = false
 
 # `[patch]` only applies at the root: keep worldgen's modified Pumpkin crates together.
 [patch."https://github.com/Pumpkin-MC/Pumpkin.git"]
