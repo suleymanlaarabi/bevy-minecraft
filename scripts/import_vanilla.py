@@ -63,8 +63,20 @@ def client_jar():
         raise ValueError('client jar SHA-1 mismatch')
     return zipfile.ZipFile(BytesIO(data)), client['sha1']
 
+def import_breaking_textures(jar, sha1):
+    dest = DEST.parents[1] / 'breaking/vanilla'
+    # Read all ten stages before replacing any files. Keep Mojang's PNGs unchanged.
+    stages = [jar.read(f'assets/minecraft/textures/block/destroy_stage_{stage}.png')
+              for stage in range(10)]
+    dest.mkdir(parents=True, exist_ok=True)
+    for stage, data in enumerate(stages):
+        (dest / f'destroy_stage_{stage}.png').write_bytes(data)
+    (dest / 'source.json').write_text(json.dumps(
+        {'minecraft': VERSION, 'client_sha1': sha1}, indent=2) + '\n')
+
 def main():
     jar, sha1 = client_jar()
+    import_breaking_textures(jar, sha1)
     def texture(name):
         tile = Image.open(BytesIO(jar.read(f'assets/minecraft/textures/block/{name}.png'))).convert('RGBA')
         # Animated/oversized textures: keep the first 16x16 frame.

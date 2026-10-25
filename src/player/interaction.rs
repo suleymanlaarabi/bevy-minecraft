@@ -78,10 +78,20 @@ fn prepare_breaking_assets(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let mesh = meshes.add(Cuboid::new(1.006, 1.006, 1.006));
+    // Keep a single reusable overlay; changing stages only swaps its material handle.
+    let mesh = meshes.add(Cuboid::new(1.002, 1.002, 1.002));
+    let vanilla = (0..10).all(|stage| {
+        crate::asset_directory()
+            .join(format!("voxel/breaking/vanilla/destroy_stage_{stage}.png"))
+            .is_file()
+    });
     let stages = core::array::from_fn(|stage| {
+        let texture = if vanilla {
+            format!("voxel/breaking/vanilla/destroy_stage_{stage}.png")
+        } else {
+            format!("voxel/breaking/stage_{stage}.png")
+        };
         materials.add(StandardMaterial {
-            base_color: Color::srgb(0.65, 0.65, 0.65),
             base_color_texture: Some(
                 asset_server
                     .load_builder()
@@ -95,13 +105,13 @@ fn prepare_breaking_assets(
                             ..default()
                         });
                     })
-                    .load(format!("voxel/breaking/stage_{stage}.png")),
+                    .load(texture),
             ),
-            alpha_mode: AlphaMode::Mask(0.05),
+            // Cracks darken the underlying block, preserving its texture and lighting.
+            alpha_mode: AlphaMode::Multiply,
             unlit: true,
             fog_enabled: false,
             depth_bias: 1.0,
-            cull_mode: None,
             ..default()
         })
     });

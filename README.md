@@ -29,8 +29,13 @@ python3 -m pip install Pillow
 python3 scripts/import_vanilla.py   # version optionnelle en argument, ex. 26.3
 ```
 
-Le script écrit aussi `pack.ron` (une entrée par `VoxelKind::key`). Les packs
-historiques (Faithful, Replete, Meadow, Twilight) n'ont que quelques blocs ; les
+Le script écrit aussi `pack.ron` (une entrée par `VoxelKind::key`) et extrait les
+textures de fissures officielles dans `assets/voxel/breaking/vanilla/` :
+les dix étapes sont appliquées en multiplication sur le bloc pendant la casse,
+quel que soit le pack de blocs choisi. Ces PNG sont ignorés par git ; sans eux,
+les fissures utilisent le pack de repli fourni avec le jeu.
+
+Les packs historiques (Faithful, Replete, Meadow, Twilight) n'ont que quelques blocs ; les
 autres utilisent leur repli (`VoxelKind::fallback`, ex. bouleau → chêne → pierre).
 Faithful : voir `assets/voxel/packs/faithful/LICENSE.txt` et
 `scripts/import_faithful.py`.
