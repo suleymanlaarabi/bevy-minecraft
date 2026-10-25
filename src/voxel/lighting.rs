@@ -97,6 +97,7 @@ pub(crate) fn update_lighting(
             x: position.x,
             z: position.y,
             states: states.clone(),
+            // Rendering estimates must never seed Pumpkin's authoritative light.
             light: voxels.light.clone(),
             edits: voxels.native_edits.iter().copied().collect(),
         });

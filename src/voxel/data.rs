@@ -206,6 +206,8 @@ pub struct ChunkVoxels {
     cells: Arc<[VoxelKind]>,
     pub(crate) native_states: Option<Arc<[u16]>>,
     pub(crate) light: Arc<[u8]>,
+    /// Rendering-only estimates while Pumpkin relights edits. Never seed the worker with these.
+    render_light: Option<Arc<[u8]>>,
     pub(crate) native_edits: Arc<std::collections::BTreeSet<usize>>,
     pub(crate) content_revision: u64,
     /// One bit per render section whose mesh is outdated.
@@ -223,6 +225,7 @@ impl ChunkVoxels {
             cells: cells.into(),
             native_states: None,
             light: vec![0xf0; (size * size * height) as usize].into(),
+            render_light: None,
             native_edits: default(),
             content_revision: 0,
             dirty_sections: 0,
@@ -273,20 +276,42 @@ impl ChunkVoxels {
         self.revision = self.revision.wrapping_add(1);
     }
 
-    /// Replaces the light and returns the sections whose light changed.
+    pub(crate) fn render_light(&self) -> &Arc<[u8]> {
+        self.render_light.as_ref().unwrap_or(&self.light)
+    }
+
+    /// The voxel edit already dirties this cell's sections and their border readers.
+    pub(crate) fn estimate_light(&mut self, local: IVec3, light: u8) {
+        let Some(index) = self.index(local) else {
+            return;
+        };
+        if self.render_light()[index] == light {
+            return;
+        }
+        let render = self.render_light.get_or_insert_with(|| self.light.clone());
+        Arc::make_mut(render)[index] = light;
+    }
+
+    /// Replaces authoritative light, clears estimates, and returns visually changed sections.
     pub(crate) fn replace_light(&mut self, light: Arc<[u8]>) -> u32 {
-        if self.light == light || light.len() != self.light.len() {
+        if light.len() != self.light.len() {
+            return 0;
+        }
+        if *self.render_light() == light {
+            self.light = light;
+            self.render_light = None;
             return 0;
         }
         let section_cells = (self.size * self.size * SECTION_HEIGHT) as usize;
         let changed = self
-            .light
+            .render_light()
             .chunks(section_cells)
             .zip(light.chunks(section_cells))
             .enumerate()
             .filter(|(_, (old, new))| old != new)
             .fold(0, |mask, (section, _)| mask | (1 << section));
         self.light = light;
+        self.render_light = None;
         // Light is drawn at face corners, which also sample the adjacent sections.
         let spread = changed | (changed << 1) | (changed >> 1);
         self.mark_sections(spread);

@@ -1,5 +1,5 @@
 use super::{
-    ChunkVoxels, SHADOW_LAYER, SetVoxel, VoxelChunk, VoxelSettings, VoxelViewer,
+    ChunkVoxels, SHADOW_LAYER, SetVoxel, VoxelChunk, VoxelKind, VoxelSettings, VoxelViewer,
     generation::WorldGenerator,
     material::{TexturePack, VoxelMaterial, WaterMaterial, block_texture},
     meshing::{ChunkNeighborhood, build_sections},
@@ -202,12 +202,64 @@ pub(crate) fn set_voxel(
     mut chunks: Query<&mut ChunkVoxels>,
 ) {
     let (chunk, local) = settings.split_world_position(event.world_position);
+    // Read neighbors before borrowing the edited chunk mutably, using the same query.
+    // Only removal exposes a formerly opaque cell with stale (usually zero) light.
+    let estimate = if event.kind == VoxelKind::Air
+        && let Some(entity) = index.get(&chunk)
+        && let Ok(voxels) = chunks.get(*entity)
+        && voxels.native_states.is_some()
+        && voxels.get(local).is_some_and(VoxelKind::is_opaque)
+    {
+        let height = voxels.height;
+        let (mut sky, mut block) = (0u8, 0u8);
+        for offset in [
+            IVec3::X,
+            IVec3::NEG_X,
+            IVec3::Y,
+            IVec3::NEG_Y,
+            IVec3::Z,
+            IVec3::NEG_Z,
+        ] {
+            let position = event.world_position + offset;
+            let light = if position.y >= height {
+                0xf0
+            } else {
+                let (neighbor_chunk, neighbor_local) = settings.split_world_position(position);
+                let Some(entity) = index.get(&neighbor_chunk) else {
+                    continue;
+                };
+                let Ok(neighbor) = chunks.get(*entity) else {
+                    continue;
+                };
+                let Some(cell) = neighbor.index(neighbor_local) else {
+                    continue;
+                };
+                if neighbor.get(neighbor_local).is_none_or(VoxelKind::is_opaque) {
+                    continue;
+                }
+                neighbor.render_light()[cell]
+            };
+            let neighbor_sky = light >> 4;
+            sky = sky.max(if offset == IVec3::Y && neighbor_sky == 15 {
+                15
+            } else {
+                neighbor_sky.saturating_sub(1)
+            });
+            block = block.max((light & 15).saturating_sub(1));
+        }
+        Some((sky << 4) | block)
+    } else {
+        None
+    };
     let changed = if let Some(entity) = index.get(&chunk) {
         let Ok(mut voxels) = chunks.get_mut(*entity) else {
             return;
         };
         let changed = voxels.bypass_change_detection().set(local, event.kind);
         if changed {
+            if let Some(light) = estimate {
+                voxels.bypass_change_detection().estimate_light(local, light);
+            }
             voxels.set_changed();
             commands.entity(*entity).try_insert(EditedChunk);
         }

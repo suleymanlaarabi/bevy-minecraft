@@ -91,7 +91,7 @@ impl ChunkNeighborhood {
     ) -> Self {
         let column = |voxels: &ChunkVoxels| Column {
             cells: voxels.cells().clone(),
-            light: voxels.light.clone(),
+            light: voxels.render_light().clone(),
         };
         let columns = std::array::from_fn(|slot| {
             let offset = IVec2::new(slot as i32 % 3 - 1, slot as i32 / 3 - 1);
