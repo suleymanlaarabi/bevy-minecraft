@@ -11,8 +11,8 @@ import bevy_pbr::render::{
     shadows,
 };
 
-// The water still uses the StandardMaterial input. Keep its specialized
-// ambient-and-sun lighting path separate from the lean opaque voxel material.
+// Glossy ambient-and-sun lighting of the water, kept separate from the lean
+// diffuse path of the opaque voxel material.
 fn apply_voxel_lighting(in: PbrInput, voxel_light: vec2<f32>) -> vec4<f32> {
     let base_color = in.material.base_color;
     let metallic = in.material.metallic;

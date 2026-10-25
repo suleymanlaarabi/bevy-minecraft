@@ -1,20 +1,15 @@
-import bevy_pbr::render::{
-    mesh_view_bindings::globals,
-    pbr_fragment::pbr_input_from_standard_material,
-};
-@if(PREPASS_PIPELINE)
-import bevy_pbr::{
-    prepass::io::{VertexOutput, FragmentOutput},
-    deferred::functions::deferred_output,
-};
-@if(!PREPASS_PIPELINE)
-import bevy_pbr::render::forward_io::{VertexOutput, FragmentOutput};
-@if(!PREPASS_PIPELINE)
+import super::voxel_vertex::{PackedVertex, decode, face_normal};
 import super::voxel_lighting::apply_voxel_lighting;
-@if(!PREPASS_PIPELINE)
 import super::voxel_fog::apply_voxel_fog;
-@if(!PREPASS_PIPELINE)
 import super::block_lighting::sky_visibility;
+import bevy_pbr::render::{
+    forward_io::FragmentOutput,
+    mesh_functions,
+    mesh_view_bindings::{globals, view},
+    pbr_functions::calculate_view,
+    pbr_types::pbr_input_new,
+    view_transformations::position_world_to_clip,
+};
 
 struct WaterSettings {
     tint: vec4<f32>,
@@ -23,12 +18,47 @@ struct WaterSettings {
     animation: vec4<f32>,
 }
 
-@group(constants::MATERIAL_BIND_GROUP) @binding(100)
+@group(constants::MATERIAL_BIND_GROUP) @binding(0)
 var<uniform> water: WaterSettings;
-@group(constants::MATERIAL_BIND_GROUP) @binding(101)
+@group(constants::MATERIAL_BIND_GROUP) @binding(1)
 var still: texture_2d_array<f32>;
-@group(constants::MATERIAL_BIND_GROUP) @binding(102)
+@group(constants::MATERIAL_BIND_GROUP) @binding(2)
 var still_sampler: sampler;
+
+// Vanilla still water stops 2/16 below the top of its block.
+const SURFACE_DROP: f32 = 2.0 / 16.0;
+
+struct WaterVaryings {
+    @builtin(position) position: vec4<f32>,
+    @location(0) world_position: vec4<f32>,
+    @location(1) world_normal: vec3<f32>,
+    @location(2) light: vec2<f32>,
+    // Normalized water column depth (1 on sides and undersides).
+    @location(3) depth: f32,
+}
+
+// Word 1 of a water vertex also holds the corner depth (bits 12..16) and whether the
+// corner sits at the lowered surface level (bit 16), see `meshing::water_mesh`.
+@vertex
+fn vertex(in: PackedVertex) -> WaterVaryings {
+    let vertex = decode(in.voxel);
+    var position = vertex.position;
+    position.y -= f32((in.voxel.y >> 16u) & 1u) * SURFACE_DROP;
+    let world_from_local = mesh_functions::get_world_from_local(in.instance_index);
+    var out: WaterVaryings;
+    out.world_position = mesh_functions::mesh_position_local_to_world(
+        world_from_local,
+        vec4<f32>(position, 1.0),
+    );
+    out.position = position_world_to_clip(out.world_position.xyz);
+    out.world_normal = mesh_functions::mesh_normal_local_to_world(
+        face_normal(vertex.direction),
+        in.instance_index,
+    );
+    out.light = vertex.light;
+    out.depth = f32((in.voxel.y >> 12u) & 15u) / 15.0;
+    return out;
+}
 
 // Integer hash: stable at any world coordinate, unlike fract(sin()) hashes.
 fn hash(p: vec3<i32>) -> f32 {
@@ -82,45 +112,42 @@ fn water_texture(world: vec3<f32>, normal: vec3<f32>) -> f32 {
 
 @fragment
 fn fragment(
-    in: VertexOutput,
+    in: WaterVaryings,
     @builtin(front_facing) is_front: bool,
 ) -> FragmentOutput {
-    var pbr_input = pbr_input_from_standard_material(in, is_front);
-    let world = pbr_input.world_position.xyz;
+    let world = in.world_position.xyz;
     // Flat like vanilla: the motion lives in the texture, not in bent normals.
     let normal = normalize(in.world_normal);
-    pbr_input.N = select(-normal, normal, is_front);
 
-    // Red vertex color is the normalized water column depth (1 on sides and undersides).
-@if(VERTEX_COLORS)
-    let depth = in.color.r;
-@if(!VERTEX_COLORS)
-    let depth = 1.0;
+    // The glossy dielectric the water used to get from its StandardMaterial base.
+    // Water never receives shadows (`NotShadowReceiver`), hence no mesh flags.
+    var pbr_input = pbr_input_new();
+    pbr_input.is_orthographic = view.clip_from_view[3].w == 1.0;
+    pbr_input.V = calculate_view(in.world_position, pbr_input.is_orthographic);
+    pbr_input.frag_coord = in.position;
+    pbr_input.world_position = in.world_position;
+    pbr_input.world_normal = in.world_normal;
+    pbr_input.N = select(-normal, normal, is_front);
+    pbr_input.material.perceptual_roughness = 0.08;
 
     let facing = clamp(dot(pbr_input.N, pbr_input.V), 0.0, 1.0);
     // Viewed from inside the water, the surface keeps a flat, slightly darker look.
     let fresnel = select(0.0, pow(1.0 - facing, 5.0), is_front);
-    let albedo = water.tint.rgb * water_texture(world, normal) * mix(1.0, 0.75, depth);
-    let opacity = select(water.alpha.z, mix(water.alpha.x, water.alpha.y, depth), is_front);
+    let albedo = water.tint.rgb * water_texture(world, normal) * mix(1.0, 0.75, in.depth);
+    let opacity = select(water.alpha.z, mix(water.alpha.x, water.alpha.y, in.depth), is_front);
     pbr_input.material.base_color = vec4<f32>(
         select(albedo * 0.8, albedo, is_front),
         mix(opacity, water.alpha.w, fresnel),
     );
 
-@if(PREPASS_PIPELINE) {
-    return deferred_output(in, pbr_input);
-} @else {
-    var out: FragmentOutput;
-@if(VERTEX_UVS_B)
-    let voxel_light = in.uv_b;
-@if(!VERTEX_UVS_B)
-    let voxel_light = vec2<f32>(1.0, 0.0);
-    let lit = apply_voxel_lighting(pbr_input, voxel_light);
+    let lit = apply_voxel_lighting(pbr_input, in.light);
     // Cheap sky reflection: the clear color is already in output space, so blend it
     // after lighting, dimmed where the sky cannot reach.
-    let sky = water.sky_color.rgb * sky_visibility(voxel_light);
-    out.color = vec4<f32>(mix(lit.rgb, sky, fresnel * water.sky_color.a), lit.a);
-    out.color = apply_voxel_fog(out.color, world);
+    let sky = water.sky_color.rgb * sky_visibility(in.light);
+    var out: FragmentOutput;
+    out.color = apply_voxel_fog(
+        vec4<f32>(mix(lit.rgb, sky, fresnel * water.sky_color.a), lit.a),
+        world,
+    );
     return out;
-}
 }

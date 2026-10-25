@@ -121,6 +121,12 @@ impl Plugin for VoxelPlugin {
         .add_systems(PreStartup, prepare_assets)
         .add_systems(Update, stream_chunks.run_if(in_state(GameState::Game)))
         .add_systems(
+            Update,
+            material::generate_block_mipmaps.run_if(
+                on_message::<AssetEvent<Image>>.or_else(on_message::<AssetEvent<VoxelMaterial>>),
+            ),
+        )
+        .add_systems(
             PostUpdate,
             (
                 poll_chunk_generations,

@@ -1,7 +1,7 @@
 use super::{
     ChunkVoxels, SHADOW_LAYER, SetVoxel, VoxelChunk, VoxelSettings, VoxelViewer,
     generation::WorldGenerator,
-    material::{TexturePack, VoxelMaterial, WaterMaterial, WaterMaterialExtension, block_texture},
+    material::{TexturePack, VoxelMaterial, WaterMaterial, block_texture},
     meshing::{ChunkNeighborhood, build_sections},
     streaming::{AwaitingNeighbors, ChunkIndex, StoredChunks},
 };
@@ -43,18 +43,7 @@ pub(crate) fn prepare_assets(
     commands.insert_resource(pack);
     commands.insert_resource(VoxelAssets {
         terrain: voxel_materials.add(VoxelMaterial { blocks, faces }),
-        water: water_materials.add(WaterMaterial {
-            base: StandardMaterial {
-                // The shader computes the tint and opacity from WaterSettings.
-                base_color: Color::WHITE,
-                alpha_mode: AlphaMode::Blend,
-                cull_mode: None,
-                perceptual_roughness: 0.08,
-                reflectance: 0.5,
-                ..default()
-            },
-            extension: WaterMaterialExtension::load(&asset_server),
-        }),
+        water: water_materials.add(WaterMaterial::load(&asset_server)),
     });
 }
 

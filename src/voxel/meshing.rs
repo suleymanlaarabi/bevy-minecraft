@@ -8,10 +8,11 @@ use bevy::{
 };
 use std::sync::Arc;
 
-/// Packed terrain vertex, decoded by `voxel_vertex.wesl`:
+/// Packed terrain and water vertex, decoded by `voxel_vertex.wesl`:
 /// - word 0: x, y, z (5 bits each, section-local 0..=16), face direction (3 bits,
 ///   `axis * 2 + positive`), block kind (8 bits);
-/// - word 1: corner sky light and block light (6 bits each, 0..=60).
+/// - word 1: corner sky light and block light (6 bits each, 0..=60); water adds the
+///   corner column depth (4 bits) and the lowered surface flag (1 bit) above them.
 ///
 /// UVs, normals, tints and texture layers are derived on the GPU, so a vertex is
 /// 8 bytes instead of 56 and meshes do not depend on the texture pack.
@@ -254,13 +255,13 @@ fn face_light(padded: &Padded, outside: [i32; 3], axis: usize) -> [u16; 4] {
 pub(crate) struct SectionMeshes {
     pub(crate) index: usize,
     pub(crate) terrain: Option<TerrainGeometry>,
-    pub(crate) water: Option<VoxelGeometry>,
+    pub(crate) water: Option<TerrainGeometry>,
     /// Depth-only terrain for the shadow maps. Only built when sunlight reaches the
     /// section or its border; otherwise its faces are buried beneath other geometry.
     pub(crate) shadow: Option<TerrainGeometry>,
 }
 
-/// Terrain in the packed [`ATTRIBUTE_VOXEL`] format.
+/// Terrain or water in the packed [`ATTRIBUTE_VOXEL`] format.
 #[derive(Default)]
 pub(crate) struct TerrainGeometry {
     vertices: Vec<[u32; 2]>,
@@ -281,7 +282,7 @@ impl TerrainGeometry {
         axis: usize,
         positive: bool,
         kind: VoxelKind,
-        light: [u16; 4],
+        word1: [u16; 4],
     ) {
         let add = |a: [i32; 3], b: [i32; 3]| [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
         let corners = [
@@ -293,12 +294,9 @@ impl TerrainGeometry {
         let first = self.vertices.len() as u16;
         let face = (axis as u32 * 2 + u32::from(positive)) << 15 | (kind as u32) << 18;
         self.vertices
-            .extend(corners.into_iter().zip(light).map(|(point, light)| {
+            .extend(corners.into_iter().zip(word1).map(|(point, word1)| {
                 let [x, y, z] = point.map(|value| value as u32);
-                [
-                    x | y << 5 | z << 10 | face,
-                    u32::from(light & 63) | u32::from((light >> 6) & 63) << 6,
-                ]
+                [x | y << 5 | z << 10 | face, u32::from(word1)]
             }));
         let order = if positive {
             [0, 1, 2, 0, 2, 3]
@@ -338,37 +336,6 @@ impl TerrainGeometry {
     #[cfg(feature = "dev")]
     pub(crate) fn counts(&self) -> (usize, usize) {
         (self.vertices.len(), self.indices.len() / 3)
-    }
-}
-
-/// Water in the standard vertex format of its `StandardMaterial` extension.
-#[derive(Default)]
-pub(crate) struct VoxelGeometry {
-    positions: Vec<[f32; 3]>,
-    normals: Vec<[f32; 3]>,
-    colors: Vec<[f32; 4]>,
-    uvs: Vec<[f32; 2]>,
-    light: Vec<[f32; 2]>,
-    indices: Vec<u32>,
-}
-
-impl VoxelGeometry {
-    pub(crate) fn into_mesh(self) -> Mesh {
-        Mesh::new(
-            PrimitiveTopology::TriangleList,
-            RenderAssetUsages::RENDER_WORLD,
-        )
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, self.colors)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_1, self.light)
-        .with_inserted_indices(Indices::U32(self.indices))
-    }
-
-    #[cfg(feature = "dev")]
-    pub(crate) fn counts(&self) -> (usize, usize) {
-        (self.positions.len(), self.indices.len() / 3)
     }
 }
 
@@ -549,13 +516,14 @@ fn shadow_mesh(padded: &Padded) -> TerrainGeometry {
     geometry
 }
 
-/// Vanilla still water stops 2/16 below the top of its block.
-const WATER_SURFACE_DROP: f32 = 2.0 / 16.0;
 /// Water columns deeper than this read as fully deep in the shader.
 const WATER_DEPTH_CAP: usize = 8;
 /// Depth is packed in the bits above the 12 bits of corner light, as 0..=15.
 const WATER_DEPTH_SHIFT: u16 = 12;
 const WATER_DEPTH_MAX: u16 = 15;
+/// Marks corners at the lowered surface level, 2/16 below the block top
+/// (`water_material.wesl` applies the drop).
+const WATER_LOWERED: u32 = 1 << 16;
 
 /// Water cells stacked downward from `top` (inclusive), capped at [`WATER_DEPTH_CAP`].
 fn water_depth(neighborhood: &ChunkNeighborhood, top: IVec3) -> u8 {
@@ -583,14 +551,9 @@ fn water_mesh(
     padded: &Padded,
     neighborhood: &ChunkNeighborhood,
     base: i32,
-) -> Option<VoxelGeometry> {
+) -> Option<TerrainGeometry> {
     let dimensions = padded.dimensions;
-    let mut positions = Vec::new();
-    let mut normals = Vec::new();
-    let mut colors = Vec::new();
-    let mut uvs = Vec::new();
-    let mut light = Vec::new();
-    let mut indices = Vec::new();
+    let mut geometry = TerrainGeometry::default();
     let stride = dimensions[0] + 2;
     let mut depths = Vec::new();
     for axis in 0..3 {
@@ -659,42 +622,24 @@ fn water_mesh(
                 }
             }
             consume_mask(&mut mask, width, height, |i, j, w, h, (face, lowered)| {
-                let mut corner = [0; 3];
-                corner[axis] = layer + 1;
-                corner[u] = i as i32;
-                corner[v] = j as i32;
-                let mut du = [0; 3];
-                let mut dv = [0; 3];
-                du[u] = w as i32;
-                dv[v] = h as i32;
-                push_quad(
-                    &mut positions,
-                    &mut normals,
-                    &mut colors,
-                    &mut uvs,
-                    &mut light,
-                    &mut indices,
-                    corner,
-                    du,
-                    dv,
-                    axis,
-                    face.face,
-                );
+                let (corner, du, dv) = quad(axis, layer, i, j, w, h);
+                let Face(kind, positive, values) = face.face;
+                geometry.push_quad(corner, du, dv, axis, positive, kind, values);
                 if lowered {
                     // A lowered side never merges vertically: the cell above it is
                     // not water, so the next cell up has no side face to join.
-                    let top = (corner[1] + du[1] + dv[1]) as f32;
-                    let start = positions.len() - 4;
-                    for position in &mut positions[start..] {
-                        if position[1] == top {
-                            position[1] -= WATER_SURFACE_DROP;
+                    let top = (corner[1] + du[1] + dv[1]) as u32;
+                    let start = geometry.vertices.len() - 4;
+                    for vertex in &mut geometry.vertices[start..] {
+                        if TerrainGeometry::position(*vertex).y as u32 == top {
+                            vertex[1] |= WATER_LOWERED;
                         }
                     }
                 }
             });
         }
     }
-    (!indices.is_empty()).then(|| finish_mesh(positions, normals, colors, uvs, light, indices))
+    (!geometry.is_empty()).then_some(geometry)
 }
 
 fn consume_mask<T: Copy + Eq>(
@@ -733,91 +678,6 @@ fn consume_mask<T: Copy + Eq>(
             x += quad_width;
         }
         y += 1;
-    }
-}
-
-fn finish_mesh(
-    positions: Vec<[f32; 3]>,
-    normals: Vec<[f32; 3]>,
-    colors: Vec<[f32; 4]>,
-    uvs: Vec<[f32; 2]>,
-    light: Vec<[f32; 2]>,
-    indices: Vec<u32>,
-) -> VoxelGeometry {
-    VoxelGeometry {
-        positions,
-        normals,
-        colors,
-        uvs,
-        light,
-        indices,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn push_quad(
-    positions: &mut Vec<[f32; 3]>,
-    normals: &mut Vec<[f32; 3]>,
-    colors: &mut Vec<[f32; 4]>,
-    uvs: &mut Vec<[f32; 2]>,
-    light: &mut Vec<[f32; 2]>,
-    indices: &mut Vec<u32>,
-    corner: [i32; 3],
-    du: [i32; 3],
-    dv: [i32; 3],
-    axis: usize,
-    face: Face,
-) {
-    let add = |a: [i32; 3], b: [i32; 3]| [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
-    let vertices = [
-        corner,
-        add(corner, du),
-        add(add(corner, du), dv),
-        add(corner, dv),
-    ];
-    positions.extend(vertices.map(|point| point.map(|value| value as f32)));
-    let mut normal = [0.0; 3];
-    normal[axis] = if face.1 { 1.0 } else { -1.0 };
-    normals.extend([normal; 4]);
-    // Red carries the normalized water column depth.
-    colors.extend(face.2.map(|value| {
-        [
-            f32::from(value >> WATER_DEPTH_SHIFT) / f32::from(WATER_DEPTH_MAX),
-            0.0,
-            0.0,
-            1.0,
-        ]
-    }));
-    uvs.extend(quad_uvs(axis, du, dv));
-    light.extend(face.2.map(|value| {
-        [
-            f32::from(value & 63) / 60.0,
-            f32::from((value >> 6) & 63) / 60.0,
-        ]
-    }));
-    let first = positions.len() as u32 - 4;
-    let order = if face.1 {
-        [0, 1, 2, 0, 2, 3]
-    } else {
-        [0, 2, 1, 0, 3, 2]
-    };
-    indices.extend(order.map(|index| first + index));
-}
-
-fn quad_uvs(axis: usize, du: [i32; 3], dv: [i32; 3]) -> [[f32; 2]; 4] {
-    match axis {
-        0 => {
-            let (width, height) = (dv[2] as f32, du[1] as f32);
-            [[0.0, height], [0.0, 0.0], [width, 0.0], [width, height]]
-        }
-        1 => {
-            let (width, height) = (du[2] as f32, dv[0] as f32);
-            [[0.0, 0.0], [width, 0.0], [width, height], [0.0, height]]
-        }
-        _ => {
-            let (width, height) = (du[0] as f32, dv[1] as f32);
-            [[0.0, height], [width, height], [width, 0.0], [0.0, 0.0]]
-        }
     }
 }
 
@@ -876,14 +736,28 @@ mod tests {
     #[test]
     fn water_has_side_faces_and_no_faces_inside_solid_ceilings() {
         let mut water = ChunkVoxels::generated(1, 2, vec![VoxelKind::Water, VoxelKind::Air]);
+        let has_face = |geometry: &TerrainGeometry, direction: u32| {
+            geometry
+                .vertices
+                .iter()
+                .any(|vertex| vertex[0] >> 15 & 7 == direction)
+        };
         let geometry = mesh(&water, None).water.unwrap();
         assert_eq!(geometry.indices.len(), 6 * 6);
-        assert!(geometry.normals.contains(&[1.0, 0.0, 0.0]));
-        assert!(geometry.normals.contains(&[0.0, 1.0, 0.0]));
+        assert!(has_face(&geometry, 1));
+        assert!(has_face(&geometry, 3));
+        // The surface and the upper rim of the sides sit at the lowered level.
+        assert!(
+            geometry
+                .vertices
+                .iter()
+                .all(|vertex| (vertex[1] & WATER_LOWERED != 0)
+                    == (TerrainGeometry::position(*vertex).y == 1.0))
+        );
         water.set(IVec3::Y, VoxelKind::Stone);
         let geometry = mesh(&water, None).water.unwrap();
         assert_eq!(geometry.indices.len(), 5 * 6);
-        assert!(!geometry.normals.contains(&[0.0, 1.0, 0.0]));
+        assert!(!has_face(&geometry, 3));
         water.set(IVec3::Y, VoxelKind::Water);
         let geometry = mesh(&water, None).water.unwrap();
         assert_eq!(geometry.indices.len(), 6 * 6);

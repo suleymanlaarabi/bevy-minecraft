@@ -6,11 +6,12 @@ use bevy::{
         ImageSamplerDescriptor,
     },
     mesh::MeshVertexBufferLayoutRef,
-    pbr::{ExtendedMaterial, Material, MaterialExtension, MaterialPipeline, MaterialPipelineKey},
+    pbr::{Material, MaterialPipeline, MaterialPipelineKey},
     prelude::*,
     render::{
         render_resource::{
             AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+            TextureDataOrder, TextureFormat,
         },
         storage::ShaderBuffer,
     },
@@ -302,33 +303,33 @@ const WATER_STILL_FRAMES: u32 = 32;
 /// Vanilla advances the flipbook every 2 ticks.
 const WATER_STILL_FPS: f32 = 10.0;
 
+/// Translucent water in the packed `ATTRIBUTE_VOXEL` format, lit like a glossy
+/// dielectric (roughness 0.08, reflectance 0.5) by `water_material.wesl`.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
-pub(crate) struct WaterMaterialExtension {
-    #[uniform(100)]
+pub(crate) struct WaterMaterial {
+    #[uniform(0)]
     settings: WaterSettings,
-    #[texture(101, dimension = "2d_array")]
-    #[sampler(102)]
+    #[texture(1, dimension = "2d_array")]
+    #[sampler(2)]
     still: Option<Handle<Image>>,
 }
 
-impl WaterMaterialExtension {
+impl WaterMaterial {
     /// Uses the vanilla flipbook when imported, otherwise the shader's procedural texture.
     pub(crate) fn load(asset_server: &AssetServer) -> Self {
-        let mut extension = Self::default();
+        let mut material = Self::default();
         if crate::asset_directory().join(WATER_STILL_PATH).is_file() {
-            extension.still = Some(block_texture(
+            material.still = Some(block_texture(
                 asset_server,
                 WATER_STILL_PATH,
                 WATER_STILL_FRAMES,
             ));
-            extension.settings.animation =
+            material.settings.animation =
                 Vec4::new(WATER_STILL_FRAMES as f32, WATER_STILL_FPS, 0.0, 0.0);
         }
-        extension
+        material
     }
 }
-
-pub(crate) type WaterMaterial = ExtendedMaterial<StandardMaterial, WaterMaterialExtension>;
 
 pub(crate) fn block_texture(asset_server: &AssetServer, path: &str, layers: u32) -> Handle<Image> {
     asset_server
@@ -340,11 +341,123 @@ pub(crate) fn block_texture(asset_server: &AssetServer, path: &str, layers: u32)
                 address_mode_v: ImageAddressMode::Repeat,
                 mag_filter: ImageFilterMode::Nearest,
                 min_filter: ImageFilterMode::Nearest,
-                mipmap_filter: ImageFilterMode::Nearest,
+                // Blends between the levels of `block_mipmaps`, so no mip seams show.
+                mipmap_filter: ImageFilterMode::Linear,
                 ..default()
             });
         })
         .load(path.to_owned())
+}
+
+/// Box-filtered mip chain of a pixel-art array texture, as `(data, level count)` in
+/// layer-major order, or `None` when the image already has one or is unsupported.
+///
+/// Without it, distant terrain samples full-resolution texels: they shimmer and
+/// scatter texture reads across the cache. Colors are averaged in linear space and
+/// weighted by alpha. The terrain shader shades a texel as `mix(dark, rgb, alpha)`,
+/// which is linear in `(rgb * alpha, alpha)`, so each level is exactly the average of
+/// the shaded texels it covers and leaf cutouts keep their brightness at a distance.
+fn block_mipmaps(image: &Image) -> Option<(Vec<u8>, u32)> {
+    let descriptor = &image.texture_descriptor;
+    let srgb = match descriptor.format {
+        TextureFormat::Rgba8UnormSrgb => true,
+        TextureFormat::Rgba8Unorm => false,
+        _ => return None,
+    };
+    let (width, height) = (descriptor.size.width, descriptor.size.height);
+    if descriptor.mip_level_count != 1 || !width.is_power_of_two() || !height.is_power_of_two() {
+        return None;
+    }
+    let levels = width.min(height).ilog2() + 1;
+    let data = image.data.as_ref()?;
+    let layer_bytes = (width * height * 4) as usize;
+    if levels == 1 || data.len() != layer_bytes * descriptor.size.depth_or_array_layers as usize {
+        return None;
+    }
+
+    let decode: [f32; 256] = std::array::from_fn(|value| {
+        let value = value as f32 / 255.0;
+        if !srgb {
+            value
+        } else if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    });
+    let encode = |value: f32| {
+        let value = value.clamp(0.0, 1.0);
+        let value = if !srgb {
+            value
+        } else if value <= 0.003_130_8 {
+            value * 12.92
+        } else {
+            1.055 * value.powf(1.0 / 2.4) - 0.055
+        };
+        (value * 255.0).round() as u8
+    };
+
+    let mut mipmapped = Vec::with_capacity(data.len() * 4 / 3 + 4);
+    for layer in data.chunks_exact(layer_bytes) {
+        mipmapped.extend_from_slice(layer);
+        // Premultiplied linear color: plain averages are then correct.
+        let mut texels: Vec<[f32; 4]> = layer
+            .chunks_exact(4)
+            .map(|texel| {
+                let alpha = f32::from(texel[3]) / 255.0;
+                [
+                    decode[texel[0] as usize] * alpha,
+                    decode[texel[1] as usize] * alpha,
+                    decode[texel[2] as usize] * alpha,
+                    alpha,
+                ]
+            })
+            .collect();
+        let (mut level_width, mut level_height) = (width as usize, height as usize);
+        for _ in 1..levels {
+            let (next_width, next_height) = (level_width / 2, level_height / 2);
+            texels = (0..next_width * next_height)
+                .map(|index| {
+                    let (x, y) = (index % next_width * 2, index / next_width * 2);
+                    let mut sum = [0.0; 4];
+                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        let texel = texels[x + dx + (y + dy) * level_width];
+                        for channel in 0..4 {
+                            sum[channel] += texel[channel] * 0.25;
+                        }
+                    }
+                    sum
+                })
+                .collect();
+            mipmapped.extend(texels.iter().flat_map(|&[r, g, b, alpha]| {
+                let color = |value: f32| encode(if alpha > 0.0 { value / alpha } else { 0.0 });
+                [color(r), color(g), color(b), (alpha * 255.0).round() as u8]
+            }));
+            (level_width, level_height) = (next_width, next_height);
+        }
+    }
+    Some((mipmapped, levels))
+}
+
+/// Gives the terrain's block texture its mip chain once it loads, including after a
+/// texture pack switch. Runs only on image or material asset events.
+pub(crate) fn generate_block_mipmaps(
+    assets: Option<Res<super::rebuild::VoxelAssets>>,
+    materials: Res<Assets<VoxelMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let Some(material) = assets.and_then(|assets| materials.get(&assets.terrain)) else {
+        return;
+    };
+    // Checked before `get_mut`, which would re-upload the image and wake this system.
+    let Some((data, levels)) = images.get(&material.blocks).and_then(block_mipmaps) else {
+        return;
+    };
+    if let Some(mut image) = images.get_mut(&material.blocks) {
+        image.data = Some(data);
+        image.data_order = TextureDataOrder::LayerMajor;
+        image.texture_descriptor.mip_level_count = levels;
+    }
 }
 
 impl Material for VoxelMaterial {
@@ -376,9 +489,42 @@ impl Material for VoxelMaterial {
     }
 }
 
-impl MaterialExtension for WaterMaterialExtension {
+impl Material for WaterMaterial {
+    fn vertex_shader() -> ShaderRef {
+        "shaders/water_material.wesl".into()
+    }
+
     fn fragment_shader() -> ShaderRef {
         "shaders/water_material.wesl".into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Blend
+    }
+
+    // Water neither casts shadows nor writes depth before the main pass.
+    fn enable_prepass() -> bool {
+        false
+    }
+
+    fn enable_shadows() -> bool {
+        false
+    }
+
+    fn specialize(
+        _pipeline: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        descriptor.vertex.buffers = vec![
+            layout
+                .0
+                .get_layout(&[ATTRIBUTE_VOXEL.at_shader_location(0)])?,
+        ];
+        // Both sides render: the surface is also seen from below.
+        descriptor.primitive.cull_mode = None;
+        Ok(())
     }
 }
 
@@ -392,12 +538,46 @@ mod tests {
         render::{
             RenderApp, RenderPlugin,
             pipelined_rendering::PipelinedRenderingPlugin,
-            render_resource::{CachedPipelineState, PipelineCache, TextureFormat},
+            render_resource::{CachedPipelineState, PipelineCache},
         },
         window::ExitCondition,
         winit::WinitPlugin,
     };
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn block_mipmaps_average_shaded_texels_per_layer() {
+        use bevy::render::render_resource::{Extent3d, TextureDimension};
+        // Two 2x2 layers: opaque red with one transparent texel, then opaque white.
+        let red = [255, 0, 0, 255];
+        let data = [
+            red,
+            red,
+            red,
+            [0, 0, 0, 0],
+            [255; 4],
+            [255; 4],
+            [255; 4],
+            [255; 4],
+        ];
+        let image = Image::new(
+            Extent3d {
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 2,
+            },
+            TextureDimension::D2,
+            data.concat(),
+            TextureFormat::Rgba8UnormSrgb,
+            default(),
+        );
+        let (mipmapped, levels) = block_mipmaps(&image).unwrap();
+        assert_eq!(levels, 2);
+        // Layer-major: each layer is followed by its own 1x1 level.
+        assert_eq!(mipmapped.len(), 2 * (16 + 4));
+        assert_eq!(&mipmapped[16..20], &[255, 0, 0, 191]);
+        assert_eq!(&mipmapped[36..40], &[255; 4]);
+    }
 
     #[test]
     fn built_in_packs_have_valid_layers_and_assets() {
@@ -484,13 +664,7 @@ mod tests {
         let water = app
             .world_mut()
             .resource_mut::<Assets<WaterMaterial>>()
-            .add(WaterMaterial {
-                base: StandardMaterial {
-                    alpha_mode: AlphaMode::Blend,
-                    ..default()
-                },
-                extension: default(),
-            });
+            .add(WaterMaterial::default());
         let block = super::super::meshing::build_block_item_mesh(VoxelKind::Stone);
         let mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(block);
         app.world_mut().spawn((
@@ -498,11 +672,10 @@ mod tests {
             MeshMaterial3d(terrain),
             Transform::from_xyz(-0.7, 0.0, 0.0),
         ));
-        // Water keeps the standard vertex layout.
-        let water_mesh = app
-            .world_mut()
-            .resource_mut::<Assets<Mesh>>()
-            .add(Cuboid::default());
+        // Any packed cube exercises the water pipeline's vertex layout.
+        let water_mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(
+            super::super::meshing::build_block_item_mesh(VoxelKind::Stone),
+        );
         app.world_mut().spawn((
             Mesh3d(water_mesh),
             MeshMaterial3d(water),
