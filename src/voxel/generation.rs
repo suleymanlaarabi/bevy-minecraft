@@ -1,7 +1,4 @@
-use super::{
-    ChunkVoxels, VoxelKind,
-    coordinates::{CHUNK_HEIGHT, CHUNK_VOLUME},
-};
+use super::{ChunkVoxels, VoxelKind, coordinates::CHUNK_HEIGHT};
 use bevy::prelude::*;
 use pumpkin_worldgen::{BlockInfo, GeneratedChunk, World, block_info};
 use std::{
@@ -13,8 +10,6 @@ pub(crate) const MIN_Y: i32 = -64;
 const HEIGHT: usize = CHUNK_HEIGHT as usize;
 struct ChunkSource {
     cells: Vec<VoxelKind>,
-    states: Box<[u16]>,
-    light: Box<[u8]>,
 }
 impl ChunkSource {
     fn new(generated: &GeneratedChunk) -> Self {
@@ -25,21 +20,7 @@ impl ChunkSource {
                 .iter()
                 .map(|&state| kinds[state as usize])
                 .collect(),
-            states: generated.block_states().into(),
-            light: generated
-                .light()
-                .expect("full worldgen includes lighting")
-                .into(),
         }
-    }
-
-    fn into_voxels(self) -> ChunkVoxels {
-        assert_eq!(
-            self.cells.len(),
-            CHUNK_VOLUME,
-            "worldgen columns are 16x16x384"
-        );
-        ChunkVoxels::generated(&self.cells, &self.states, &self.light)
     }
 }
 impl std::ops::Deref for ChunkSource {
@@ -66,7 +47,21 @@ pub(crate) struct WorldGenerator {
 }
 
 fn init_world(world: &OnceLock<World>, seed: i64) -> &World {
-    world.get_or_init(|| World::new(seed))
+    world.get_or_init(|| {
+        World::with_options(
+            seed,
+            pumpkin_worldgen::Dimension::Overworld,
+            generation_options(),
+        )
+    })
+}
+
+fn generation_options() -> pumpkin_worldgen::WorldOptions {
+    let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+    pumpkin_worldgen::WorldOptions {
+        generation_threads: Some((cores / 4).clamp(1, 6)),
+        ..default()
+    }
 }
 
 /// Applies the latest requested view; older pending ones are skipped.
@@ -143,7 +138,7 @@ impl WorldGenerator {
         let world = Arc::new(OnceLock::new());
         let options = pumpkin_worldgen::WorldOptions {
             quality: quality.native(),
-            ..Default::default()
+            ..generation_options()
         };
         let _ = world.set(World::with_storage(
             seed,
@@ -236,7 +231,11 @@ impl WorldGenerator {
             }
         }
         let generated = self.world().loaded_chunk(position.x, position.y)?;
-        Some(ChunkSource::new(&generated).into_voxels())
+        Some(ChunkVoxels::from_native(
+            generated.block_states(),
+            generated.light().expect("full worldgen includes lighting"),
+            kinds(),
+        ))
     }
 
     fn chunk(&self, position: IVec2) -> std::io::Result<ChunkSource> {

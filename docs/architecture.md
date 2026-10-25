@@ -80,6 +80,11 @@ Mesh, collider, lighting, and save tasks read shared snapshots. Sparse-set marke
 represent transient chunk work. Budgets limit streaming copies, mesh uploads,
 collision jobs, and despawns. Persistence revisions are independent of render
 invalidations, so save acknowledgements do not trigger remeshing.
+Mesh integration applies atomic sections within shared byte, mesh-count and time
+budgets, retaining unfinished results. Chunk arrivals drive neighbor readiness.
+Camera visibility uses cached section connectivity without hiding shadow casters;
+transparent re-sorts patch GPU indices without re-extracting static vertices.
+See [performance contracts](performance.md) for these invariants and verification limits.
 
 Pumpkin owns procedural terrain and its dependency stages. Hollow owns gameplay
 edits and dynamic lighting. Persistent generator records retain native palettes,

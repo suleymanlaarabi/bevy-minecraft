@@ -85,7 +85,7 @@ pub(crate) fn prepare_assets(
     let vanilla_models = pack.vanilla_models();
     let animations = buffers.add(pack.animation_buffer());
     let special = pack.special_texture(&asset_server);
-    let water = WaterMaterial::load(&asset_server, pack.surface_water(), fog.0.clone());
+    let water = WaterMaterial::load(&asset_server, pack.surface_water(), &fog);
     commands.insert_resource(pack);
     let mut model = |blend| {
         model_materials.add(ModelMaterial::new(
@@ -106,12 +106,16 @@ pub(crate) fn prepare_assets(
             faces: faces.clone(),
             animations: animations.clone(),
             fog: fog.0.clone(),
+            fog_sky: fog.1.clone(),
+            fog_aerial: fog.2.clone(),
         }),
         terrain: voxel_materials.add(VoxelMaterial {
             blocks,
             faces,
             animations,
             fog: fog.0.clone(),
+            fog_sky: fog.1.clone(),
+            fog_aerial: fog.2.clone(),
         }),
     });
 }
@@ -142,7 +146,7 @@ pub(crate) fn apply_texture_pack(
     let cube_faces = buffers.add(next_pack.cube_face_buffer());
     let animations = buffers.add(next_pack.animation_buffer());
     let special = next_pack.special_texture(&asset_server);
-    let water = WaterMaterial::load(&asset_server, next_pack.surface_water(), fog.0.clone());
+    let water = WaterMaterial::load(&asset_server, next_pack.surface_water(), &fog);
     if let Some(mut material) = voxel_materials.get_mut(&voxel_assets.terrain) {
         material.blocks = blocks.clone();
         material.faces = cube_faces.clone();

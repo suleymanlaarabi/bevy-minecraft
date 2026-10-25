@@ -1,6 +1,10 @@
 #![allow(clippy::needless_arbitrary_self_type)]
 
-use super::{meshing::ATTRIBUTE_VOXEL, texture_pack::block_texture};
+use super::{
+    fog::{FogLut, FogMaterialKey, specialize_fog},
+    meshing::ATTRIBUTE_VOXEL,
+    texture_pack::block_texture,
+};
 use bevy::{
     mesh::MeshVertexBufferLayoutRef,
     pbr::{Material, MaterialPipeline, MaterialPipelineKey, MeshPipelineKey},
@@ -17,6 +21,7 @@ use bevy::{
 /// Terrain in the packed `ATTRIBUTE_VOXEL` format, textured from the pack's array.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 #[type_path = "hollow::voxel::material"]
+#[bind_group_data(FogMaterialKey)]
 pub(crate) struct VoxelMaterial {
     #[texture(0, dimension = "2d_array")]
     #[sampler(1)]
@@ -28,6 +33,12 @@ pub(crate) struct VoxelMaterial {
     pub(crate) animations: Handle<ShaderBuffer>,
     #[storage(11, read_only, visibility(fragment))]
     pub(crate) fog: Handle<ShaderBuffer>,
+    #[texture(12, visibility(fragment))]
+    #[sampler(13, visibility(fragment))]
+    pub(crate) fog_sky: Option<Handle<Image>>,
+    #[texture(14, dimension = "3d", visibility(fragment))]
+    #[sampler(15, visibility(fragment))]
+    pub(crate) fog_aerial: Option<Handle<Image>>,
 }
 
 /// Alpha-tested greedy cubes (leaves), with the terrain's bindings and shaders.
@@ -37,6 +48,7 @@ pub(crate) struct VoxelMaterial {
 /// depth test, and the main pass discards the front holes onto the clear color.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 #[type_path = "hollow::voxel::material"]
+#[bind_group_data(FogMaterialKey)]
 pub(crate) struct VoxelCutoutMaterial {
     #[texture(0, dimension = "2d_array")]
     #[sampler(1)]
@@ -47,6 +59,12 @@ pub(crate) struct VoxelCutoutMaterial {
     pub(crate) animations: Handle<ShaderBuffer>,
     #[storage(11, read_only, visibility(fragment))]
     pub(crate) fog: Handle<ShaderBuffer>,
+    #[texture(12, visibility(fragment))]
+    #[sampler(13, visibility(fragment))]
+    pub(crate) fog_sky: Option<Handle<Image>>,
+    #[texture(14, dimension = "3d", visibility(fragment))]
+    #[sampler(15, visibility(fragment))]
+    pub(crate) fog_aerial: Option<Handle<Image>>,
 }
 
 fn voxel_vertex_layout(
@@ -92,8 +110,9 @@ impl Material for VoxelCutoutMaterial {
         _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
+        key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        specialize_fog(descriptor, key.bind_group_data.0);
         voxel_vertex_layout(descriptor, layout)?;
         if let Some(fragment) = &mut descriptor.fragment {
             fragment.shader_defs.push("FOG_BEFORE_ATMOSPHERE".into());
@@ -144,6 +163,7 @@ const WATER_STILL_FPS: f32 = 10.0;
 /// dielectric (roughness 0.08, reflectance 0.5) by `water_material.wesl`.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
 #[type_path = "hollow::voxel::material"]
+#[bind_group_data(FogMaterialKey)]
 pub(crate) struct WaterMaterial {
     #[uniform(0)]
     settings: WaterSettings,
@@ -152,16 +172,23 @@ pub(crate) struct WaterMaterial {
     still: Option<Handle<Image>>,
     #[storage(11, read_only, visibility(fragment))]
     fog: Handle<ShaderBuffer>,
+    #[texture(12, visibility(fragment))]
+    #[sampler(13, visibility(fragment))]
+    pub(crate) fog_sky: Option<Handle<Image>>,
+    #[texture(14, dimension = "3d", visibility(fragment))]
+    #[sampler(15, visibility(fragment))]
+    pub(crate) fog_aerial: Option<Handle<Image>>,
 }
 
 impl WaterMaterial {
     /// Uses the vanilla flipbook when imported, otherwise the shader's procedural texture.
-    pub(crate) fn load(
-        asset_server: &AssetServer,
-        surface_water: bool,
-        fog: Handle<ShaderBuffer>,
-    ) -> Self {
-        let mut material = Self { fog, ..default() };
+    pub(crate) fn load(asset_server: &AssetServer, surface_water: bool, fog: &FogLut) -> Self {
+        let mut material = Self {
+            fog: fog.0.clone(),
+            fog_sky: fog.1.clone(),
+            fog_aerial: fog.2.clone(),
+            ..default()
+        };
         material.settings.animation.z = if surface_water { 1.0 } else { 0.0 };
         if !surface_water && crate::asset_directory().join(WATER_STILL_PATH).is_file() {
             material.still = Some(block_texture(
@@ -200,6 +227,7 @@ impl Material for VoxelMaterial {
         layout: &MeshVertexBufferLayoutRef,
         key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        specialize_fog(descriptor, key.bind_group_data.0);
         voxel_vertex_layout(descriptor, layout)?;
         if let Some(fragment) = &mut descriptor.fragment {
             fragment.shader_defs.push("FOG_BEFORE_ATMOSPHERE".into());
@@ -246,8 +274,9 @@ impl Material for WaterMaterial {
         _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
+        key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        specialize_fog(descriptor, key.bind_group_data.0);
         descriptor.vertex.buffers = vec![
             layout
                 .0
@@ -285,17 +314,25 @@ pub(crate) struct ModelMaterial {
     pub animations: Handle<ShaderBuffer>,
     #[storage(11, read_only, visibility(fragment))]
     pub fog: Handle<ShaderBuffer>,
+    #[texture(12, visibility(fragment))]
+    #[sampler(13, visibility(fragment))]
+    pub(crate) fog_sky: Option<Handle<Image>>,
+    #[texture(14, dimension = "3d", visibility(fragment))]
+    #[sampler(15, visibility(fragment))]
+    pub(crate) fog_aerial: Option<Handle<Image>>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ModelMaterialKey {
     blend: ModelBlend,
     breaking: bool,
+    filtered_fog: bool,
 }
 impl From<&ModelMaterial> for ModelMaterialKey {
     fn from(material: &ModelMaterial) -> Self {
         Self {
             blend: material.blend,
             breaking: material.cracks.is_some(),
+            filtered_fog: material.fog_sky.is_some(),
         }
     }
 }
@@ -331,6 +368,8 @@ impl ModelMaterial {
             special,
             animations,
             fog: water.fog.clone(),
+            fog_sky: water.fog_sky.clone(),
+            fog_aerial: water.fog_aerial.clone(),
         }
     }
 }
@@ -369,6 +408,7 @@ impl Material for ModelMaterial {
         layout: &MeshVertexBufferLayoutRef,
         key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        specialize_fog(descriptor, key.bind_group_data.filtered_fog);
         descriptor.vertex.buffers = vec![
             layout
                 .0
@@ -502,6 +542,8 @@ mod tests {
                 faces: faces.clone(),
                 animations,
                 fog: fog.clone(),
+                fog_sky: None,
+                fog_aerial: None,
             });
         let water = app
             .world_mut()
@@ -602,5 +644,23 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(5));
             }
         }
+    }
+}
+
+impl From<&VoxelMaterial> for FogMaterialKey {
+    fn from(material: &VoxelMaterial) -> Self {
+        Self(material.fog_sky.is_some())
+    }
+}
+
+impl From<&VoxelCutoutMaterial> for FogMaterialKey {
+    fn from(material: &VoxelCutoutMaterial) -> Self {
+        Self(material.fog_sky.is_some())
+    }
+}
+
+impl From<&WaterMaterial> for FogMaterialKey {
+    fn from(material: &WaterMaterial) -> Self {
+        Self(material.fog_sky.is_some())
     }
 }

@@ -105,11 +105,6 @@ impl Sample {
     pub(super) fn cube(&self) -> bool {
         self.has(cell::CUBE)
     }
-    /// Alpha-tested greedy cube.
-    #[inline]
-    pub(super) fn cutout(&self) -> bool {
-        self.has(cell::CUTOUT)
-    }
     #[inline]
     pub(super) fn water(&self) -> bool {
         self.has(cell::WATER)
@@ -153,6 +148,7 @@ struct Column {
 pub(crate) struct ChunkNeighborhood {
     pub(super) origin: IVec3,
     columns: [Option<Column>; 9],
+    cached_connectivity: [Option<u64>; SECTION_COUNT],
 }
 
 /// Column index of a cell whose y is inside the world; x and z wrap into the column.
@@ -192,12 +188,19 @@ impl ChunkNeighborhood {
         });
         Self {
             columns,
+            cached_connectivity: [None; SECTION_COUNT],
             origin: IVec3::ZERO,
         }
     }
 
     pub(crate) fn at(mut self, chunk: IVec2) -> Self {
         self.origin = IVec3::new(chunk.x * CHUNK_SIZE, 0, chunk.y * CHUNK_SIZE);
+        self
+    }
+
+    pub(super) fn reuse_connectivity(mut self, values: [u64; SECTION_COUNT], built: u32) -> Self {
+        self.cached_connectivity =
+            std::array::from_fn(|section| (built & (1 << section) != 0).then_some(values[section]));
         self
     }
 
@@ -266,13 +269,32 @@ impl ChunkNeighborhood {
 /// Cells of a padded section row: one border cell on each side.
 const PADDED_SIZE: i32 = CHUNK_SIZE + 2;
 
+struct SectionSummary {
+    flags: u8,
+    fluids: bool,
+    sky: bool,
+    enclosed: bool,
+    opaque: [u64; 64],
+}
+
+impl Default for SectionSummary {
+    fn default() -> Self {
+        Self {
+            flags: 0,
+            fluids: false,
+            sky: false,
+            enclosed: true,
+            opaque: [0; 64],
+        }
+    }
+}
+
 /// One section plus a one-cell border, copied once so meshing indexes a flat array.
 #[derive(Default)]
 pub(super) struct Padded {
     dimensions: [i32; 3],
     samples: Vec<Sample>,
-    /// Whether the section itself, border excluded, holds alpha-tested cubes.
-    cutout: bool,
+    summary: SectionSummary,
     /// Includes the halo: a neighboring partial block can cover a fluid face.
     pub(super) fluid_occluders: bool,
 }
@@ -284,12 +306,14 @@ impl Padded {
         let base = section as i32 * SECTION_HEIGHT;
         self.dimensions = [CHUNK_SIZE, SECTION_HEIGHT, CHUNK_SIZE];
         self.samples.clear();
-        self.cutout = false;
         self.samples
             .reserve((PADDED_SIZE * PADDED_SIZE * (SECTION_HEIGHT + 2)) as usize);
         let mut kinds = [VoxelKind::Air; CHUNK_SIZE as usize];
         let mut light = [0; CHUNK_SIZE as usize];
         let mut states = [0; CHUNK_SIZE as usize];
+        let build_connectivity = neighborhood.cached_connectivity[section].is_none();
+        let mut summary = SectionSummary::default();
+        self.fluid_occluders = false;
         for y in base - 1..=base + SECTION_HEIGHT {
             for z in -1..=CHUNK_SIZE {
                 self.samples.push(neighborhood.sample(IVec3::new(-1, y, z)));
@@ -316,22 +340,33 @@ impl Padded {
                                 light,
                             )
                         }));
-                    // Interior rows always come from the center column.
-                    let interior =
-                        (base..base + SECTION_HEIGHT).contains(&y) && (0..CHUNK_SIZE).contains(&z);
-                    self.cutout |= interior
-                        && self.samples[self.samples.len() - CHUNK_SIZE as usize..]
-                            .iter()
-                            .any(Sample::cutout);
                 } else {
                     self.samples
                         .extend((0..CHUNK_SIZE).map(|x| neighborhood.sample(IVec3::new(x, y, z))));
                 }
                 self.samples
                     .push(neighborhood.sample(IVec3::new(CHUNK_SIZE, y, z)));
+                // Summarize the row while it is hot, using the known row
+                // coordinates rather than dividing every padded cell index.
+                let interior =
+                    (base..base + SECTION_HEIGHT).contains(&y) && (0..CHUNK_SIZE).contains(&z);
+                let row = &self.samples[self.samples.len() - PADDED_SIZE as usize..];
+                for (x, sample) in row.iter().enumerate() {
+                    summary.sky |= sample.light >> 4 != 0;
+                    summary.enclosed &= sample.occludes();
+                    self.fluid_occluders |= sample.fluid_occluder();
+                    if interior && (1..=CHUNK_SIZE as usize).contains(&x) {
+                        summary.flags |= sample.info.flags;
+                        summary.fluids |= sample.fluid() != 0;
+                        if build_connectivity && sample.cube() && sample.occludes() {
+                            let cell = x - 1 + z as usize * 16 + (y - base) as usize * 256;
+                            summary.opaque[cell / 64] |= 1 << (cell % 64);
+                        }
+                    }
+                }
             }
         }
-        self.fluid_occluders = self.samples.iter().any(Sample::fluid_occluder);
+        self.summary = summary;
     }
 
     #[cfg(test)]
@@ -340,9 +375,9 @@ impl Padded {
         samples[13] = Sample::new(kind, FULL_SKY);
         Self {
             dimensions: [1, 1, 1],
-            cutout: samples[13].cutout(),
             fluid_occluders: samples[13].fluid_occluder(),
             samples,
+            summary: SectionSummary::default(),
         }
     }
 
@@ -354,13 +389,30 @@ impl Padded {
 }
 
 /// Buffers reused by every section a thread meshes, instead of allocating per section.
-#[derive(Default)]
 struct Scratch {
     padded: Padded,
     faces: Vec<Option<LitFace>>,
     shadow: Vec<Option<bool>>,
     water: Vec<Option<(LitFace, bool)>>,
     depths: Vec<u8>,
+    model_depths: Vec<u8>,
+    visited: [u64; 64],
+    flood_stack: Vec<u16>,
+}
+
+impl Default for Scratch {
+    fn default() -> Self {
+        Self {
+            padded: default(),
+            faces: Vec::new(),
+            shadow: Vec::new(),
+            water: Vec::new(),
+            depths: Vec::new(),
+            model_depths: Vec::new(),
+            visited: [0; 64],
+            flood_stack: Vec::new(),
+        }
+    }
 }
 
 thread_local! {
@@ -394,7 +446,9 @@ pub(super) fn face_light(padded: &Padded, outside: [i32; 3], axis: usize) -> [u1
 }
 
 /// Geometry of one render section, in section-local coordinates.
+#[derive(Default)]
 pub(crate) struct SectionMeshes {
+    pub(super) connectivity: u64,
     /// Alpha-tested greedy cubes (leaves), drawn and shadowed with discard.
     pub(crate) cutout: Option<TerrainGeometry<u32>>,
     pub(crate) models: Option<super::model_mesh::ModelGeometry>,
@@ -731,6 +785,9 @@ pub(crate) fn build_sections(
             shadow,
             water: water_faces,
             depths,
+            model_depths,
+            visited,
+            flood_stack,
         } = scratch;
         (0..SECTION_COUNT)
             .filter(|section| sections & (1 << section) != 0)
@@ -738,6 +795,7 @@ pub(crate) fn build_sections(
                 let (opaque, water) = neighborhood.section_contents(index);
                 if !opaque && !water {
                     return SectionMeshes {
+                        connectivity: super::visibility::ALL_CONNECTIONS,
                         index,
                         cutout: None,
                         terrain: None,
@@ -748,17 +806,33 @@ pub(crate) fn build_sections(
                     };
                 }
                 padded.fill_section(neighborhood, index);
-                let casts_shadow = padded.samples.iter().any(|sample| sample.light >> 4 != 0);
+                if padded.summary.enclosed && padded.summary.flags & cell::MODEL == 0 {
+                    return SectionMeshes {
+                        index,
+                        connectivity: 0,
+                        ..default()
+                    };
+                }
+                let connectivity = neighborhood.cached_connectivity[index].unwrap_or_else(|| {
+                    *visited = padded.summary.opaque;
+                    super::visibility::connectivity(visited, flood_stack)
+                });
+                let casts_shadow = padded.summary.sky;
                 let super::model_mesh::ModelSection {
                     opaque: models,
                     cutout: models_cutout,
                     mut translucent,
-                } = super::model_mesh::section(
-                    padded,
-                    neighborhood.origin + IVec3::Y * (index as i32 * SECTION_HEIGHT),
-                    neighborhood,
-                    index as i32 * SECTION_HEIGHT,
-                );
+                } = if padded.summary.flags & cell::MODEL != 0 || padded.summary.fluids {
+                    super::model_mesh::section(
+                        padded,
+                        neighborhood.origin + IVec3::Y * (index as i32 * SECTION_HEIGHT),
+                        neighborhood,
+                        index as i32 * SECTION_HEIGHT,
+                        model_depths,
+                    )
+                } else {
+                    default()
+                };
                 // Water only needs per-cell sort keys when it shares the
                 // translucent mesh with ice, glass or other translucent models.
                 let interleaved = translucent.is_some();
@@ -777,10 +851,10 @@ pub(crate) fn build_sections(
                 if let Some(water) = water {
                     translucent.get_or_insert_default().append_water(water);
                 }
-                let mut terrain = opaque
+                let mut terrain = (padded.summary.flags & cell::CUBE != 0)
                     .then(|| greedy_mesh::<u16>(padded, true, cell::CUBE, faces))
                     .filter(|geometry| !geometry.is_empty());
-                let mut cutout = (opaque && padded.cutout)
+                let mut cutout = (padded.summary.flags & cell::CUTOUT != 0)
                     .then(|| greedy_mesh::<u32>(padded, true, cell::CUTOUT, faces))
                     .filter(|geometry| !geometry.is_empty());
                 if terrain.is_some() || cutout.is_some() {
@@ -800,13 +874,14 @@ pub(crate) fn build_sections(
                     }
                 }
                 SectionMeshes {
+                    connectivity,
                     index,
                     models,
                     models_cutout,
                     translucent,
                     terrain,
                     cutout,
-                    shadow: (opaque && casts_shadow)
+                    shadow: (padded.summary.flags & cell::CUBE != 0 && casts_shadow)
                         .then(|| shadow_mesh(padded, shadow))
                         .filter(|geometry| !geometry.is_empty()),
                 }

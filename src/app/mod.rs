@@ -27,12 +27,11 @@ impl Plugin for HollowPlugin {
         let mut plugins = DefaultPlugins
             .set(TaskPoolPlugin {
                 task_pool_options: TaskPoolOptions {
-                    // Chunk meshing runs here; Bevy's default caps it at 4 threads.
-                    // Meshing and colliders run here; the rest of the cores stay free for
-                    // the main and render threads and Pumpkin's generation threads.
+                    // Bound meshing and collider workers so background terrain work
+                    // leaves CPU time for rendering, ECS and Pumpkin generation.
                     async_compute: bevy::app::TaskPoolThreadAssignmentPolicy {
-                        min_threads: 2,
-                        max_threads: 6,
+                        min_threads: 1,
+                        max_threads: 4,
                         percent: 0.25,
                         on_thread_spawn: None,
                         on_thread_destroy: None,
@@ -74,11 +73,14 @@ impl Plugin for HollowPlugin {
         ));
         #[cfg(feature = "dev")]
         app.add_plugins(dev::DevelopmentPlugin);
-        app.insert_resource(UiTheme(create_dark_theme()))
-            .insert_resource(ClearColor(Color::srgb_u8(15, 15, 18)))
-            .add_systems(
-                Update,
-                crate::game::handle_escape.run_if(in_state(GameState::Game)),
-            );
+        app.insert_resource(bevy::render::render_asset::RenderAssetBytesPerFrame::new(
+            4 << 20,
+        ))
+        .insert_resource(UiTheme(create_dark_theme()))
+        .insert_resource(ClearColor(Color::srgb_u8(15, 15, 18)))
+        .add_systems(
+            Update,
+            crate::game::handle_escape.run_if(in_state(GameState::Game)),
+        );
     }
 }

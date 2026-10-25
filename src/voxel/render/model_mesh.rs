@@ -170,9 +170,16 @@ impl ModelGeometry {
             .chunks_exact(4)
             .zip(self.indices.chunks_exact(6))
             .zip(&self.sort_cells)
-            .map(|((p, indices), &cell)| {
+            .enumerate()
+            .map(|(quad, ((p, indices), &cell))| {
                 let center = p.iter().map(|&v| Vec3::from_array(v)).sum::<Vec3>() * 0.25;
-                (cell, center, <[u32; 6]>::try_from(indices).unwrap())
+                let reversed = indices[1] > indices[2];
+                debug_assert_eq!(indices, &quad_indices(quad as u32, reversed));
+                SortQuad {
+                    cell,
+                    center,
+                    reversed,
+                }
             })
             .collect::<Vec<_>>();
         SortData(Arc::from(quads))
@@ -218,9 +225,27 @@ pub(crate) fn compact_indices(indices: Vec<u32>, vertices: usize) -> Indices {
     }
 }
 
-/// Owning cells, face centers and indices of a translucent section.
+/// Every translucent quad owns four consecutive vertices. Reconstruct its six
+/// indices instead of retaining 24 bytes of redundant indices for every quad.
+fn quad_indices(quad: u32, reversed: bool) -> [u32; 6] {
+    let first = quad * 4;
+    let offsets = if reversed {
+        [0, 2, 1, 0, 3, 2]
+    } else {
+        [0, 1, 2, 0, 2, 3]
+    };
+    offsets.map(|offset| first + offset)
+}
+
+struct SortQuad {
+    cell: Vec3,
+    center: Vec3,
+    reversed: bool,
+}
+
+/// Owning cells, face centers and winding of a translucent section.
 #[derive(Clone, Component)]
-pub(crate) struct SortData(pub Arc<[(Vec3, Vec3, [u32; 6])]>);
+pub(crate) struct SortData(Arc<[SortQuad]>);
 impl SortData {
     /// Order blocks first, then their faces: a water face must never jump in
     /// front of ice in a nearer block merely because their face centers differ.
@@ -236,26 +261,25 @@ impl SortData {
         }
     }
     fn sorted<T>(&self, eye: Vec3, narrow: impl Fn(u32) -> T) -> Vec<T> {
-        // Equal-sized grid cells have a consistent radial back-to-front order
-        // along each ray. Cache integer keys for the non-negative distances.
-        let mut order = self
-            .0
-            .iter()
-            .enumerate()
-            .map(|(index, (cell, center, _))| {
-                let cell = u64::from(cell.distance_squared(eye).to_bits());
-                let center = u64::from(center.distance_squared(eye).to_bits());
+        thread_local! {
+            static ORDER: std::cell::RefCell<Vec<(u64, u32)>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        ORDER.with_borrow_mut(|order| {
+            // Equal-sized grid cells have a consistent radial back-to-front order
+            // along each ray. Cache integer keys for the non-negative distances.
+            order.clear();
+            order.extend(self.0.iter().enumerate().map(|(index, quad)| {
+                let cell = u64::from(quad.cell.distance_squared(eye).to_bits());
+                let center = u64::from(quad.center.distance_squared(eye).to_bits());
                 (cell << 32 | center, index as u32)
-            })
-            .collect::<Vec<_>>();
-        order.sort_unstable_by(|a, b| b.cmp(a));
-        let mut indices = Vec::with_capacity(self.0.len() * 6);
-        indices.extend(
-            order
-                .into_iter()
-                .flat_map(|(_, quad)| self.0[quad as usize].2.map(&narrow)),
-        );
-        indices
+            }));
+            order.sort_unstable_by(|a, b| b.cmp(a));
+            let mut indices = Vec::with_capacity(self.0.len() * 6);
+            indices.extend(order.iter().copied().flat_map(|(_, quad)| {
+                quad_indices(quad, self.0[quad as usize].reversed).map(&narrow)
+            }));
+            indices
+        })
     }
     pub fn vertex_count(&self) -> usize {
         self.0.len() * 4
@@ -277,6 +301,7 @@ pub(super) fn section(
     origin: IVec3,
     neighborhood: &super::meshing::ChunkNeighborhood,
     base: i32,
+    water_depths: &mut Vec<u8>,
 ) -> ModelSection {
     let (mut opaque, mut cutout, mut translucent) = (
         ModelGeometry::default(),
@@ -284,7 +309,6 @@ pub(super) fn section(
         ModelGeometry::default(),
     );
     let fallback = models::texture_names().is_empty();
-    let mut water_depths = Vec::new();
     for y in 0..SECTION_HEIGHT {
         water_depths.clear();
         for z in 0..CHUNK_SIZE {
@@ -370,7 +394,7 @@ pub(super) fn section(
                                     }));
                                 }
                                 let corners =
-                                    super::meshing::surface_depth(&water_depths, stride, x, z);
+                                    super::meshing::surface_depth(water_depths, stride, x, z);
                                 q.positions.map(|p| {
                                     // Clipped fluid faces introduce vertices between
                                     // cell corners; interpolate on the original two

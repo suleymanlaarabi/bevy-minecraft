@@ -164,10 +164,7 @@ pub(super) fn register(app: &mut App) {
         )
         .add_systems(OnEnter(InventoryState::Open), spawn_preview)
         .add_systems(OnEnter(InventoryState::Open), cancel_swing)
-        .add_systems(
-            Update,
-            (resize_arm_target, dim_arm_with_daylight).run_if(crate::world::playing),
-        )
+        .add_systems(Update, dim_arm_with_daylight.run_if(crate::world::playing))
         .add_systems(
             Update,
             (
@@ -179,6 +176,13 @@ pub(super) fn register(app: &mut App) {
         .add_systems(
             Update,
             (animate_rigs, sync_labels).run_if(in_state(InventoryState::Open)),
+        )
+        .add_systems(
+            PostUpdate,
+            resize_arm_target
+                .after(animate_first_person)
+                .before(bevy::camera::CameraUpdateSystems)
+                .run_if(crate::world::playing),
         )
         .add_systems(
             PostUpdate,

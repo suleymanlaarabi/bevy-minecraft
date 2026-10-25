@@ -76,11 +76,19 @@ impl Plugin for VoxelPlugin {
             .insert_resource(self.settings.clone())
             .insert_resource(StreamOffsets::new(view_distance))
             .init_resource::<ChunkIndex>()
+            .init_resource::<streaming::ChunkArrivals>()
+            .init_resource::<collision::ColliderRequests>()
+            .add_observer(collision::invalidate_collider)
+            .add_observer(streaming::track_chunk_arrival)
             .init_resource::<StoredChunks>()
             .init_resource::<PendingChunks>()
             .init_resource::<PendingEdits>()
             .init_resource::<StreamState>()
             .init_resource::<lighting::LightingState>()
+            .init_resource::<lighting::LightingVersion>()
+            .add_observer(lighting::edited_lighting)
+            .add_observer(lighting::added_lighting)
+            .add_observer(lighting::removed_lighting)
             .add_observer(apply_view_distance)
             .add_observer(apply_texture_pack)
             .add_observer(set_voxel)
@@ -103,11 +111,13 @@ impl Plugin for VoxelPlugin {
                     refresh_neighbors_of_spawned,
                     release_ready_chunks,
                     lighting::update_lighting,
+                    // Release completed/stale task slots before scheduling their
+                    // replacements, avoiding an idle frame at every completion.
+                    poll_builds,
                     mark_changed_chunks,
                     start_changed_builds,
-                    poll_builds,
-                    request_chunk_colliders,
                     poll_chunk_colliders,
+                    request_chunk_colliders,
                 )
                     .chain()
                     .before(bevy::transform::TransformSystems::Propagate)

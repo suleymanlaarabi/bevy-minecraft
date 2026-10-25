@@ -1,6 +1,9 @@
 //! Asynchronous terrain colliders around moving bodies.
 
-use super::{ChunkVoxels, VoxelChunk, VoxelViewer, coordinates::chunk_at, streaming::ChunkIndex};
+use super::{
+    ChunkVoxels, VoxelChunk, VoxelViewer, coordinates::chunk_at, edits::EditedChunk,
+    streaming::ChunkIndex,
+};
 use avian3d::prelude::*;
 use bevy::{
     platform::collections::HashSet,
@@ -17,6 +20,17 @@ pub(crate) struct ColliderBuild {
 #[derive(Component)]
 pub(crate) struct PartialCollider(Entity);
 
+/// Arrival/edit observers enqueue invalidations even when a mesh finishes first.
+#[derive(Resource, Default)]
+pub(super) struct ColliderRequests(pub(super) HashSet<Entity>);
+
+pub(super) fn invalidate_collider(
+    event: On<Insert<EditedChunk>>,
+    mut requests: ResMut<ColliderRequests>,
+) {
+    requests.0.insert(event.entity);
+}
+
 /// Chunks within this Chebyshev distance of a moving body or viewer get colliders.
 pub(super) const COLLIDER_RADIUS: i32 = 2;
 /// Colliders are dropped only beyond this distance, so bodies near a border do not churn.
@@ -28,7 +42,9 @@ pub(crate) fn request_chunk_colliders(
     index: Res<ChunkIndex>,
     bodies: Query<(&GlobalTransform, &RigidBody)>,
     viewers: Query<&GlobalTransform, With<VoxelViewer>>,
-    chunks: Query<(&ChunkVoxels, Has<Collider>, Has<ColliderBuild>)>,
+    chunks: Query<(&VoxelChunk, &ChunkVoxels, Has<Collider>, Has<ColliderBuild>)>,
+    mut requests: ResMut<ColliderRequests>,
+    builds: Query<(), With<ColliderBuild>>,
     loaded: Query<
         (Entity, &VoxelChunk, Option<&PartialCollider>),
         Or<(With<Collider>, With<ColliderBuild>)>,
@@ -36,6 +52,8 @@ pub(crate) fn request_chunk_colliders(
     mut centers: Local<(Vec<IVec2>, Vec<IVec2>)>,
     mut near: Local<HashSet<IVec2>>,
     mut keep: Local<HashSet<IVec2>>,
+    mut demand: Local<HashSet<Entity>>,
+    mut candidates: Local<Vec<(i32, Entity)>>,
 ) {
     // The areas only change when a body or viewer enters another chunk.
     let (previous, current) = &mut *centers;
@@ -68,6 +86,15 @@ pub(crate) fn request_chunk_colliders(
                 }
             }
         }
+        demand.retain(|entity| {
+            chunks
+                .get(*entity)
+                .is_ok_and(|(chunk, _, _, _)| near.contains(&chunk.position))
+        });
+        demand.extend(
+            near.iter()
+                .filter_map(|position| index.get(position).copied()),
+        );
         // Colliders are only requested near bodies, so none can leave `keep` meanwhile.
         for (entity, chunk, partial) in &loaded {
             if !keep.contains(&chunk.position) {
@@ -81,19 +108,50 @@ pub(crate) fn request_chunk_colliders(
             }
         }
     }
-    let pool = AsyncComputeTaskPool::get();
-    for position in near.iter() {
-        let Some(&entity) = index.get(position) else {
-            continue;
-        };
-        let Ok((voxels, has_collider, building)) = chunks.get(entity) else {
-            continue;
-        };
-        if building || ((has_collider || voxels.collider_built) && !voxels.collider_dirty) {
-            continue;
+    for entity in requests.0.drain() {
+        if chunks
+            .get(entity)
+            .is_ok_and(|(chunk, _, _, _)| near.contains(&chunk.position))
+        {
+            demand.insert(entity);
         }
+    }
+    let pool = AsyncComputeTaskPool::get();
+    let available = (pool.thread_num() / 2)
+        .max(1)
+        .saturating_sub(builds.iter().count());
+    let viewer_center = viewers
+        .iter()
+        .next()
+        .map(|viewer| chunk_at(viewer.translation()));
+    candidates.clear();
+    demand.retain(|&entity| {
+        let Ok((chunk, voxels, has_collider, building)) = chunks.get(entity) else {
+            return false;
+        };
+        if !near.contains(&chunk.position) {
+            return false;
+        }
+        if building {
+            return true;
+        }
+        if (has_collider || voxels.collider_built) && !voxels.collider_dirty {
+            return false;
+        }
+        let distance = viewer_center.map_or(0, |center| chunk.position.distance_squared(center));
+        candidates.push((distance, entity));
+        true
+    });
+    if available < candidates.len() && available > 0 {
+        candidates.select_nth_unstable(available);
+    }
+    candidates.truncate(available);
+    for &(_, entity) in candidates.iter() {
+        let Ok((chunk, voxels, _, _)) = chunks.get(entity) else {
+            continue;
+        };
         let snapshot = voxels.clone();
-        let position = *position;
+        let position = chunk.position;
         commands.entity(entity).try_insert(ColliderBuild {
             content_revision: voxels.content_revision,
             task: pool.spawn(async move { snapshot.collider(position) }),
@@ -119,6 +177,12 @@ pub(crate) fn poll_chunk_colliders(
     let viewer_chunk = viewer.map(|viewer| chunk_at(viewer.translation()));
     let mut applied = 0;
     for (entity, chunk, mut voxels, mut build, has_collider, old_partial) in &mut chunks {
+        if build.content_revision != voxels.content_revision {
+            // Cancel stale queued work immediately. It must neither occupy a
+            // scheduling slot nor consume this frame's integration allowance.
+            commands.entity(entity).remove::<ColliderBuild>();
+            continue;
+        }
         // Edited colliders and the viewer's own chunk never wait: something may stand on them.
         let urgent = has_collider || viewer_chunk == Some(chunk.position);
         if !urgent && applied >= COLLIDERS_PER_FRAME {
@@ -131,9 +195,6 @@ pub(crate) fn poll_chunk_colliders(
             applied += 1;
         }
         commands.entity(entity).remove::<ColliderBuild>();
-        if build.content_revision != voxels.content_revision {
-            continue;
-        }
         voxels.bypass_change_detection().collider_dirty = false;
         voxels.bypass_change_detection().collider_built = terrain.is_none() && partial.is_none();
         // A Voxels shape cannot be a leaf of a Compound: Parry dispatches those

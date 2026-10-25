@@ -7,7 +7,7 @@ use super::{
         ALL_SECTIONS, CHUNK_HEIGHT, CHUNK_VOLUME, SECTION_COUNT, SECTION_HEIGHT, SECTION_VOLUME,
         cell_index, cell_position,
     },
-    storage::Layer,
+    storage::{Layer, Section},
 };
 use bevy::prelude::*;
 use std::{collections::BTreeSet, sync::Arc};
@@ -52,6 +52,15 @@ impl ChunkVoxels {
     pub(crate) fn generated(cells: &[VoxelKind], states: &[u16], light: &[u8]) -> Self {
         Self::from_layers(
             Layer::from_cells(cells),
+            Layer::from_cells(light),
+            Some(Layer::from_cells(states)),
+        )
+    }
+
+    /// Converts native generation data directly into shared section storage.
+    pub(crate) fn from_native(states: &[u16], light: &[u8], kinds: &[VoxelKind]) -> Self {
+        Self::from_layers(
+            Layer::from_mapped(states, |state| kinds[state as usize]),
             Layer::from_cells(light),
             Some(Layer::from_cells(states)),
         )
@@ -125,10 +134,16 @@ impl ChunkVoxels {
 
     /// Replaces authoritative light, clears estimates, and returns visually changed sections.
     pub(crate) fn replace_light(&mut self, light: Layer<u8>) -> u32 {
-        if self.light.changed_sections(&light) != 0 {
+        let authoritative_changed = self.light.changed_sections(&light);
+        if authoritative_changed != 0 {
             self.save_revision += 1;
         }
-        let changed = self.render_light().changed_sections(&light);
+        let changed = self
+            .render_light
+            .as_ref()
+            .map_or(authoritative_changed, |render| {
+                render.changed_sections(&light)
+            });
         self.light = light;
         self.render_light = None;
         if changed == 0 {
@@ -209,8 +224,6 @@ impl ChunkVoxels {
         };
         let mut classes = vec![0u8; CHUNK_VOLUME];
         let mut partial = Vec::new();
-        let mut states = [0u16; SECTION_VOLUME];
-        let mut kinds = [VoxelKind::Air; SECTION_VOLUME];
         for section in 0..SECTION_COUNT {
             if !self.cells.section(section).any(VoxelKind::is_solid) {
                 continue;
@@ -225,16 +238,42 @@ impl ChunkVoxels {
                 }
             };
             if let Some(native) = &self.native_states {
-                native.section(section).copy_cells(0, &mut states);
-                for (offset, &id) in states.iter().enumerate() {
-                    if let Some(state) = VoxelState::from_id(id) {
-                        classify(offset, state);
+                match native.section(section) {
+                    Section::Uniform(id) => {
+                        if let Some(state) = VoxelState::from_id(*id) {
+                            let value = class(state);
+                            out.fill(value);
+                            if value == PARTIAL_SHAPE {
+                                partial.extend(
+                                    (0..SECTION_VOLUME).map(|offset| (start + offset, state)),
+                                );
+                            }
+                        }
+                    }
+                    Section::Dense(states) => {
+                        for (offset, &id) in states.iter().enumerate() {
+                            if let Some(state) = VoxelState::from_id(id) {
+                                classify(offset, state);
+                            }
+                        }
                     }
                 }
             } else {
-                self.cells.section(section).copy_cells(0, &mut kinds);
-                for (offset, &kind) in kinds.iter().enumerate() {
-                    classify(offset, kind.default_state());
+                match self.cells.section(section) {
+                    Section::Uniform(kind) => {
+                        let state = kind.default_state();
+                        let value = class(state);
+                        out.fill(value);
+                        if value == PARTIAL_SHAPE {
+                            partial
+                                .extend((0..SECTION_VOLUME).map(|offset| (start + offset, state)));
+                        }
+                    }
+                    Section::Dense(kinds) => {
+                        for (offset, &kind) in kinds.iter().enumerate() {
+                            classify(offset, kind.default_state());
+                        }
+                    }
                 }
             }
         }
@@ -250,22 +289,29 @@ impl ChunkVoxels {
     }
 
     fn shell(classes: &[u8]) -> Vec<IVec3> {
-        const NEIGHBORS: [IVec3; 6] = [
-            IVec3::X,
-            IVec3::NEG_X,
-            IVec3::Y,
-            IVec3::NEG_Y,
-            IVec3::Z,
-            IVec3::NEG_Z,
-        ];
-        let solid =
-            |local: IVec3| cell_index(local).is_some_and(|index| classes[index] == FULL_CUBE);
         classes
             .iter()
             .enumerate()
             .filter(|&(_, &class)| class == FULL_CUBE)
-            .map(|(index, _)| cell_position(index))
-            .filter(|&local| !NEIGHBORS.iter().all(|&offset| solid(local + offset)))
+            .filter_map(|(index, _)| {
+                let (x, z, y) = (index & 15, (index >> 4) & 15, index >> 8);
+                // Borders are kept conservatively; interior neighbors have known
+                // linear offsets, without six coordinate conversions per cube.
+                let boundary = x == 0
+                    || x == 15
+                    || z == 0
+                    || z == 15
+                    || y == 0
+                    || y + 1 == CHUNK_HEIGHT as usize;
+                (boundary
+                    || classes[index - 1] != FULL_CUBE
+                    || classes[index + 1] != FULL_CUBE
+                    || classes[index - 16] != FULL_CUBE
+                    || classes[index + 16] != FULL_CUBE
+                    || classes[index - 256] != FULL_CUBE
+                    || classes[index + 256] != FULL_CUBE)
+                    .then(|| IVec3::new(x as i32, y as i32, z as i32))
+            })
             .collect()
     }
 

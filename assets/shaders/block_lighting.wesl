@@ -80,6 +80,11 @@ fn celestial_irradiance(
                 frag_coord,
             );
         }
+        // Occluded fragments contribute zero direct irradiance. In particular,
+        // cave walls need no atmospheric transmittance lookup for this light.
+        if shadow <= 0.0 {
+            continue;
+        }
         irradiance += (*light).color.rgb
             * atmosphere_transmittance(
                 world_position.xyz,

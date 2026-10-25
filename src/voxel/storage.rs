@@ -90,6 +90,20 @@ impl<T: Copy + PartialEq> Section<T> {
 pub(crate) struct Layer<T>(Arc<[Section<T>; SECTION_COUNT]>);
 
 impl<T: Copy + PartialEq> Layer<T> {
+    /// Maps and compresses one section at a time without a full-column temporary.
+    pub(crate) fn from_mapped<U: Copy + PartialEq>(cells: &[U], map: impl Fn(U) -> T) -> Self {
+        assert_eq!(cells.len(), CHUNK_VOLUME, "one full chunk column");
+        Self(Arc::new(std::array::from_fn(|section| {
+            let start = section * SECTION_VOLUME;
+            let cells = &cells[start..start + SECTION_VOLUME];
+            if cells.iter().all(|&cell| cell == cells[0]) {
+                return Section::Uniform(map(cells[0]));
+            }
+            let values: [T; SECTION_VOLUME] = std::array::from_fn(|i| map(cells[i]));
+            Section::from_cells(&values)
+        })))
+    }
+
     #[cfg(test)]
     pub(crate) fn filled(value: T) -> Self {
         Self(Arc::new(std::array::from_fn(|_| Section::Uniform(value))))

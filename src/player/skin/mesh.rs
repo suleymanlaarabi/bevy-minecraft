@@ -55,14 +55,21 @@ pub(super) fn cuboid(size: Vec3, center: Vec3, uv: Vec2, texture: Vec2, inflate:
         );
         indices.extend([first, first + 1, first + 2, first, first + 2, first + 3]);
     }
-    Mesh::new(
+    let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD,
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
     .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-    .with_inserted_indices(Indices::U32(indices))
+    .with_inserted_indices(Indices::U16(
+        indices.into_iter().map(|index| index as u16).collect(),
+    ));
+    mesh.final_aabb = Some(Aabb3d::from_min_max(
+        (center - half) * PIXEL,
+        (center + half) * PIXEL,
+    ));
+    mesh
 }
 
 /// Model-space size of each body part: head, body, right/left arm, right/left leg.

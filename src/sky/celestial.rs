@@ -92,9 +92,7 @@ pub(super) struct SunDiskMesh;
 
 fn sun_settings(sky: &SkyState) -> SunSettings {
     SunSettings {
-        direction: sky
-            .sun_direction
-            .extend(SunDisk::EARTH.angular_size * 0.5),
+        direction: sky.sun_direction.extend(SunDisk::EARTH.angular_size * 0.5),
         color: (Vec3::new(1.0, 0.98, 0.95) * SUN_DISK_RADIANCE).extend(1.0),
     }
 }
@@ -122,7 +120,11 @@ pub(super) fn spawn_sky(
         ..default()
     }
     .build();
-    let layers = RenderLayers::from_layers(&[0, SHADOW_LAYER]);
+    let layers = RenderLayers::from_layers(&[
+        0,
+        SHADOW_LAYER,
+        crate::voxel::render::visibility::OCCLUDED_LAYER,
+    ]);
     commands.spawn((
         Sun,
         SkyLight,

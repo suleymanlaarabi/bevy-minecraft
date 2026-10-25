@@ -32,7 +32,7 @@ impl Plugin for DevelopmentPlugin {
                 frame_time_graph_config: FrameTimeGraphConfig {
                     enabled: true,
                     min_fps: 30.0,
-                    target_fps: 120.0,
+                    target_fps: 144.0,
                 },
             },
         });

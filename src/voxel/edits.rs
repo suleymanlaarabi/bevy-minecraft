@@ -32,7 +32,7 @@ impl SetVoxel {
     }
 }
 
-/// Marks chunks rebuilt because of a player edit; they skip the streaming limits.
+/// Prioritizes chunks rebuilt because of an edit within the shared work budgets.
 #[derive(Component)]
 #[component(storage = "SparseSet")]
 pub(crate) struct EditedChunk;
@@ -153,20 +153,18 @@ pub(crate) fn set_voxel(
 /// Neighbor chunks whose meshes sample this cell (faces or corner light).
 fn border_neighbors(local: IVec3) -> impl Iterator<Item = IVec2> {
     let side = |value: i32| match value {
-        0 => [-1, 0],
-        value if value == CHUNK_SIZE - 1 => [1, 0],
-        _ => [0, 0],
+        0 => -1,
+        value if value == CHUNK_SIZE - 1 => 1,
+        _ => 0,
     };
-    let (xs, zs) = (side(local.x), side(local.z));
-    let mut offsets = Vec::with_capacity(3);
-    for x in [0, xs[0]] {
-        for z in [0, zs[0]] {
-            if (x, z) != (0, 0) && !offsets.contains(&IVec2::new(x, z)) {
-                offsets.push(IVec2::new(x, z));
-            }
-        }
-    }
-    offsets.into_iter()
+    let (x, z) = (side(local.x), side(local.z));
+    [
+        (z != 0).then_some(IVec2::new(0, z)),
+        (x != 0).then_some(IVec2::new(x, 0)),
+        (x != 0 && z != 0).then_some(IVec2::new(x, z)),
+    ]
+    .into_iter()
+    .flatten()
 }
 
 #[cfg(test)]

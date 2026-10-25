@@ -1,6 +1,6 @@
 import super::surface_animation::surface_frame;
 import super::block_lighting::{sky_visibility, voxel_diffuse};
-import super::voxel_fog::{apply_voxel_fog, sky_reflection};
+import super::voxel_fog::{apply_voxel_fog_ray, fog_ray, sky_reflection, fully_fogged};
 import super::model_vertex::{ModelVertex, ModelVaryings, decode_model};
 import super::voxel_lighting::apply_voxel_lighting;
 import bevy_pbr::render::{
@@ -125,6 +125,7 @@ fn shade_water(
     is_front: bool,
 ) -> FragmentOutput {
     let world = in.world_position.xyz;
+    let ray = fog_ray(world);
     // Flat like vanilla: the motion lives in the texture, not in bent normals.
     let normal = normalize(in.world_normal);
 
@@ -132,7 +133,10 @@ fn shade_water(
     // Water never receives shadows (`NotShadowReceiver`), hence no mesh flags.
     var pbr_input = pbr_input_new();
     pbr_input.is_orthographic = view.clip_from_view[3].w == 1.0;
-    pbr_input.V = calculate_view(in.world_position, pbr_input.is_orthographic);
+    pbr_input.V = -ray.direction;
+    if pbr_input.is_orthographic {
+        pbr_input.V = calculate_view(in.world_position, true);
+    }
     pbr_input.frag_coord = in.position;
     pbr_input.world_position = in.world_position;
     pbr_input.world_normal = in.world_normal;
@@ -166,11 +170,14 @@ fn shade_water(
     let lit = apply_voxel_lighting(pbr_input, in.light);
     // The reflected physical sky is already exposed: blend it after lighting,
     // dimmed where the sky cannot reach.
-    let sky = sky_reflection(water.sky_color.rgb, world) * sky_visibility(in.light);
+    var sky = vec3<f32>(0.0);
+    if fresnel * water.sky_color.a > 0.0 {
+        sky = sky_reflection(water.sky_color.rgb, ray) * sky_visibility(in.light);
+    }
     var out: FragmentOutput;
-    out.color = apply_voxel_fog(
+    out.color = apply_voxel_fog_ray(
         vec4<f32>(mix(lit.rgb, sky, fresnel * water.sky_color.a), lit.a),
-        world,
+        world, ray,
     );
     return out;
 }
@@ -213,6 +220,12 @@ fn fragment(
     breaking_out.color = vec4<f32>(crack.rgb * crack.a, crack.a);
     return breaking_out;
 }
+    let ray = fog_ray(in.world_position.xyz);
+    if fully_fogged(ray) {
+        var fogged: FragmentOutput;
+        fogged.color = apply_voxel_fog_ray(vec4<f32>(0.0, 0.0, 0.0, texture_color.a), in.world_position.xyz, ray);
+        return fogged;
+    }
     var albedo = texture_color.rgb * in.tint;
     if (in.flags & 2u) != 0u {
         // Layered, world-stable star field. Only portal surfaces pay this cost.
@@ -231,13 +244,17 @@ fn fragment(
         albedo = stars + albedo * 0.2;
     }
     let normal = normalize(select(-in.world_normal, in.world_normal, is_front));
+    var shaded = albedo;
+    if (in.flags & 4u) == 0u {
+        shaded = voxel_diffuse(albedo, normal, in.world_position, in.position.xy, in.light);
+    }
     var out: FragmentOutput;
-    out.color = apply_voxel_fog(
+    out.color = apply_voxel_fog_ray(
         vec4<f32>(
-            select(voxel_diffuse(albedo, normal, in.world_position, in.position.xy, in.light), albedo, (in.flags & 4u) != 0u),
+            shaded,
             texture_color.a,
         ),
-        in.world_position.xyz,
+        in.world_position.xyz, ray,
     );
     return out;
 }

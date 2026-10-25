@@ -6,7 +6,13 @@ import bevy_pbr::atmosphere::{
 @group(1) @binding(0)
 var<storage, read_write> snapshot: array<vec4<f32>>;
 
-// Shared layout: two metadata vectors, a 128x64 sky, then a 32x32x32 aerial LUT.
+@if(FILTERED_FOG) {
+@group(1) @binding(1) var sky_output: texture_storage_2d<rgba32float, write>;
+@group(1) @binding(2) var aerial_output: texture_storage_3d<rgba32float, write>;
+}
+
+// Two metadata vectors plus a 128x64 sky and a 32x32x32 aerial LUT.
+// Filterable devices store the LUTs in textures; other devices append them here.
 const SKY_WIDTH: u32 = 128u;
 const SKY_HEIGHT: u32 = 64u;
 const SKY_OFFSET: u32 = 2u;
@@ -39,15 +45,24 @@ fn main(@builtin(global_invocation_id) invocation: vec3<u32>) {
         let elevation = sign(latitude) * latitude * latitude * (0.5 * PI);
         let direction = vec3<f32>(sin(azimuth) * cos(elevation), sin(elevation), -cos(azimuth) * cos(elevation));
         let sky = sample_sky_view_lut(length(get_view_position()), direction_world_to_atmosphere(direction));
+@if(FILTERED_FOG) {
+        textureStore(sky_output, vec2<i32>(i32(index % SKY_WIDTH), i32(index / SKY_WIDTH)), vec4<f32>(sky * view.exposure, 1.0));
+} @else {
         snapshot[SKY_OFFSET + index] = vec4<f32>(sky * view.exposure, 1.0);
+}
     }
     if index < AERIAL_SIZE * AERIAL_SIZE * AERIAL_SIZE {
         let position = vec3<u32>(index % AERIAL_SIZE, (index / AERIAL_SIZE) % AERIAL_SIZE, index / (AERIAL_SIZE * AERIAL_SIZE));
         // The camera keeps Bevy's default 32-cubed LUT. Sampling at texel centers
         // preserves it exactly, and still supports another source resolution.
         let uvw = (vec3<f32>(position) + 0.5) / f32(AERIAL_SIZE);
-        snapshot[AERIAL_OFFSET + index] = textureSampleLevel(
+        let aerial = textureSampleLevel(
             aerial_view_lut, atmosphere_lut_sampler, uvw, 0.0,
         );
+@if(FILTERED_FOG) {
+        textureStore(aerial_output, vec3<i32>(position), aerial);
+} @else {
+        snapshot[AERIAL_OFFSET + index] = aerial;
+}
     }
 }

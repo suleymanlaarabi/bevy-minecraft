@@ -1,23 +1,30 @@
 //! Translucent sections are sorted back to front when meshed, then re-sorted as
 //! the eye moves. Grid-cell ordering stays valid when the camera turns. Meshes
-//! keep a main-world copy so new indices never need a remesh.
+//! retain immutable GPU vertices; re-sorts patch only their index allocation.
 use super::model_mesh::SortData;
 use crate::{
     game::GameState,
     player::PlayerCamera,
     voxel::coordinates::{CHUNK_SIZE, SECTION_HEIGHT},
 };
+use bevy::mesh::Indices;
+use bevy::platform::collections::HashMap;
 use bevy::{
     core_pipeline::core_3d::{Transparent3d, TransparentSortingInfo3d},
     prelude::*,
     render::{
         Extract, ExtractSchedule, Render, RenderApp, RenderSystems,
+        mesh::{RenderMesh, allocator::MeshAllocator},
+        render_asset::RenderAssets,
         render_phase::{ViewSortedRenderPhases, sort_phase_system},
-        sync_world::MainEntityHashMap,
+        render_resource::IndexFormat,
+        renderer::RenderQueue,
+        sync_world::{MainEntity, MainEntityHashMap},
         view::ExtractedView,
     },
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
+use std::sync::Arc;
 
 /// Sections within this many blocks of the eye (per axis, outside the section's
 /// box) track quarter-block movement: two chunks horizontally, one section vertically.
@@ -27,7 +34,7 @@ const NEAR_POSITION_STEPS: f32 = 4.0;
 /// Farther away the order of a section's cells changes far more slowly: re-sort
 /// once per chunk-sized eye cell.
 const FAR_POSITION_STEPS: f32 = 1.0 / CHUNK_SIZE as f32;
-/// Concurrent re-sorts and applications per frame; a changed order uploads the mesh.
+/// Concurrent re-sorts and applications per frame; a changed order uploads indices.
 const MAX_SORTS: usize = 2;
 const SECTION_SIZE: Vec3 = Vec3::new(CHUNK_SIZE as f32, SECTION_HEIGHT as f32, CHUNK_SIZE as f32);
 
@@ -47,7 +54,7 @@ pub(super) fn sort_key(eye: Vec3, local_eye: Vec3) -> SortKey {
 }
 
 struct Output {
-    indices: bevy::mesh::Indices,
+    indices: Option<Arc<Indices>>,
     key: SortKey,
     mesh: AssetId<Mesh>,
 }
@@ -60,6 +67,7 @@ pub(super) struct SortState {
     /// Frame of the last applied sort: the slots after the nearest one go to the
     /// stalest sections, so none starves during continuous movement.
     last_sorted: u64,
+    indices: Option<Arc<Indices>>,
 }
 
 impl SortState {
@@ -68,20 +76,32 @@ impl SortState {
             key,
             task: None,
             last_sorted: 0,
+            indices: None,
         }
     }
 }
 
 pub(super) fn register(app: &mut App) {
-    app.add_systems(
-        PostUpdate,
-        sort_translucent
-            .after(bevy::transform::TransformSystems::Propagate)
-            .run_if(in_state(GameState::Game)),
-    );
+    app.init_resource::<IndexUpdates>()
+        .init_resource::<SortVersion>()
+        .add_observer(mark_sort_changed)
+        .add_systems(
+            PostUpdate,
+            sort_translucent
+                .after(
+                    bevy::camera::visibility::VisibilitySystems::MarkNewlyHiddenEntitiesInvisible,
+                )
+                .run_if(in_state(GameState::Game)),
+        );
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
         render_app
             .init_resource::<SectionCenters>()
+            .init_resource::<PendingIndices>()
+            .add_systems(ExtractSchedule, extract_index_updates)
+            .add_systems(
+                Render,
+                upload_indices.in_set(RenderSystems::PrepareBindGroups),
+            )
             .add_systems(ExtractSchedule, extract_section_centers)
             .add_systems(
                 Render,
@@ -98,9 +118,20 @@ struct SectionCenters(MainEntityHashMap<Vec3>);
 
 fn extract_section_centers(
     mut centers: ResMut<SectionCenters>,
-    sections: Extract<Query<(Entity, &GlobalTransform), With<SortState>>>,
+    sections: Extract<
+        Query<
+            (Entity, &GlobalTransform),
+            (
+                With<SortState>,
+                Or<(Added<SortState>, Changed<GlobalTransform>)>,
+            ),
+        >,
+    >,
+    mut removed: Extract<RemovedComponents<SortState>>,
 ) {
-    centers.0.clear();
+    for entity in removed.read() {
+        centers.0.remove(&MainEntity::from(entity));
+    }
     let half_size = SECTION_SIZE * 0.5;
     centers.0.extend(
         sections
@@ -151,14 +182,26 @@ fn sort_translucent(
         &SortData,
         &mut SortState,
     )>,
-    mut meshes: ResMut<Assets<Mesh>>,
+    visibility_changes: Query<(), (With<SortState>, Changed<ViewVisibility>)>,
+    mut updates: ResMut<IndexUpdates>,
+    version: Res<SortVersion>,
+    mut previous: Local<Option<(Vec3, u64)>>,
+    mut active_hint: Local<usize>,
     mut candidates: Local<Vec<(u64, f32, Entity, SortKey, Vec3)>>,
     mut frame: Local<u64>,
 ) {
+    updates.0.clear();
     let Some(camera) = camera else {
         return;
     };
     let eye = camera.translation();
+    let view_key = (eye, version.0);
+    // Rotation cannot change a radial ordering. Bevy's visibility change ticks
+    // identify newly exposed sections, including after projection changes.
+    if *previous == Some(view_key) && visibility_changes.is_empty() && *active_hint == 0 {
+        return;
+    }
+    *previous = Some(view_key);
     *frame += 1;
     let mut active = 0;
     let mut applied = 0;
@@ -173,16 +216,10 @@ fn sort_translucent(
             && let Some(output) = check_ready(task)
         {
             state.task = None;
-            if output.mesh == mesh.0.id()
-                && let Some(target) = meshes.get(&mesh.0)
-            {
-                // Movement must not starve uploads by invalidating every result.
-                // Record its captured view, then queue a refresh below if needed.
-                // Avoid re-uploading vertices when the index order did not change.
-                if target.indices() != Some(&output.indices)
-                    && let Some(mut target) = meshes.get_mut(&mesh.0)
-                {
-                    target.insert_indices(output.indices);
+            if output.mesh == mesh.0.id() {
+                if let Some(indices) = output.indices {
+                    updates.0.push((output.mesh, indices.clone()));
+                    state.indices = Some(indices);
                 }
                 state.key = Some(output.key);
                 state.last_sorted = *frame;
@@ -218,18 +255,69 @@ fn sort_translucent(
         }
     }
     candidates.truncate(available);
+    *active_hint = active + candidates.len();
     for &(_, _, entity, key, local_eye) in candidates.iter() {
         let Ok((_, mesh, _, _, sort, mut state)) = sections.get_mut(entity) else {
             continue;
         };
         let sort = sort.clone();
         let mesh = mesh.0.id();
+        let previous = state.indices.clone();
         state.task = Some(AsyncComputeTaskPool::get().spawn(async move {
-            Output {
-                indices: sort.mesh_indices(local_eye),
-                key,
-                mesh,
-            }
+            let indices = sort.mesh_indices(local_eye);
+            // Comparing and dropping a large unchanged payload belongs on the
+            // worker too; the ECS thread only handles the shared result.
+            let indices = (previous.as_deref() != Some(&indices)).then(|| Arc::new(indices));
+            Output { indices, key, mesh }
         }));
     }
+}
+
+/// Only the latest immutable index payload crosses extraction; vertices stay untouched.
+#[derive(Resource, Default)]
+struct IndexUpdates(Vec<(AssetId<Mesh>, Arc<Indices>)>);
+
+#[derive(Resource, Default)]
+struct PendingIndices(HashMap<AssetId<Mesh>, Arc<Indices>>);
+
+fn extract_index_updates(
+    updates: Extract<Res<IndexUpdates>>,
+    meshes: Extract<Res<Assets<Mesh>>>,
+    mut pending: ResMut<PendingIndices>,
+) {
+    pending.0.extend(updates.0.iter().cloned());
+    pending.0.retain(|mesh, _| meshes.contains(*mesh));
+}
+
+fn upload_indices(
+    mut pending: ResMut<PendingIndices>,
+    allocator: Res<MeshAllocator>,
+    meshes: Res<RenderAssets<RenderMesh>>,
+    queue: Res<RenderQueue>,
+) {
+    pending.0.retain(|id, indices| {
+        let (Some(mesh), Some(slice)) = (meshes.get(*id), allocator.mesh_index_slice(id)) else {
+            return true;
+        };
+        let (format, bytes): (IndexFormat, &[u8]) = match &**indices {
+            Indices::U16(values) => (IndexFormat::Uint16, bytemuck::cast_slice(values)),
+            Indices::U32(values) => (IndexFormat::Uint32, bytemuck::cast_slice(values)),
+        };
+        // The ID changes on remeshing. Never write across a replaced allocation.
+        if mesh.index_format() == Some(format) && slice.range.len() >= indices.len() {
+            let stride = match format {
+                IndexFormat::Uint16 => 2,
+                IndexFormat::Uint32 => 4,
+            };
+            queue.write_buffer(&slice.buffer, u64::from(slice.range.start) * stride, bytes);
+        }
+        false
+    });
+}
+
+#[derive(Resource, Default)]
+pub(super) struct SortVersion(pub(super) u64);
+
+fn mark_sort_changed(_event: On<Insert<SortState>>, mut version: ResMut<SortVersion>) {
+    version.0 = version.0.wrapping_add(1);
 }

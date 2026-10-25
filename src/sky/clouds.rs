@@ -5,7 +5,7 @@ use crate::{game::GameState, player::PlayerCamera, settings::GraphicsSettings};
 use bevy::{
     asset::RenderAssetUsages,
     light::{NotShadowCaster, NotShadowReceiver},
-    mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology},
+    mesh::{MeshVertexBufferLayoutRef, PrimitiveTopology},
     pbr::{Material, MaterialPipeline, MaterialPipelineKey},
     prelude::*,
     render::render_resource::{
@@ -189,107 +189,105 @@ pub(super) fn update_clouds(
     }
 }
 
-/// Boxes for the filled cells within `radius` of `center`, relative to that cell's
-/// corner. Top and bottom faces merge along X; sides only face empty cells.
+/// Greedy rectangles on all six orientations preserve the exact cloud surface.
 fn cloud_mesh(pattern: &[bool], center: IVec2, radius: i32) -> Mesh {
-    let filled = |x: i32, z: i32| {
-        x * x + z * z <= radius * radius
-            && CloudPattern::filled(pattern, center.x + x, center.y + z)
+    let side = radius * 2 + 1;
+    let dimensions = [side, 1, side];
+    let scale = Vec3::new(CELL, THICKNESS, CELL);
+    let origin = Vec3::new(-radius as f32 * CELL, 0.0, -radius as f32 * CELL);
+    let occupancy = (-radius..=radius)
+        .flat_map(|z| {
+            (-radius..=radius).map(move |x| {
+                x * x + z * z <= radius * radius
+                    && CloudPattern::filled(pattern, center.x + x, center.y + z)
+            })
+        })
+        .collect::<Vec<_>>();
+    let filled = |cell: [i32; 3]| {
+        cell.iter()
+            .zip(dimensions)
+            .all(|(&value, size)| (0..size).contains(&value))
+            && occupancy[(cell[0] + cell[2] * side) as usize]
     };
-    let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut normals: Vec<[f32; 3]> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
-    let mut quad = |corners: [Vec3; 4], normal: Vec3| {
-        let base = positions.len() as u32;
-        positions.extend(corners.map(|corner| corner.to_array()));
-        normals.extend([normal.to_array(); 4]);
-        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
-    };
-
-    for z in -radius..=radius {
-        let (z0, z1) = (z as f32 * CELL, (z + 1) as f32 * CELL);
-        let mut x = -radius;
-        while x <= radius {
-            if !filled(x, z) {
-                x += 1;
-                continue;
-            }
-            let start = x;
-            while x <= radius && filled(x, z) {
-                x += 1;
-            }
-            let (x0, x1) = (start as f32 * CELL, x as f32 * CELL);
-            quad(
-                [
-                    Vec3::new(x0, THICKNESS, z0),
-                    Vec3::new(x0, THICKNESS, z1),
-                    Vec3::new(x1, THICKNESS, z1),
-                    Vec3::new(x1, THICKNESS, z0),
-                ],
-                Vec3::Y,
-            );
-            quad(
-                [
-                    Vec3::new(x0, 0.0, z0),
-                    Vec3::new(x1, 0.0, z0),
-                    Vec3::new(x1, 0.0, z1),
-                    Vec3::new(x0, 0.0, z1),
-                ],
-                Vec3::NEG_Y,
-            );
-            quad(
-                [
-                    Vec3::new(x0, 0.0, z0),
-                    Vec3::new(x0, 0.0, z1),
-                    Vec3::new(x0, THICKNESS, z1),
-                    Vec3::new(x0, THICKNESS, z0),
-                ],
-                Vec3::NEG_X,
-            );
-            quad(
-                [
-                    Vec3::new(x1, 0.0, z0),
-                    Vec3::new(x1, THICKNESS, z0),
-                    Vec3::new(x1, THICKNESS, z1),
-                    Vec3::new(x1, 0.0, z1),
-                ],
-                Vec3::X,
-            );
-            for cell in start..x {
-                let (c0, c1) = (cell as f32 * CELL, (cell + 1) as f32 * CELL);
-                if !filled(cell, z - 1) {
-                    quad(
-                        [
-                            Vec3::new(c0, 0.0, z0),
-                            Vec3::new(c0, THICKNESS, z0),
-                            Vec3::new(c1, THICKNESS, z0),
-                            Vec3::new(c1, 0.0, z0),
-                        ],
-                        Vec3::NEG_Z,
-                    );
+    let mut positions = Vec::<[f32; 3]>::with_capacity(4096);
+    let mut normals = Vec::<[f32; 3]>::with_capacity(4096);
+    let mut indices = Vec::<u32>::with_capacity(6144);
+    let mut mask = Vec::<i8>::new();
+    for axis in 0..3 {
+        let u = (axis + 1) % 3;
+        let v = (axis + 2) % 3;
+        let width = dimensions[u] as usize;
+        let height = dimensions[v] as usize;
+        mask.resize(width * height, 0);
+        for plane in 0..=dimensions[axis] {
+            for j in 0..height {
+                for i in 0..width {
+                    let mut cell = [0; 3];
+                    cell[axis] = plane - 1;
+                    cell[u] = i as i32;
+                    cell[v] = j as i32;
+                    let before = filled(cell);
+                    cell[axis] += 1;
+                    let after = filled(cell);
+                    mask[i + j * width] = match (before, after) {
+                        (true, false) => 1,
+                        (false, true) => -1,
+                        _ => 0,
+                    };
                 }
-                if !filled(cell, z + 1) {
-                    quad(
-                        [
-                            Vec3::new(c0, 0.0, z1),
-                            Vec3::new(c1, 0.0, z1),
-                            Vec3::new(c1, THICKNESS, z1),
-                            Vec3::new(c0, THICKNESS, z1),
-                        ],
-                        Vec3::Z,
-                    );
+            }
+            for j in 0..height {
+                let mut i = 0;
+                while i < width {
+                    let sign = mask[i + j * width];
+                    if sign == 0 {
+                        i += 1;
+                        continue;
+                    }
+                    let mut w = 1;
+                    while i + w < width && mask[i + w + j * width] == sign {
+                        w += 1;
+                    }
+                    let mut h = 1;
+                    while j + h < height && (i..i + w).all(|x| mask[x + (j + h) * width] == sign) {
+                        h += 1;
+                    }
+                    let mut corner = Vec3::ZERO;
+                    corner[axis] = plane as f32;
+                    corner[u] = i as f32;
+                    corner[v] = j as f32;
+                    let p = origin + corner * scale;
+                    let mut du = Vec3::ZERO;
+                    let mut dv = Vec3::ZERO;
+                    du[u] = w as f32 * scale[u];
+                    dv[v] = h as f32 * scale[v];
+                    let corners = if sign > 0 {
+                        [p, p + du, p + du + dv, p + dv]
+                    } else {
+                        [p, p + dv, p + du + dv, p + du]
+                    };
+                    let mut normal = Vec3::ZERO;
+                    normal[axis] = sign as f32;
+                    let base = positions.len() as u32;
+                    positions.extend(corners.map(|corner| corner.to_array()));
+                    normals.extend([normal.to_array(); 4]);
+                    indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+                    for row in j..j + h {
+                        mask[i + row * width..i + w + row * width].fill(0);
+                    }
+                    i += w;
                 }
             }
         }
     }
-
+    let indices = crate::voxel::render::model_mesh::compact_indices(indices, positions.len());
     Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD,
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-    .with_inserted_indices(Indices::U32(indices))
+    .with_inserted_indices(indices)
 }
 
 /// Tileable value-noise fBm, thresholded to about a third of the sky.

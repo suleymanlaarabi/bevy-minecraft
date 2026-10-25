@@ -78,6 +78,25 @@ impl StreamOffsets {
     }
 }
 
+/// Arrival notifications are reused by neighbor refresh and mesh readiness.
+#[derive(Resource, Default)]
+pub(crate) struct ChunkArrivals {
+    pending: Vec<IVec2>,
+    current: Vec<IVec2>,
+}
+
+pub(super) fn track_chunk_arrival(
+    event: On<Add<VoxelChunk>>,
+    chunks: Query<&VoxelChunk>,
+    mut arrivals: ResMut<ChunkArrivals>,
+    mut colliders: ResMut<super::collision::ColliderRequests>,
+) {
+    if let Ok(chunk) = chunks.get(event.entity) {
+        arrivals.pending.push(chunk.position);
+        colliders.0.insert(event.entity);
+    }
+}
+
 #[derive(Resource, Default)]
 pub(crate) struct StreamState {
     pub center: Option<IVec2>,
@@ -303,13 +322,34 @@ pub(crate) fn release_ready_chunks(
     offsets: Res<StreamOffsets>,
     state: Res<StreamState>,
     waiting: Query<(Entity, &VoxelChunk), With<AwaitingNeighbors>>,
+    arrivals: Option<Res<ChunkArrivals>>,
+    mut last_view: Local<Option<(IVec2, u32)>>,
+    mut candidates: Local<HashSet<Entity>>,
 ) {
     let Some(center) = state.center else {
         return;
     };
     let render_squared = (offsets.render_radius * offsets.render_radius) as i32;
     let loaded_squared = (offsets.radius * offsets.radius) as i32;
-    for (entity, chunk) in &waiting {
+    candidates.clear();
+    if *last_view != Some((center, offsets.render_radius)) || arrivals.is_none() {
+        candidates.extend(waiting.iter().map(|(entity, _)| entity));
+        *last_view = Some((center, offsets.render_radius));
+    } else if let Some(arrivals) = arrivals {
+        for &position in &arrivals.current {
+            for offset in NEIGHBOR_OFFSETS.into_iter().chain([IVec2::ZERO]) {
+                if let Some(&entity) = index.get(&(position + offset))
+                    && waiting.contains(entity)
+                {
+                    candidates.insert(entity);
+                }
+            }
+        }
+    }
+    for &entity in candidates.iter() {
+        let Ok((_, chunk)) = waiting.get(entity) else {
+            continue;
+        };
         if chunk.position.distance_squared(center) > render_squared {
             continue;
         }
@@ -341,17 +381,12 @@ const NEIGHBOR_OFFSETS: [IVec2; 8] = [
 pub(crate) fn refresh_neighbors_of_spawned(
     index: Res<ChunkIndex>,
     mut chunks: Query<(&VoxelChunk, &mut ChunkVoxels, Option<&ChunkSections>)>,
-    mut spawned: Local<Vec<IVec2>>,
+    mut arrivals: ResMut<ChunkArrivals>,
 ) {
-    // One query: an `Added<ChunkVoxels>` filter would conflict with `&mut ChunkVoxels`.
-    spawned.clear();
-    spawned.extend(
-        chunks
-            .iter_mut()
-            .filter(|(_, voxels, _)| voxels.is_added())
-            .map(|(chunk, _, _)| chunk.position),
-    );
-    for &position in spawned.iter() {
+    let arrivals = &mut *arrivals;
+    arrivals.current.clear();
+    std::mem::swap(&mut arrivals.current, &mut arrivals.pending);
+    for &position in &arrivals.current {
         for offset in NEIGHBOR_OFFSETS {
             let Some(&entity) = index.get(&(position + offset)) else {
                 continue;
@@ -463,5 +498,7 @@ pub(super) fn cleanup_voxel_world(
         }
         world.init_resource::<super::lighting::LightingState>();
         *world.resource_mut::<StreamState>() = StreamState::default();
+        *world.resource_mut::<ChunkArrivals>() = ChunkArrivals::default();
+        *world.resource_mut::<super::collision::ColliderRequests>() = default();
     });
 }

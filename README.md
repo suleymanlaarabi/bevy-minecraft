@@ -2,6 +2,8 @@
 
 A Bevy voxel game. See the [architecture](docs/architecture.md) for code organization
 and [world persistence](docs/worlds.md) for the save format and session lifecycle.
+The [performance contracts](docs/performance.md) describe streaming budgets,
+section visibility, GPU updates and the native-4K 144 FPS optimization target.
 
 The neighboring `../worldgen` repository is required through local Cargo path
 dependencies. Its `pumpkin-worldgen` facade embeds Pumpkin's Minecraft 26.3 terrain,

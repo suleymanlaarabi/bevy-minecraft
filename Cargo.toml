@@ -21,6 +21,7 @@ lz4_flex = "0.13"
 directories = "6"
 uuid = { version = "1", features = ["v4"] }
 crc32fast = "1"
+bytemuck = "1"
 
 [profile.dev]
 opt-level = 2

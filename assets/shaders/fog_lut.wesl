@@ -8,6 +8,13 @@ import bevy_pbr::atmosphere::{
 @group(constants::MATERIAL_BIND_GROUP) @binding(11)
 var<storage, read> snapshot: array<vec4<f32>>;
 
+@if(FILTERED_FOG) {
+@group(constants::MATERIAL_BIND_GROUP) @binding(12) var fog_sky: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(13) var fog_sky_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(14) var fog_aerial: texture_3d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(15) var fog_aerial_sampler: sampler;
+}
+
 const SKY_WIDTH: i32 = 128;
 const SKY_HEIGHT: i32 = 64;
 const SKY_OFFSET: u32 = 2u;
@@ -30,6 +37,9 @@ fn sample_fog_sky(direction: vec3<f32>) -> vec3<f32> {
     let latitude = sign(elevation) * sqrt(abs(elevation) / (0.5 * PI));
     let horizontal = select(vec2<f32>(0.0, -1.0), direction.xz, length(direction.xz) > 1e-5);
     let uv = vec2<f32>(atan2(horizontal.x, -horizontal.y) / (2.0 * PI) + 0.5, latitude * 0.5 + 0.5);
+@if(FILTERED_FOG) {
+    return textureSampleLevel(fog_sky, fog_sky_sampler, uv, 0.0).rgb;
+} @else {
     let pixel = uv * vec2<f32>(f32(SKY_WIDTH), f32(SKY_HEIGHT)) - 0.5;
     let cell = vec2<i32>(floor(pixel));
     let weight = fract(pixel);
@@ -38,6 +48,8 @@ fn sample_fog_sky(direction: vec3<f32>) -> vec3<f32> {
         mix(sky_texel(cell + vec2<i32>(0, 1)), sky_texel(cell + vec2<i32>(1, 1)), weight.x),
         weight.y,
     );
+}
+
 }
 
 // The lower sky fades into the upper sky over three degrees. This also supplies the
@@ -84,10 +96,16 @@ fn aerial_inscattering(world_position: vec3<f32>, distance: f32) -> vec3<f32> {
     let uv = clip.xy / clip.w * vec2<f32>(0.5, -0.5) + 0.5;
     let max_distance = snapshot[0].w;
     let uvw = vec3<f32>(uv, clamp(distance / max_distance - 0.5 / f32(AERIAL_SIZE), 0.0, 1.0));
+    var logarithm: vec3<f32>;
+@if(FILTERED_FOG) {
+    logarithm = textureSampleLevel(fog_aerial, fog_aerial_sampler, uvw, 0.0).rgb;
+} @else {
     let pixel = uvw * f32(AERIAL_SIZE) - 0.5;
     let cell = vec3<i32>(floor(pixel));
     let weight = fract(pixel);
-    let logarithm = mix(aerial_slice(cell, weight.xy), aerial_slice(cell + vec3<i32>(0, 0, 1), weight.xy), weight.z);
+    logarithm = mix(aerial_slice(cell, weight.xy), aerial_slice(cell + vec3<i32>(0, 0, 1), weight.xy), weight.z);
+
+}
     let fade = clamp(distance * f32(AERIAL_SIZE) / max_distance, 0.0, 1.0);
     return exp(logarithm) * fade * view_bindings::view.exposure;
 }

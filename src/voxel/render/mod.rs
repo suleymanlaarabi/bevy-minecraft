@@ -12,6 +12,7 @@ pub(crate) mod model_mesh;
 pub(crate) mod models;
 mod sort;
 mod texture_pack;
+pub(crate) mod visibility;
 
 use bevy::prelude::*;
 pub(crate) use environment::{OPEN_AIR_SCATTERING, terrain_radius};
@@ -27,6 +28,7 @@ pub(super) struct VoxelRenderPlugin;
 impl Plugin for VoxelRenderPlugin {
     fn build(&self, app: &mut App) {
         sort::register(app);
+        visibility::register(app);
         fog::register(app);
         app.add_systems(
             PostUpdate,

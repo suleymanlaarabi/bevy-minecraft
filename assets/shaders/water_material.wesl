@@ -1,6 +1,6 @@
 import super::voxel_vertex::{PackedVertex, decode, face_normal};
 import super::voxel_lighting::apply_voxel_lighting;
-import super::voxel_fog::{apply_voxel_fog, sky_reflection};
+import super::voxel_fog::{apply_voxel_fog_ray, fog_ray, sky_reflection};
 import super::block_lighting::sky_visibility;
 import bevy_pbr::render::{
     forward_io::FragmentOutput,
@@ -116,6 +116,7 @@ fn fragment(
     @builtin(front_facing) is_front: bool,
 ) -> FragmentOutput {
     let world = in.world_position.xyz;
+    let ray = fog_ray(world);
     // Flat like vanilla: the motion lives in the texture, not in bent normals.
     let normal = normalize(in.world_normal);
 
@@ -123,7 +124,10 @@ fn fragment(
     // Water never receives shadows (`NotShadowReceiver`), hence no mesh flags.
     var pbr_input = pbr_input_new();
     pbr_input.is_orthographic = view.clip_from_view[3].w == 1.0;
-    pbr_input.V = calculate_view(in.world_position, pbr_input.is_orthographic);
+    pbr_input.V = -ray.direction;
+    if pbr_input.is_orthographic {
+        pbr_input.V = calculate_view(in.world_position, true);
+    }
     pbr_input.frag_coord = in.position;
     pbr_input.world_position = in.world_position;
     pbr_input.world_normal = in.world_normal;
@@ -143,11 +147,14 @@ fn fragment(
     let lit = apply_voxel_lighting(pbr_input, in.light);
     // The reflected physical sky is already exposed: blend it after lighting,
     // dimmed where the sky cannot reach.
-    let sky = sky_reflection(water.sky_color.rgb, world) * sky_visibility(in.light);
+    var sky = vec3<f32>(0.0);
+    if fresnel * water.sky_color.a > 0.0 {
+        sky = sky_reflection(water.sky_color.rgb, ray) * sky_visibility(in.light);
+    }
     var out: FragmentOutput;
-    out.color = apply_voxel_fog(
+    out.color = apply_voxel_fog_ray(
         vec4<f32>(mix(lit.rgb, sky, fresnel * water.sky_color.a), lit.a),
-        world,
+        world, ray,
     );
     return out;
 }

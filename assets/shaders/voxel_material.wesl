@@ -1,6 +1,6 @@
 import super::surface_animation::surface_frame;
 import super::block_lighting::voxel_diffuse;
-import super::voxel_fog::apply_voxel_fog;
+import super::voxel_fog::{apply_voxel_fog_ray, fog_ray, fully_fogged};
 import super::voxel_vertex::{PackedVertex, decode, face_normal, block_uv, face_index, transform_uv, face_layer, face_transform};
 import bevy_pbr::render::{
     forward_io::FragmentOutput,
@@ -65,6 +65,14 @@ fn fragment(
 ) -> FragmentOutput {
     let uv_dx = dpdx(in.uv);
     let uv_dy = dpdy(in.uv);
+    let ray = fog_ray(in.world_position.xyz);
+    var out: FragmentOutput;
+@if(!VOXEL_CUTOUT) {
+    if fully_fogged(ray) {
+        out.color = apply_voxel_fog_ray(vec4<f32>(0.0, 0.0, 0.0, 1.0), in.world_position.xyz, ray);
+        return out;
+    }
+}
     var texture_color = textureSampleGrad(blocks, blocks_sampler, in.uv, in.layer, uv_dx, uv_dy);
     if in.frame_mix > 0.0 {
         texture_color = mix(texture_color, textureSampleGrad(blocks, blocks_sampler, in.uv, in.next_layer, uv_dx, uv_dy), in.frame_mix);
@@ -72,6 +80,10 @@ fn fragment(
 @if(VOXEL_CUTOUT) {
     // Leaves and other cutout cubes: real holes, alpha-tested like vanilla.
     if texture_color.a < 0.5 { discard; }
+    if fully_fogged(ray) {
+        out.color = apply_voxel_fog_ray(vec4<f32>(0.0, 0.0, 0.0, 1.0), in.world_position.xyz, ray);
+        return out;
+    }
 } @else {
     // Opaque terrain: close stray cutouts (any layer with alpha) with a dark tone.
     if texture_color.a < 1.0 {
@@ -82,13 +94,12 @@ fn fragment(
     }
 }
     let albedo = texture_color.rgb * in.tint;
-    var out: FragmentOutput;
-    out.color = apply_voxel_fog(
+    out.color = apply_voxel_fog_ray(
         vec4<f32>(
             voxel_diffuse(albedo, normalize(in.world_normal), in.world_position, in.position.xy, in.light),
             1.0,
         ),
-        in.world_position.xyz,
+        in.world_position.xyz, ray,
     );
     return out;
 }

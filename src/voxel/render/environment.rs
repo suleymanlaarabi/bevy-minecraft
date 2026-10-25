@@ -1,3 +1,4 @@
+use super::fog::FogMaterialKey;
 use crate::{
     game::GameState,
     settings::GraphicsSettings,
@@ -118,9 +119,22 @@ pub(crate) fn terrain_radius(settings: &GraphicsSettings) -> f32 {
 
 /// Draws lower-sky haze or the opaque immersion dome after the atmosphere pass.
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
+#[bind_group_data(FogMaterialKey)]
 pub(in crate::voxel) struct HorizonFogMaterial {
     #[storage(11, read_only, visibility(fragment))]
     fog: Handle<ShaderBuffer>,
+    #[texture(12, visibility(fragment))]
+    #[sampler(13, visibility(fragment))]
+    fog_sky: Option<Handle<Image>>,
+    #[texture(14, dimension = "3d", visibility(fragment))]
+    #[sampler(15, visibility(fragment))]
+    fog_aerial: Option<Handle<Image>>,
+}
+
+impl From<&HorizonFogMaterial> for super::fog::FogMaterialKey {
+    fn from(material: &HorizonFogMaterial) -> Self {
+        Self(material.fog_sky.is_some())
+    }
 }
 
 impl Material for HorizonFogMaterial {
@@ -144,8 +158,9 @@ impl Material for HorizonFogMaterial {
         _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
+        key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        super::fog::specialize_fog(descriptor, key.bind_group_data.0);
         // Seen from inside.
         descriptor.primitive.cull_mode = None;
         Ok(())
@@ -167,7 +182,11 @@ pub(in crate::voxel) fn spawn_horizon_skirt(
     mut materials: ResMut<Assets<HorizonFogMaterial>>,
     fog: Res<super::fog::FogLut>,
 ) {
-    let material = MeshMaterial3d(materials.add(HorizonFogMaterial { fog: fog.0.clone() }));
+    let material = MeshMaterial3d(materials.add(HorizonFogMaterial {
+        fog: fog.0.clone(),
+        fog_sky: fog.1.clone(),
+        fog_aerial: fog.2.clone(),
+    }));
     let tube = Cylinder::new(1.0, 1.0)
         .mesh()
         .resolution(64)
