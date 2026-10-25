@@ -1,4 +1,3 @@
-use avian3d::prelude::*;
 use bevy::{
     color::palettes::css::BLACK,
     image::{
@@ -11,6 +10,7 @@ use bevy::{
 };
 
 use crate::{
+    character::{Aabb, CharacterBody, CharacterMotion, CharacterState},
     dropped_item::DroppedItemCommandsExt,
     game::GameState,
     inventory::{InventoryState, ItemKind, ItemStack},
@@ -221,9 +221,8 @@ fn handle_block_placement(
     mouse: Res<ButtonInput<MouseButton>>,
     target: Single<&BlockTargetState, With<PlayerCamera>>,
     voxel_world: VoxelWorld,
-    spatial_query: SpatialQuery,
     camera_forward: Option<Single<&GlobalTransform, With<PlayerCamera>>>,
-    players: Query<(), With<Player>>,
+    players: Query<(&CharacterMotion, &CharacterBody, &CharacterState), With<Player>>,
     mut inventory: Single<&mut crate::inventory::PlayerInventory, With<Player>>,
 ) {
     let Some(target) = target.0 else {
@@ -248,7 +247,7 @@ fn handle_block_placement(
         return;
     };
     for &(position, state) in &edits {
-        if block_contains_player(&spatial_query, &players, position, state) {
+        if block_contains_player(&players, position, state) {
             return;
         }
     }
@@ -319,29 +318,20 @@ fn cancel_breaking(
 }
 
 fn block_contains_player(
-    spatial_query: &SpatialQuery,
-    players: &Query<(), With<Player>>,
+    players: &Query<(&CharacterMotion, &CharacterBody, &CharacterState), With<Player>>,
     position: IVec3,
     state: VoxelState,
 ) -> bool {
-    for shape in state.collision_boxes(position) {
-        let size = (shape.size() - Vec3::splat(0.001)).max(Vec3::splat(0.001));
-        let mut contains = false;
-        spatial_query.shape_intersections_callback(
-            &Collider::cuboid(size.x, size.y, size.z),
-            position.as_vec3() + shape.center(),
-            Quat::IDENTITY,
-            &SpatialQueryFilter::DEFAULT,
-            |entity| {
-                contains = players.contains(entity);
-                !contains
-            },
-        );
-        if contains {
-            return true;
-        }
-    }
-    false
+    let origin = position.as_dvec3();
+    players.iter().any(|(motion, body, character)| {
+        let player = body.aabb(motion.position, character.pose);
+        state.collision_boxes(position).any(|shape| {
+            player.intersects(&Aabb {
+                min: origin + shape.min.as_dvec3(),
+                max: origin + shape.max.as_dvec3(),
+            })
+        })
+    })
 }
 
 fn draw_targeted_block(

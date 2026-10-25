@@ -8,7 +8,7 @@ mod spawn;
 
 use crate::{game::GameState, inventory::InventoryState};
 use bevy::prelude::*;
-use input::{clear_player_input, mouse_look, player_input};
+use input::{clear_player_input, follow_eye_height, mouse_look, player_input};
 use spawn::{finish_spawn_loading, finish_spawn_search, start_spawn_search};
 
 pub(crate) use components::Crosshair;
@@ -36,6 +36,12 @@ impl Plugin for PlayerPlugin {
                 .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
                 .run_if(crate::world::playing)
                 .run_if(in_state(InventoryState::Closed)),
+        )
+        .add_systems(
+            PostUpdate,
+            follow_eye_height
+                .before(crate::spatial::FollowSystems)
+                .run_if(crate::world::playing),
         );
         interaction::register(app);
         safety::register(app);

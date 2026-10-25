@@ -21,21 +21,20 @@ fn recover_player(
         (
             &mut Position,
             &mut Transform,
-            &mut LinearVelocity,
             &mut PlayerCheckpoint,
-            Has<crate::character::OnGround>,
+            &crate::character::CharacterState,
         ),
         With<Player>,
     >,
 ) {
-    for (mut position, mut transform, mut velocity, mut checkpoint, grounded) in &mut players {
+    for (mut position, mut transform, mut checkpoint, state) in &mut players {
         if !position.0.is_finite() || position.y < -8.0 {
             if let Some(safe) = checkpoint.0 {
                 position.0 = safe;
+                // The controller sees the jump as a teleport and drops its velocity.
                 transform.translation = safe;
-                velocity.0 = Vec3::ZERO;
             }
-        } else if world.collision_ready(position.0) && (grounded || checkpoint.0.is_none()) {
+        } else if world.collision_ready(position.0) && (state.on_ground || checkpoint.0.is_none()) {
             checkpoint.0 = Some(position.0);
         }
     }

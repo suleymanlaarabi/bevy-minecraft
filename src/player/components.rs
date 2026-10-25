@@ -1,9 +1,8 @@
 use super::interaction;
 use crate::{
-    character::{AutoJump, CHARACTER_GRAVITY_SCALE, GameCharacter},
+    character::{AutoJump, GameCharacter},
     game::GameState,
     inventory::PlayerInventory,
-    spatial::GameLayer,
     voxel::VoxelViewer,
 };
 use avian3d::prelude::*;
@@ -12,34 +11,18 @@ use bevy::{
     prelude::*,
 };
 
-const PLAYER_WIDTH: f32 = 0.6;
-const PLAYER_HEIGHT: f32 = 1.8;
-
-fn default_friction() -> Friction {
-    Friction::ZERO.with_combine_rule(CoefficientCombine::Min)
-}
-
-fn default_restitution() -> Restitution {
-    Restitution::ZERO.with_combine_rule(CoefficientCombine::Min)
-}
-
 #[derive(Component, Default, Debug, Clone)]
 #[require(
     PlayerInventory,
     super::safety::PlayerCheckpoint,
     GameCharacter,
     AutoJump,
-    RigidBody::Dynamic,
+    // Moved by the character controller, not by the solver. As a body it still
+    // keeps terrain colliders loaded around it for the items it drops.
+    RigidBody::Kinematic,
     // Physics ticks at 64 Hz: ease the position the camera follows between ticks.
     // Rotation is driven by the mouse every frame and must not be eased.
     TranslationInterpolation,
-    Collider::cuboid(PLAYER_WIDTH, PLAYER_HEIGHT, PLAYER_WIDTH),
-    LockedAxes::ROTATION_LOCKED,
-    GravityScale(CHARACTER_GRAVITY_SCALE),
-    LinearDamping::default(),
-    Friction = default_friction(),
-    Restitution = default_restitution(),
-    CollisionLayers::new(GameLayer::Player, [GameLayer::Default, GameLayer::World]),
     Visibility::default(),
     DespawnOnExit::<GameState>(GameState::Game)
 )]

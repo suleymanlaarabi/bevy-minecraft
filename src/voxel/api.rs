@@ -8,35 +8,43 @@ use bevy::{ecs::system::SystemParam, prelude::*};
 pub struct VoxelWorld<'w, 's> {
     index: Res<'w, ChunkIndex>,
     chunks: Query<'w, 's, &'static ChunkVoxels>,
-    colliders: Query<'w, 's, (), With<avian3d::prelude::Collider>>,
 }
 
 impl VoxelWorld<'_, '_> {
-    /// Collision is installed after asynchronous terrain/mesh generation.
+    /// Whether the voxels around a position are loaded. Character movement reads
+    /// them directly, so it does not wait for the asynchronous terrain colliders.
     pub fn collision_ready(&self, position: Vec3) -> bool {
         self.index
             .get(&chunk_at(position))
-            .is_some_and(|entity| self.colliders.contains(*entity))
+            .is_some_and(|entity| self.chunks.contains(*entity))
     }
 
-    /// Covers the body's current footprint and its next fixed-step footprint.
-    pub(crate) fn collision_ready_for_motion(
+    /// Visits every cell of an inclusive region, each column from top to bottom,
+    /// looking its chunk up once. Cells of unloaded chunks come back as `None`;
+    /// cells above or below the world are air.
+    pub(crate) fn visit_cells(
         &self,
-        position: Vec3,
-        velocity: Vec3,
-        dt: f32,
-    ) -> bool {
-        let end = position + velocity * dt;
-        let min = position.min(end) - Vec3::splat(0.35);
-        let max = position.max(end) + Vec3::splat(0.35);
-        [
-            Vec3::new(min.x, position.y, min.z),
-            Vec3::new(min.x, position.y, max.z),
-            Vec3::new(max.x, position.y, min.z),
-            Vec3::new(max.x, position.y, max.z),
-        ]
-        .into_iter()
-        .all(|p| self.collision_ready(p))
+        min: IVec3,
+        max: IVec3,
+        mut visit: impl FnMut(IVec3, Option<VoxelState>),
+    ) {
+        let air = VoxelKind::Air.default_state();
+        for x in min.x..=max.x {
+            for z in min.z..=max.z {
+                let (chunk, local) = split_world_position(IVec3::new(x, 0, z));
+                let voxels = self
+                    .index
+                    .get(&chunk)
+                    .and_then(|&entity| self.chunks.get(entity).ok());
+                for y in (min.y..=max.y).rev() {
+                    let cell = IVec3::new(x, y, z);
+                    visit(
+                        cell,
+                        voxels.map(|voxels| voxels.state(local.with_y(y)).unwrap_or(air)),
+                    );
+                }
+            }
+        }
     }
 
     /// Returns the voxel at an integer world position, or `None` when it is unavailable.
@@ -88,11 +96,10 @@ impl VoxelCommandsExt for Commands<'_, '_> {
 mod tests {
 
     use super::*;
-    use avian3d::prelude::Collider;
     use bevy::ecs::system::RunSystemOnce;
 
     #[test]
-    fn collision_readiness_waits_for_the_loaded_chunk_collider() {
+    fn collision_readiness_waits_for_the_loaded_chunk_voxels() {
         let mut world = World::new();
         world.init_resource::<ChunkIndex>();
         let chunk = world.spawn_empty().id();
@@ -103,7 +110,7 @@ mod tests {
         assert!(!world.run_system_once(ready).unwrap());
         world
             .entity_mut(chunk)
-            .insert(Collider::cuboid(16.0, 1.0, 16.0));
+            .insert(ChunkVoxels::filled(VoxelKind::Air));
         assert!(world.run_system_once(ready).unwrap());
         world.despawn(chunk);
         assert!(!world.run_system_once(ready).unwrap());

@@ -1,7 +1,10 @@
 #![allow(clippy::type_complexity)]
 
 use super::{CameraSensitivity, Player, PlayerCamera};
-use crate::character::CharacterMovement;
+use crate::{
+    character::{CharacterMotion, CharacterMovement},
+    spatial::FollowOffset,
+};
 use bevy::{input::mouse::AccumulatedMouseMotion, prelude::*};
 use std::f32::consts::FRAC_PI_2;
 
@@ -55,6 +58,17 @@ pub(super) fn player_input(
     movement.jump = keyboard.pressed(KeyCode::Space);
     movement.sneak = keyboard.pressed(KeyCode::ShiftLeft);
     movement.sprint = keyboard.pressed(KeyCode::ControlLeft);
+}
+
+/// Crouching and swimming lower the camera smoothly, as the eyes ease between poses.
+pub(super) fn follow_eye_height(
+    player: Single<&CharacterMotion, With<Player>>,
+    mut camera: Single<&mut FollowOffset, With<PlayerCamera>>,
+) {
+    let offset = Vec3::Y * player.eye_offset();
+    if camera.0 != offset {
+        camera.0 = offset;
+    }
 }
 
 fn axis(input: &ButtonInput<KeyCode>, positive: KeyCode, negative: KeyCode) -> f32 {

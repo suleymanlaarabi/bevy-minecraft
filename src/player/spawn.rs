@@ -9,7 +9,8 @@ use bevy::{
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
 
-const PLAYER_EYE_HEIGHT: f32 = 0.65;
+/// Vanilla eyes sit 1.62 above the feet; the player's origin is its box center.
+const PLAYER_EYE_HEIGHT: f32 = 0.72;
 
 /// The spawn point search generates terrain, so it runs off the main thread while a
 /// loading screen shows. The player waits for both the search and area loading.
