@@ -21,7 +21,7 @@ use crate::{game::GameState, voxel::TexturePackId};
 use super::model::{FOV_MAX, FOV_MIN, VIEW_DISTANCE_MAX, VIEW_DISTANCE_MIN, normalized_fov};
 use super::{AntiAliasingMode, DisplayMode, GraphicsSettings, ShadowQuality};
 
-const SAVE_DELAY: core::time::Duration = core::time::Duration::from_millis(250);
+use super::SAVE_DELAY;
 
 #[derive(Component, Clone, Copy, Debug, Default)]
 struct SettingsPage;

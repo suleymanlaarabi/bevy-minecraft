@@ -10,4 +10,4 @@ pub mod spatial;
 pub mod voxel;
 pub mod world;
 
-pub use app::asset_directory;
+pub use app::{asset_directory, load_nearest};

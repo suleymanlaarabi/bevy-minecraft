@@ -132,7 +132,7 @@ pub(super) fn finish_spawn_loading(
         if let Some(session) = &session {
             if let Some(stack) = saved
                 .and_then(|p| p.cursor.as_ref())
-                .and_then(|s| s.restore().ok())
+                .and_then(|s| s.restore().ok()?.next())
             {
                 cursor.stack = Some(stack);
             }

@@ -1,16 +1,18 @@
-mod icons;
+mod crafting;
+pub(crate) mod icons;
 mod input;
 mod model;
 mod ui;
 
 use bevy::prelude::*;
-use input::{handle_hotbar_scroll, handle_number_keys};
+use input::{handle_hotbar_scroll, handle_number_keys, handle_swap_offhand};
 
 use crate::{game::GameState, player::Player};
 
 pub use model::{
-    BLOCK_STACK_SIZE, DragMode, HOTBAR_SIZE, INVENTORY_SIZE, ItemKind, ItemStack,
-    MAIN_INVENTORY_SIZE, PlayerInventory,
+    ARMOR_START, BLOCK_STACK_SIZE, CRAFT_RESULT, CRAFT_START, DragMode, HOTBAR_SIZE,
+    INVENTORY_SIZE, ItemKind, ItemStack, MAIN_INVENTORY_SIZE, OFFHAND_SLOT, PlayerInventory,
+    SLOT_COUNT,
 };
 
 #[derive(SubStates, Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
@@ -25,7 +27,7 @@ pub enum InventoryState {
 pub(crate) struct DragState {
     pub source_entity: Entity,
     pub mode: DragMode,
-    pub visited: [bool; INVENTORY_SIZE],
+    pub visited: [bool; SLOT_COUNT],
 }
 
 #[derive(Resource, Default)]
@@ -42,7 +44,7 @@ impl Plugin for InventoryPlugin {
         app.add_sub_state::<InventoryState>()
             .init_resource::<InventoryCursor>()
             .init_resource::<icons::BlockIcons>()
-            .add_systems(Startup, icons::setup_block_icons)
+            .add_systems(Startup, (icons::setup_block_icons, crafting::initialize))
             .add_systems(
                 Update,
                 icons::render_block_icons.run_if(
@@ -78,7 +80,12 @@ impl Plugin for InventoryPlugin {
             )
             .add_systems(
                 Update,
-                (handle_number_keys, handle_hotbar_scroll, ui::refresh_slots)
+                (
+                    handle_number_keys,
+                    handle_hotbar_scroll,
+                    handle_swap_offhand,
+                    ui::refresh_slots,
+                )
                     .chain()
                     .run_if(crate::world::playing),
             )

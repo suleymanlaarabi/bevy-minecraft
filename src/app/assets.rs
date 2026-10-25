@@ -13,3 +13,16 @@ pub fn asset_directory() -> std::path::PathBuf {
     }
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets")
 }
+
+/// Loads a pixel-art image with nearest-neighbor sampling.
+pub fn load_nearest(
+    server: &bevy::asset::AssetServer,
+    path: impl Into<bevy::asset::AssetPath<'static>>,
+) -> bevy::asset::Handle<bevy::image::Image> {
+    server
+        .load_builder()
+        .with_settings(|settings: &mut bevy::image::ImageLoaderSettings| {
+            settings.sampler = bevy::image::ImageSampler::nearest();
+        })
+        .load(path)
+}

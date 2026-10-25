@@ -138,3 +138,48 @@ a change, and never compile in release mode.
 
 Completed terrain sections appear progressively during loading. Assets are found
 next to the executable, then in the build repository, or through `BEVY_ASSET_ROOT`.
+
+## Inventory and skins
+
+Press **E** to open the inventory. The original dark slots now include four armor
+slots, an offhand slot, a 3D player portrait, and a 2×2 crafting grid. Standard
+shaped and shapeless vanilla recipes that fit the grid are loaded from Pumpkin,
+including ingredient tags, shifted patterns, and mirrored patterns. Click the
+result to craft once; Shift-click crafts as many batches as fit in storage.
+Number keys also move a crafted batch into the corresponding hotbar slot. Closing
+the inventory returns crafting ingredients to storage and drops any overflow.
+Armor slots accept compatible equipment only; Shift-click equips it. **F** swaps
+the selected hotbar slot and offhand. **F5** cycles first-person, rear, and front
+views. Third-person cameras shorten their distance when terrain blocks the view.
+
+`assets/skin.png` is the default skin. Drop a PNG on the game window while the
+inventory is open to import another skin. Imports are decoded and validated on a
+worker before being stored in `assets/player/custom/`; the previous skin remains
+available if import fails. **Classic arms / Slim arms** chooses the model, and
+**Layers** toggles hats, jackets, sleeves, and trouser overlays. **Reset** restores
+the supplied default. Skin choices use Bevy's persistent `skin` settings group.
+Modern 64×64, legacy 64×32, and proportional HD skins up to 2048 pixels wide are
+supported. Legacy left limbs are mirrored, base layers are opaque, and outer
+layers preserve transparency. Shared meshes and textures drive the inventory
+portrait, animated world model, and first-person arm. The portrait camera exists
+only while the inventory is open. The hand swings on left-click, repeats while
+mining, and swings when placing a block. Opening the inventory cancels the swing.
+The hand follows Minecraft 26.3's first-person arm transforms and renders into a
+transparent texture. The main world camera composites it behind the HUD, keeping
+the hotbar above the arm without sharing window buffers between 2D and 3D cameras
+or relying on matching their antialiasing settings. The hand target resizes with
+the window and its camera is inactive outside the first-person inventory-closed view.
+
+The vanilla importer also extracts item sprites and humanoid armor textures to
+`assets/player/vanilla/`. To import these separately from a local official client:
+
+```bash
+python3 scripts/import_player_assets.py /path/to/minecraft-client.jar
+```
+
+These generated Mojang assets are ignored by Git. Without them, missing item
+sprites use a placeholder and armor textures are unavailable; custom player skins
+continue to work. Armor rendering covers the vanilla humanoid armor layers;
+special equipment models such as elytra wings and wearable block heads are not
+part of this renderer. Item durability, armor damage reduction, and special
+crafting recipes (such as item repair or armor dyeing) are not simulated.

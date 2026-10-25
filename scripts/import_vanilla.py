@@ -85,6 +85,8 @@ def import_breaking_textures(jar, sha1):
 def main():
     jar, sha1 = client_jar()
     import_breaking_textures(jar, sha1)
+    from import_player_assets import import_player_assets
+    import_player_assets(jar)
     def texture(name):
         tile = Image.open(BytesIO(jar.read(f'assets/minecraft/textures/block/{name}.png'))).convert('RGBA')
         # Animated/oversized textures: keep the first 16x16 frame.

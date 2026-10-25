@@ -2,7 +2,7 @@ use super::InventorySlotView;
 use crate::{
     dropped_item::DroppedItemCommandsExt,
     game::GameState,
-    inventory::{DragMode, DragState, INVENTORY_SIZE, InventoryCursor, PlayerInventory},
+    inventory::{CRAFT_RESULT, DragMode, DragState, InventoryCursor, PlayerInventory, SLOT_COUNT},
     player::Player,
 };
 use bevy::{picking::prelude::*, prelude::*};
@@ -19,22 +19,22 @@ pub(crate) fn return_cursor_stack(
     }
     cursor.hovered_slot = None;
     cursor.drag = None;
-    let Some(stack) = cursor.stack.take() else {
-        return;
-    };
+    let held = cursor.stack.take();
     let Ok((mut inventory, transform)) = players.single_mut() else {
-        // The session may already have despawned its player.
         return;
     };
-    if let Some(remaining) =
-        PlayerInventory::edit(&mut inventory, |inventory| inventory.insert(stack))
-    {
-        commands.spawn_dropped_item(
-            remaining,
-            transform.translation() + Vec3::Y * 0.5,
-            Vec3::Y * 1.2,
-        );
-    }
+    PlayerInventory::edit(&mut inventory, |inventory| {
+        let inputs = inventory.take_crafting_inputs();
+        for stack in held.into_iter().chain(inputs.into_iter().flatten()) {
+            if let Some(remaining) = inventory.insert(stack) {
+                commands.spawn_dropped_item(
+                    remaining,
+                    transform.translation() + Vec3::Y * 0.5,
+                    Vec3::Y * 1.2,
+                );
+            }
+        }
+    });
 }
 
 pub(super) fn slot_over(
@@ -82,11 +82,20 @@ pub(super) fn slot_click(
 
     let index = slot.index;
 
+    let shift = keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
+    if index == CRAFT_RESULT {
+        if matches!(
+            event.button,
+            PointerButton::Primary | PointerButton::Secondary
+        ) {
+            PlayerInventory::edit(&mut inventory, |inventory| {
+                inventory.craft(&mut cursor.stack, shift)
+            });
+        }
+        return;
+    }
     match event.button {
         PointerButton::Primary => {
-            let shift =
-                keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
-
             if shift && cursor.stack.is_none() {
                 PlayerInventory::edit(&mut inventory, |inventory| inventory.quick_move(index));
                 return;
@@ -124,6 +133,9 @@ pub(super) fn slot_drag_start(
         return;
     };
 
+    if slot.index == CRAFT_RESULT {
+        return;
+    }
     let had_stack_before_drag = cursor.stack.is_some();
 
     let mode = match event.button {
@@ -146,7 +158,7 @@ pub(super) fn slot_drag_start(
         return;
     }
 
-    let mut visited = [false; INVENTORY_SIZE];
+    let mut visited = [false; SLOT_COUNT];
 
     if had_stack_before_drag {
         visited[slot.index] = true;
@@ -178,7 +190,9 @@ pub(super) fn slot_drag_enter(
         return;
     }
 
-    drag.visited[slot.index] = true;
+    if slot.index < SLOT_COUNT {
+        drag.visited[slot.index] = true;
+    }
 }
 
 pub(super) fn slot_drag_over(
@@ -200,7 +214,9 @@ pub(super) fn slot_drag_over(
         return;
     }
 
-    drag.visited[slot.index] = true;
+    if slot.index < SLOT_COUNT {
+        drag.visited[slot.index] = true;
+    }
 }
 
 pub(super) fn slot_drag_end(

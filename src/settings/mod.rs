@@ -11,12 +11,16 @@ use ui::spawn_settings_page;
 pub use model::{AntiAliasingMode, DisplayMode, GraphicsSettings, ShadowQuality};
 
 const SETTINGS_APP_NAME: &str = "org.hollow.game";
+/// Debounce before writing settings changed from the UI.
+pub(crate) const SAVE_DELAY: core::time::Duration = core::time::Duration::from_millis(250);
 
 pub struct GameSettingsPlugin;
 
 impl Plugin for GameSettingsPlugin {
     fn build(&self, app: &mut App) {
-        app.register_type::<AntiAliasingMode>()
+        app.register_type::<crate::player::SkinModel>()
+            .register_type::<crate::player::SkinSettings>()
+            .register_type::<AntiAliasingMode>()
             .register_type::<ShadowQuality>()
             .register_type::<DisplayMode>()
             .register_type::<TexturePackId>()

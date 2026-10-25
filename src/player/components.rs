@@ -33,6 +33,7 @@ pub struct Player;
     CameraSensitivity,
     interaction::BlockTargetState,
     interaction::BreakingState,
+    super::skin::ArmSwing,
     Camera3d,
     IsDefaultUiCamera,
     AmbientLight {
@@ -59,6 +60,13 @@ pub struct Player;
 )]
 pub struct PlayerCamera {
     pub pitch: f32,
+}
+
+impl PlayerCamera {
+    /// Eye orientation: the body's yaw followed by the camera pitch.
+    pub fn look(&self, body: Quat) -> Quat {
+        body * Quat::from_rotation_x(self.pitch)
+    }
 }
 
 #[derive(Debug, Component, Deref, DerefMut)]

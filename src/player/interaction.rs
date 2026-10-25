@@ -28,6 +28,8 @@ struct BlockTarget {
     place: IVec3,
     normal: Vec3,
     hit: Vec3,
+    /// Eye look direction, independent of the third-person camera.
+    look: Vec3,
 }
 
 #[derive(Component, Default)]
@@ -53,6 +55,9 @@ struct BreakingAssets {
     materials: [Handle<crate::voxel::render::ModelMaterial>; 10],
 }
 
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct PlayerInteraction;
+
 pub(super) fn register(app: &mut App) {
     app.add_systems(
         PreStartup,
@@ -70,6 +75,7 @@ pub(super) fn register(app: &mut App) {
             draw_targeted_block,
         )
             .chain()
+            .in_set(PlayerInteraction)
             .after(FollowSystems)
             .before(TransformSystems::Propagate)
             .run_if(crate::world::playing)
@@ -137,20 +143,17 @@ fn spawn_breaking_overlay(mut commands: Commands, assets: Res<BreakingAssets>) {
     ));
 }
 
+/// Rays start at the player's eyes: third-person cameras sit behind or in front of them.
 fn update_block_target(
-    transforms: TransformHelper,
-    camera: Single<(Entity, &mut BlockTargetState), With<PlayerCamera>>,
+    player: Single<(&Transform, &CharacterMotion), With<Player>>,
+    camera: Single<(&PlayerCamera, &mut BlockTargetState)>,
     voxel_world: VoxelWorld,
 ) {
-    let (entity, mut target) = camera.into_inner();
-    target.0 = transforms
-        .compute_global_transform(entity)
-        .ok()
-        .and_then(|transform| {
-            targeted_state(transform.translation(), transform.forward(), |position| {
-                voxel_world.state(position)
-            })
-        });
+    let (transform, motion) = *player;
+    let (camera, mut target) = camera.into_inner();
+    let origin = transform.translation + Vec3::Y * motion.eye_offset();
+    let look = camera.look(transform.rotation) * Dir3::NEG_Z;
+    target.0 = targeted_state(origin, look, |position| voxel_world.state(position));
 }
 
 fn update_breaking(
@@ -159,6 +162,7 @@ fn update_breaking(
     time: Res<Time>,
     target: Single<&BlockTargetState, With<PlayerCamera>>,
     mut breaking: Single<&mut BreakingState, With<PlayerCamera>>,
+    mut swing: Single<&mut super::skin::ArmSwing, With<PlayerCamera>>,
     voxel_world: VoxelWorld,
 ) {
     if !mouse.pressed(MouseButton::Left) {
@@ -178,6 +182,7 @@ fn update_breaking(
         breaking.0 = None;
         return;
     };
+    swing.request();
 
     if breaking
         .0
@@ -221,9 +226,9 @@ fn handle_block_placement(
     mouse: Res<ButtonInput<MouseButton>>,
     target: Single<&BlockTargetState, With<PlayerCamera>>,
     voxel_world: VoxelWorld,
-    camera_forward: Option<Single<&GlobalTransform, With<PlayerCamera>>>,
     players: Query<(&CharacterMotion, &CharacterBody, &CharacterState), With<Player>>,
     mut inventory: Single<&mut crate::inventory::PlayerInventory, With<Player>>,
+    mut swing: Single<&mut super::skin::ArmSwing, With<PlayerCamera>>,
 ) {
     let Some(target) = target.0 else {
         return;
@@ -234,7 +239,6 @@ fn handle_block_placement(
     let Some(ItemKind::Block(kind)) = inventory.selected_stack().map(|stack| stack.item()) else {
         return;
     };
-    let look = camera_forward.map_or(Vec3::NEG_Z, |camera| camera.forward().as_vec3());
     let Some(edits) = crate::voxel::rules::placement(
         &voxel_world,
         kind,
@@ -242,7 +246,7 @@ fn handle_block_placement(
         target.place,
         target.hit,
         target.normal,
-        look,
+        target.look,
     ) else {
         return;
     };
@@ -252,6 +256,7 @@ fn handle_block_placement(
         }
     }
     if inventory.consume_selected(1) {
+        swing.request();
         for (position, state) in edits {
             commands.set_voxel_state(position, state);
         }
@@ -406,6 +411,7 @@ fn targeted_state(
                                     place: owner + normal.round().as_ivec3(),
                                     normal,
                                     hit: origin + direction * distance,
+                                    look: direction,
                                 },
                             ));
                         }

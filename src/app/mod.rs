@@ -4,7 +4,7 @@ mod assets;
 #[cfg(feature = "dev")]
 mod dev;
 
-pub use assets::asset_directory;
+pub use assets::{asset_directory, load_nearest};
 
 use crate::{
     game::{GamePlugin, GameState},

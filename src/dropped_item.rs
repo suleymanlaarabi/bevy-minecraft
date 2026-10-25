@@ -60,6 +60,7 @@ struct DroppedItemVisual {
 #[derive(Resource, Default)]
 struct DroppedItemAssets {
     meshes: HashMap<ItemKind, Handle<Mesh>>,
+    materials: HashMap<AssetId<Image>, Handle<StandardMaterial>>,
 }
 
 pub struct DroppedItemPlugin;
@@ -90,12 +91,16 @@ fn spawn_dropped_item(
     mut assets: ResMut<DroppedItemAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     voxel_assets: Res<VoxelAssets>,
+    icons: Res<crate::inventory::icons::BlockIcons>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     spawn_item(
         &mut commands,
         &mut assets,
         &mut meshes,
         &voxel_assets,
+        &icons,
+        &mut materials,
         event.stack,
         event.position,
         event.velocity,
@@ -118,14 +123,18 @@ fn restore_dropped_item(
     mut assets: ResMut<DroppedItemAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     voxel_assets: Res<VoxelAssets>,
+    icons: Res<crate::inventory::icons::BlockIcons>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let drop = &event.0;
-    if let Ok(stack) = drop.stack.restore() {
+    for stack in drop.stack.restore().into_iter().flatten() {
         spawn_item(
             &mut commands,
             &mut assets,
             &mut meshes,
             &voxel_assets,
+            &icons,
+            &mut materials,
             stack,
             Vec3::from_array(drop.position),
             Vec3::from_array(drop.velocity),
@@ -158,18 +167,35 @@ fn spawn_item(
     assets: &mut DroppedItemAssets,
     meshes: &mut Assets<Mesh>,
     voxel_assets: &VoxelAssets,
+    icons: &crate::inventory::icons::BlockIcons,
+    materials: &mut Assets<StandardMaterial>,
     stack: ItemStack,
     position: Vec3,
     velocity: Vec3,
     expires_at: Duration,
     pickup_after: Duration,
 ) {
-    let ItemKind::Block(kind) = stack.item();
     let mesh = assets
         .meshes
         .entry(stack.item())
         .or_insert_with(|| {
-            meshes.add(crate::voxel::render::model_mesh::item_geometry(kind).into_mesh())
+            meshes.add(match stack.item() {
+                ItemKind::Block(kind) => {
+                    crate::voxel::render::model_mesh::item_geometry(kind).into_mesh()
+                }
+                ItemKind::Item(_) => {
+                    let mut mesh = Rectangle::new(1.0, 1.0).mesh().build();
+                    if let Some((offset, scale)) = icons.item_uv(stack.item())
+                        && let Some(bevy::mesh::VertexAttributeValues::Float32x2(uvs)) =
+                            mesh.attribute_mut(Mesh::ATTRIBUTE_UV_0)
+                    {
+                        for uv in uvs {
+                            *uv = (offset + Vec2::from_array(*uv) * scale).to_array();
+                        }
+                    }
+                    mesh
+                }
+            })
         })
         .clone();
     let root = commands
@@ -205,19 +231,45 @@ fn spawn_item(
             ChildOf(root),
         ))
         .id();
-    // The block mesh spans 0..1: center it on the spinning visual.
-    commands.spawn((
-        Mesh3d(mesh.clone()),
-        MeshMaterial3d(if kind.name().contains("glass") || kind.name() == "ice" {
-            voxel_assets.translucent.clone()
-        } else {
-            // Item models may hold cutout textures (flowers, torches).
-            voxel_assets.models_cutout.clone()
-        }),
-        Transform::from_translation(Vec3::splat(-0.5)),
-        ChildOf(visual),
-        NotShadowCaster,
-    ));
+    match stack.item() {
+        ItemKind::Block(kind) => {
+            commands.spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(if kind.name().contains("glass") || kind.name() == "ice" {
+                    voxel_assets.translucent.clone()
+                } else {
+                    voxel_assets.models_cutout.clone()
+                }),
+                Transform::from_translation(Vec3::splat(-0.5)),
+                ChildOf(visual),
+                NotShadowCaster,
+            ));
+        }
+        ItemKind::Item(_) => {
+            let texture = icons.item_image(stack.item()).cloned().unwrap_or_default();
+            let material = assets
+                .materials
+                .entry(texture.id())
+                .or_insert_with(|| {
+                    materials.add(StandardMaterial {
+                        base_color_texture: Some(texture),
+                        alpha_mode: AlphaMode::Mask(0.5),
+                        cull_mode: None,
+                        perceptual_roughness: 1.0,
+                        reflectance: 0.0,
+                        ..default()
+                    })
+                })
+                .clone();
+            commands.spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
+                Transform::default(),
+                ChildOf(visual),
+                NotShadowCaster,
+            ));
+        }
+    }
 }
 
 fn animate_dropped_item_visuals(

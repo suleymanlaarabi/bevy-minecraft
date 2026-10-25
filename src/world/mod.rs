@@ -5,7 +5,7 @@ mod ui;
 
 use crate::{
     game::GameState,
-    inventory::{INVENTORY_SIZE, InventoryCursor, InventoryState, PlayerInventory},
+    inventory::{InventoryCursor, InventoryState, PlayerInventory},
     player::{Player, PlayerCamera},
     voxel::{
         ChunkVoxels, VoxelChunk, VoxelSettings,
@@ -497,7 +497,7 @@ fn checkpoint(
         position: transform.translation.to_array(),
         rotation: transform.rotation.to_array(),
         pitch: cameras.single().map_or(0.0, |c| c.pitch),
-        slots: (0..INVENTORY_SIZE)
+        slots: (0..crate::inventory::SLOT_COUNT)
             .map(|i| inventory.slot(i).map(SavedStack::capture))
             .collect(),
         selected: inventory.selected_hotbar(),

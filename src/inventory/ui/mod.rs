@@ -42,6 +42,24 @@ pub(crate) struct SlotCount {
     index: usize,
 }
 
+#[derive(Component, Clone, Copy, Default)]
+pub(crate) struct EmptySlotLabel {
+    index: usize,
+}
+
+fn empty_slot_label(index: usize) -> &'static str {
+    use crate::inventory::{ARMOR_START, CRAFT_RESULT, OFFHAND_SLOT};
+    match index {
+        index if index == ARMOR_START => "Head",
+        index if index == ARMOR_START + 1 => "Chest",
+        index if index == ARMOR_START + 2 => "Legs",
+        index if index == ARMOR_START + 3 => "Feet",
+        OFFHAND_SLOT => "Hand",
+        CRAFT_RESULT => "Result",
+        _ => "",
+    }
+}
+
 #[derive(Component, Clone, Default)]
 pub(crate) struct CursorStackView;
 

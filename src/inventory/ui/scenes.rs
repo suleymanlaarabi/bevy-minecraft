@@ -3,12 +3,16 @@ use super::interactions::{
     slot_over,
 };
 use super::{
-    CursorStackCount, CursorStackView, HotbarHud, ICON_SIZE, InventoryOverlay, InventorySlotView,
-    PANEL_BG, SLOT_BG, SLOT_BORDER, SLOT_GAP, SLOT_SIZE, SlotCount, SlotIcon,
+    CursorStackCount, CursorStackView, EmptySlotLabel, HotbarHud, ICON_SIZE, InventoryOverlay,
+    InventorySlotView, PANEL_BG, SLOT_BG, SLOT_BORDER, SLOT_GAP, SLOT_SIZE, SlotCount, SlotIcon,
+    empty_slot_label,
 };
 use crate::{
     game::GameState,
-    inventory::{HOTBAR_SIZE, INVENTORY_SIZE, InventoryState},
+    inventory::{
+        ARMOR_START, CRAFT_RESULT, CRAFT_START, HOTBAR_SIZE, INVENTORY_SIZE, InventoryState,
+        OFFHAND_SLOT, SLOT_COUNT,
+    },
 };
 use bevy::{picking::prelude::Pickable, prelude::*};
 
@@ -38,6 +42,13 @@ fn slot(index: usize, interactive: bool) -> impl Scene {
         @picking
         @interactions
         Children [
+            Text({empty_slot_label(index)})
+            EmptySlotLabel { index }
+            TextFont { font_size: FontSize::Px(10.0) }
+            TextColor(Color::srgb(0.48,0.48,0.52))
+            Node { position_type: PositionType::Absolute }
+            Pickable::IGNORE
+            --
             Node { width: px(ICON_SIZE), height: px(ICON_SIZE) }
             SlotIcon { index }
             ImageNode
@@ -101,7 +112,7 @@ pub(crate) fn spawn_hotbar_hud(mut commands: Commands) {
     commands.spawn_scene(hotbar_hud_scene());
 }
 
-fn inventory_overlay_scene() -> impl Scene {
+fn inventory_overlay_scene(preview: Handle<Image>) -> impl Scene {
     bsn! {
         Node {
             width: percent(100),
@@ -131,6 +142,97 @@ fn inventory_overlay_scene() -> impl Scene {
                 }
                 TextColor(Color::WHITE)
                 Pickable::IGNORE
+                --
+                Node { column_gap: px(10), height: px(204) }
+                Children [
+                    Node { flex_direction: FlexDirection::Column, row_gap: px(SLOT_GAP) }
+                    Children [ { slot_list(ARMOR_START..OFFHAND_SLOT, true) } ]
+                    --
+                    Node { width: px(136), height: px(204) }
+                    ImageNode { image: preview }
+                    crate::player::skin::SkinPortrait
+                    Pickable::IGNORE
+                    --
+                    Node { flex_direction: FlexDirection::Column, flex_grow: 1.0, row_gap: px(10) }
+                    Children [
+                        Text("Crafting")
+                        TextFont { font_size: FontSize::Px(15.0) }
+                        TextColor(Color::WHITE)
+                        Pickable::IGNORE
+                        --
+                        Node { align_items: AlignItems::Center, column_gap: px(8) }
+                        Children [
+                            Node {
+                                display: Display::Grid,
+                                grid_template_columns: RepeatedGridTrack::px::<Vec<RepeatedGridTrack>>(2_u16, SLOT_SIZE),
+                                column_gap: px(SLOT_GAP), row_gap: px(SLOT_GAP),
+                            }
+                            Children [ { slot_list(CRAFT_START..SLOT_COUNT, true) } ]
+                            --
+                            Text("→")
+                            TextFont { font_size: FontSize::Px(20.0) }
+                            TextColor(Color::srgb(0.65,0.65,0.68))
+                            Pickable::IGNORE
+                            --
+                            { slot_list(CRAFT_RESULT..CRAFT_RESULT+1, true) }
+                        ]
+                        --
+                        Node { align_items: AlignItems::Center, column_gap: px(10) }
+                        Children [
+                            { slot_list(OFFHAND_SLOT..OFFHAND_SLOT+1, true) }
+                            --
+                            Text("Offhand")
+                            TextFont { font_size: FontSize::Px(13.0) }
+                            TextColor(Color::srgb(0.65,0.65,0.68))
+                            Pickable::IGNORE
+                        ]
+                    ]
+                ]
+                --
+                Node { align_items: AlignItems::Center, column_gap: px(8) }
+                Children [
+                    Node { padding: UiRect::axes(px(8),px(5)), border: UiRect::all(px(1)) }
+                    BackgroundColor(SLOT_BG)
+                    BorderColor::all(SLOT_BORDER)
+                    on(crate::player::skin::toggle_model)
+                    Children [
+                        Text("Classic arms")
+                        crate::player::skin::SkinModelLabel
+                        TextFont { font_size: FontSize::Px(12.0) }
+                        TextColor(Color::WHITE)
+                        Pickable::IGNORE
+                    ]
+                    --
+                    Node { padding: UiRect::axes(px(8),px(5)), border: UiRect::all(px(1)) }
+                    BackgroundColor(SLOT_BG)
+                    BorderColor::all(SLOT_BORDER)
+                    on(crate::player::skin::toggle_layers)
+                    Children [
+                        Text("Layers: on")
+                        crate::player::skin::SkinLayersLabel
+                        TextFont { font_size: FontSize::Px(12.0) }
+                        TextColor(Color::WHITE)
+                        Pickable::IGNORE
+                    ]
+                    --
+                    Node { padding: UiRect::axes(px(8),px(5)), border: UiRect::all(px(1)) }
+                    BackgroundColor(SLOT_BG)
+                    BorderColor::all(SLOT_BORDER)
+                    on(crate::player::skin::reset_skin)
+                    Children [
+                        Text("Reset")
+                        TextFont { font_size: FontSize::Px(12.0) }
+                        TextColor(Color::WHITE)
+                        Pickable::IGNORE
+                    ]
+                    --
+                    Text(crate::player::skin::IMPORT_HINT)
+                    crate::player::skin::SkinStatusLabel
+                    TextFont { font_size: FontSize::Px(11.0) }
+                    TextColor(Color::srgb(0.65,0.65,0.68))
+                    Node { max_width: px(170) }
+                    Pickable::IGNORE
+                ]
                 --
                 Node {
                     display: Display::Grid,
@@ -190,8 +292,11 @@ fn inventory_overlay_scene() -> impl Scene {
     }
 }
 
-pub(crate) fn spawn_inventory_overlay(mut commands: Commands) {
-    commands.spawn_scene(inventory_overlay_scene());
+pub(crate) fn spawn_inventory_overlay(
+    mut commands: Commands,
+    assets: Res<crate::player::skin::SkinAssets>,
+) {
+    commands.spawn_scene(inventory_overlay_scene(assets.preview.clone()));
 }
 
 #[cfg(test)]
@@ -201,7 +306,10 @@ mod tests {
     fn inventory_scenes_preserve_all_slot_indices() {
         for (scene, expected_count) in [
             (Box::new(hotbar_hud_scene()) as Box<dyn Scene>, HOTBAR_SIZE),
-            (Box::new(inventory_overlay_scene()), INVENTORY_SIZE),
+            (
+                Box::new(inventory_overlay_scene(Handle::default())),
+                SLOT_COUNT + 1,
+            ),
         ] {
             let mut app = App::new();
             app.add_plugins((

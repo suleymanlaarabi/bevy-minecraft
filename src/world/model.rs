@@ -1,4 +1,6 @@
-use crate::inventory::{HOTBAR_SIZE, INVENTORY_SIZE, ItemKind, ItemStack, PlayerInventory};
+use crate::inventory::{
+    HOTBAR_SIZE, INVENTORY_SIZE, ItemKind, ItemStack, PlayerInventory, SLOT_COUNT,
+};
 use crate::voxel::VoxelKind;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -88,21 +90,42 @@ pub(crate) struct SavedStack {
     pub count: u8,
 }
 impl SavedStack {
+    /// Blocks keep their block key so items such as `redstone_wire` reload as the same
+    /// block, and saves written before non-block items existed stay readable.
     pub(crate) fn capture(stack: ItemStack) -> Self {
-        let ItemKind::Block(kind) = stack.item();
+        let name = match stack.item() {
+            ItemKind::Block(kind) => kind.name(),
+            item => item.name(),
+        };
         Self {
-            name: kind.name().into(),
+            name: name.into(),
             count: stack.count(),
         }
     }
-    pub(crate) fn restore(&self) -> io::Result<ItemStack> {
-        let kind = VoxelKind::from_key(&self.name)
-            .ok_or_else(|| io::Error::other("Unknown saved item."))?;
-        let item = ItemKind::Block(kind);
-        if !item.is_valid() || self.count == 0 || self.count > item.max_stack_size() {
+    fn item(&self) -> io::Result<ItemKind> {
+        VoxelKind::from_key(&self.name)
+            .filter(|kind| kind.is_itemizable())
+            .map(ItemKind::Block)
+            .or_else(|| ItemKind::from_name(&self.name))
+            .filter(|item| item.is_valid())
+            .ok_or_else(|| io::Error::other("Unknown saved item."))
+    }
+    /// Splits the saved count into valid stacks: older saves allowed 64 of every block,
+    /// above the real max stack size of signs, beds, cakes, etc.
+    pub(crate) fn restore(&self) -> io::Result<impl Iterator<Item = ItemStack>> {
+        let item = self.item()?;
+        if self.count == 0 {
             return Err(io::Error::other("Invalid saved item stack."));
         }
-        Ok(ItemStack::new(item, self.count))
+        let max = item.max_stack_size();
+        let mut left = self.count;
+        Ok(std::iter::from_fn(move || {
+            (left > 0).then(|| {
+                let count = left.min(max);
+                left -= count;
+                ItemStack::new(item, count)
+            })
+        }))
     }
 }
 
@@ -132,7 +155,8 @@ impl SavedPlayer {
             0.0
         };
         let valid = |p: &[f32; 3]| {
-            p.iter().all(|v| v.is_finite() && v.abs() <= 30_000_000.0) && (-8.0..=512.0).contains(&p[1])
+            p.iter().all(|v| v.is_finite() && v.abs() <= 30_000_000.0)
+                && (-8.0..=512.0).contains(&p[1])
         };
         if !valid(&self.position) {
             self.position = fallback
@@ -150,7 +174,7 @@ impl SavedPlayer {
     }
 
     pub(crate) fn inventory(&self) -> io::Result<PlayerInventory> {
-        if self.slots.len() != INVENTORY_SIZE
+        if ![INVENTORY_SIZE, SLOT_COUNT].contains(&self.slots.len())
             || self.selected >= HOTBAR_SIZE
             || !self
                 .position
@@ -170,14 +194,31 @@ impl SavedPlayer {
         {
             return Err(io::Error::other("Invalid player position or orientation."));
         }
-        let mut slots = [None; INVENTORY_SIZE];
+        let mut slots = [None; SLOT_COUNT];
+        let mut overflow = Vec::new();
         for (slot, saved) in slots.iter_mut().zip(&self.slots) {
-            *slot = saved.as_ref().map(SavedStack::restore).transpose()?;
+            if let Some(saved) = saved {
+                let mut stacks = saved.restore()?;
+                *slot = stacks.next();
+                overflow.extend(stacks);
+            }
+        }
+        if slots
+            .iter()
+            .enumerate()
+            .any(|(index, stack)| stack.is_some_and(|stack| !PlayerInventory::fits(index, stack)))
+        {
+            return Err(io::Error::other("Invalid equipped item."));
         }
         if let Some(cursor) = &self.cursor {
-            cursor.restore()?;
+            overflow.extend(cursor.restore()?.skip(1));
         }
-        Ok(PlayerInventory::from_saved(slots, self.selected))
+        let mut inventory = PlayerInventory::from_saved(slots, self.selected);
+        // Excess from oversized legacy stacks goes to free slots; a full inventory loses it.
+        for stack in overflow {
+            inventory.insert(stack);
+        }
+        Ok(inventory)
     }
 }
 
@@ -191,7 +232,7 @@ pub(crate) struct SavedDrop {
 }
 impl SavedDrop {
     pub(super) fn validate(&self) -> io::Result<()> {
-        self.stack.restore()?;
+        let _ = self.stack.restore()?;
         if !self
             .position
             .iter()

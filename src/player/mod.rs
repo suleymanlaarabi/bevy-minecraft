@@ -4,7 +4,9 @@ mod components;
 mod input;
 mod interaction;
 mod safety;
+pub(crate) mod skin;
 mod spawn;
+pub use skin::{SkinModel, SkinSettings};
 
 use crate::{game::GameState, inventory::InventoryState};
 use bevy::prelude::*;
@@ -43,6 +45,7 @@ impl Plugin for PlayerPlugin {
                 .before(crate::spatial::FollowSystems)
                 .run_if(crate::world::playing),
         );
+        skin::register(app);
         interaction::register(app);
         safety::register(app);
     }

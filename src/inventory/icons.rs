@@ -36,16 +36,56 @@ pub(crate) struct BlockIcons {
     image: Handle<Image>,
     layout: Handle<TextureAtlasLayout>,
     source: Option<AssetId<Image>>,
+    items: std::collections::HashMap<u16, usize>,
+    item_image: Handle<Image>,
+    item_layout: Handle<TextureAtlasLayout>,
+    item_grid: UVec2,
+    missing: Handle<Image>,
     revision: u64,
     finished: Option<u64>,
     task: Option<Task<IconOutput>>,
 }
 impl BlockIcons {
+    pub(crate) fn item_image(&self, item: ItemKind) -> Option<&Handle<Image>> {
+        match item {
+            ItemKind::Item(id) => Some(if self.items.contains_key(&id) {
+                &self.item_image
+            } else {
+                &self.missing
+            }),
+            _ => None,
+        }
+    }
+    pub(crate) fn item_atlas(&self, item: ItemKind) -> Option<TextureAtlas> {
+        let ItemKind::Item(id) = item else {
+            return None;
+        };
+        Some(TextureAtlas {
+            layout: self.item_layout.clone(),
+            index: *self.items.get(&id)?,
+        })
+    }
+    pub(crate) fn item_uv(&self, item: ItemKind) -> Option<(Vec2, Vec2)> {
+        let ItemKind::Item(id) = item else {
+            return None;
+        };
+        let index = *self.items.get(&id)? as u32;
+        let scale = Vec2::ONE / self.item_grid.as_vec2();
+        Some((
+            UVec2::new(index % self.item_grid.x, index / self.item_grid.x).as_vec2() * scale,
+            scale,
+        ))
+    }
     pub(crate) fn image(&self) -> &Handle<Image> {
         &self.image
     }
     pub(crate) fn atlas(&self, item: ItemKind) -> TextureAtlas {
-        let ItemKind::Block(kind) = item;
+        let ItemKind::Block(kind) = item else {
+            return TextureAtlas {
+                layout: self.layout.clone(),
+                index: 0,
+            };
+        };
         TextureAtlas {
             layout: self.layout.clone(),
             index: icon_index(kind),
@@ -56,7 +96,68 @@ pub(crate) fn setup_block_icons(
     mut icons: ResMut<BlockIcons>,
     mut images: ResMut<Assets<Image>>,
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
+    server: Res<AssetServer>,
 ) {
+    #[derive(serde::Deserialize)]
+    struct ItemAtlasManifest {
+        columns: u32,
+        rows: u32,
+        tile: u32,
+        items: std::collections::HashMap<String, usize>,
+    }
+    let manifest = crate::asset_directory().join("player/vanilla/items.json");
+    if let Ok(bytes) = std::fs::read(manifest)
+        && let Ok(manifest) = serde_json::from_slice::<ItemAtlasManifest>(&bytes)
+        && manifest.columns > 0
+        && manifest.rows > 0
+        && manifest.tile > 0
+    {
+        icons.item_grid = UVec2::new(manifest.columns, manifest.rows);
+        icons.item_image = crate::load_nearest(&server, "player/vanilla/items.png");
+        icons.item_layout = layouts.add(TextureAtlasLayout::from_grid(
+            UVec2::splat(manifest.tile),
+            manifest.columns,
+            manifest.rows,
+            None,
+            None,
+        ));
+        icons.items = manifest
+            .items
+            .into_iter()
+            .filter_map(|(name, index)| {
+                Some((
+                    pumpkin_data::item::Item::from_registry_key(&name)?.id,
+                    index,
+                ))
+            })
+            .collect();
+    }
+    // An explicit missing-item symbol also covers installations without imported sprites.
+    let mut missing = vec![0; 16 * 16 * 4];
+    let symbol = [
+        0b01110_u8, 0b10001, 0b00001, 0b00110, 0b00100, 0b00000, 0b00100,
+    ];
+    for (y, row) in symbol.into_iter().enumerate() {
+        for x in 0..5 {
+            if row & (1 << (4 - x)) != 0 {
+                let offset = ((y + 4) * 16 + x + 5) * 4;
+                missing[offset..offset + 4].copy_from_slice(&[195, 195, 205, 255]);
+            }
+        }
+    }
+    let mut fallback = Image::new(
+        Extent3d {
+            width: 16,
+            height: 16,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        missing,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    fallback.sampler = bevy::image::ImageSampler::nearest();
+    icons.missing = images.add(fallback);
     let rows = icon_count().div_ceil(ICON_COLUMNS);
     let size = Extent3d {
         width: (ICON_SIZE * ICON_COLUMNS) as u32,

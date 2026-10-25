@@ -17,8 +17,13 @@ errors. A temporary viewer loads the spawn area using the existing mesh and
 collision budgets before spawning the player. Developer autoplay stays ephemeral.
 
 Session entities remain attached to `GameState::Game` until the final commit
-succeeds. Closing the inventory returns its cursor stack to the player or creates
-a drop if the inventory is full. The checkpoint is captured in `Last`, after
+succeeds. Closing the inventory returns its cursor stack and crafting inputs to storage,
+or creates drops if storage is full. Checkpoints write 45 slots: the original 36
+storage slots, four armor slots, offhand, and four crafting inputs. Loaders also
+accept the older 36-slot layout and initialize the extra slots as empty. The
+crafting result is derived from the inputs and is never saved as an item. Item
+stacks retain registry names and vanilla stack limits; armor slots are validated
+on load. The checkpoint is captured in `Last`, after
 deferred commands, while simulation is frozen. Any existing autosave finishes
 first; a new final checkpoint follows. Only its acknowledgement allows returning
 to the world list or emitting `AppExit`. Native window closing is disabled so the

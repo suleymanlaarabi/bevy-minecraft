@@ -1,6 +1,6 @@
 use super::{
-    CursorStackCount, CursorStackView, HotbarHud, InventorySlotView, SELECTED_BORDER, SLOT_BORDER,
-    SlotCount, SlotIcon,
+    CursorStackCount, CursorStackView, EmptySlotLabel, HotbarHud, InventorySlotView,
+    SELECTED_BORDER, SLOT_BORDER, SlotCount, SlotIcon, empty_slot_label,
 };
 use crate::{
     inventory::{HOTBAR_SIZE, InventoryCursor, ItemKind, PlayerInventory, icons::BlockIcons},
@@ -53,6 +53,16 @@ pub(crate) fn show_game_hud(
 
 /// Points `node` at the icon of `item`, leaving it untouched when already shown.
 fn show_icon(node: &mut Mut<ImageNode>, icons: &BlockIcons, item: ItemKind) {
+    if let Some(image) = icons.item_image(item) {
+        let atlas = icons.item_atlas(item);
+        if node.image != *image
+            || node.texture_atlas.as_ref().map(|a| a.index) != atlas.as_ref().map(|a| a.index)
+        {
+            node.image = image.clone();
+            node.texture_atlas = atlas;
+        }
+        return;
+    }
     let atlas = icons.atlas(item);
     let shown = node.image == *icons.image()
         && node
@@ -70,7 +80,10 @@ pub(crate) fn refresh_slots(
     new_views: Query<(), Added<InventorySlotView>>,
     block_icons: Res<BlockIcons>,
     mut icons: Query<(&SlotIcon, &mut ImageNode, &mut Visibility)>,
-    mut counts: Query<(&SlotCount, &mut Text)>,
+    mut counts: Query<
+        (&mut Text, Option<&SlotCount>, Option<&EmptySlotLabel>),
+        Or<(With<SlotCount>, With<EmptySlotLabel>)>,
+    >,
     mut slots: Query<(&InventorySlotView, &mut BorderColor)>,
 ) {
     if !inventory.is_changed() && new_views.is_empty() {
@@ -88,10 +101,20 @@ pub(crate) fn refresh_slots(
         }
     }
 
-    for (view, mut text) in &mut counts {
-        let value = match inventory.slot(view.index) {
-            Some(stack) if stack.count() > 1 => stack.count().to_string(),
-            _ => String::new(),
+    for (mut text, count, placeholder) in &mut counts {
+        let value = if let Some(view) = count {
+            match inventory.slot(view.index) {
+                Some(stack) if stack.count() > 1 => stack.count().to_string(),
+                _ => String::new(),
+            }
+        } else if let Some(view) = placeholder {
+            if inventory.slot(view.index).is_none() {
+                empty_slot_label(view.index).into()
+            } else {
+                String::new()
+            }
+        } else {
+            continue;
         };
         text.set_if_neq(Text(value));
     }

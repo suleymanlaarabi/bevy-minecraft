@@ -1,5 +1,7 @@
 use crate::{
-    inventory::{HOTBAR_SIZE, InventoryCursor, InventoryState, PlayerInventory},
+    inventory::{
+        CRAFT_RESULT, HOTBAR_SIZE, InventoryCursor, InventoryState, OFFHAND_SLOT, PlayerInventory,
+    },
     player::Player,
 };
 use bevy::{input::mouse::AccumulatedMouseScroll, prelude::*};
@@ -42,7 +44,11 @@ pub(super) fn handle_number_keys(
             };
 
             PlayerInventory::edit(&mut inventory, |inventory| {
-                inventory.swap_slots(slot_index, hotbar_index)
+                if slot_index == CRAFT_RESULT {
+                    inventory.craft_to_hotbar(hotbar_index);
+                } else {
+                    inventory.swap_slots(slot_index, hotbar_index);
+                }
             });
         }
     }
@@ -70,4 +76,16 @@ pub(super) fn handle_hotbar_scroll(
     };
 
     inventory.set_selected_hotbar(next);
+}
+
+pub(super) fn handle_swap_offhand(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    state: Res<State<InventoryState>>,
+    mut inventory: Single<&mut PlayerInventory, With<Player>>,
+) {
+    if *state.get() == InventoryState::Closed && keyboard.just_pressed(KeyCode::KeyF) {
+        PlayerInventory::edit(&mut inventory, |inventory| {
+            inventory.swap_slots(inventory.selected_hotbar(), OFFHAND_SLOT)
+        });
+    }
 }
