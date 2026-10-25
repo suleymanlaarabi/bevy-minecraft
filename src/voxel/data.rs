@@ -180,25 +180,8 @@ impl VoxelKind {
         !matches!(self, Self::Air | Self::Water | Self::Lava | Self::Bedrock)
     }
 
-    pub const fn is_leaves(self) -> bool {
-        matches!(
-            self,
-            Self::AcaciaLeaves
-                | Self::AzaleaLeaves
-                | Self::BirchLeaves
-                | Self::CherryLeaves
-                | Self::DarkOakLeaves
-                | Self::FloweringAzaleaLeaves
-                | Self::JungleLeaves
-                | Self::Leaves
-                | Self::MangroveLeaves
-                | Self::PaleOakLeaves
-                | Self::SpruceLeaves
-        )
-    }
-
     pub const fn is_solid(self) -> bool {
-        !matches!(self, Self::Air | Self::Water | Self::Lava) && !self.is_leaves()
+        !matches!(self, Self::Air | Self::Water | Self::Lava)
     }
 
     /// Lava has no fluid simulation yet: it is drawn as an opaque block you sink into.
