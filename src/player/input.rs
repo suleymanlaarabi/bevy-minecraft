@@ -8,7 +8,7 @@ use crate::{
 use bevy::{input::mouse::AccumulatedMouseMotion, prelude::*};
 use std::f32::consts::FRAC_PI_2;
 
-pub(super) fn clear_player_input(mut players: Query<&mut CharacterMovement, With<Player>>) {
+pub(crate) fn clear_player_input(mut players: Query<&mut CharacterMovement, With<Player>>) {
     for mut movement in &mut players {
         *movement = CharacterMovement::default();
     }

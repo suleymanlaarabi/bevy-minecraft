@@ -3,6 +3,7 @@ pub(crate) mod icons;
 mod input;
 mod model;
 mod ui;
+pub(crate) use ui::{lock_cursor, unlock_cursor};
 
 use bevy::prelude::*;
 use input::{handle_hotbar_scroll, handle_number_keys, handle_swap_offhand};
@@ -75,15 +76,16 @@ impl Plugin for InventoryPlugin {
                 Update,
                 toggle_inventory
                     .run_if(crate::world::playing)
+                    .run_if(crate::devtools::panel_closed)
                     // Nothing to open while the world is still loading.
                     .run_if(any_with_component::<Player>),
             )
             .add_systems(
                 Update,
                 (
-                    handle_number_keys,
-                    handle_hotbar_scroll,
-                    handle_swap_offhand,
+                    (handle_number_keys, handle_hotbar_scroll, handle_swap_offhand)
+                        .chain()
+                        .run_if(crate::devtools::panel_closed),
                     ui::refresh_slots,
                 )
                     .chain()

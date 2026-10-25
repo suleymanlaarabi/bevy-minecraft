@@ -502,6 +502,7 @@ fn checkpoint(
     stored: Res<StoredChunks>,
     pending: Res<PendingEdits>,
     game_time: Res<Time>,
+    time_of_day: Res<crate::sky::TimeOfDay>,
 ) {
     let Some(session) = session else {
         return;
@@ -554,6 +555,7 @@ fn checkpoint(
                     .map(|e| (e.world_position.to_array(), e.state.id()))
             })
             .collect(),
+        time_of_day: Some(time_of_day.days()),
     };
     // Layers are copy-on-write: these clones only bump reference counts.
     let mut snapshots = HashMap::new();

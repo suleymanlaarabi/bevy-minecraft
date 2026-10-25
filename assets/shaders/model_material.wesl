@@ -1,5 +1,5 @@
-import super::block_lighting::{sky_visibility, block_irradiance};
-import super::voxel_fog::apply_voxel_fog;
+import super::block_lighting::{sky_visibility, voxel_diffuse};
+import super::voxel_fog::{apply_voxel_fog, sky_reflection};
 import super::model_vertex::{ModelVertex, ModelVaryings, decode_model};
 import super::voxel_lighting::apply_voxel_lighting;
 import bevy_pbr::render::{
@@ -8,9 +8,6 @@ import bevy_pbr::render::{
     mesh_view_bindings::{globals, view},
     pbr_functions::calculate_view,
     pbr_types::pbr_input_new,
-    mesh_view_bindings as view_bindings,
-    mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
-    shadows,
     view_transformations::position_world_to_clip,
 };
 
@@ -142,9 +139,9 @@ fn shade_water(
     );
 
     let lit = apply_voxel_lighting(pbr_input, in.light);
-    // Cheap sky reflection: the clear color is already in output space, so blend it
-    // after lighting, dimmed where the sky cannot reach.
-    let sky = water.sky_color.rgb * sky_visibility(in.light);
+    // Cheap sky reflection: the horizon color is already in output space, so blend
+    // it after lighting, dimmed where the sky cannot reach.
+    let sky = sky_reflection(water.sky_color.rgb) * sky_visibility(in.light);
     var out: FragmentOutput;
     out.color = apply_voxel_fog(
         vec4<f32>(mix(lit.rgb, sky, fresnel * water.sky_color.a), lit.a),
@@ -185,39 +182,12 @@ fn fragment(
 }
     let albedo = texture_color.rgb * in.tint;
     let normal = normalize(select(-in.world_normal, in.world_normal, is_front));
-    let voxel_light = in.light;
-    let sky = sky_visibility(voxel_light);
-    var irradiance = view_bindings::lights.ambient_color.rgb * sky
-        + block_irradiance(voxel_light);
-
-    if view_bindings::lights.n_directional_lights > 0u {
-        let light = &view_bindings::lights.directional_lights[0u];
-        let ndotl = max(dot(normal, (*light).direction_to_light), 0.0);
-        var shadow = 1.0;
-        if (((*light).flags & DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
-            let view_z = dot(
-                vec4<f32>(
-                    view_bindings::view.view_from_world[0].z,
-                    view_bindings::view.view_from_world[1].z,
-                    view_bindings::view.view_from_world[2].z,
-                    view_bindings::view.view_from_world[3].z,
-                ),
-                in.world_position,
-            );
-            shadow = shadows::fetch_directional_shadow(
-                0u,
-                in.world_position,
-                normal,
-                view_z,
-                in.position.xy,
-            );
-        }
-        irradiance += (*light).color.rgb * (ndotl * shadow * sky * 0.318309886);
-    }
-
     var out: FragmentOutput;
     out.color = apply_voxel_fog(
-        vec4<f32>(albedo * irradiance * view_bindings::view.exposure, texture_color.a),
+        vec4<f32>(
+            voxel_diffuse(albedo, normal, in.world_position, in.position.xy, in.light),
+            texture_color.a,
+        ),
         in.world_position.xyz,
     );
     return out;

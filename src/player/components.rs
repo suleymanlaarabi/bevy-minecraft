@@ -7,7 +7,9 @@ use crate::{
 };
 use avian3d::prelude::*;
 use bevy::{
-    pbr::{DistanceFog, FogFalloff},
+    camera::Exposure,
+    core_pipeline::tonemapping::Tonemapping,
+    pbr::{AtmosphereSettings, DistanceFog, FogFalloff},
     prelude::*,
 };
 
@@ -36,19 +38,27 @@ pub struct Player;
     super::skin::ArmSwing,
     Camera3d,
     IsDefaultUiCamera,
-    AmbientLight {
-        color: Color::srgb_u8(215, 235, 255),
-        brightness: 500.0,
-        ..default()
-    },
+    // Exposure, ambient light and fog follow the day cycle
+    // (`crate::voxel::render::environment`); these are the first frame's values.
+    AmbientLight,
+    Exposure,
     DistanceFog {
-        color: Color::srgb_u8(195, 222, 255),
+        // Forward scattering around the sun and moon (`voxel_fog.wesl`).
+        directional_light_color: crate::voxel::OPEN_AIR_SCATTERING,
+        directional_light_exponent: 12.0,
         falloff: FogFalloff::Linear {
-            start: 160.0,
-            end: 280.0,
+            start: 100.0,
+            end: 160.0,
         },
         ..default()
     },
+    // Physical sky and aerial perspective. Terrain ends within a few hundred
+    // meters, so the aerial-view slices only need to cover the clouds' reach.
+    AtmosphereSettings {
+        aerial_view_lut_max_distance: 2_000.0,
+        ..default()
+    },
+    Tonemapping::AgX,
     Projection::from(PerspectiveProjection {
         fov: 85.0_f32.to_radians(),
         ..default()

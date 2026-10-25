@@ -126,6 +126,33 @@ pub(crate) struct SkinLayersLabel;
 #[derive(Component, Clone, Default)]
 pub(crate) struct SkinStatusLabel;
 
+/// Linear brightness of the first-person arm in the middle of the night.
+const ARM_NIGHT_LEVEL: f32 = 0.25;
+
+/// The arm is unlit and drawn by its own camera at a fixed exposure: dim it with the
+/// daylight so it does not glow against the night.
+fn dim_arm_with_daylight(
+    sky: Res<crate::sky::SkyState>,
+    assets: Res<SkinAssets>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    if !sky.is_changed() {
+        return;
+    }
+    let level = ARM_NIGHT_LEVEL + (1.0 - ARM_NIGHT_LEVEL) * (1.0 - sky.night);
+    let color = Color::linear_rgb(level, level, level);
+    for handle in [&assets.arm_base, &assets.arm_outer] {
+        // `get_mut` re-uploads the material: only while the level changes.
+        if materials
+            .get(handle)
+            .is_some_and(|material| material.base_color != color)
+            && let Some(mut material) = materials.get_mut(handle)
+        {
+            material.base_color = color;
+        }
+    }
+}
+
 pub(super) fn register(app: &mut App) {
     app.init_resource::<PlayerView>()
         .init_resource::<SkinAssets>()
@@ -137,7 +164,10 @@ pub(super) fn register(app: &mut App) {
         )
         .add_systems(OnEnter(InventoryState::Open), spawn_preview)
         .add_systems(OnEnter(InventoryState::Open), cancel_swing)
-        .add_systems(Update, resize_arm_target.run_if(crate::world::playing))
+        .add_systems(
+            Update,
+            (resize_arm_target, dim_arm_with_daylight).run_if(crate::world::playing),
+        )
         .add_systems(
             Update,
             (

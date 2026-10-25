@@ -1,12 +1,9 @@
-import super::block_lighting::{sky_visibility, block_irradiance};
+import super::block_lighting::voxel_diffuse;
 import super::voxel_fog::apply_voxel_fog;
 import super::voxel_vertex::{PackedVertex, decode, face_normal, block_uv, face_index, transform_uv, face_layer, face_transform};
 import bevy_pbr::render::{
     forward_io::FragmentOutput,
     mesh_functions,
-    mesh_view_bindings as view_bindings,
-    mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
-    shadows,
 };
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0)
@@ -74,40 +71,12 @@ fn fragment(
     }
 }
     let albedo = texture_color.rgb * in.tint;
-    let normal = normalize(in.world_normal);
-    let voxel_light = in.light;
-    let sky = sky_visibility(voxel_light);
-    var irradiance = view_bindings::lights.ambient_color.rgb * sky
-        + block_irradiance(voxel_light);
-
-    if view_bindings::lights.n_directional_lights > 0u {
-        let light = &view_bindings::lights.directional_lights[0u];
-        let ndotl = max(dot(normal, (*light).direction_to_light), 0.0);
-        var shadow = 1.0;
-        if (((*light).flags & DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
-            let view_z = dot(
-                vec4<f32>(
-                    view_bindings::view.view_from_world[0].z,
-                    view_bindings::view.view_from_world[1].z,
-                    view_bindings::view.view_from_world[2].z,
-                    view_bindings::view.view_from_world[3].z,
-                ),
-                in.world_position,
-            );
-            shadow = shadows::fetch_directional_shadow(
-                0u,
-                in.world_position,
-                normal,
-                view_z,
-                in.position.xy,
-            );
-        }
-        irradiance += (*light).color.rgb * (ndotl * shadow * sky * 0.318309886);
-    }
-
     var out: FragmentOutput;
     out.color = apply_voxel_fog(
-        vec4<f32>(albedo * irradiance * view_bindings::view.exposure, 1.0),
+        vec4<f32>(
+            voxel_diffuse(albedo, normalize(in.world_normal), in.world_position, in.position.xy, in.light),
+            1.0,
+        ),
         in.world_position.xyz,
     );
     return out;

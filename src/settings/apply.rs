@@ -2,12 +2,13 @@ use bevy::{
     anti_alias::fxaa::Fxaa,
     core_pipeline::prepass::DepthPrepass,
     light::DirectionalLightShadowMap,
+    post_process::bloom::Bloom,
     prelude::*,
     render::occlusion_culling::OcclusionCulling,
     window::{MonitorSelection, PresentMode, WindowMode},
 };
 
-use super::{AntiAliasingMode, DisplayMode, GraphicsSettings, ShadowQuality};
+use super::{AntiAliasingMode, DisplayMode, GraphicsSettings};
 use crate::player::PlayerCamera;
 
 const WINDOWED_WIDTH: f32 = 1600.0;
@@ -23,7 +24,7 @@ fn apply_graphics_settings(
     settings: Res<GraphicsSettings>,
     mut windows: Query<&mut Window>,
     mut cameras: Query<(Entity, &mut Projection), With<PlayerCamera>>,
-    mut lights: Query<(Entity, &mut DirectionalLight)>,
+    lights: Query<Entity, With<DirectionalLight>>,
     shadow_map: Option<ResMut<DirectionalLightShadowMap>>,
     mut commands: Commands,
 ) {
@@ -36,8 +37,8 @@ fn apply_graphics_settings(
     for (entity, mut projection) in &mut cameras {
         apply_camera_settings(&settings, entity, &mut projection, &mut commands);
     }
-    for (entity, mut light) in &mut lights {
-        apply_light_settings(&settings, entity, &mut light, &mut commands);
+    for entity in &lights {
+        apply_light_settings(&settings, entity, &mut commands);
     }
     if let (Some(size), Some(mut shadow_map)) = (settings.shadow_quality.map_size(), shadow_map) {
         shadow_map.size = size;
@@ -49,7 +50,7 @@ fn apply_settings_to_new_target(
     settings: Res<GraphicsSettings>,
     mut windows: Query<&mut Window>,
     mut cameras: Query<&mut Projection, With<PlayerCamera>>,
-    mut lights: Query<&mut DirectionalLight>,
+    lights: Query<(), With<DirectionalLight>>,
     mut commands: Commands,
 ) {
     let settings = settings.normalized();
@@ -59,18 +60,17 @@ fn apply_settings_to_new_target(
     if let Ok(mut projection) = cameras.get_mut(add.entity) {
         apply_camera_settings(&settings, add.entity, &mut projection, &mut commands);
     }
-    if let Ok(mut light) = lights.get_mut(add.entity) {
-        apply_light_settings(&settings, add.entity, &mut light, &mut commands);
+    if lights.contains(add.entity) {
+        apply_light_settings(&settings, add.entity, &mut commands);
     }
 }
 
 fn apply_light_settings(
     settings: &GraphicsSettings,
     entity: Entity,
-    light: &mut DirectionalLight,
     commands: &mut Commands,
 ) {
-    light.shadow_maps_enabled = settings.shadow_quality != ShadowQuality::Off;
+    // Shadow maps are the sky's: only the sun or the moon ever casts one (`crate::sky`).
     // Also culls shadow casters hidden from the sun in every cascade.
     let mut light = commands.entity(entity);
     if settings.occlusion_culling {
@@ -124,5 +124,14 @@ fn apply_camera_settings(
         camera.insert(Fxaa::default());
     } else {
         camera.remove::<Fxaa>();
+    }
+    if settings.bloom {
+        // Subtle: a halo around the sun and moon, not a haze over the terrain.
+        camera.insert(Bloom {
+            intensity: 0.08,
+            ..Bloom::NATURAL
+        });
+    } else {
+        camera.remove::<Bloom>();
     }
 }

@@ -12,7 +12,10 @@ mod sort;
 mod texture_pack;
 
 use bevy::prelude::*;
-pub(super) use environment::update_underwater_effect;
+pub(crate) use environment::{OPEN_AIR_SCATTERING, terrain_radius};
+pub(super) use environment::{
+    follow_horizon_skirt, spawn_horizon_skirt, update_camera_environment,
+};
 pub(crate) use material::{ModelMaterial, VoxelMaterial};
 pub(crate) use texture_pack::TexturePack;
 pub use texture_pack::TexturePackId;
@@ -22,10 +25,11 @@ pub(super) struct VoxelRenderPlugin;
 impl Plugin for VoxelRenderPlugin {
     fn build(&self, app: &mut App) {
         sort::register(app);
-        app.add_plugins((
+        app.init_resource::<environment::CameraLiquid>().add_plugins((
             MaterialPlugin::<VoxelMaterial>::default(),
             MaterialPlugin::<material::VoxelCutoutMaterial>::default(),
             MaterialPlugin::<ModelMaterial>::default(),
+            MaterialPlugin::<environment::HorizonFogMaterial>::default(),
         ));
     }
 }

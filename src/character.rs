@@ -42,6 +42,11 @@ const FLUID_JUMP_THRESHOLD: f64 = 0.4;
 const SHORE_JUMP: f64 = 0.3;
 const SOURCE_FLUID_HEIGHT: f64 = 8.0 / 9.0;
 const MIN_VELOCITY: f64 = 0.003;
+/// Vanilla creative flight: horizontal acceleration (doubled when sprinting),
+/// vertical push per tick, and the vertical drag that replaces gravity.
+const FLY_SPEED: f64 = 0.05;
+const FLY_VERTICAL: f64 = FLY_SPEED * 3.0;
+const FLY_VERTICAL_DRAG: f64 = 0.6;
 /// Vanilla `Mth.equal`: a smaller difference is not a collision.
 const MOVE_EPSILON: f64 = 1e-5;
 /// Touching faces do not overlap.
@@ -156,6 +161,11 @@ pub struct CharacterMovement {
 
 #[derive(Component, Default, Debug, Clone, Copy)]
 pub struct AutoJump;
+
+/// Creative flight: no gravity, jump and sneak move up and down, fluids are ignored.
+/// Collisions stay.
+#[derive(Component, Default, Debug, Clone, Copy)]
+pub struct Flying;
 
 #[derive(Component, Default)]
 #[require(CharacterBody, CharacterMotion, CharacterState, CharacterMovement)]
@@ -468,12 +478,14 @@ fn character_physics(
         &CharacterBody,
         &CharacterMovement,
         Has<AutoJump>,
+        Has<Flying>,
     )>,
 ) {
     if physics_time.is_paused() {
         return;
     }
-    for (mut position, mut motion, mut state, body, movement, auto_jump) in &mut characters {
+    for (mut position, mut motion, mut state, body, movement, auto_jump, flying) in &mut characters
+    {
         // Spawns, respawns and benchmark moves write `Position` directly.
         if motion
             .written
@@ -520,7 +532,16 @@ fn character_physics(
             motion.previous = motion.position;
             motion.previous_eye = motion.eye;
             if ticks < MAX_TICKS_PER_STEP {
-                tick(&world, &mut terrain, &mut motion, &mut state, body, movement, auto_jump);
+                tick(
+                    &world,
+                    &mut terrain,
+                    &mut motion,
+                    &mut state,
+                    body,
+                    movement,
+                    auto_jump,
+                    flying,
+                );
                 ticks += 1;
             }
         }
@@ -534,6 +555,7 @@ fn character_physics(
 }
 
 /// One vanilla tick: `LivingEntity.aiStep` then `travel`.
+#[allow(clippy::too_many_arguments)]
 fn tick(
     world: &VoxelWorld,
     terrain: &mut Terrain,
@@ -542,6 +564,7 @@ fn tick(
     body: &CharacterBody,
     movement: &CharacterMovement,
     auto_jump: bool,
+    flying: bool,
 ) {
     let mut velocity = motion.velocity;
     let mut aabb = body.aabb(motion.position, state.pose);
@@ -573,11 +596,13 @@ fn tick(
     let wish = Vec3::new(movement.direction.x, 0.0, movement.direction.z)
         .normalize_or_zero()
         .as_dvec3();
-    let sneaking = movement.sneak;
+    // Sneaking while flying only descends.
+    let sneaking = movement.sneak && !flying;
     // Vanilla `updateSwimming`: start with the eyes under water, keep swimming
     // while sprinting in water.
     let wants_sprint = movement.sprint && !sneaking && wish != DVec3::ZERO;
     state.swimming = wants_sprint
+        && !flying
         && state.in_water
         && (state.swimming || state.eyes_in_water);
     let desired = if state.swimming {
@@ -598,7 +623,10 @@ fn tick(
     let input = wish * INPUT_SCALE * if slow { SNEAK_FACTOR } else { 1.0 };
     let (slipperiness, speed_factor, jump_factor) = ground_block(world, &aabb);
 
-    if movement.jump {
+    if flying {
+        velocity.y += FLY_VERTICAL
+            * (movement.jump as i32 as f64 - movement.sneak as i32 as f64);
+    } else if movement.jump {
         let depth = if state.in_water { water_depth } else { lava_depth };
         if (state.in_water || state.in_lava)
             && (!state.on_ground || depth > FLUID_JUMP_THRESHOLD)
@@ -629,7 +657,14 @@ fn tick(
 
     let start_y = aabb.min.y;
     let falling = velocity.y <= 0.0;
-    if state.in_water {
+    if flying {
+        let speed = FLY_SPEED * if sprinting { 2.0 } else { 1.0 };
+        velocity += input * speed;
+        move_body(terrain, &mut aabb, &mut velocity, state, false, speed_factor);
+        velocity.y *= FLY_VERTICAL_DRAG;
+        velocity.x *= AIR_DRAG;
+        velocity.z *= AIR_DRAG;
+    } else if state.in_water {
         if state.swimming {
             // Swimming follows the camera pitch.
             let look = movement.look_direction.normalize_or_zero().y as f64;

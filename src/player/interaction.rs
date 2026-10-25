@@ -79,7 +79,8 @@ pub(super) fn register(app: &mut App) {
             .after(FollowSystems)
             .before(TransformSystems::Propagate)
             .run_if(crate::world::playing)
-            .run_if(in_state(InventoryState::Closed)),
+            .run_if(in_state(InventoryState::Closed))
+            .run_if(crate::devtools::panel_closed),
     );
 }
 

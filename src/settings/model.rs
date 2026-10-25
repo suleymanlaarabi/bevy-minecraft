@@ -71,6 +71,10 @@ pub struct GraphicsSettings {
     /// GPU occlusion culling (experimental in Bevy): skips terrain hidden behind terrain.
     pub occlusion_culling: bool,
     pub shadow_quality: ShadowQuality,
+    /// Glow around the sun, the moon and bright light sources.
+    pub bloom: bool,
+    /// Vanilla-style cloud layer (`crate::sky`).
+    pub clouds: bool,
     pub texture_pack: TexturePackId,
     pub field_of_view: f32,
     pub view_distance: u32,
@@ -84,9 +88,11 @@ impl Default for GraphicsSettings {
             vsync: true,
             occlusion_culling: true,
             shadow_quality: ShadowQuality::Medium,
+            bloom: true,
+            clouds: true,
             texture_pack: TexturePackId::default(),
             field_of_view: 85.0,
-            view_distance: 10,
+            view_distance: 14,
             display_mode: DisplayMode::BorderlessFullscreen,
         }
     }

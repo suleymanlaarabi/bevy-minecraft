@@ -37,8 +37,8 @@ pub(crate) use render::assets::VoxelAssets;
 use render::assets::apply_texture_pack;
 pub(crate) use render::assets::prepare_assets;
 use render::build::{mark_changed_chunks, poll_builds, start_changed_builds};
-use render::update_underwater_effect;
-pub(crate) use render::{TexturePack, VoxelMaterial};
+pub(crate) use render::{OPEN_AIR_SCATTERING, TexturePack, VoxelMaterial, terrain_radius};
+use render::{follow_horizon_skirt, spawn_horizon_skirt, update_camera_environment};
 pub use settings::VoxelSettings;
 use streaming::{
     ChunkIndex, PendingChunks, PendingEdits, StoredChunks, StreamOffsets, StreamState,
@@ -46,9 +46,6 @@ use streaming::{
     refresh_neighbors_of_spawned, release_ready_chunks, stream_chunks,
 };
 
-/// Where the sun's `DirectionalLight` sits, looking at the origin. Shadow meshes keep
-/// only the faces turned toward it: remesh every chunk if this ever changes.
-pub(crate) const SUN_POSITION: Vec3 = Vec3::new(100.0, 200.0, 100.0);
 /// Render layer of depth-only terrain: drawn into the sun's shadow maps, never by cameras.
 pub(crate) const SHADOW_LAYER: usize = 1;
 
@@ -118,7 +115,14 @@ impl Plugin for VoxelPlugin {
             )
             .add_systems(
                 PostUpdate,
-                update_underwater_effect.run_if(crate::world::streaming),
+                update_camera_environment.run_if(crate::world::streaming),
+            )
+            .add_systems(OnEnter(GameState::Game), spawn_horizon_skirt)
+            .add_systems(
+                PostUpdate,
+                follow_horizon_skirt
+                    .after(update_camera_environment)
+                    .before(bevy::transform::TransformSystems::Propagate),
             )
             .add_systems(OnExit(GameState::Game), cleanup_voxel_world);
 

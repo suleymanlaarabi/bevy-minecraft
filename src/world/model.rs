@@ -255,10 +255,14 @@ pub(crate) struct Checkpoint {
     pub drops: Vec<SavedDrop>,
     // Edits to unloaded chunks must survive even when no chunk has been materialized.
     pub pending: Vec<([i32; 3], u16)>,
+    /// Days since the world was created ([`crate::sky::TimeOfDay`]); absent in older saves.
+    #[serde(default)]
+    pub time_of_day: Option<f64>,
 }
 impl Checkpoint {
     /// Equality for skipping autosaves. Drop timers tick every frame even in an idle
-    /// world, so only the drops' items and resting positions count.
+    /// world, so only the drops' items and resting positions count; the time of day
+    /// always moves and is saved along with real changes.
     pub(super) fn same_state(&self, other: &Self) -> bool {
         self.player == other.player
             && self.pending == other.pending

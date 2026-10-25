@@ -1,4 +1,4 @@
-import super::block_lighting::{sky_visibility, block_irradiance};
+import super::block_lighting::{sky_visibility, block_light};
 import bevy_pbr::render::{
     pbr_ambient as ambient,
     pbr_lighting as lighting,
@@ -81,10 +81,9 @@ fn apply_voxel_lighting(in: PbrInput, voxel_light: vec2<f32>) -> vec4<f32> {
         * mix(1.0, view_bindings::view.exposure, emissive.a);
 
     return vec4<f32>(
-        view_bindings::view.exposure * (
-            (direct_light + indirect_light) * sky_visibility(voxel_light)
-            + diffuse_color * block_irradiance(voxel_light)
-        ) + emissive_light,
+        view_bindings::view.exposure * (direct_light + indirect_light) * sky_visibility(voxel_light)
+            + diffuse_color * block_light(voxel_light)
+            + emissive_light,
         base_color.a,
     );
 }

@@ -93,6 +93,10 @@ fn settings_page(settings: GraphicsSettings) -> impl Scene {
                     --
                     @setting_row("Shadow Quality", shadow_quality_control(settings.shadow_quality))
                     --
+                    @setting_row("Bloom", bloom_control(settings.bloom))
+                    --
+                    @setting_row("Clouds", clouds_control(settings.clouds))
+                    --
                     @setting_row("Texture Pack", texture_pack_control(settings.texture_pack))
                     --
                     @setting_row("Field of View", fov_control(settings.field_of_view))
@@ -320,6 +324,46 @@ fn set_occlusion_culling(
 ) {
     let mut updated = *settings;
     updated.occlusion_culling = change.value;
+    store_settings(*settings, updated, &mut commands);
+}
+
+fn bloom_control(enabled: bool) -> impl Scene {
+    let checked = enabled.then_some(bsn! { Checked });
+    bsn! {
+        @FeathersToggleSwitch
+        @checked
+        on(checkbox_self_update)
+        on(set_bloom)
+    }
+}
+
+fn set_bloom(
+    change: On<ValueChange<bool>>,
+    settings: Res<GraphicsSettings>,
+    mut commands: Commands,
+) {
+    let mut updated = *settings;
+    updated.bloom = change.value;
+    store_settings(*settings, updated, &mut commands);
+}
+
+fn clouds_control(enabled: bool) -> impl Scene {
+    let checked = enabled.then_some(bsn! { Checked });
+    bsn! {
+        @FeathersToggleSwitch
+        @checked
+        on(checkbox_self_update)
+        on(set_clouds)
+    }
+}
+
+fn set_clouds(
+    change: On<ValueChange<bool>>,
+    settings: Res<GraphicsSettings>,
+    mut commands: Commands,
+) {
+    let mut updated = *settings;
+    updated.clouds = change.value;
     store_settings(*settings, updated, &mut commands);
 }
 

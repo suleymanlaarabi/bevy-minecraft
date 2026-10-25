@@ -1,17 +1,17 @@
 use bevy::{
-    camera::visibility::RenderLayers,
     prelude::*,
     window::{CursorGrabMode, CursorOptions},
 };
 
 use crate::{
     character::CharacterPlugin,
+    devtools::DevToolsPlugin,
     dropped_item::DroppedItemPlugin,
     inventory::{InventoryPlugin, InventoryState},
     menu::GameMenuPlugin,
     player::PlayerPlugin,
+    sky::SkyPlugin,
     spatial::GameSpatialPlugin,
-    voxel::{SHADOW_LAYER, SUN_POSITION},
 };
 
 #[derive(Clone, Copy, Default, Eq, PartialEq, Debug, Hash, States)]
@@ -37,6 +37,8 @@ impl Plugin for GamePlugin {
                 CharacterPlugin,
                 GameSpatialPlugin,
                 DroppedItemPlugin,
+                SkyPlugin,
+                DevToolsPlugin,
             ))
             .add_systems(OnEnter(GameState::Menu), setup_menu_environment)
             .add_systems(OnEnter(GameState::Settings), setup_menu_environment)
@@ -64,28 +66,13 @@ fn setup_menu_environment(
 fn setup_game_environment(
     mut cursors: Query<&mut CursorOptions>,
     mut clear_color: ResMut<ClearColor>,
-    mut commands: Commands,
 ) {
-    commands.spawn((
-        DirectionalLight {
-            shadow_maps_enabled: true,
-            shadow_depth_bias: 0.02,
-            shadow_normal_bias: 1.8,
-            illuminance: 5_000.0,
-            color: Color::srgb(1.0, 0.98, 0.94),
-            ..default()
-        },
-        Transform::from_translation(SUN_POSITION).looking_at(Vec3::ZERO, Vec3::Y),
-        // Lights the camera's layer and casts terrain shadows from the shadow layer.
-        RenderLayers::from_layers(&[0, SHADOW_LAYER]),
-        DespawnOnExit(GameState::Game),
-    ));
-
     for mut cursor in &mut cursors {
         cursor.visible = false;
         cursor.grab_mode = CursorGrabMode::Locked;
     }
-    clear_color.0 = Color::srgb_u8(148, 195, 255);
+    // The atmosphere adds the sky over a black background (`crate::sky`).
+    clear_color.0 = Color::BLACK;
 }
 
 pub(crate) fn handle_escape(

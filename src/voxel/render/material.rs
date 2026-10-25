@@ -188,7 +188,7 @@ impl Material for VoxelMaterial {
         // not reject visible terrain at grazing edges. Only directional shadow
         // views stay two-sided: Bevy keys point and spot shadow views exactly like
         // a perspective camera prepass, so they cull too. Voxel shadow meshes keep
-        // sun-facing faces only (`faces_sun`) and support no other caster anyway.
+        // faces the sky can light only (`faces_sun`) and support no other caster anyway.
         if !key
             .mesh_key
             .contains(MeshPipelineKey::UNCLIPPED_DEPTH_ORTHO)

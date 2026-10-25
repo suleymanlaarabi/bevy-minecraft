@@ -1,6 +1,6 @@
 use super::models::{CellInfo, cell};
 use crate::voxel::{
-    ChunkVoxels, SUN_POSITION, VoxelKind, VoxelState,
+    ChunkVoxels, VoxelKind, VoxelState,
     coordinates::{
         CHUNK_HEIGHT, CHUNK_SIZE, FULL_SKY, SECTION_COUNT, SECTION_HEIGHT, SECTION_VOLUME,
     },
@@ -426,7 +426,11 @@ impl EdgeVertices {
                 let interior_row =
                     (1..dimensions[1]).contains(&y) && (1..dimensions[2]).contains(&z);
                 // Interior rows only touch the boundary at their two ends.
-                let step = if interior_row { dimensions[0] as usize } else { 1 };
+                let step = if interior_row {
+                    dimensions[0] as usize
+                } else {
+                    1
+                };
                 for x in (0..=dimensions[0]).step_by(step) {
                     let point = [x, y, z];
                     if shared_point(padded, point) {
@@ -903,12 +907,13 @@ fn quad(
 
 /// Whether the shadow maps need faces of this orientation.
 ///
-/// The shadow pass rasterizes both sides, but a face turned away from the sun always
-/// lies behind a sunward face of the same closed opaque surface: dropping it leaves
-/// the depth seen from the light unchanged. Remesh everything if the sun ever moves.
+/// The shadow pass rasterizes both sides, but a face turned away from the light always
+/// lies behind a lit face of the same closed opaque surface: dropping it leaves the
+/// depth seen from the light unchanged. The shadow-casting sun or moon is always above
+/// the horizon and on the +Z side of the sky ([`crate::sky::LIGHT_NEVER_FROM`]), so
+/// only -Y and -Z faces can go, whatever the time of day.
 fn faces_sun(axis: usize, positive: bool) -> bool {
-    let toward = SUN_POSITION[axis];
-    toward == 0.0 || (toward > 0.0) == positive
+    positive || !crate::sky::LIGHT_NEVER_FROM[axis]
 }
 
 /// Depth-only terrain: faces merge regardless of block, texture or light, and only
@@ -1145,7 +1150,10 @@ mod tests {
         let uniform = Face(1, true, [60; 4]);
         let gradient = Face(1, true, [0, 20, 40, 60]);
         for (face, expected) in [(uniform, 1), (gradient, 2)] {
-            let mut mask = vec![Some(LitFace::new(face, 0, false)), Some(LitFace::new(face, 1, false))];
+            let mut mask = vec![
+                Some(LitFace::new(face, 0, false)),
+                Some(LitFace::new(face, 1, false)),
+            ];
             let mut count = 0;
             consume_mask(&mut mask, 2, 1, |_, _, _, _, _| count += 1);
             assert_eq!(count, expected);
@@ -1269,7 +1277,7 @@ mod tests {
     #[test]
     fn shadow_meshes_merge_blocks_and_keep_only_sunward_faces() {
         // Two different blocks side by side: the lit mesh keeps them apart, the
-        // shadow mesh merges them and drops the faces turned away from the sun.
+        // shadow mesh merges them and drops the faces the sky never lights.
         let chunk = chunk(&[
             (IVec3::new(5, 5, 5), VoxelKind::Stone),
             (IVec3::new(6, 5, 5), VoxelKind::Dirt),
@@ -1278,7 +1286,7 @@ mod tests {
         let shadow = section.shadow.unwrap();
         let sunward = (0..3).filter(|&axis| faces_sun(axis, true)).count()
             + (0..3).filter(|&axis| faces_sun(axis, false)).count();
-        assert_eq!(sunward, 3);
+        assert_eq!(sunward, 4);
         assert_eq!(shadow.indices.len(), sunward * 6);
         assert!(section.terrain.unwrap().indices.len() > 6 * 6);
         for vertex in &shadow.vertices {

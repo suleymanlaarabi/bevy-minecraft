@@ -1,6 +1,6 @@
 import super::voxel_vertex::{PackedVertex, decode, face_normal};
 import super::voxel_lighting::apply_voxel_lighting;
-import super::voxel_fog::apply_voxel_fog;
+import super::voxel_fog::{apply_voxel_fog, sky_reflection};
 import super::block_lighting::sky_visibility;
 import bevy_pbr::render::{
     forward_io::FragmentOutput,
@@ -141,9 +141,9 @@ fn fragment(
     );
 
     let lit = apply_voxel_lighting(pbr_input, in.light);
-    // Cheap sky reflection: the clear color is already in output space, so blend it
-    // after lighting, dimmed where the sky cannot reach.
-    let sky = water.sky_color.rgb * sky_visibility(in.light);
+    // Cheap sky reflection: the horizon color is already in output space, so blend
+    // it after lighting, dimmed where the sky cannot reach.
+    let sky = sky_reflection(water.sky_color.rgb) * sky_visibility(in.light);
     var out: FragmentOutput;
     out.color = apply_voxel_fog(
         vec4<f32>(mix(lit.rgb, sky, fresnel * water.sky_color.a), lit.a),
