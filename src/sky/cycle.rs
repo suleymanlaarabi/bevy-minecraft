@@ -80,7 +80,7 @@ pub(crate) struct SkyState {
     /// `AmbientLight` for terrain open to the sky.
     pub ambient_color: Color,
     pub ambient_brightness: f32,
-    /// Horizon color in output space, for the distance fog and water reflections.
+    /// Fallback horizon color in output space while atmosphere LUTs are unavailable.
     pub horizon_color: Color,
     /// Lit fraction of the moon's disk, from 0 (new) to 1 (full), and whether it waxes.
     pub moon_phase: f32,

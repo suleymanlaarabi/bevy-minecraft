@@ -95,6 +95,8 @@ pub(crate) mod cell {
     pub(crate) const MODEL: u8 = 1 << 5;
     /// Solid translucent cube: bounds water without hiding block faces or light.
     pub(crate) const WATER_OCCLUDES: u8 = 1 << 6;
+    /// Partial solid shape: clip fluid faces against its native outline boxes.
+    pub(crate) const FLUID_OCCLUDER: u8 = 1 << 7;
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -268,6 +270,12 @@ fn base_flags(state: VoxelState) -> u8 {
         // Cache this separately: these blocks must still transmit light and
         // show the geometry behind them, unlike ordinary opaque occluders.
         flags |= cell::WATER_OCCLUDES;
+    }
+    if state.native().can_occlude()
+        && !state.native().is_full_cube()
+        && !state.native().outline_shapes.is_empty()
+    {
+        flags |= cell::FLUID_OCCLUDER;
     }
     flags
 }

@@ -1,6 +1,12 @@
 // Shared by terrain, explicit models and their shadow passes. Timelines are
 // immutable; advancing an animation never uploads assets or remeshes a section.
-import bevy_pbr::render::mesh_view_bindings::globals;
+// Bevy's prepasses (including shadows) bind the same clock at slot 1; the
+// forward view binds it at slot 11. Keep animation frames synchronized in both.
+import bevy_render::globals::Globals;
+@if(PREPASS_PIPELINE)
+@group(0) @binding(1) var<uniform> globals: Globals;
+@if(!PREPASS_PIPELINE)
+@group(0) @binding(11) var<uniform> globals: Globals;
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(10)
 var<storage, read> surface_animations: array<vec4<u32>>;

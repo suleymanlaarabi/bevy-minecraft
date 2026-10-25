@@ -66,6 +66,7 @@ pub(crate) fn prepare_assets(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     settings: Option<Res<crate::settings::GraphicsSettings>>,
+    fog: Res<super::fog::FogLut>,
     mut voxel_materials: ResMut<Assets<VoxelMaterial>>,
     mut cutout_materials: ResMut<Assets<VoxelCutoutMaterial>>,
     mut model_materials: ResMut<Assets<ModelMaterial>>,
@@ -84,7 +85,7 @@ pub(crate) fn prepare_assets(
     let vanilla_models = pack.vanilla_models();
     let animations = buffers.add(pack.animation_buffer());
     let special = pack.special_texture(&asset_server);
-    let water = WaterMaterial::load(&asset_server, pack.surface_water());
+    let water = WaterMaterial::load(&asset_server, pack.surface_water(), fog.0.clone());
     commands.insert_resource(pack);
     let mut model = |blend| {
         model_materials.add(ModelMaterial::new(
@@ -104,11 +105,13 @@ pub(crate) fn prepare_assets(
             blocks: blocks.clone(),
             faces: faces.clone(),
             animations: animations.clone(),
+            fog: fog.0.clone(),
         }),
         terrain: voxel_materials.add(VoxelMaterial {
             blocks,
             faces,
             animations,
+            fog: fog.0.clone(),
         }),
     });
 }
@@ -116,6 +119,7 @@ pub(crate) fn prepare_assets(
 pub(crate) fn apply_texture_pack(
     _insert: On<Insert<crate::settings::GraphicsSettings>>,
     settings: Res<crate::settings::GraphicsSettings>,
+    fog: Res<super::fog::FogLut>,
     asset_server: Res<AssetServer>,
     mut texture_pack: Option<ResMut<TexturePack>>,
     voxel_assets: Option<Res<VoxelAssets>>,
@@ -138,7 +142,7 @@ pub(crate) fn apply_texture_pack(
     let cube_faces = buffers.add(next_pack.cube_face_buffer());
     let animations = buffers.add(next_pack.animation_buffer());
     let special = next_pack.special_texture(&asset_server);
-    let water = WaterMaterial::load(&asset_server, next_pack.surface_water());
+    let water = WaterMaterial::load(&asset_server, next_pack.surface_water(), fog.0.clone());
     if let Some(mut material) = voxel_materials.get_mut(&voxel_assets.terrain) {
         material.blocks = blocks.clone();
         material.faces = cube_faces.clone();

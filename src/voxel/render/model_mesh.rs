@@ -372,12 +372,21 @@ pub(super) fn section(
                                 let corners =
                                     super::meshing::surface_depth(&water_depths, stride, x, z);
                                 q.positions.map(|p| {
-                                    corners[match (p[0] >= 0.5, p[2] >= 0.5) {
-                                        (false, false) => 0,
-                                        (false, true) => 1,
-                                        (true, true) => 2,
-                                        (true, false) => 3,
-                                    }]
+                                    // Clipped fluid faces introduce vertices between
+                                    // cell corners; interpolate on the original two
+                                    // triangles, whose shared diagonal runs from 0 to 2.
+                                    let (x, z) = (p[0].clamp(0.0, 1.0), p[2].clamp(0.0, 1.0));
+                                    let weights = if z >= x {
+                                        [1.0 - z, z - x, x, 0.0]
+                                    } else {
+                                        [1.0 - x, 0.0, z, x - z]
+                                    };
+                                    corners
+                                        .iter()
+                                        .zip(weights)
+                                        .map(|(&depth, weight)| f32::from(depth) * weight)
+                                        .sum::<f32>()
+                                        .round() as u16
                                 })
                             } else {
                                 [15; 4]

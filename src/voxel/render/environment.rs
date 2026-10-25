@@ -13,6 +13,7 @@ use bevy::{
     render::render_resource::{
         AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
     },
+    render::storage::ShaderBuffer,
     shader::ShaderRef,
 };
 
@@ -53,8 +54,12 @@ pub(in crate::voxel) fn update_camera_environment(
             }
         });
 
-    // The sky has changed on the first run, which applies everything once.
-    if camera_liquid.0 == liquid && !sky.is_changed() && !settings.is_changed() {
+    // A newly spawned camera also needs initialization when the day is frozen.
+    if camera_liquid.0 == liquid
+        && !sky.is_changed()
+        && !settings.is_changed()
+        && !camera.1.is_added()
+    {
         return;
     }
     camera_liquid.set_if_neq(CameraLiquid(liquid));
@@ -91,14 +96,14 @@ pub(in crate::voxel) fn update_camera_environment(
         ambient.color = Color::srgb_u8(95, 140, 215);
         ambient.brightness = sky.ambient_brightness * 0.55;
     } else {
-        // The fog only hides the edge of the loaded terrain, in the horizon's color:
-        // the atmosphere's aerial perspective handles the haze before it. Like vanilla,
-        // it only covers a thin band before that edge.
-        let radius = terrain_radius(&settings);
+        // Streaming is centered on the viewer's chunk, not their exact position.
+        // One chunk diagonal keeps the opaque boundary inside the loaded circle
+        // throughout movement across that chunk, including negative coordinates.
+        let radius = terrain_radius(&settings) - CHUNK_SIZE as f32 * std::f32::consts::SQRT_2;
         fog.color = sky.horizon_color;
         fog.directional_light_color = OPEN_AIR_SCATTERING;
         fog.falloff = FogFalloff::Linear {
-            start: radius - (radius * 0.15).clamp(8.0, 64.0),
+            start: radius * 0.6,
             end: radius,
         };
         ambient.color = sky.ambient_color;
@@ -106,17 +111,26 @@ pub(in crate::voxel) fn update_camera_environment(
     }
 }
 
-/// Distance at which the loaded terrain ends and the open-air fog becomes opaque.
+/// Nominal loaded terrain radius, before the fog's chunk-alignment safety margin.
 pub(crate) fn terrain_radius(settings: &GraphicsSettings) -> f32 {
     (settings.effective_view_distance() * CHUNK_SIZE as u32) as f32
 }
 
-/// Draws nothing but fully fogged color (`horizon_fog.wesl`): the fog shader's own
-/// sun scattering included, so it blends seamlessly with fogged terrain beside it.
-#[derive(Asset, AsBindGroup, TypePath, Debug, Clone, Default)]
-pub(in crate::voxel) struct HorizonFogMaterial {}
+/// Draws lower-sky haze or the opaque immersion dome after the atmosphere pass.
+#[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
+pub(in crate::voxel) struct HorizonFogMaterial {
+    #[storage(11, read_only, visibility(fragment))]
+    fog: Handle<ShaderBuffer>,
+}
 
 impl Material for HorizonFogMaterial {
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Blend
+    }
+    fn depth_bias(&self) -> f32 {
+        // Draw behind all world translucency, despite being camera-centered.
+        -1_000_000.0
+    }
     fn fragment_shader() -> ShaderRef {
         "shaders/horizon_fog.wesl".into()
     }
@@ -138,9 +152,7 @@ impl Material for HorizonFogMaterial {
     }
 }
 
-/// A fully fogged tube hanging from eye level around the camera, past the terrain
-/// and the clouds. Below the horizon the atmosphere would otherwise show its bare
-/// planet ground behind the terrain's edge, which never matches the fog.
+/// Lower-sky haze behind the terrain and clouds, with an invisible upper rim.
 #[derive(Component)]
 pub(in crate::voxel) struct HorizonSkirt;
 
@@ -153,8 +165,9 @@ pub(in crate::voxel) fn spawn_horizon_skirt(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<HorizonFogMaterial>>,
+    fog: Res<super::fog::FogLut>,
 ) {
-    let material = MeshMaterial3d(materials.add(HorizonFogMaterial::default()));
+    let material = MeshMaterial3d(materials.add(HorizonFogMaterial { fog: fog.0.clone() }));
     let tube = Cylinder::new(1.0, 1.0)
         .mesh()
         .resolution(64)
@@ -181,7 +194,7 @@ pub(in crate::voxel) fn spawn_horizon_skirt(
     ));
 }
 
-/// Keeps the skirt and the dome centered on the camera, the skirt's rim at eye level.
+/// Keeps the skirt and dome camera-centered, the skirt's rim above its alpha fade.
 /// Reads last frame's camera placement: a frame's lag at this distance is invisible.
 pub(in crate::voxel) fn follow_horizon_skirt(
     settings: Res<GraphicsSettings>,
@@ -199,10 +212,14 @@ pub(in crate::voxel) fn follow_horizon_skirt(
         radius = radius.max(crate::sky::cloud_reach(&settings));
     }
     let radius = radius + 1.0;
+    let rim_height = radius * 0.10510424;
+    // Reach below the whole terrain column even from a high flying camera.
+    let depth =
+        (radius * 3.0).max(center.y + rim_height + super::super::coordinates::CHUNK_HEIGHT as f32);
     skirt.set_if_neq(
-        Transform::from_translation(center)
-            // Deep enough that only steep downward views, always on terrain, miss it.
-            .with_scale(Vec3::new(radius, radius * 3.0, radius)),
+        Transform::from_translation(center + Vec3::Y * rim_height)
+            // The rim is six degrees above eye level; haze vanishes at three.
+            .with_scale(Vec3::new(radius, depth, radius)),
     );
 
     let (dome_transform, visibility) = &mut *dome;

@@ -313,5 +313,8 @@ pub struct VoxelChunk {
     pub position: IVec2,
 }
 
-#[derive(Component, Clone, Copy, Debug, Default)]
+#[derive(
+    Component, Clone, Copy, Debug, Default, bevy::render::extract_component::ExtractComponent,
+)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct VoxelViewer;

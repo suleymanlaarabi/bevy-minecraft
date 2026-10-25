@@ -26,6 +26,8 @@ pub(crate) struct VoxelMaterial {
     pub(crate) faces: Handle<ShaderBuffer>,
     #[storage(10, read_only)]
     pub(crate) animations: Handle<ShaderBuffer>,
+    #[storage(11, read_only, visibility(fragment))]
+    pub(crate) fog: Handle<ShaderBuffer>,
 }
 
 /// Alpha-tested greedy cubes (leaves), with the terrain's bindings and shaders.
@@ -43,6 +45,8 @@ pub(crate) struct VoxelCutoutMaterial {
     pub(crate) faces: Handle<ShaderBuffer>,
     #[storage(10, read_only)]
     pub(crate) animations: Handle<ShaderBuffer>,
+    #[storage(11, read_only, visibility(fragment))]
+    pub(crate) fog: Handle<ShaderBuffer>,
 }
 
 fn voxel_vertex_layout(
@@ -91,6 +95,9 @@ impl Material for VoxelCutoutMaterial {
         _key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         voxel_vertex_layout(descriptor, layout)?;
+        if let Some(fragment) = &mut descriptor.fragment {
+            fragment.shader_defs.push("FOG_BEFORE_ATMOSPHERE".into());
+        }
         descriptor.vertex.shader_defs.push("VOXEL_CUTOUT".into());
         if let Some(fragment) = &mut descriptor.fragment {
             fragment.shader_defs.push("VOXEL_CUTOUT".into());
@@ -143,12 +150,18 @@ pub(crate) struct WaterMaterial {
     #[texture(1, dimension = "2d_array")]
     #[sampler(2)]
     still: Option<Handle<Image>>,
+    #[storage(11, read_only, visibility(fragment))]
+    fog: Handle<ShaderBuffer>,
 }
 
 impl WaterMaterial {
     /// Uses the vanilla flipbook when imported, otherwise the shader's procedural texture.
-    pub(crate) fn load(asset_server: &AssetServer, surface_water: bool) -> Self {
-        let mut material = Self::default();
+    pub(crate) fn load(
+        asset_server: &AssetServer,
+        surface_water: bool,
+        fog: Handle<ShaderBuffer>,
+    ) -> Self {
+        let mut material = Self { fog, ..default() };
         material.settings.animation.z = if surface_water { 1.0 } else { 0.0 };
         if !surface_water && crate::asset_directory().join(WATER_STILL_PATH).is_file() {
             material.still = Some(block_texture(
@@ -188,6 +201,9 @@ impl Material for VoxelMaterial {
         key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         voxel_vertex_layout(descriptor, layout)?;
+        if let Some(fragment) = &mut descriptor.fragment {
+            fragment.shader_defs.push("FOG_BEFORE_ATMOSPHERE".into());
+        }
         // Bevy's prepass defaults to drawing both sides, whereas the forward pass
         // culls back faces. Camera coverage must match so invisible back faces do
         // not reject visible terrain at grazing edges. Only directional shadow
@@ -267,6 +283,8 @@ pub(crate) struct ModelMaterial {
     pub special: Option<Handle<Image>>,
     #[storage(10, read_only)]
     pub animations: Handle<ShaderBuffer>,
+    #[storage(11, read_only, visibility(fragment))]
+    pub fog: Handle<ShaderBuffer>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ModelMaterialKey {
@@ -312,6 +330,7 @@ impl ModelMaterial {
             cracks: None,
             special,
             animations,
+            fog: water.fog.clone(),
         }
     }
 }
@@ -377,6 +396,9 @@ impl Material for ModelMaterial {
             depth.bias.slope_scale = 1.0;
         }
         if let Some(fragment) = &mut descriptor.fragment {
+            if blend != ModelBlend::Translucent && !key.bind_group_data.breaking {
+                fragment.shader_defs.push("FOG_BEFORE_ATMOSPHERE".into());
+            }
             match blend {
                 ModelBlend::Opaque => {}
                 ModelBlend::Cutout => fragment.shader_defs.push("MODEL_CUTOUT".into()),
@@ -434,6 +456,7 @@ mod tests {
             MaterialPlugin::<VoxelMaterial>::default(),
             MaterialPlugin::<WaterMaterial>::default(),
         ));
+        app.init_resource::<super::super::fog::FogLut>();
         let deadline = Instant::now() + Duration::from_secs(60);
         while app.plugins_state() != PluginsState::Ready {
             assert!(
@@ -466,6 +489,11 @@ mod tests {
             .world_mut()
             .resource_mut::<Assets<ShaderBuffer>>()
             .add(ShaderBuffer::from(vec![[0_u32; 4]]));
+        let fog = app
+            .world()
+            .resource::<super::super::fog::FogLut>()
+            .0
+            .clone();
         let terrain = app
             .world_mut()
             .resource_mut::<Assets<VoxelMaterial>>()
@@ -473,11 +501,12 @@ mod tests {
                 blocks: texture,
                 faces: faces.clone(),
                 animations,
+                fog: fog.clone(),
             });
         let water = app
             .world_mut()
             .resource_mut::<Assets<WaterMaterial>>()
-            .add(WaterMaterial::default());
+            .add(WaterMaterial { fog, ..default() });
         let block = super::super::meshing::build_block_item_mesh(VoxelKind::Stone);
         let mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(block);
         app.world_mut().spawn((

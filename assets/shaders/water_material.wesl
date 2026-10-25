@@ -141,9 +141,9 @@ fn fragment(
     );
 
     let lit = apply_voxel_lighting(pbr_input, in.light);
-    // Cheap sky reflection: the horizon color is already in output space, so blend
-    // it after lighting, dimmed where the sky cannot reach.
-    let sky = sky_reflection(water.sky_color.rgb) * sky_visibility(in.light);
+    // The reflected physical sky is already exposed: blend it after lighting,
+    // dimmed where the sky cannot reach.
+    let sky = sky_reflection(water.sky_color.rgb, world) * sky_visibility(in.light);
     var out: FragmentOutput;
     out.color = apply_voxel_fog(
         vec4<f32>(mix(lit.rgb, sky, fresnel * water.sky_color.a), lit.a),

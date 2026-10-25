@@ -132,6 +132,10 @@ impl Sample {
     pub(super) fn hides_water(&self) -> bool {
         self.has(cell::OCCLUDES | cell::WATER_OCCLUDES)
     }
+    #[inline]
+    pub(super) fn fluid_occluder(&self) -> bool {
+        self.has(cell::FLUID_OCCLUDER)
+    }
 }
 
 #[derive(Clone)]
@@ -269,6 +273,8 @@ pub(super) struct Padded {
     samples: Vec<Sample>,
     /// Whether the section itself, border excluded, holds alpha-tested cubes.
     cutout: bool,
+    /// Includes the halo: a neighboring partial block can cover a fluid face.
+    pub(super) fluid_occluders: bool,
 }
 
 impl Padded {
@@ -325,6 +331,7 @@ impl Padded {
                     .push(neighborhood.sample(IVec3::new(CHUNK_SIZE, y, z)));
             }
         }
+        self.fluid_occluders = self.samples.iter().any(Sample::fluid_occluder);
     }
 
     #[cfg(test)]
@@ -334,6 +341,7 @@ impl Padded {
         Self {
             dimensions: [1, 1, 1],
             cutout: samples[13].cutout(),
+            fluid_occluders: samples[13].fluid_occluder(),
             samples,
         }
     }

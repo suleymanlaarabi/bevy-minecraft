@@ -4,6 +4,7 @@ pub(super) mod assets;
 pub(super) mod build;
 mod environment;
 mod fluids;
+mod fog;
 mod material;
 mod meshing;
 pub(super) mod mipmaps;
@@ -26,6 +27,7 @@ pub(super) struct VoxelRenderPlugin;
 impl Plugin for VoxelRenderPlugin {
     fn build(&self, app: &mut App) {
         sort::register(app);
+        fog::register(app);
         app.add_systems(
             PostUpdate,
             assets::prepare_single_layer_arrays
