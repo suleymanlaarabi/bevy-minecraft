@@ -249,7 +249,13 @@ impl TexturePack {
                         return [0.0; 4];
                     }
                     let [r, g, b] = self.texture_tint(kind, axis, positive);
-                    [r, g, b, self.texture_layer(kind, axis, positive) as f32]
+                    let layer = self.texture_layer(kind, axis, positive);
+                    let layer = if self.vanilla_models() {
+                        super::models::animated_layer(layer)
+                    } else {
+                        layer
+                    };
+                    [r, g, b, layer as f32]
                 })
             })
             .collect()
@@ -261,6 +267,16 @@ impl TexturePack {
         self.id == TexturePackId::Vanilla
     }
 
+    /// Water samples the block array only when both imported fluid textures exist.
+    pub(crate) fn surface_water(&self) -> bool {
+        self.vanilla_models()
+            && ["water_still", "water_flow"].into_iter().all(|name| {
+                super::models::texture_names()
+                    .iter()
+                    .any(|texture| texture == name)
+            })
+    }
+
     pub(crate) fn model_face_table(&self) -> Vec<[f32; 4]> {
         let vanilla = self.vanilla_models();
         let mut table = super::models::texture_names()
@@ -268,7 +284,7 @@ impl TexturePack {
             .enumerate()
             .map(|(index, name)| {
                 if vanilla {
-                    return [1.0, 1.0, 1.0, index as f32];
+                    return [1.0, 1.0, 1.0, super::models::texture_layer(index) as f32];
                 }
                 let kind = VoxelKind::from_key(name)
                     .or_else(|| name.strip_suffix("_top").and_then(VoxelKind::from_key))
@@ -285,6 +301,21 @@ impl TexturePack {
     }
     pub(crate) fn model_face_buffer(&self) -> ShaderBuffer {
         ShaderBuffer::from(self.model_face_table())
+    }
+
+    /// Both material families share one immutable animation descriptor buffer.
+    pub(crate) fn animation_buffer(&self) -> ShaderBuffer {
+        ShaderBuffer::from(if self.vanilla_models() {
+            super::models::animation_table()
+        } else {
+            vec![[0_u32; 4]]
+        })
+    }
+
+    pub(crate) fn special_texture(&self, server: &AssetServer) -> Option<Handle<Image>> {
+        let layers = super::models::special_layers();
+        (self.vanilla_models() && layers != 0)
+            .then(|| block_texture(server, "voxel/packs/vanilla/special_array.png", layers))
     }
 
     /// `(tint, layer | uv transform << 12)` of each greedy cube appearance, six
@@ -327,7 +358,10 @@ pub(crate) fn block_texture(asset_server: &AssetServer, path: &str, layers: u32)
     asset_server
         .load_builder()
         .with_settings(move |settings: &mut ImageLoaderSettings| {
-            settings.array_layout = Some(ImageArrayLayout::RowCount { rows: layers });
+            // Bevy rejects a one-tile array layout. Single-layer images keep
+            // their pixels intact and receive an explicit array view on load.
+            settings.array_layout =
+                (layers > 1).then_some(ImageArrayLayout::RowCount { rows: layers });
             settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
                 address_mode_u: ImageAddressMode::Repeat,
                 address_mode_v: ImageAddressMode::Repeat,

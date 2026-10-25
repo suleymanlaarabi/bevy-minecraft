@@ -3,6 +3,8 @@ use super::{VoxelKind, VoxelState, VoxelWorld};
 use bevy::prelude::*;
 use pumpkin_data::BlockDirection;
 use std::sync::LazyLock;
+mod placement;
+pub(crate) use placement::item_form;
 
 const SIDES: [(&str, IVec3); 4] = [
     ("north", IVec3::NEG_Z),
@@ -35,7 +37,8 @@ const PANE: u8 = 1 << 2;
 const STAIR: u8 = 1 << 3;
 const DRIPSTONE: u8 = 1 << 4;
 const GATE: u8 = 1 << 5;
-const CONNECTS: u8 = FENCE | WALL | PANE | STAIR | DRIPSTONE;
+const CHEST: u8 = 1 << 6;
+const CONNECTS: u8 = FENCE | WALL | PANE | STAIR | DRIPSTONE | CHEST;
 
 fn family(kind: VoxelKind) -> u8 {
     static FAMILIES: LazyLock<Box<[u8]>> = LazyLock::new(|| {
@@ -55,6 +58,10 @@ fn family(kind: VoxelKind) -> u8 {
                     DRIPSTONE
                 } else if name.ends_with("_fence_gate") {
                     GATE
+                } else if kind.default_state().property("type") == Some("single")
+                    && name.ends_with("chest")
+                {
+                    CHEST
                 } else {
                     0
                 }
@@ -77,6 +84,33 @@ pub(crate) fn connected(
     mut sample: impl FnMut(IVec3) -> Option<VoxelState>,
 ) -> VoxelState {
     let own = family(state.kind());
+    if own == CHEST {
+        let face = state.property("facing").unwrap_or("north");
+        let forward = direction(face);
+        let left = IVec3::new(forward.z, 0, -forward.x);
+        let current = state.property("type").unwrap_or("single");
+        // Existing pairs get first refusal. This prevents a third chest from
+        // stealing a partner; missing chunks preserve generated pair states.
+        for (offset, own_type, other_type) in [(-left, "left", "right"), (left, "right", "left")] {
+            if current != "single" && current != own_type {
+                continue;
+            }
+            let Some(other) = sample(position + offset) else {
+                if current == own_type {
+                    return state;
+                }
+                continue;
+            };
+            if other.kind() == state.kind()
+                && other.property("facing") == Some(face)
+                && (other.property("type") == Some("single")
+                    || other.property("type") == Some(other_type))
+            {
+                return state.with(&[("type", own_type)]);
+            }
+        }
+        return state.with(&[("type", "single")]);
+    }
     if own & (FENCE | PANE | WALL) != 0 {
         let wall = own == WALL;
         let mut connections = [false; 4];
@@ -208,11 +242,22 @@ pub(crate) fn connected(
 }
 
 pub(crate) fn paired_position(state: VoxelState, position: IVec3) -> Option<IVec3> {
-    match state.property("half") {
-        Some("lower") => Some(position + IVec3::Y),
-        Some("upper") => Some(position - IVec3::Y),
+    let pair = placement::profile(state.kind()).pair?;
+    let values = pair.values();
+    let delta = pair.delta(state);
+    match state.property(pair.property()) {
+        Some(value) if value == values[0] => Some(position + delta),
+        Some(value) if value == values[1] => Some(position - delta),
         _ => None,
     }
+}
+
+pub(crate) fn paired_states(first: VoxelState, second: VoxelState) -> bool {
+    first.kind() == second.kind()
+        && placement::profile(first.kind()).pair.is_some_and(|pair| {
+            first.property(pair.property()) != second.property(pair.property())
+                && first.property("facing") == second.property("facing")
+        })
 }
 
 pub(crate) fn placement(
@@ -252,13 +297,54 @@ pub(crate) fn placement(
     if !old.replaceable() && !old.native().is_air() && old.kind() != VoxelKind::Water {
         return None;
     }
-    let mut state = kind.default_state();
+    let (mut state, mounted) = placement::mounted(kind, normal, look)?;
+    let kind = state.kind();
     let name = kind.name();
     let face = facing(look);
     let wall = facing(normal);
     let upper = normal.y < -0.5 || (normal.y.abs() < 0.5 && hit.y.rem_euclid(1.0) > 0.5);
-    if state.property("facing").is_some() {
+    if state.property("facing").is_some() && !mounted {
         state = state.with(&[("facing", opposite(face))]);
+    }
+    let profile = placement::profile(kind);
+    if matches!(profile.pair, Some(placement::Pair::Horizontal)) {
+        state = state.with(&[("facing", face)]);
+    }
+    if mounted {
+        let support = world.state(position - normal.round().as_ivec3())?;
+        let side = match normal.round().as_ivec3() {
+            IVec3::X => BlockDirection::East,
+            IVec3::NEG_X => BlockDirection::West,
+            IVec3::Z => BlockDirection::South,
+            IVec3::NEG_Z => BlockDirection::North,
+            IVec3::NEG_Y => BlockDirection::Down,
+            _ => BlockDirection::Up,
+        };
+        let supported = if profile.hanging || name.ends_with("torch") && normal.y > 0.5 {
+            support.native().is_center_solid(side)
+        } else if normal.y > 0.5 && (name.ends_with("_sign") || name.ends_with("_banner")) {
+            support.native().is_solid()
+        } else {
+            support.native().is_side_solid(side)
+        };
+        if !supported {
+            return None;
+        }
+    }
+    if profile.six_way {
+        let orientation = if profile.facing_normal {
+            normal
+        } else if profile.facing_look {
+            look
+        } else {
+            -look
+        };
+        let facing = if orientation.y.abs() > orientation.x.abs().max(orientation.z.abs()) {
+            if orientation.y > 0.0 { "up" } else { "down" }
+        } else {
+            self::facing(orientation)
+        };
+        state = state.with(&[("facing", facing)]);
     }
     if state.property("axis").is_some() {
         state = state.with(&[(
@@ -318,30 +404,6 @@ pub(crate) fn placement(
         }
         state = state.with(&[("vertical_direction", vertical)]);
     }
-    if name == "torch" || name == "soul_torch" || name == "redstone_torch" {
-        if normal.y < -0.5 {
-            return None;
-        }
-        if normal.y.abs() < 0.5 {
-            let wall_name = name.replace("torch", "wall_torch");
-            state = VoxelKind::from_key(&wall_name)?
-                .default_state()
-                .with(&[("facing", wall)]);
-        }
-        if !world
-            .state(position - normal.as_ivec3())?
-            .native()
-            .is_side_solid(match normal.round().as_ivec3() {
-                IVec3::X => BlockDirection::East,
-                IVec3::NEG_X => BlockDirection::West,
-                IVec3::Z => BlockDirection::South,
-                IVec3::NEG_Z => BlockDirection::North,
-                _ => BlockDirection::Up,
-            })
-        {
-            return None;
-        }
-    }
     if name == "vine" || name == "glow_lichen" {
         let attachment = if normal.y < -0.5 {
             "up"
@@ -393,27 +455,28 @@ pub(crate) fn placement(
         return None;
     }
     let below = world.state(position - IVec3::Y);
-    let floor_support = matches!(
-        name,
-        "bamboo"
-            | "bamboo_sapling"
-            | "cactus"
-            | "sugar_cane"
-            | "azalea"
-            | "flowering_azalea"
-            | "sweet_berry_bush"
-            | "big_dripleaf"
-            | "big_dripleaf_stem"
-    ) || aquatic
-        || name.ends_with("_carpet")
-        || name.ends_with("_door")
-        || name == "snow"
-        || state.property("half") == Some("lower")
-        || (state.native().collision_shapes.is_empty()
-            && name != "vine"
-            && name != "hanging_roots"
-            && name != "glow_lichen"
-            && !name.contains("torch"));
+    let floor_support = !mounted
+        && (matches!(
+            name,
+            "bamboo"
+                | "bamboo_sapling"
+                | "cactus"
+                | "sugar_cane"
+                | "azalea"
+                | "flowering_azalea"
+                | "sweet_berry_bush"
+                | "big_dripleaf"
+                | "big_dripleaf_stem"
+        ) || aquatic
+            || name.ends_with("_carpet")
+            || name.ends_with("_door")
+            || name == "snow"
+            || placement::profile(kind).pair.is_some()
+            || (state.native().collision_shapes.is_empty()
+                && name != "vine"
+                && name != "hanging_roots"
+                && name != "glow_lichen"
+                && !name.contains("torch")));
     if floor_support
         && !below.is_some_and(|s| {
             s.native().is_side_solid(BlockDirection::Up)
@@ -449,8 +512,9 @@ pub(crate) fn placement(
         if !old_upper.replaceable() && !old_upper.native().is_air() {
             return None;
         }
+        let pair = placement::profile(kind).pair?;
         let upper_state = state.with(&[
-            ("half", "upper"),
+            (pair.property(), pair.values()[1]),
             (
                 "waterlogged",
                 if old_upper.has_water() {
@@ -460,6 +524,14 @@ pub(crate) fn placement(
                 },
             ),
         ]);
+        if matches!(pair, placement::Pair::Horizontal)
+            && !world
+                .state(upper - IVec3::Y)?
+                .native()
+                .is_side_solid(BlockDirection::Up)
+        {
+            return None;
+        }
         edits.push((upper, upper_state));
     }
     Some(edits)

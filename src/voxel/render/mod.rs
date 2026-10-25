@@ -3,6 +3,7 @@
 pub(super) mod assets;
 pub(super) mod build;
 mod environment;
+mod fluids;
 mod material;
 mod meshing;
 pub(super) mod mipmaps;
@@ -25,11 +26,21 @@ pub(super) struct VoxelRenderPlugin;
 impl Plugin for VoxelRenderPlugin {
     fn build(&self, app: &mut App) {
         sort::register(app);
-        app.init_resource::<environment::CameraLiquid>().add_plugins((
-            MaterialPlugin::<VoxelMaterial>::default(),
-            MaterialPlugin::<material::VoxelCutoutMaterial>::default(),
-            MaterialPlugin::<ModelMaterial>::default(),
-            MaterialPlugin::<environment::HorizonFogMaterial>::default(),
-        ));
+        app.add_systems(
+            PostUpdate,
+            assets::prepare_single_layer_arrays
+                .after(bevy::asset::AssetEventSystems)
+                .run_if(
+                    on_message::<AssetEvent<Image>>
+                        .or_else(on_message::<AssetEvent<ModelMaterial>>),
+                ),
+        );
+        app.init_resource::<environment::CameraLiquid>()
+            .add_plugins((
+                MaterialPlugin::<VoxelMaterial>::default(),
+                MaterialPlugin::<material::VoxelCutoutMaterial>::default(),
+                MaterialPlugin::<ModelMaterial>::default(),
+                MaterialPlugin::<environment::HorizonFogMaterial>::default(),
+            ));
     }
 }

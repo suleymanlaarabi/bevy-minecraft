@@ -1,0 +1,144 @@
+{
+  "chest_single": {
+    "class": "net.minecraft.client.model.object.chest.ChestModel",
+    "method": "createSingleBodyLayer"
+  },
+  "chest_left": {
+    "class": "net.minecraft.client.model.object.chest.ChestModel",
+    "method": "createDoubleBodyLeftLayer"
+  },
+  "chest_right": {
+    "class": "net.minecraft.client.model.object.chest.ChestModel",
+    "method": "createDoubleBodyRightLayer"
+  },
+  "shulker": {
+    "class": "net.minecraft.client.model.monster.shulker.ShulkerModel",
+    "method": "createBoxLayer"
+  },
+  "banner_standing": {
+    "class": "net.minecraft.client.model.object.banner.BannerModel",
+    "method": "createBodyLayer",
+    "args": [
+      true
+    ]
+  },
+  "flag_standing": {
+    "class": "net.minecraft.client.model.object.banner.BannerFlagModel",
+    "method": "createFlagLayer",
+    "args": [
+      true
+    ]
+  },
+  "banner_wall": {
+    "class": "net.minecraft.client.model.object.banner.BannerModel",
+    "method": "createBodyLayer",
+    "args": [
+      false
+    ]
+  },
+  "flag_wall": {
+    "class": "net.minecraft.client.model.object.banner.BannerFlagModel",
+    "method": "createFlagLayer",
+    "args": [
+      false
+    ]
+  },
+  "skull": {
+    "class": "net.minecraft.client.model.object.skull.SkullModel",
+    "method": "createMobHeadLayer"
+  },
+  "humanoid_head": {
+    "class": "net.minecraft.client.model.object.skull.SkullModel",
+    "method": "createHumanoidHeadLayer"
+  },
+  "piglin_head": {
+    "class": "net.minecraft.client.model.object.skull.PiglinHeadModel",
+    "method": "createHeadModel",
+    "width": 64,
+    "height": 64
+  },
+  "dragon_head": {
+    "class": "net.minecraft.client.model.object.skull.DragonHeadModel",
+    "method": "createHeadLayer"
+  },
+  "golem_standing": {
+    "class": "net.minecraft.client.model.animal.golem.CopperGolemModel",
+    "method": "createBodyLayer",
+    "parts": {
+      "": {
+        "y": 0,
+        "zRot": 3.141592653589793
+      }
+    }
+  },
+  "golem_running": {
+    "class": "net.minecraft.client.model.animal.golem.CopperGolemModel",
+    "method": "createRunningPoseBodyLayer",
+    "parts": {
+      "": {
+        "y": 0,
+        "zRot": 3.141592653589793
+      }
+    }
+  },
+  "golem_sitting": {
+    "class": "net.minecraft.client.model.animal.golem.CopperGolemModel",
+    "method": "createSittingPoseBodyLayer",
+    "parts": {
+      "": {
+        "y": 0,
+        "zRot": 3.141592653589793
+      }
+    }
+  },
+  "golem_star": {
+    "class": "net.minecraft.client.model.animal.golem.CopperGolemModel",
+    "method": "createStarPoseBodyLayer",
+    "parts": {
+      "": {
+        "y": 0,
+        "zRot": 3.141592653589793
+      }
+    }
+  },
+  "pot_base": {
+    "class": "net.minecraft.client.renderer.blockentity.DecoratedPotRenderer",
+    "method": "createBaseLayer"
+  },
+  "pot_sides": {
+    "class": "net.minecraft.client.renderer.blockentity.DecoratedPotRenderer",
+    "method": "createSidesLayer"
+  },
+  "conduit": {
+    "class": "net.minecraft.client.renderer.blockentity.ConduitRenderer",
+    "method": "createShellLayer"
+  },
+  "book": {
+    "class": "net.minecraft.client.model.object.book.BookModel",
+    "method": "createBodyLayer",
+    "parts": {
+      "/left_lid": {
+        "yRot": 4.14159265
+      },
+      "/right_lid": {
+        "yRot": -1
+      },
+      "/left_pages": {
+        "yRot": 1,
+        "x": 0.84147
+      },
+      "/right_pages": {
+        "yRot": -1,
+        "x": 0.84147
+      },
+      "/flip_page1": {
+        "yRot": 0.5,
+        "x": 0.84147
+      },
+      "/flip_page2": {
+        "yRot": -0.5,
+        "x": 0.84147
+      }
+    }
+  }
+}

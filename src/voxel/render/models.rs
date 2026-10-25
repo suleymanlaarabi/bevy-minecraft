@@ -18,6 +18,11 @@ pub(crate) struct ModelQuad {
     pub tinted: bool,
     pub cull: [i32; 3],
     pub translucent: bool,
+    /// Non-water surface effect flags: bit 1 is the end-portal surface.
+    #[serde(default)]
+    pub effect: u8,
+    #[serde(default)]
+    pub light_emission: u8,
     /// Vanilla's `shade_direction_override: "up"`, resolved once instead of per quad.
     #[serde(default, rename = "shade", deserialize_with = "shade_up")]
     pub shade_up: bool,
@@ -35,15 +40,32 @@ struct Imported {
     opaque_textures: Vec<bool>,
     models: HashMap<String, Vec<ModelQuad>>,
     blocks: HashMap<String, Value>,
+    texture_layers: Vec<u32>,
+    special_layers: u32,
+    animations: Vec<Animation>,
+}
+#[derive(Deserialize)]
+struct Animation {
+    layer: u32,
+    frames: Vec<[u32; 2]>,
+    interpolate: bool,
 }
 #[derive(Clone)]
 struct Weighted {
     quads: Arc<[ModelQuad]>,
     weight: u32,
 }
+struct Group {
+    choices: Vec<Weighted>,
+    total: u64,
+}
 #[derive(Default)]
 struct Recipe {
-    groups: Vec<Vec<Weighted>>,
+    groups: Vec<Group>,
+    /// Common deterministic recipes bypass hashing and weighted selection.
+    fixed: Option<Arc<[ModelQuad]>>,
+    /// A resolved empty model is deliberately invisible, never a fallback cube.
+    resolved: bool,
 }
 struct Library {
     recipes: Box<[Recipe]>,
@@ -53,6 +75,10 @@ struct Library {
     cells: Box<[CellInfo]>,
     /// Face slots of greedy cubes, indexed by [`CellInfo::appearance`].
     appearances: Vec<Appearance>,
+    texture_layers: Vec<u32>,
+    special_layers: u32,
+    animations: Vec<Animation>,
+    animated_layers: Box<[bool; 2048]>,
 }
 
 /// Per-state mesher flags (bits of [`CellInfo::flags`]).
@@ -76,6 +102,9 @@ pub(crate) struct CellInfo {
     /// Greedy cube appearance (0 when not a cube), packed in 14 vertex bits.
     pub(crate) appearance: u16,
     pub(crate) flags: u8,
+    /// Family in the high nibble (water=1, lava=2); amount 1..=8, or falling=9.
+    /// Uses the byte that was padding in this four-byte per-state record.
+    pub(crate) fluid: u8,
 }
 
 /// One face of a greedy cube: a model face-table slot, whether the block tint
@@ -130,7 +159,7 @@ fn cube_faces(quads: &[ModelQuad]) -> Option<[CubeFace; 6]> {
     }
     let mut faces = [None; 6];
     for q in quads {
-        if q.translucent || q.shade_up {
+        if q.translucent || q.shade_up || q.effect != 0 || q.light_emission != 0 {
             return None;
         }
         // Rotated variants carry float noise (0.99999994): compare with a tolerance.
@@ -243,6 +272,33 @@ fn base_flags(state: VoxelState) -> u8 {
     flags
 }
 
+fn state_info(state: VoxelState) -> CellInfo {
+    let family = if state.has_water() {
+        1
+    } else if state.kind() == VoxelKind::Lava {
+        2
+    } else {
+        0
+    };
+    let level = if family != 0 {
+        state
+            .property("level")
+            .and_then(|v| v.parse::<u8>().ok())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    CellInfo {
+        appearance: 0,
+        flags: base_flags(state),
+        fluid: if family == 0 {
+            0
+        } else {
+            family << 4 | if level >= 8 { 9 } else { 8 - level }
+        },
+    }
+}
+
 /// Cells without a greedy cube and with something to draw use explicit models.
 fn finish(mut info: CellInfo, state: VoxelState) -> CellInfo {
     if info.flags & (cell::AIR | cell::CUBE | cell::CUTOUT) == 0 && state.kind() != VoxelKind::Water
@@ -342,7 +398,7 @@ fn library() -> &'static Library {
     static LIBRARY: OnceLock<Library> = OnceLock::new();
     LIBRARY.get_or_init(|| {
         let imported = std::fs::read(crate::asset_directory().join("voxel/packs/vanilla/models.json"))
-            .ok().and_then(|data| serde_json::from_slice::<Imported>(&data).ok()).filter(|data| data.version == 1 && data.minecraft == "26.3");
+            .ok().and_then(|data| serde_json::from_slice::<Imported>(&data).ok()).filter(|data| data.version == 2 && data.minecraft == "26.3");
         let mut recipes = (0..=u16::MAX).map(|_| Recipe::default()).collect::<Vec<_>>();
         let mut cells = vec![CellInfo::default(); 65536];
         let mut appearances = Appearances::default();
@@ -351,21 +407,26 @@ fn library() -> &'static Library {
             warn!("Vanilla models unavailable: using shape-based models; run scripts/import_vanilla.py");
             for raw in 0..=u16::MAX {
                 let Some(state) = VoxelState::from_id(raw) else { continue; };
-                let mut info = CellInfo { appearance: 0, flags: base_flags(state) };
+                let mut info = state_info(state);
                 if state.is_opaque_cube() && legacy_cube(&legacy, state.kind()) {
                     info.appearance = appearances.id(legacy_faces(state.kind(), 0), state.kind());
                     info.flags |= cell::CUBE;
                 }
                 cells[raw as usize] = finish(info, state);
             }
-            return Library { recipes: recipes.into(), cells: cells.into(), appearances: appearances.list, textures: Vec::new(), opaque_textures: Vec::new() };
+            return Library { recipes: recipes.into(), cells: cells.into(), appearances: appearances.list, textures: Vec::new(), opaque_textures: Vec::new(), texture_layers: Vec::new(), special_layers: 0, animations: Vec::new(), animated_layers: Box::new([false; 2048]) };
         };
         let mut rotations = HashMap::<(String, i32, i32, bool), Arc<[ModelQuad]>>::new();
+        let mut assemblies = HashMap::<Vec<usize>, Arc<[ModelQuad]>>::new();
         let mut missing = std::collections::HashSet::new();
         for raw in 0..=u16::MAX {
             let Some(state) = VoxelState::from_id(raw) else { continue; };
             let kind = state.kind();
-            let Some(block) = imported.blocks.get(kind.name()) else { continue; };
+            let Some(block) = imported.blocks.get(kind.name()) else {
+                missing.insert(kind.name());
+                cells[raw as usize] = finish(state_info(state), state);
+                continue;
+            };
             let properties = state.properties();
             let props = properties.iter().map(|p| (p.key_str(), p.value_str())).collect::<Vec<_>>();
             let mut applications = Vec::new();
@@ -378,6 +439,8 @@ fn library() -> &'static Library {
                 }
             }
             let recipe = &mut recipes[raw as usize];
+            let mut selected_model = false;
+            let mut missing_model = false;
             for apply in applications {
                 let mut group = Vec::new();
                 let values = if let Some(a) = apply.as_array() { a.as_slice() } else { std::slice::from_ref(apply) };
@@ -386,20 +449,28 @@ fn library() -> &'static Library {
                     let x = variant.get("x").and_then(Value::as_i64).unwrap_or(0) as i32;
                     let y = variant.get("y").and_then(Value::as_i64).unwrap_or(0) as i32;
                     let lock = variant.get("uvlock").and_then(Value::as_bool).unwrap_or(false);
-                    let Some(source) = imported.models.get(name) else { missing.insert(kind.name()); continue; };
+                    let Some(source) = imported.models.get(name) else { missing.insert(kind.name()); missing_model = true; continue; };
+                    selected_model = true;
                     let quads = rotations.entry((name.to_owned(),x,y,lock)).or_insert_with(|| rotated(source, x as f32, y as f32, lock)).clone();
                     if !quads.is_empty() {
                         group.push(Weighted { quads, weight: variant.get("weight").and_then(Value::as_u64).unwrap_or(1).clamp(1, u32::MAX as u64) as u32 });
                     }
                 }
-                if !group.is_empty() { recipe.groups.push(group); }
+                if !group.is_empty() {
+                    recipe.groups.push(Group { total: group.iter().map(|m| u64::from(m.weight)).sum(), choices: group });
+                }
+            }
+            recipe.resolved = selected_model && !missing_model;
+            if !recipe.resolved {
+                missing.insert(kind.name());
+                recipe.groups.clear();
             }
             // Default legacy cubes keep the pack's per-block faces; any other state
             // whose single model is a plain cube shares a deduplicated appearance.
-            let mut info = CellInfo { appearance: 0, flags: base_flags(state) };
+            let mut info = state_info(state);
             let model_faces = match recipe.groups.as_slice() {
                 [group] => {
-                    let mut faces = group.iter().map(|model| cube_faces(&model.quads));
+                    let mut faces = group.choices.iter().map(|model| cube_faces(&model.quads));
                     faces.next().flatten().filter(|first| faces.all(|other| other == Some(*first)))
                 }
                 _ => None,
@@ -422,10 +493,27 @@ fn library() -> &'static Library {
                     info.flags |= class;
                 }
             }
-            cells[raw as usize] = finish(info, state);
+            cells[raw as usize] = if recipe.resolved && recipe.groups.is_empty() {
+                // Invisible technical blocks still retain collision and native
+                // lighting behavior, but have no model-meshing work.
+                info
+            } else {
+                finish(info, state)
+            };
+            if !recipe.groups.is_empty() && recipe.groups.iter().all(|group| group.choices.len() == 1) {
+                let key = recipe.groups.iter().map(|group| Arc::as_ptr(&group.choices[0].quads) as *const ModelQuad as usize).collect::<Vec<_>>();
+                recipe.fixed = Some(assemblies.entry(key).or_insert_with(|| {
+                    if recipe.groups.len() == 1 { recipe.groups[0].choices[0].quads.clone() }
+                    else { recipe.groups.iter().flat_map(|group| group.choices[0].quads.iter().cloned()).collect() }
+                }).clone());
+                recipe.groups.clear();
+                recipe.groups.shrink_to_fit();
+            }
         }
         if !missing.is_empty() { warn!("{} vanilla model families unavailable", missing.len()); }
-        Library { recipes: recipes.into(), textures: imported.textures, opaque_textures: imported.opaque_textures, cells: cells.into(), appearances: appearances.list }
+        let mut animated_layers = Box::new([false; 2048]);
+        for animation in &imported.animations { animated_layers[animation.layer as usize] = true; }
+        Library { recipes: recipes.into(), textures: imported.textures, opaque_textures: imported.opaque_textures, cells: cells.into(), appearances: appearances.list, texture_layers: imported.texture_layers, special_layers: imported.special_layers, animations: imported.animations, animated_layers }
     })
 }
 /// Block keys of the bundled vanilla manifest.
@@ -463,10 +551,74 @@ pub(crate) fn opaque_texture(slot: u32) -> bool {
 pub(crate) fn texture_names() -> &'static [String] {
     &library().textures
 }
+pub(crate) fn texture_layer(slot: usize) -> u32 {
+    animated_layer(library().texture_layers[slot])
+}
+/// Bit 11 marks a flipbook. Static vertices bypass the GPU timeline buffer.
+pub(crate) fn animated_layer(layer: u32) -> u32 {
+    layer
+        | if library()
+            .animated_layers
+            .get(layer as usize)
+            .copied()
+            .unwrap_or(false)
+        {
+            2048
+        } else {
+            0
+        }
+}
+pub(crate) fn special_layers() -> u32 {
+    library().special_layers
+}
+
+pub(crate) fn fluid_texture(family: u8, flowing: bool) -> u32 {
+    static SLOTS: OnceLock<[[u32; 2]; 2]> = OnceLock::new();
+    SLOTS.get_or_init(|| {
+        [VoxelKind::Water, VoxelKind::Lava].map(|kind| {
+            ["still", "flow"].map(|suffix| {
+                let name = format!("{}_{}", kind.name(), suffix);
+                texture_names()
+                    .iter()
+                    .position(|texture| texture == &name)
+                    .map_or_else(|| fallback_slot(kind, 1, true), |index| index as u32)
+            })
+        })
+    })[(family - 1) as usize][usize::from(flowing)]
+}
+
+/// Fixed descriptor prefix, followed by cumulative animation timeline entries.
+/// Layers are physical array indices; static surfaces bypass this buffer entirely.
+pub(crate) fn animation_table() -> Vec<[u32; 4]> {
+    let mut table = vec![[0; 4]; 2048];
+    for animation in &library().animations {
+        let offset = table.len() as u32;
+        let mut end = 0;
+        for &[layer, ticks] in &animation.frames {
+            end += ticks;
+            table.push([layer, end, 0, 0]);
+        }
+        table[animation.layer as usize] = [
+            offset,
+            animation.frames.len() as u32,
+            end,
+            u32::from(animation.interpolate),
+        ];
+    }
+    table
+}
 pub(crate) fn visit_quads(state: VoxelState, world: IVec3, mut visit: impl FnMut(&ModelQuad)) {
     let recipe = &library().recipes[state.id() as usize];
+    if let Some(quads) = &recipe.fixed {
+        for q in quads.iter() {
+            visit(q);
+        }
+        return;
+    }
     if recipe.groups.is_empty() {
-        fallback(state, world, visit);
+        if !recipe.resolved {
+            fallback(state, world, visit);
+        }
         return;
     }
     let mut seed = (world.x as u32).wrapping_mul(0x8da6b343)
@@ -475,9 +627,9 @@ pub(crate) fn visit_quads(state: VoxelState, world: IVec3, mut visit: impl FnMut
     for group in &recipe.groups {
         seed ^= seed >> 16;
         seed = seed.wrapping_mul(0x7feb352d);
-        let total: u64 = group.iter().map(|model| u64::from(model.weight)).sum();
-        let mut choice = u64::from(seed) % total;
+        let mut choice = u64::from(seed) % group.total;
         let model = group
+            .choices
             .iter()
             .find(|m| {
                 if choice < u64::from(m.weight) {
@@ -558,6 +710,8 @@ fn fallback(state: VoxelState, world: IVec3, mut visit: impl FnMut(&ModelQuad)) 
                     },
                     translucent,
                     shade_up: false,
+                    effect: 0,
+                    light_emission: 0,
                 });
             }
         }

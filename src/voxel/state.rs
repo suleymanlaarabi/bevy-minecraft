@@ -183,12 +183,21 @@ impl VoxelState {
     }
     pub(crate) fn with(self, edits: &[(&str, &str)]) -> Self {
         let mut props = self.properties();
+        let mut changed = false;
         for &(key, value) in edits {
             if let Some(prop) = props.iter_mut().find(|p| p.key_str() == key)
                 && let Some(next) = Property::from_str_pair(key, value)
+                && *prop != next
             {
                 *prop = next;
+                changed = true;
             }
+        }
+        // Property-free blocks have no native BlockProperties implementation.
+        // Generic capability probes and unsupported edits must remain no-ops
+        // instead of reaching Pumpkin's `from_properties` panic arm.
+        if !changed {
+            return self;
         }
         Self(
             self.0

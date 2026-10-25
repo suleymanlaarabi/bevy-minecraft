@@ -52,8 +52,17 @@ python3 scripts/import_vanilla.py   # optional version argument, e.g. 26.3
 
 The importer first checks `~/.minecraft/versions/26.3/26.3.jar`, verifies its
 SHA-1, and downloads the official client if necessary. It resolves inherited
-models, variants, and multipart assemblies in `models.json`, extending the
-texture array to model faces. After changing the importer, regenerate the
+models, variants, multipart assemblies, and specialized model families into a
+versioned `models.json`. Importing specialized geometry also requires the official
+client libraries under `~/.minecraft/libraries` and a Java runtime with source-file
+support. The importer prefers the launcher's `java-runtime-epsilon`; `JAVA_HOME`
+overrides it. The headless helper invokes model factories only, without starting
+Minecraft. Generated geometry and `special_array.png` remain local, ignored assets.
+
+The import checks every block and property combination against the neighboring
+Pumpkin registry. Missing visible geometry or textures, unmapped variants, and
+packed-format overflows stop the import. Deliberately invisible models are
+explicitly classified. Identical models share recipes across material aliases. After changing the importer, regenerate the
 manifest, textures, and models together, then recompile to include the manifest.
 
 It also writes `pack.ron` and extracts the ten official breaking textures into
@@ -75,8 +84,10 @@ them leaves water behind. Vanilla aquifers remain enabled, so caves can contain
 water. No global filling or draining pass is added.
 
 Water meshes include every air interface, including sides and bottoms. No face
-is emitted against a solid ceiling. Side normals remain intact; waves affect
-top surfaces.
+is emitted against a solid ceiling. Broad, flat water surfaces retain greedy
+meshing. Uneven water, shore corners, falling states, and lava share a surface
+builder that reads cached fluid families and amounts. Fluid ticks remain outside
+this renderer.
 
 ## Lighting
 
@@ -93,18 +104,32 @@ indices so lighting can reconcile them when reloaded.
 
 ## Shapes and interactions
 
-Rendering imports vanilla models for glass and panes, foliage, grasses, flowers,
-tall and aquatic plants, vines, roots, bamboo, cactus, pointed dripstone, crystals,
-torches, snow layers, carpets, slabs, stairs, fences, gates, walls, doors,
-trapdoors, and bars. Generated states keep their properties. Local placement rules
-orient blocks, merge slabs, update neighboring connections, and manage both halves
-of doors and tall plants with one drop.
+Rendering covers the 1,286 native Minecraft 26.3 block types and 35,723 states
+through imported recipes, including native specialized models for chests and
+copper chests, shulkers, banners, skulls, decorated pots, conduits, copper golem
+statues, and the enchanting book. Orientations, double-chest halves, statue poses,
+colors, and generated state properties are retained. Technical invisible blocks
+stay invisible instead of becoming fallback cubes. Import coverage describes
+recipe availability; visual correctness still requires a separately authorized
+in-game review.
 
-Compatible cubes keep greedy meshing and eight-byte vertices. Models are batched
-by section into cutout or translucent passes. Water and glass share the
-translucent pass; bounded tasks reorder only its indices when the camera changes
-cells. Icons are rasterized from models in the background and drop meshes are
-created on demand.
+Placement profiles derive wall aliases, attachment properties, and paired parts
+from the registry. Doors, tall plants, and beds share pair placement/removal;
+chests share connection handling across their material variants. Selection and
+collision continue to use native shapes. Block drops use canonical item forms.
+
+Compatible cubes keep greedy meshing and eight-byte vertices. Other models share
+sixteen-byte vertices and section-level opaque, cutout, or translucent batches.
+Static blocks do not create individual ECS entities. Deterministic multipart
+assemblies are cached and shared, bypassing weighted selection during meshing.
+
+Official animation timelines preserve frame order, duration, and interpolation on
+the GPU. Static surfaces skip timeline reads entirely. Specialized textures retain
+their source resolution in a shared atlas bank. State-dependent redstone/stem
+colors and multi-index tints are resolved during import. End portals and gateways
+use a layered procedural star effect. Water and glass share the translucent pass;
+bounded tasks reorder only its indices when the camera changes cells. Icons and
+dropped objects reuse the same model recipes; inventory icons remain still images.
 
 Collision and selection use native shapes independently of opacity. Terrain's
 voxel collider remains separate from convex partial-shape colliders; never nest
@@ -120,14 +145,17 @@ obstacles.
 - No vanilla ticks: plant growth, falling dripstone, fluids, leaves, damage, and
   redstone are not simulated. Doors and gates display their state but do not
   open interactively.
-- Blocks rendered by block entities or specialized renderers use shape and
-  material fallbacks. Their contents and animations are not implemented.
+- Specialized blocks use their default appearance: closed containers, blank
+  signs, plain banners, default pots and player heads, and resting model parts.
+  Per-block contents, text, patterns, owner skins, equipment, opening animations,
+  and active effects requiring block-entity data are not stored or simulated.
 - Exact model geometry requires the vanilla import. Without it, selection shapes
   provide a simplified fallback; incomplete packs reuse substitute textures.
 - Biome tint is fixed to plains. Per-section and per-face translucent sorting
   does not provide exact composition for all intersecting geometry. Ambient
   occlusion still needs improvement.
-- Lava retains fallback rendering without damage or simulation.
+- Lava has state-aware surface rendering and texture animation, without damage
+  or fluid simulation.
 
 ## Verification
 

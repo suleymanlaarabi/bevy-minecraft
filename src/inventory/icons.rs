@@ -36,6 +36,8 @@ pub(crate) struct BlockIcons {
     image: Handle<Image>,
     layout: Handle<TextureAtlasLayout>,
     source: Option<AssetId<Image>>,
+    special_source: Option<AssetId<Image>>,
+    special_failed: bool,
     items: std::collections::HashMap<u16, usize>,
     item_image: Handle<Image>,
     item_layout: Handle<TextureAtlasLayout>,
@@ -182,19 +184,27 @@ pub(crate) fn setup_block_icons(
 pub(crate) fn render_block_icons(
     mut icons: ResMut<BlockIcons>,
     mut events: MessageReader<AssetEvent<Image>>,
+    server: Res<AssetServer>,
     voxel_assets: Res<VoxelAssets>,
     materials: Res<Assets<VoxelMaterial>>,
+    model_materials: Res<Assets<crate::voxel::render::ModelMaterial>>,
     texture_pack: Res<TexturePack>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let Some(source) = materials.get(&voxel_assets.terrain).map(|m| m.blocks.id()) else {
         return;
     };
+    let special_source = model_materials
+        .get(&voxel_assets.models)
+        .and_then(|material| material.special.as_ref())
+        .map(Handle::id);
     let modified = events
         .read()
-        .any(|e| matches!(e,AssetEvent::Modified{id} if *id==source));
-    if icons.source != Some(source) || modified {
+        .any(|e| matches!(e,AssetEvent::Added{id} | AssetEvent::Modified{id} if *id==source || Some(*id)==special_source));
+    if icons.source != Some(source) || icons.special_source != special_source || modified {
         icons.source = Some(source);
+        icons.special_source = special_source;
+        icons.special_failed = false;
         icons.revision = icons.revision.wrapping_add(1);
         icons.task = None;
     }
@@ -209,6 +219,13 @@ pub(crate) fn render_block_icons(
             icons.finished = Some(output.revision);
         }
     }
+    if !icons.special_failed
+        && let Some(source) = special_source
+        && let Some(bevy::asset::LoadState::Failed(error)) = server.get_load_state(source)
+    {
+        warn!("Special icon textures failed to load; using available block textures: {error}");
+        icons.special_failed = true;
+    }
     if icons.task.is_some() || icons.finished == Some(icons.revision) {
         return;
     }
@@ -222,13 +239,19 @@ pub(crate) fn render_block_icons(
     {
         return;
     }
+    // Render immediately with the available textures. An Added/Modified event
+    // regenerates the atlas when optional special textures become available.
+    let special = special_source
+        .and_then(|source| images.get(source))
+        .filter(|image| image.data.is_some())
+        .cloned();
     let blocks = blocks.clone();
     let table = texture_pack.model_face_table();
     let revision = icons.revision;
     icons.task = Some(AsyncComputeTaskPool::get().spawn(async move {
         IconOutput {
             revision,
-            pixels: render_icons(&blocks, &table),
+            pixels: render_icons(&blocks, special.as_ref(), &table),
         }
     }));
 }
@@ -256,7 +279,7 @@ impl BlockTexture<'_> {
         )
     }
 }
-fn render_icons(blocks: &Image, table: &[[f32; 4]]) -> Vec<u8> {
+fn image_texture(blocks: &Image) -> BlockTexture<'_> {
     let size = blocks.texture_descriptor.size;
     let (width, height) = (size.width as usize, size.height as usize);
     let stride = match blocks.data_order {
@@ -265,7 +288,7 @@ fn render_icons(blocks: &Image, table: &[[f32; 4]]) -> Vec<u8> {
             .sum(),
         TextureDataOrder::MipMajor => width * height * 4,
     };
-    let texture = BlockTexture {
+    BlockTexture {
         data: blocks.data.as_deref().unwrap_or(&[]),
         width,
         height,
@@ -278,7 +301,11 @@ fn render_icons(blocks: &Image, table: &[[f32; 4]]) -> Vec<u8> {
                 value
             }
         }),
-    };
+    }
+}
+fn render_icons(blocks: &Image, special: Option<&Image>, table: &[[f32; 4]]) -> Vec<u8> {
+    let texture = image_texture(blocks);
+    let special = special.map(image_texture);
     let rows = icon_count().div_ceil(ICON_COLUMNS);
     let grid_width = ICON_COLUMNS * ICON_SIZE;
     let mut grid = vec![0; ICON_BYTES * ICON_COLUMNS * rows];
@@ -287,7 +314,14 @@ fn render_icons(blocks: &Image, table: &[[f32; 4]]) -> Vec<u8> {
     for (index, &kind) in VoxelKind::itemizable().iter().enumerate() {
         icon.fill(Vec4::ZERO);
         depths.fill(f32::NEG_INFINITY);
-        render_icon(&texture, table, kind, &mut icon, &mut depths);
+        render_icon(
+            &texture,
+            special.as_ref(),
+            table,
+            kind,
+            &mut icon,
+            &mut depths,
+        );
         for (pixel, &color) in icon.iter().enumerate() {
             let offset = (((index / ICON_COLUMNS) * ICON_SIZE + pixel / ICON_SIZE) * grid_width
                 + (index % ICON_COLUMNS) * ICON_SIZE
@@ -308,6 +342,7 @@ fn render_icons(blocks: &Image, table: &[[f32; 4]]) -> Vec<u8> {
 }
 fn render_icon(
     texture: &BlockTexture,
+    special: Option<&BlockTexture>,
     table: &[[f32; 4]],
     kind: VoxelKind,
     pixels: &mut [Vec4],
@@ -315,6 +350,15 @@ fn render_icon(
 ) {
     let mut quads = Vec::new();
     models::visit_quads(kind.default_state(), IVec3::ZERO, |q| quads.push(q.clone()));
+    let (min, max) = quads
+        .iter()
+        .flat_map(|q| q.positions)
+        .map(Vec3::from_array)
+        .fold((Vec3::splat(0.5), Vec3::splat(0.5)), |(min, max), p| {
+            (min.min(p), max.max(p))
+        });
+    let center = (min + max) * 0.5;
+    let scale = (max - min).max_element().max(1.0);
     let eye = Vec3::ONE.normalize();
     quads.sort_unstable_by(|a, b| {
         let depth = |q: &models::ModelQuad| {
@@ -345,7 +389,7 @@ fn render_icon(
             normal.abs().dot(Vec3::new(0.6, 1.0, 0.8)).min(1.0)
         };
         let points = q.positions.map(|p| {
-            let p = Vec3::from_array(p) - Vec3::splat(0.5);
+            let p = (Vec3::from_array(p) - center) / scale;
             Vec3::new(
                 (ISO_X * (p.x - p.z) / 1.04 + 1.0) * 0.5 * ICON_SIZE as f32,
                 ((0.5 * (p.x + p.z) - p.y) / 1.04 + 1.0) * 0.5 * ICON_SIZE as f32,
@@ -389,7 +433,13 @@ fn render_icon(
                     if z <= depths[index] + 1e-6 {
                         continue;
                     }
-                    let color = texture.sample(face[3] as u32, ua * w0 + ub * w1 + uc * w2);
+                    let layer = face[3] as u32;
+                    let bank = if layer & 4096 != 0 {
+                        special.unwrap_or(texture)
+                    } else {
+                        texture
+                    };
+                    let color = bank.sample(layer & 2047, ua * w0 + ub * w1 + uc * w2);
                     if color.w < if q.translucent { 0.004 } else { 0.5 } {
                         continue;
                     }

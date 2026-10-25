@@ -19,7 +19,7 @@ use std::sync::Arc;
 /// Packed model vertex, decoded by `model_vertex.wesl` (16 bytes instead of 48):
 /// - words 0-1: position as 15-bit fixed point per axis over `[-2, 30)` (1/1024 block),
 ///   octahedral normal (2 x 8 bits) and tint palette index (3 bits);
-/// - word 2: UV as two 16-bit unorms;
+/// - word 2: UV as two 16-bit fixed-point values in [-8, 8), at 1/4096 precision;
 /// - word 3: model face-table slot (13 bits), corner light (12 bits), and water
 ///   flag plus column depth (5 bits).
 pub(crate) const ATTRIBUTE_MODEL: MeshVertexAttribute =
@@ -55,7 +55,13 @@ fn pack_vertex(position: [f32; 3], normal: [f32; 3], uv: [f32; 2], meta: [u32; 4
             as u32
     });
     let [nx, ny] = octahedral(Vec3::from_array(normal));
-    let [u, v] = uv.map(|value| (value.clamp(0.0, 1.0) * 65535.0).round() as u32);
+    let [u, v] = uv.map(|value| {
+        debug_assert!(
+            value.is_finite() && (-8.0..8.0).contains(&value),
+            "model UV must fit the packed range"
+        );
+        ((value + 8.0) * 4096.0).round().clamp(0.0, 65535.0) as u32
+    });
     let [slot, light, tint, flags] = meta;
     debug_assert!(slot < 1 << 13, "model face slot must fit in 13 bits");
     [
@@ -95,8 +101,14 @@ impl ModelGeometry {
             }; 4],
         );
         self.uv.extend(q.uv);
-        self.metadata
-            .extend(light.map(|l| [slot.unwrap_or(q.texture), u32::from(l), tint, 0]));
+        self.metadata.extend(light.map(|l| {
+            [
+                slot.unwrap_or(q.texture),
+                u32::from(l),
+                tint,
+                u32::from(q.effect) | if q.light_emission == 15 { 4 } else { 0 },
+            ]
+        }));
         self.indices
             .extend([first, first + 1, first + 2, first, first + 2, first + 3]);
     }
@@ -133,13 +145,17 @@ impl ModelGeometry {
             for &v in quad {
                 let mut position = TerrainGeometry::position(v);
                 if v[1] & (1 << 16) != 0 {
-                    position.y -= 1.0 / 8.0;
+                    position.y -= 1.0 / 9.0;
                 }
                 self.positions.push(position.to_array());
                 self.normals.push(normal.to_array());
                 self.uv.push([0.0; 2]);
-                self.metadata
-                    .push([0, v[1] & 4095, 0, 1 | (((v[1] >> 12) & 15) << 1)]);
+                self.metadata.push([
+                    models::fluid_texture(1, false),
+                    v[1] & 4095,
+                    0,
+                    1 | (((v[1] >> 12) & 15) << 1),
+                ]);
             }
             let base = u32::from(indices[0]);
             self.indices
@@ -256,19 +272,27 @@ pub(super) struct ModelSection {
     pub(super) translucent: Option<ModelGeometry>,
 }
 
-pub(super) fn section(padded: &Padded, origin: IVec3) -> ModelSection {
+pub(super) fn section(
+    padded: &Padded,
+    origin: IVec3,
+    neighborhood: &super::meshing::ChunkNeighborhood,
+    base: i32,
+) -> ModelSection {
     let (mut opaque, mut cutout, mut translucent) = (
         ModelGeometry::default(),
         ModelGeometry::default(),
         ModelGeometry::default(),
     );
     let fallback = models::texture_names().is_empty();
+    let mut water_depths = Vec::new();
     for y in 0..SECTION_HEIGHT {
+        water_depths.clear();
         for z in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
                 let local = IVec3::new(x, y, z);
                 let sample = padded.get(local);
-                if !sample.model() {
+                let uneven_water = super::fluids::explicit_water(padded, local);
+                if !sample.model() && !uneven_water {
                     continue;
                 }
                 let world = origin + local;
@@ -278,7 +302,7 @@ pub(super) fn section(padded: &Padded, origin: IVec3) -> ModelSection {
                     (u16::from(sample.light >> 4) * 4) | (u16::from(sample.light & 15) * 4 << 6);
                 // Quads of one cell share few directions: light each exposed face once.
                 let mut face_lights: [Option<[u16; 4]>; 6] = [None; 6];
-                models::visit_quads(sample.state, world, |q| {
+                let mut emit = |q: &ModelQuad| {
                     let cull = IVec3::from_array(q.cull);
                     if cull != IVec3::ZERO {
                         let adjacent = padded.get(local + cull);
@@ -325,17 +349,62 @@ pub(super) fn section(padded: &Padded, origin: IVec3) -> ModelSection {
                                 .round() as u16;
                             value.max((light >> shift) & 63)
                         };
-                        channel(0) | (channel(6) << 6)
+                        channel(0) | (channel(6).max(u16::from(q.light_emission) * 4) << 6)
                     });
                     if q.translucent {
                         let cell = local.as_vec3() + Vec3::splat(0.5);
                         translucent.translucent_quad(q, translation, face, tint, cell);
+                        if q.effect & 1 != 0 {
+                            let depths = if n.y > 0.0 {
+                                // Use the same column samples, rounding and corner order
+                                // as greedy water, including across section boundaries.
+                                let stride = CHUNK_SIZE + 2;
+                                if water_depths.is_empty() {
+                                    water_depths.extend((-1..=CHUNK_SIZE).flat_map(|z| {
+                                        (-1..=CHUNK_SIZE).map(move |x| {
+                                            super::meshing::water_depth(
+                                                neighborhood,
+                                                IVec3::new(x, base + y, z),
+                                            )
+                                        })
+                                    }));
+                                }
+                                let corners =
+                                    super::meshing::surface_depth(&water_depths, stride, x, z);
+                                q.positions.map(|p| {
+                                    corners[match (p[0] >= 0.5, p[2] >= 0.5) {
+                                        (false, false) => 0,
+                                        (false, true) => 1,
+                                        (true, true) => 2,
+                                        (true, false) => 3,
+                                    }]
+                                })
+                            } else {
+                                [15; 4]
+                            };
+                            let start = translucent.metadata.len() - 4;
+                            for (metadata, depth) in
+                                translucent.metadata[start..].iter_mut().zip(depths)
+                            {
+                                metadata[3] = 1 | (u32::from(depth) << 1);
+                            }
+                        }
                     } else if models::opaque_texture(q.texture) {
                         opaque.quad(q, translation, face, tint, None);
                     } else {
                         cutout.quad(q, translation, face, tint, None);
                     }
-                });
+                };
+                if sample.fluid() >> 4 == 2 {
+                    super::fluids::visit(padded, local, &mut emit);
+                } else {
+                    if sample.model() {
+                        models::visit_quads(sample.state, world, &mut emit);
+                    }
+                    if uneven_water {
+                        super::fluids::visit(padded, local, emit);
+                    }
+                }
             }
         }
     }

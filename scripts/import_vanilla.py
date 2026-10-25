@@ -12,7 +12,10 @@ import json
 import sys
 import zipfile
 from PIL import Image
-from vanilla_models import import_models
+from vanilla_models import import_models, deduplicate_models
+from vanilla_textures import texture_banks
+from vanilla_coverage import coverage
+from vanilla_tints import apply_tints
 
 VERSION = sys.argv[1] if len(sys.argv) > 1 else '26.3'
 MANIFEST = 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json'
@@ -87,39 +90,25 @@ def main():
     import_breaking_textures(jar, sha1)
     from import_player_assets import import_player_assets
     import_player_assets(jar)
-    def texture(name):
-        tile = Image.open(BytesIO(jar.read(f'assets/minecraft/textures/block/{name}.png'))).convert('RGBA')
-        # Animated/oversized textures: keep the first 16x16 frame.
-        return tile.crop((0, 0, 16, 16))
     DEST.mkdir(parents=True, exist_ok=True)
-    models, model_textures = import_models(jar)
+    models, _ = import_models(jar)
+    apply_tints(jar, models)
+    deduplicate_models(models)
+    models['coverage'] = coverage(models)
     models['minecraft'] = VERSION
     models['client_sha1'] = sha1
-    names = sorted(model_textures | {name for top, side, bottom, _ in BLOCKS.values() for name in (top, side, bottom)})
-    layers = {name: layer for layer, name in enumerate(names)}
-    if len(names) > 2048:
-        raise ValueError('block texture array exceeds the portable 2048-layer limit')
-    atlas = Image.new('RGBA', (16, 16 * len(names)))
-    # Layers without any transparent texel: their model quads skip alpha testing,
-    # which keeps early depth tests enabled on the GPU.
-    opaque = [False] * len(names)
-    for name, layer in layers.items():
-        tile = texture(name)
-        if name == 'grass_block_side':
-            # The grass fringe is a grey overlay tinted by biome colour; bake plains.
-            overlay = texture('grass_block_side_overlay')
-            tinted = Image.new('RGBA', overlay.size)
-            tinted.putdata([(r * GRASS[0] // 255, g * GRASS[1] // 255, b * GRASS[2] // 255, a) for r, g, b, a in overlay.get_flattened_data()])
-            tile.alpha_composite(tinted)
-        opaque[layer] = min(tile.getchannel('A').getdata()) == 255
-        atlas.paste(tile, (0, layer * 16))
+    required = {name for top, side, bottom, _ in BLOCKS.values() for name in (top, side, bottom)}
+    required.update(["water_flow", "lava_flow"])
+    atlas, special_atlas, layers = texture_banks(jar, models, required, GRASS)
+    # All model families and timelines are resolved before publishing the cache.
     atlas.save(DEST / 'blocks_array.png')
-    for quads in models['models'].values():
-        for quad in quads:
-            quad['texture'] = layers[quad['texture']]
-    models['textures'] = names
-    models['opaque_textures'] = opaque
+    special_atlas.save(DEST / 'special_array.png')
     (DEST / 'models.json').write_text(json.dumps(models, separators=(',', ':')))
+    layer_count = atlas.height // 16
+    print(f"Imported {len(models['blocks'])} block definitions, {len(models['models'])} models, "
+          f"{layer_count} block texture layers, {models['special_layers']} special atlas pages, "
+          f"and {len(models['animations'])} GPU animation timelines")
+    print('Native registry coverage:', models['coverage'])
     # Still water keeps all its flipbook frames: a 16x512 strip of grey frames
     # tinted in the shader and cross-faded at the game's 10 frames per second.
     Image.open(BytesIO(jar.read('assets/minecraft/textures/block/water_still.png'))).convert('RGBA').save(DEST / 'water_still.png')
@@ -129,7 +118,7 @@ def main():
     for key, (top, side, bottom, color) in sorted(BLOCKS.items()):
         top_tint = tint(GRASS if key == 'grass' else color)
         entries.append(f'        "{key}": (top: {layers[top]}, side: {layers[side]}, bottom: {layers[bottom]}, tint_top: {top_tint}, tint_side: {tint(color)}, tint_bottom: {tint(color)}),')
-    (DEST / 'pack.ron').write_text(f'(\n    name: "Minecraft {VERSION}",\n    layers: {len(names)},\n    texture: "blocks_array.png",\n    blocks: {{\n' + '\n'.join(entries) + '\n    },\n)\n')
+    (DEST / 'pack.ron').write_text(f'(\n    name: "Minecraft {VERSION}",\n    layers: {layer_count},\n    texture: "blocks_array.png",\n    blocks: {{\n' + '\n'.join(entries) + '\n    },\n)\n')
     (DEST / 'source.json').write_text(json.dumps({'minecraft': VERSION, 'client_sha1': sha1}, indent=2) + '\n')
 
 if __name__ == '__main__':

@@ -1,0 +1,78 @@
+[
+  {
+    "blocks": [
+      "redstone_wire"
+    ],
+    "property": "power",
+    "palette": {
+      "0": "4c0000",
+      "1": "700000",
+      "2": "7a0000",
+      "3": "840000",
+      "4": "8e0000",
+      "5": "990000",
+      "6": "a30000",
+      "7": "ad0000",
+      "8": "b70000",
+      "9": "c10000",
+      "10": "cc0000",
+      "11": "d60000",
+      "12": "e00000",
+      "13": "ea0600",
+      "14": "f41b00",
+      "15": "ff3200"
+    }
+  },
+  {
+    "blocks": [
+      "melon_stem",
+      "pumpkin_stem"
+    ],
+    "property": "age",
+    "palette": {
+      "0": "00ff00",
+      "1": "20f704",
+      "2": "40ef08",
+      "3": "60e70c",
+      "4": "80df10",
+      "5": "a0d714",
+      "6": "c0cf18",
+      "7": "e0c71c"
+    }
+  },
+  {
+    "blocks": [
+      "attached_melon_stem",
+      "attached_pumpkin_stem"
+    ],
+    "indices": {
+      "0": "e0c71c"
+    }
+  },
+  {
+    "blocks": [
+      "pink_petals",
+      "wildflowers"
+    ],
+    "indices": {
+      "0": "ffffff",
+      "1": "91bd59"
+    }
+  },
+  {
+    "blocks": [
+      "water_cauldron"
+    ],
+    "indices": {
+      "0": "3f76e4"
+    }
+  },
+  {
+    "blocks": [
+      "leaf_litter"
+    ],
+    "colormap": "dry_foliage",
+    "temperature": 0.8,
+    "rainfall": 0.4
+  }
+]

@@ -64,6 +64,7 @@ const ABOVE_WORLD: Sample = Sample {
     info: CellInfo {
         appearance: 0,
         flags: cell::AIR,
+        fluid: 0,
     },
     light: FULL_SKY,
 };
@@ -72,6 +73,7 @@ const BELOW_WORLD: Sample = Sample {
     info: CellInfo {
         appearance: 0,
         flags: cell::AIR | cell::OCCLUDES,
+        fluid: 0,
     },
     light: 0,
 };
@@ -113,6 +115,10 @@ impl Sample {
         self.has(cell::WATER)
     }
     #[inline]
+    pub(super) fn fluid(&self) -> u8 {
+        self.info.fluid
+    }
+    #[inline]
     pub(super) fn model(&self) -> bool {
         self.has(cell::MODEL)
     }
@@ -123,7 +129,7 @@ impl Sample {
     }
     /// Whether a neighboring water face is enclosed by this solid material.
     #[inline]
-    fn hides_water(&self) -> bool {
+    pub(super) fn hides_water(&self) -> bool {
         self.has(cell::OCCLUDES | cell::WATER_OCCLUDES)
     }
 }
@@ -742,6 +748,8 @@ pub(crate) fn build_sections(
                 } = super::model_mesh::section(
                     padded,
                     neighborhood.origin + IVec3::Y * (index as i32 * SECTION_HEIGHT),
+                    neighborhood,
+                    index as i32 * SECTION_HEIGHT,
                 );
                 // Water only needs per-cell sort keys when it shares the
                 // translucent mesh with ice, glass or other translucent models.
@@ -974,7 +982,7 @@ const WATER_DEPTH_MAX: u16 = 15;
 const WATER_LOWERED: u32 = 1 << 16;
 
 /// Water cells stacked downward from `top` (inclusive), capped at [`WATER_DEPTH_CAP`].
-fn water_depth(neighborhood: &ChunkNeighborhood, top: IVec3) -> u8 {
+pub(super) fn water_depth(neighborhood: &ChunkNeighborhood, top: IVec3) -> u8 {
     (0..WATER_DEPTH_CAP as i32)
         .take_while(|&below| neighborhood.sample(top - IVec3::Y * below).water())
         .count() as u8
@@ -982,7 +990,7 @@ fn water_depth(neighborhood: &ChunkNeighborhood, top: IVec3) -> u8 {
 
 /// Corner depths of a surface face, averaged over the four columns around each
 /// corner so shores fade smoothly into shallow water.
-fn surface_depth(depths: &[u8], stride: i32, x: i32, z: i32) -> [u16; 4] {
+pub(super) fn surface_depth(depths: &[u8], stride: i32, x: i32, z: i32) -> [u16; 4] {
     // Axis 1 corners walk u = z then v = x, matching `face_light`.
     [(0, 0), (1, 0), (1, 1), (0, 1)].map(|(cz, cx)| {
         let mut sum = 0u32;
@@ -1044,6 +1052,12 @@ fn water_mesh(
                         }
                     };
                     let water_cell = IVec3::from_array(water_cell);
+                    // Uneven surfaces use the shared explicit fluid builder. Broad
+                    // flat oceans retain greedy merging and compact water vertices.
+                    if super::fluids::explicit_water(padded, water_cell) {
+                        mask[i + j * width] = None;
+                        continue;
+                    }
                     let mut values = face_light(padded, outside, axis);
                     let surface = axis == 1 && positive;
                     let depth = if surface {

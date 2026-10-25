@@ -24,6 +24,8 @@ pub(crate) struct VoxelMaterial {
     /// [`super::texture_pack::TexturePack::cube_face_buffer`]: switching packs swaps it without remeshing.
     #[storage(2, read_only)]
     pub(crate) faces: Handle<ShaderBuffer>,
+    #[storage(10, read_only)]
+    pub(crate) animations: Handle<ShaderBuffer>,
 }
 
 /// Alpha-tested greedy cubes (leaves), with the terrain's bindings and shaders.
@@ -39,6 +41,8 @@ pub(crate) struct VoxelCutoutMaterial {
     pub(crate) blocks: Handle<Image>,
     #[storage(2, read_only)]
     pub(crate) faces: Handle<ShaderBuffer>,
+    #[storage(10, read_only)]
+    pub(crate) animations: Handle<ShaderBuffer>,
 }
 
 fn voxel_vertex_layout(
@@ -143,9 +147,10 @@ pub(crate) struct WaterMaterial {
 
 impl WaterMaterial {
     /// Uses the vanilla flipbook when imported, otherwise the shader's procedural texture.
-    pub(crate) fn load(asset_server: &AssetServer) -> Self {
+    pub(crate) fn load(asset_server: &AssetServer, surface_water: bool) -> Self {
         let mut material = Self::default();
-        if crate::asset_directory().join(WATER_STILL_PATH).is_file() {
+        material.settings.animation.z = if surface_water { 1.0 } else { 0.0 };
+        if !surface_water && crate::asset_directory().join(WATER_STILL_PATH).is_file() {
             material.still = Some(block_texture(
                 asset_server,
                 WATER_STILL_PATH,
@@ -257,6 +262,11 @@ pub(crate) struct ModelMaterial {
     #[texture(6)]
     #[sampler(7)]
     pub cracks: Option<Handle<Image>>,
+    #[texture(8, dimension = "2d_array")]
+    #[sampler(9)]
+    pub special: Option<Handle<Image>>,
+    #[storage(10, read_only)]
+    pub animations: Handle<ShaderBuffer>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ModelMaterialKey {
@@ -280,19 +290,28 @@ pub(crate) enum ModelBlend {
 }
 
 impl ModelMaterial {
+    pub fn set_water(&mut self, water: &WaterMaterial) {
+        self.water = water.settings;
+        self.still = water.still.clone();
+    }
     pub fn new(
         blocks: Handle<Image>,
         faces: Handle<ShaderBuffer>,
         water: &WaterMaterial,
         blend: ModelBlend,
+        special: Option<Handle<Image>>,
+        animations: Handle<ShaderBuffer>,
     ) -> Self {
+        let settings = water.settings;
         Self {
             blocks,
             faces,
-            water: water.settings,
+            water: settings,
             still: water.still.clone(),
             blend,
             cracks: None,
+            special,
+            animations,
         }
     }
 }
@@ -345,6 +364,7 @@ impl Material for ModelMaterial {
         if key.bind_group_data.breaking
             && let Some(fragment) = &mut descriptor.fragment
         {
+            descriptor.vertex.shader_defs.push("MODEL_BREAKING".into());
             fragment.shader_defs.push("MODEL_BREAKING".into());
         }
         if key.bind_group_data.breaking
@@ -442,12 +462,17 @@ mod tests {
             &TexturePack::load(TexturePackId::Vanilla).texture_path,
             TexturePack::load(TexturePackId::Vanilla).layers,
         );
+        let animations = app
+            .world_mut()
+            .resource_mut::<Assets<ShaderBuffer>>()
+            .add(ShaderBuffer::from(vec![[0_u32; 4]]));
         let terrain = app
             .world_mut()
             .resource_mut::<Assets<VoxelMaterial>>()
             .add(VoxelMaterial {
                 blocks: texture,
                 faces: faces.clone(),
+                animations,
             });
         let water = app
             .world_mut()

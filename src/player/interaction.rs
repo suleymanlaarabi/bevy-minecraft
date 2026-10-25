@@ -206,8 +206,7 @@ fn update_breaking(
     commands.set_voxel_state(target.destroy, state.removed());
     if let Some(other) = crate::voxel::rules::paired_position(state, target.destroy)
         && let Some(other_state) = voxel_world.state(other)
-        && other_state.kind() == kind
-        && other_state.property("half") != state.property("half")
+        && crate::voxel::rules::paired_states(state, other_state)
     {
         commands.set_voxel_state(other, other_state.removed());
     }

@@ -185,8 +185,7 @@ impl VoxelKind {
     }
 
     pub const fn is_itemizable(self) -> bool {
-        self.block().item_id != 0
-            && !matches!(self, Self::Air | Self::Water | Self::Lava | Self::Bedrock)
+        self.block().item_id != 0 && !matches!(self, Self::Air | Self::Water | Self::Lava)
     }
     pub const fn is_solid(self) -> bool {
         !self.block().default_state.collision_shapes.is_empty()

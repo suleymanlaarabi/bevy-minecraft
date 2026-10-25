@@ -1,3 +1,4 @@
+import super::surface_animation::surface_frame;
 import super::voxel_vertex::{PackedVertex, decode, block_uv, face_index, transform_uv, face_layer, face_transform};
 import bevy_pbr::render::mesh_functions;
 
@@ -37,7 +38,7 @@ fn vertex(in: PackedVertex) -> PrepassVaryings {
 @if(VOXEL_CUTOUT) {
     let packed = u32(faces[face_index(vertex)].a + 0.5);
     out.uv = transform_uv(block_uv(vertex.position, vertex.direction >> 1u), face_transform(packed));
-    out.layer = face_layer(packed);
+    out.layer = surface_frame(face_layer(packed)).current;
 }
     return out;
 }

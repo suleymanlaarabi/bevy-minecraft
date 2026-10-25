@@ -96,18 +96,7 @@ impl ItemKind {
     }
 
     pub fn from_voxel(kind: VoxelKind) -> Option<Self> {
-        let kind = match kind.name() {
-            "wall_torch" => VoxelKind::from_key("torch").unwrap(),
-            "soul_wall_torch" => VoxelKind::from_key("soul_torch").unwrap(),
-            "redstone_wall_torch" => VoxelKind::from_key("redstone_torch").unwrap(),
-            "kelp_plant" => VoxelKind::from_key("kelp").unwrap(),
-            _ => kind,
-        };
-        if kind.is_itemizable() {
-            Some(Self::Block(kind))
-        } else {
-            None
-        }
+        crate::voxel::rules::item_form(kind).map(Self::Block)
     }
 }
 

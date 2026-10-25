@@ -1,3 +1,4 @@
+import super::surface_animation::surface_frame;
 import super::block_lighting::voxel_diffuse;
 import super::voxel_fog::apply_voxel_fog;
 import super::voxel_vertex::{PackedVertex, decode, face_normal, block_uv, face_index, transform_uv, face_layer, face_transform};
@@ -23,6 +24,8 @@ struct VoxelVaryings {
     @location(3) light: vec2<f32>,
     @location(4) @interpolate(flat) layer: u32,
     @location(5) @interpolate(flat) tint: vec3<f32>,
+    @location(6) @interpolate(flat) next_layer: u32,
+    @location(7) @interpolate(flat) frame_mix: f32,
 }
 
 @vertex
@@ -48,7 +51,10 @@ fn vertex(in: PackedVertex) -> VoxelVaryings {
     let face = faces[face_index(vertex)];
     let packed = u32(face.a + 0.5);
     out.uv = transform_uv(block_uv(vertex.position, vertex.direction >> 1u), face_transform(packed));
-    out.layer = face_layer(packed);
+    let frame = surface_frame(face_layer(packed));
+    out.layer = frame.current;
+    out.next_layer = frame.next;
+    out.frame_mix = frame.blend;
     out.tint = face.rgb;
     return out;
 }
@@ -57,7 +63,12 @@ fn vertex(in: PackedVertex) -> VoxelVaryings {
 fn fragment(
     in: VoxelVaryings,
 ) -> FragmentOutput {
-    var texture_color = textureSample(blocks, blocks_sampler, in.uv, in.layer);
+    let uv_dx = dpdx(in.uv);
+    let uv_dy = dpdy(in.uv);
+    var texture_color = textureSampleGrad(blocks, blocks_sampler, in.uv, in.layer, uv_dx, uv_dy);
+    if in.frame_mix > 0.0 {
+        texture_color = mix(texture_color, textureSampleGrad(blocks, blocks_sampler, in.uv, in.next_layer, uv_dx, uv_dy), in.frame_mix);
+    }
 @if(VOXEL_CUTOUT) {
     // Leaves and other cutout cubes: real holes, alpha-tested like vanilla.
     if texture_color.a < 0.5 { discard; }

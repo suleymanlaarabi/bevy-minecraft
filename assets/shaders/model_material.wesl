@@ -1,3 +1,4 @@
+import super::surface_animation::surface_frame;
 import super::block_lighting::{sky_visibility, voxel_diffuse};
 import super::voxel_fog::{apply_voxel_fog, sky_reflection};
 import super::model_vertex::{ModelVertex, ModelVaryings, decode_model};
@@ -15,6 +16,8 @@ import bevy_pbr::render::{
 var blocks: texture_2d_array<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(1)
 var blocks_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(8) var special: texture_2d_array<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(9) var special_sampler: sampler;
 // Tint in RGB and texture layer in A, indexed by model slot, then the tint
 // palette. Read once per vertex: a per-fragment lookup would put a dependent
 // storage read before every texture sample.
@@ -49,7 +52,10 @@ fn vertex(in: ModelVertex) -> ModelVaryings {
     out.uv = model.uv;
     out.light = model.light;
     let face = faces[model.slot];
-    out.layer = u32(face.a + 0.5);
+    let frame = surface_frame(u32(face.a + 0.5));
+    out.layer = frame.current;
+    out.next_layer = frame.next;
+    out.frame_mix = frame.blend;
     out.tint = face.rgb;
     // Palette entry 0 is white: most vertices skip the second storage read.
     if model.tint != 0u {
@@ -57,6 +63,11 @@ fn vertex(in: ModelVertex) -> ModelVaryings {
     }
     out.flags = model.flags;
     out.depth = f32((model.flags >> 1u) & 15u) / 15.0;
+@if(MODEL_BREAKING) {
+    // Each model quad owns four vertices, independent of the atlas UV rectangle.
+    let corner = in.vertex_index & 3u;
+    out.crack_uv = vec2<f32>(select(0.0, 1.0, corner == 1u || corner == 2u), select(0.0, 1.0, corner < 2u));
+}
     return out;
 }
 // Integer hash: stable at any world coordinate, unlike fract(sin()) hashes.
@@ -131,7 +142,21 @@ fn shade_water(
     let facing = clamp(dot(pbr_input.N, pbr_input.V), 0.0, 1.0);
     // Viewed from inside the water, the surface keeps a flat, slightly darker look.
     let fresnel = select(0.0, pow(1.0 - facing, 5.0), is_front);
-    let albedo = water.tint.rgb * water_texture(world, normal) * mix(1.0, 0.75, in.depth);
+    var texture_value = 0.0;
+    if water.animation.z > 0.0 {
+        var plane = world.xz;
+        if abs(normal.x) > 0.5 { plane = vec2<f32>(world.z, -world.y); }
+        if abs(normal.z) > 0.5 { plane = vec2<f32>(world.x, -world.y); }
+        // Project in world space so merged ocean faces and explicit shores meet.
+        let uv = fract(plane);
+        texture_value = textureSampleLevel(blocks, blocks_sampler, uv, i32(in.layer), 0.0).r;
+        if in.frame_mix > 0.0 {
+            texture_value = mix(texture_value, textureSampleLevel(blocks, blocks_sampler, uv, i32(in.next_layer), 0.0).r, in.frame_mix);
+        }
+    } else {
+        texture_value = water_texture(world, normal);
+    }
+    let albedo = water.tint.rgb * texture_value * mix(1.0, 0.75, in.depth);
     let opacity = select(water.alpha.z, mix(water.alpha.x, water.alpha.y, in.depth), is_front);
     pbr_input.material.base_color = vec4<f32>(
         select(albedo * 0.8, albedo, is_front),
@@ -159,7 +184,15 @@ fn fragment(
     let uv_dx = dpdx(in.uv);
     let uv_dy = dpdy(in.uv);
     if (in.flags & 1u) != 0u { return shade_water(in, is_front); }
-    let texture_color = textureSampleGrad(blocks, blocks_sampler, in.uv, in.layer, uv_dx, uv_dy);
+    var texture_color: vec4<f32>;
+    if (in.layer & 4096u) != 0u {
+        texture_color = textureSampleGrad(special, special_sampler, in.uv, in.layer & 4095u, uv_dx, uv_dy);
+    } else {
+        texture_color = textureSampleGrad(blocks, blocks_sampler, in.uv, in.layer, uv_dx, uv_dy);
+        if in.frame_mix > 0.0 {
+            texture_color = mix(texture_color, textureSampleGrad(blocks, blocks_sampler, in.uv, in.next_layer, uv_dx, uv_dy), in.frame_mix);
+        }
+    }
     // Opaque pipelines never discard, so the GPU keeps early depth tests. Only the
     // double-sided translucent pipeline sees back faces.
 @if(MODEL_BLEND) {
@@ -172,7 +205,7 @@ fn fragment(
     if texture_color.a < 0.5 { discard; }
 }
 @if(MODEL_BREAKING) {
-    let crack = textureSampleGrad(cracks, cracks_sampler, in.uv, uv_dx, uv_dy);
+    let crack = textureSampleGrad(cracks, cracks_sampler, in.crack_uv, dpdx(in.crack_uv), dpdy(in.crack_uv));
     var breaking_out: FragmentOutput;
     // Bevy's Multiply blend is dst * src.rgb + dst * (1 - src.a).
     // Premultiply so transparent texels leave the lit block unchanged and
@@ -180,12 +213,28 @@ fn fragment(
     breaking_out.color = vec4<f32>(crack.rgb * crack.a, crack.a);
     return breaking_out;
 }
-    let albedo = texture_color.rgb * in.tint;
+    var albedo = texture_color.rgb * in.tint;
+    if (in.flags & 2u) != 0u {
+        // Layered, world-stable star field. Only portal surfaces pay this cost.
+        let plane = in.world_position.xz + in.world_position.yy * 0.37;
+        var stars = vec3<f32>(0.015, 0.035, 0.05);
+        for (var layer = 0u; layer < 4u; layer += 1u) {
+            let scale = 12.0 + f32(layer) * 9.0;
+            let point = plane * scale + vec2<f32>(globals.time * (0.11 + f32(layer) * 0.03), f32(layer) * 31.0);
+            let cell = floor(point);
+            let seed = hash(vec3<i32>(vec2<i32>(cell), i32(layer)));
+            let center = vec2<f32>(seed, fract(seed * 19.7));
+            let distance = length(fract(point) - center);
+            let star = (1.0 - smoothstep(0.015, 0.09, distance)) * step(0.78, seed);
+            stars += star * mix(vec3<f32>(0.04, 0.45, 0.37), vec3<f32>(0.5, 0.7, 0.85), seed);
+        }
+        albedo = stars + albedo * 0.2;
+    }
     let normal = normalize(select(-in.world_normal, in.world_normal, is_front));
     var out: FragmentOutput;
     out.color = apply_voxel_fog(
         vec4<f32>(
-            voxel_diffuse(albedo, normal, in.world_position, in.position.xy, in.light),
+            select(voxel_diffuse(albedo, normal, in.world_position, in.position.xy, in.light), albedo, (in.flags & 4u) != 0u),
             texture_color.a,
         ),
         in.world_position.xyz,

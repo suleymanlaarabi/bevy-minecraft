@@ -141,8 +141,15 @@ transitions; explicit static review remains required.
 
 ## Remaining boundaries
 
-Native states drive shapes, collisions and targeting, while vanilla ticking,
-block-entity-specific renderers, simulation of block state changes, a pause menu,
-and networking remain separate work. Fast terrain stays the default for new
+Native states drive shapes, collisions, targeting, and indexed rendering recipes.
+Official specialized models are extracted headlessly at import time and assembled
+through shared transforms; the game has no Java dependency or per-block render
+systems. Equal geometry and deterministic multipart assemblies share immutable
+quad lists. Materials share animation timelines and texture banks; static
+surfaces bypass animation reads and fluid family/amount fits in the existing
+four-byte state classification record.
+
+Vanilla ticking, block-entity contents and decoration data, gameplay-driven model
+animations, a pause menu, and networking remain separate work. Fast terrain stays the default for new
 worlds; users may explicitly choose Vanilla at creation, and saves retain that
 choice permanently.

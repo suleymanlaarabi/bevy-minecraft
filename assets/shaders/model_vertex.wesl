@@ -2,6 +2,7 @@ import bevy_render::utils::octahedral_decode_signed;
 // Decodes the packed model vertex written by `model_mesh::pack_vertex`.
 struct ModelVertex {
     @builtin(instance_index) instance_index: u32,
+    @builtin(vertex_index) vertex_index: u32,
     @location(0) data: vec4<u32>,
 }
 struct ModelVaryings {
@@ -14,6 +15,9 @@ struct ModelVaryings {
     @location(5) @interpolate(flat) tint: vec3<f32>,
     @location(6) @interpolate(flat) flags: u32,
     @location(7) depth: f32,
+    @location(8) @interpolate(flat) next_layer: u32,
+    @location(9) @interpolate(flat) frame_mix: f32,
+    @if(MODEL_BREAKING) @location(10) crack_uv: vec2<f32>,
 }
 
 struct DecodedModel {
@@ -48,7 +52,7 @@ fn decode_model(data: vec4<u32>) -> DecodedModel {
     let normal = vec2<u32>(data.y >> 13u, data.y >> 21u) & vec2<u32>(255u);
     out.normal = octahedral_decode_signed(vec2<f32>(normal) / 254.0 * 2.0 - 1.0);
     out.tint = data.y >> 29u;
-    out.uv = vec2<f32>(vec2<u32>(data.z, data.z >> 16u) & vec2<u32>(65535u)) / 65535.0;
+    out.uv = vec2<f32>(vec2<u32>(data.z, data.z >> 16u) & vec2<u32>(65535u)) / 4096.0 - 8.0;
     out.slot = data.w & 8191u;
     let light = (data.w >> 13u) & 4095u;
     out.light = vec2<f32>(vec2<u32>(light, light >> 6u) & vec2<u32>(63u)) / 60.0;
