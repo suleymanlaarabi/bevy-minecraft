@@ -409,7 +409,10 @@ fn report_voxel_diagnostics(
     let loaded = chunks.iter().count();
     let building = builds.iter().count();
     let modified = chunks.iter().filter(|chunk| chunk.modified).count();
-    let dirty_chunks = chunks.iter().filter(|chunk| chunk.dirty_sections != 0).count();
+    let dirty_chunks = chunks
+        .iter()
+        .filter(|chunk| chunk.dirty_sections != 0)
+        .count();
     let queued = dirty_chunks.saturating_sub(building);
     let ready = loaded.saturating_sub(dirty_chunks);
     let frames: Vec<_> = diagnostics.frames_ms.iter().copied().collect();
@@ -425,7 +428,10 @@ fn report_voxel_diagnostics(
     info!(
         "voxel: loaded={loaded} ready={ready} pending={} building={building} queued={queued} section_meshes={} modified={modified} frame_ms[p50={:.2} p95={:.2} p99={:.2}] generation_ms[p50={:.2} p95={:.2}] meshing_ms[p50={:.2} p95={:.2}] collider_ms[p50={:.2} p95={:.2}] generated={} built={} avg_vertices={} avg_triangles={}",
         pending.len(),
-        sections.iter().map(ChunkSections::mesh_count).sum::<usize>(),
+        sections
+            .iter()
+            .map(ChunkSections::mesh_count)
+            .sum::<usize>(),
         percentile(&frames, 0.50),
         percentile(&frames, 0.95),
         percentile(&frames, 0.99),

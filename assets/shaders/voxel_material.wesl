@@ -1,29 +1,59 @@
 import super::block_lighting::{sky_visibility, block_irradiance};
 import super::voxel_fog::apply_voxel_fog;
+import super::voxel_vertex::{PackedVertex, decode, face_normal, block_uv, face_index};
 import bevy_pbr::render::{
-    forward_io::{VertexOutput, FragmentOutput},
+    forward_io::FragmentOutput,
+    mesh_functions,
     mesh_view_bindings as view_bindings,
     mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
     shadows,
+    view_transformations::position_world_to_clip,
 };
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0)
 var blocks: texture_2d_array<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(1)
 var blocks_sampler: sampler;
+// Tint in RGB and texture layer in A, indexed by `face_index`.
+@group(constants::MATERIAL_BIND_GROUP) @binding(2)
+var<storage, read> faces: array<vec4<f32>>;
+
+struct VoxelVaryings {
+    @builtin(position) position: vec4<f32>,
+    @location(0) world_position: vec4<f32>,
+    @location(1) world_normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) light: vec2<f32>,
+    @location(4) @interpolate(flat) face: u32,
+}
+
+@vertex
+fn vertex(in: PackedVertex) -> VoxelVaryings {
+    let vertex = decode(in.voxel);
+    let world_from_local = mesh_functions::get_world_from_local(in.instance_index);
+    var out: VoxelVaryings;
+    out.world_position = mesh_functions::mesh_position_local_to_world(
+        world_from_local,
+        vec4<f32>(vertex.position, 1.0),
+    );
+    out.position = position_world_to_clip(out.world_position.xyz);
+    out.world_normal = mesh_functions::mesh_normal_local_to_world(
+        face_normal(vertex.direction),
+        in.instance_index,
+    );
+    out.uv = block_uv(vertex.position, vertex.direction >> 1u);
+    out.light = vertex.light;
+    out.face = face_index(vertex);
+    return out;
+}
 
 @fragment
 fn fragment(
-    in: VertexOutput,
+    in: VoxelVaryings,
 ) -> FragmentOutput {
-@if(VERTEX_COLORS)
-    let layer = u32(in.color.a + 0.5);
-@if(VERTEX_COLORS)
-    let tint = in.color.rgb;
-@if(!VERTEX_COLORS)
-    let layer = 0u;
-@if(!VERTEX_COLORS)
-    let tint = vec3<f32>(1.0);
+    let face = faces[in.face];
+    let layer = u32(face.a + 0.5);
+    let tint = face.rgb;
 
     var texture_color = textureSample(blocks, blocks_sampler, in.uv, layer);
     // Terrain is opaque: close leaf cutouts (any layer with alpha) with a dark tone.
@@ -35,10 +65,7 @@ fn fragment(
     }
     let albedo = texture_color.rgb * tint;
     let normal = normalize(in.world_normal);
-@if(VERTEX_UVS_B)
-    let voxel_light = in.uv_b;
-@if(!VERTEX_UVS_B)
-    let voxel_light = vec2<f32>(1.0, 0.0);
+    let voxel_light = in.light;
     let sky = sky_visibility(voxel_light);
     var irradiance = view_bindings::lights.ambient_color.rgb * sky
         + block_irradiance(voxel_light);

@@ -20,11 +20,16 @@ pub use material::TexturePackId;
 use material::WaterMaterial;
 pub(crate) use material::{TexturePack, VoxelMaterial};
 pub(crate) use meshing::build_block_item_mesh;
+
+/// Where the sun's `DirectionalLight` sits, looking at the origin. Shadow meshes keep
+/// only the faces turned toward it: remesh every chunk if this ever changes.
+pub(crate) const SUN_POSITION: Vec3 = Vec3::new(100.0, 200.0, 100.0);
+/// Render layer of depth-only terrain: drawn into the sun's shadow maps, never by cameras.
+pub(crate) const SHADOW_LAYER: usize = 1;
 pub(crate) use rebuild::VoxelAssets;
 use rebuild::{
     apply_texture_pack, cleanup_removed_chunk, mark_changed_chunks, poll_builds,
-    poll_chunk_colliders, prepare_assets, request_chunk_colliders, set_voxel,
-    start_changed_builds,
+    poll_chunk_colliders, prepare_assets, request_chunk_colliders, set_voxel, start_changed_builds,
 };
 use streaming::{
     ChunkIndex, PendingChunks, StoredChunks, StreamOffsets, StreamState, poll_chunk_generations,

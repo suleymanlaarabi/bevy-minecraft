@@ -8,7 +8,7 @@ use crate::{
     inventory::{ItemKind, ItemStack, PlayerInventory},
     player::Player,
     spatial::GameLayer,
-    voxel::{TexturePack, VoxelAssets, VoxelKind, build_block_item_mesh},
+    voxel::{VoxelAssets, VoxelKind, build_block_item_mesh},
 };
 
 const PICKUP_DELAY: Duration = Duration::from_millis(350);
@@ -70,8 +70,7 @@ impl Plugin for DroppedItemPlugin {
             .add_systems(PostStartup, prepare_dropped_item_meshes)
             .add_systems(
                 Update,
-                (animate_dropped_item_visuals, refresh_dropped_item_meshes)
-                    .run_if(in_state(GameState::Game)),
+                animate_dropped_item_visuals.run_if(in_state(GameState::Game)),
             )
             .add_systems(
                 PostUpdate,
@@ -86,9 +85,9 @@ impl Plugin for DroppedItemPlugin {
     }
 }
 
+/// Block meshes only store block kinds: texture packs apply through the material.
 fn prepare_dropped_item_meshes(
     mut meshes: ResMut<Assets<Mesh>>,
-    texture_pack: Res<TexturePack>,
     mut assets: ResMut<DroppedItemAssets>,
 ) {
     for kind in VoxelKind::ITEMIZABLE {
@@ -96,7 +95,7 @@ fn prepare_dropped_item_meshes(
         assets
             .meshes
             .entry(item)
-            .or_insert_with(|| meshes.add(build_block_item_mesh(kind, &texture_pack)));
+            .or_insert_with(|| meshes.add(build_block_item_mesh(kind)));
     }
 }
 
@@ -132,32 +131,24 @@ fn spawn_dropped_item(
             DespawnOnExit(GameState::Game),
         ))
         .id();
+    let visual = commands
+        .spawn((
+            DroppedItemVisual {
+                phase: event.position.x * 0.73 + event.position.z * 0.37,
+            },
+            Transform::from_scale(Vec3::splat(DROP_VISUAL_SIZE)),
+            Visibility::default(),
+            ChildOf(root),
+        ))
+        .id();
+    // The block mesh spans 0..1: center it on the spinning visual.
     commands.spawn((
-        DroppedItemVisual {
-            phase: event.position.x * 0.73 + event.position.z * 0.37,
-        },
         Mesh3d(mesh.clone()),
         MeshMaterial3d(voxel_assets.terrain.clone()),
-        Transform::from_scale(Vec3::splat(DROP_VISUAL_SIZE)),
-        ChildOf(root),
+        Transform::from_translation(Vec3::splat(-0.5)),
+        ChildOf(visual),
         NotShadowCaster,
     ));
-}
-
-fn refresh_dropped_item_meshes(
-    texture_pack: Res<TexturePack>,
-    assets: Res<DroppedItemAssets>,
-    mut meshes: ResMut<Assets<Mesh>>,
-) {
-    if !texture_pack.is_changed() {
-        return;
-    }
-    for (&item, handle) in &assets.meshes {
-        let ItemKind::Block(kind) = item;
-        if let Some(mut mesh) = meshes.get_mut(handle) {
-            *mesh = build_block_item_mesh(kind, &texture_pack);
-        }
-    }
 }
 
 fn animate_dropped_item_visuals(

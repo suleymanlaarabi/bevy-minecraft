@@ -5,15 +5,21 @@ use bevy::{
         ImageAddressMode, ImageArrayLayout, ImageFilterMode, ImageLoaderSettings, ImageSampler,
         ImageSamplerDescriptor,
     },
-    pbr::{ExtendedMaterial, Material, MaterialExtension},
+    mesh::MeshVertexBufferLayoutRef,
+    pbr::{ExtendedMaterial, Material, MaterialExtension, MaterialPipeline, MaterialPipelineKey},
     prelude::*,
-    render::render_resource::{AsBindGroup, ShaderType},
+    render::{
+        render_resource::{
+            AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+        },
+        storage::ShaderBuffer,
+    },
     shader::ShaderRef,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
 
-use super::data::VoxelKind;
+use super::{data::VoxelKind, meshing::ATTRIBUTE_VOXEL};
 
 fn default_texture_layers() -> u32 {
     9
@@ -229,13 +235,38 @@ impl TexturePack {
             [config.tint_side.0, config.tint_side.1, config.tint_side.2]
         }
     }
+
+    /// `(tint, layer)` of every block face, indexed by `kind * 3 + slot` with slots
+    /// top, side and bottom, as read by `voxel_material.wesl`.
+    fn face_table(&self) -> Vec<[f32; 4]> {
+        VoxelKind::ALL
+            .iter()
+            .flat_map(|&kind| {
+                [(1, true), (0, true), (1, false)].map(|(axis, positive)| {
+                    if self.config(kind).is_none() {
+                        return [0.0; 4];
+                    }
+                    let [r, g, b] = self.texture_tint(kind, axis, positive);
+                    [r, g, b, self.texture_layer(kind, axis, positive) as f32]
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn face_buffer(&self) -> ShaderBuffer {
+        ShaderBuffer::from(self.face_table())
+    }
 }
 
+/// Terrain in the packed `ATTRIBUTE_VOXEL` format, textured from the pack's array.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 pub(crate) struct VoxelMaterial {
     #[texture(0, dimension = "2d_array")]
     #[sampler(1)]
     pub(crate) blocks: Handle<Image>,
+    /// [`TexturePack::face_buffer`]: switching packs swaps it without remeshing.
+    #[storage(2, read_only)]
+    pub(crate) faces: Handle<ShaderBuffer>,
 }
 
 #[derive(Clone, Copy, Debug, Reflect, ShaderType)]
@@ -317,8 +348,31 @@ pub(crate) fn block_texture(asset_server: &AssetServer, path: &str, layers: u32)
 }
 
 impl Material for VoxelMaterial {
+    fn vertex_shader() -> ShaderRef {
+        "shaders/voxel_material.wesl".into()
+    }
+
     fn fragment_shader() -> ShaderRef {
         "shaders/voxel_material.wesl".into()
+    }
+
+    fn prepass_vertex_shader() -> ShaderRef {
+        "shaders/voxel_prepass.wesl".into()
+    }
+
+    fn specialize(
+        _pipeline: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        // Main pass and shadow prepass read the same packed vertex.
+        descriptor.vertex.buffers = vec![
+            layout
+                .0
+                .get_layout(&[ATTRIBUTE_VOXEL.at_shader_location(0)])?,
+        ];
+        Ok(())
     }
 }
 
@@ -411,6 +465,10 @@ mod tests {
             .world()
             .resource::<AssetServer>()
             .load("shaders/water_material.wesl");
+        let faces = app
+            .world_mut()
+            .resource_mut::<Assets<ShaderBuffer>>()
+            .add(TexturePack::load(TexturePackId::default()).face_buffer());
         let texture = block_texture(
             app.world().resource::<AssetServer>(),
             &TexturePack::load(TexturePackId::Vanilla).texture_path,
@@ -419,7 +477,10 @@ mod tests {
         let terrain = app
             .world_mut()
             .resource_mut::<Assets<VoxelMaterial>>()
-            .add(VoxelMaterial { blocks: texture });
+            .add(VoxelMaterial {
+                blocks: texture,
+                faces: faces.clone(),
+            });
         let water = app
             .world_mut()
             .resource_mut::<Assets<WaterMaterial>>()
@@ -430,16 +491,20 @@ mod tests {
                 },
                 extension: default(),
             });
-        let pack = TexturePack::load(TexturePackId::default());
-        let block = super::super::meshing::build_block_item_mesh(VoxelKind::Stone, &pack);
+        let block = super::super::meshing::build_block_item_mesh(VoxelKind::Stone);
         let mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(block);
         app.world_mut().spawn((
-            Mesh3d(mesh.clone()),
+            Mesh3d(mesh),
             MeshMaterial3d(terrain),
             Transform::from_xyz(-0.7, 0.0, 0.0),
         ));
+        // Water keeps the standard vertex layout.
+        let water_mesh = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(Cuboid::default());
         app.world_mut().spawn((
-            Mesh3d(mesh),
+            Mesh3d(water_mesh),
             MeshMaterial3d(water),
             Transform::from_xyz(0.7, 0.0, 0.0),
         ));

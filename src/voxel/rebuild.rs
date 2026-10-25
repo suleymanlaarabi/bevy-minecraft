@@ -1,5 +1,5 @@
 use super::{
-    ChunkVoxels, SetVoxel, VoxelChunk, VoxelSettings, VoxelViewer,
+    ChunkVoxels, SHADOW_LAYER, SetVoxel, VoxelChunk, VoxelSettings, VoxelViewer,
     generation::WorldGenerator,
     material::{TexturePack, VoxelMaterial, WaterMaterial, WaterMaterialExtension, block_texture},
     meshing::{ChunkNeighborhood, build_sections},
@@ -7,9 +7,12 @@ use super::{
 };
 use avian3d::prelude::*;
 use bevy::{
+    camera::visibility::RenderLayers,
     light::{NotShadowCaster, NotShadowReceiver},
+    mesh::Indices,
     platform::collections::HashSet,
     prelude::*,
+    render::storage::ShaderBuffer,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
 #[cfg(feature = "dev")]
@@ -26,6 +29,7 @@ pub(crate) fn prepare_assets(
     settings: Option<Res<crate::settings::GraphicsSettings>>,
     mut voxel_materials: ResMut<Assets<VoxelMaterial>>,
     mut water_materials: ResMut<Assets<WaterMaterial>>,
+    mut buffers: ResMut<Assets<ShaderBuffer>>,
 ) {
     let pack = TexturePack::load(
         settings
@@ -35,9 +39,10 @@ pub(crate) fn prepare_assets(
             }),
     );
     let blocks = block_texture(&asset_server, &pack.texture_path, pack.layers);
+    let faces = buffers.add(pack.face_buffer());
     commands.insert_resource(pack);
     commands.insert_resource(VoxelAssets {
-        terrain: voxel_materials.add(VoxelMaterial { blocks }),
+        terrain: voxel_materials.add(VoxelMaterial { blocks, faces }),
         water: water_materials.add(WaterMaterial {
             base: StandardMaterial {
                 // The shader computes the tint and opacity from WaterSettings.
@@ -60,7 +65,7 @@ pub(crate) fn apply_texture_pack(
     mut texture_pack: Option<ResMut<TexturePack>>,
     voxel_assets: Option<ResMut<VoxelAssets>>,
     mut voxel_materials: ResMut<Assets<VoxelMaterial>>,
-    mut chunks: Query<&mut ChunkVoxels>,
+    mut buffers: ResMut<Assets<ShaderBuffer>>,
 ) {
     let (Some(texture_pack), Some(voxel_assets)) = (texture_pack.as_deref_mut(), voxel_assets)
     else {
@@ -73,14 +78,10 @@ pub(crate) fn apply_texture_pack(
     let next_pack = TexturePack::load(settings.texture_pack);
     if let Some(mut material) = voxel_materials.get_mut(&voxel_assets.terrain) {
         material.blocks = block_texture(&asset_server, &next_pack.texture_path, next_pack.layers);
+        // Meshes only store block kinds: the face table carries the pack's layers and tints.
+        material.faces = buffers.add(next_pack.face_buffer());
     }
     *texture_pack = next_pack;
-    // Layer assignments can differ between Faithful and the legacy packs.
-    // Advancing revisions also stops pending builds from restoring the previous mapping.
-    for mut chunk in &mut chunks {
-        let all = chunk.all_sections();
-        chunk.mark_sections(all);
-    }
 }
 
 /// Render sections of a chunk: one child entity per non-empty mesh.
@@ -88,13 +89,20 @@ pub(crate) fn apply_texture_pack(
 pub(crate) struct ChunkSections {
     terrain: Vec<Option<Entity>>,
     water: Vec<Option<Entity>>,
+    /// Depth-only terrain, seen by the sun's shadow maps and not by cameras.
+    shadow: Vec<Option<Entity>>,
     /// Neighbors (bit `slot` of a 3x3 grid) absent from the last applied build.
     pub(crate) missing_neighbors: u16,
 }
 
 impl ChunkSections {
     pub(crate) fn mesh_count(&self) -> usize {
-        self.terrain.iter().chain(&self.water).flatten().count()
+        self.terrain
+            .iter()
+            .chain(&self.water)
+            .chain(&self.shadow)
+            .flatten()
+            .count()
     }
 }
 
@@ -103,7 +111,7 @@ struct BuiltSection {
     index: usize,
     terrain: Option<Mesh>,
     water: Option<Mesh>,
-    casts_shadow: bool,
+    shadow: Option<Mesh>,
 }
 
 struct BuildOutput {
@@ -141,7 +149,11 @@ const UPLOAD_BUDGET_BYTES: usize = 2 << 20;
 const UPLOAD_BUDGET_SECTIONS: usize = 64;
 
 fn mesh_bytes(mesh: &Mesh) -> usize {
-    mesh.get_vertex_buffer_size() + mesh.indices().map_or(0, |indices| indices.len() * 4)
+    mesh.get_vertex_buffer_size()
+        + mesh.indices().map_or(0, |indices| match indices {
+            Indices::U16(indices) => indices.len() * 2,
+            Indices::U32(indices) => indices.len() * 4,
+        })
 }
 
 /// Squared distance to the viewer, with coordinates as a deterministic tie-break.
@@ -266,10 +278,8 @@ pub(crate) fn cleanup_removed_chunk(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn start_changed_builds(
     mut commands: Commands,
-    texture_pack: Res<TexturePack>,
     settings: Res<VoxelSettings>,
     index: Res<ChunkIndex>,
     viewer: Option<Single<&Transform, With<VoxelViewer>>>,
@@ -300,7 +310,7 @@ pub(crate) fn start_changed_builds(
             let neighborhood = neighborhood(chunk.position, voxels);
             commands
                 .entity(entity)
-                .insert(spawn_chunk_build(pool, neighborhood, voxels, &texture_pack));
+                .insert(spawn_chunk_build(pool, neighborhood, voxels));
         } else if available > 0 {
             let position = chunk.position;
             candidates.push((
@@ -321,7 +331,7 @@ pub(crate) fn start_changed_builds(
         let neighborhood = neighborhood(chunk.position, voxels);
         commands
             .entity(entity)
-            .insert(spawn_chunk_build(pool, neighborhood, voxels, &texture_pack));
+            .insert(spawn_chunk_build(pool, neighborhood, voxels));
     }
 }
 
@@ -329,33 +339,37 @@ fn spawn_chunk_build(
     pool: &AsyncComputeTaskPool,
     neighborhood: ChunkNeighborhood,
     voxels: &ChunkVoxels,
-    texture_pack: &TexturePack,
 ) -> ChunkBuild {
     let sections = voxels.dirty_sections;
     let revision = voxels.revision;
-    let texture_pack = texture_pack.clone();
     let task = pool.spawn(async move {
         #[cfg(feature = "dev")]
         let meshing_started = Instant::now();
-        let sections = build_sections(&neighborhood, sections, &texture_pack);
+        let sections = build_sections(&neighborhood, sections);
         #[cfg(feature = "dev")]
         let counts = sections
             .iter()
-            .flat_map(|section| section.terrain.iter().chain(&section.water))
-            .map(|geometry| geometry.counts())
+            .flat_map(|section| {
+                section
+                    .terrain
+                    .iter()
+                    .map(|geometry| geometry.counts())
+                    .chain(section.water.iter().map(|geometry| geometry.counts()))
+            })
             .fold((0, 0), |sum, counts| (sum.0 + counts.0, sum.1 + counts.1));
         let sections = sections
             .into_iter()
             .map(|section| BuiltSection {
                 index: section.index,
-                casts_shadow: section.casts_shadow,
                 terrain: section.terrain.map(|geometry| geometry.into_mesh()),
                 water: section.water.map(|geometry| geometry.into_mesh()),
+                shadow: section.shadow.map(|geometry| geometry.into_mesh()),
             })
             .collect::<Vec<_>>();
         let bytes = sections
             .iter()
-            .flat_map(|section| section.terrain.iter().chain(&section.water))
+            .flat_map(|section| [&section.terrain, &section.water, &section.shadow])
+            .flatten()
             .map(mesh_bytes)
             .sum();
         BuildOutput {
@@ -388,8 +402,7 @@ pub(crate) fn poll_builds(
     let (mut uploaded, mut meshes_applied) = (0, 0);
     for (entity, mut voxels, mut build, sections, edited) in &mut chunks {
         // Finished builds wait in their task until a later frame has budget.
-        if !edited
-            && (uploaded >= UPLOAD_BUDGET_BYTES || meshes_applied >= UPLOAD_BUDGET_SECTIONS)
+        if !edited && (uploaded >= UPLOAD_BUDGET_BYTES || meshes_applied >= UPLOAD_BUDGET_SECTIONS)
         {
             continue;
         }
@@ -416,31 +429,47 @@ pub(crate) fn poll_builds(
         let count = voxels.section_count();
         entities.terrain.resize(count, None);
         entities.water.resize(count, None);
+        entities.shadow.resize(count, None);
         entities.missing_neighbors = output.missing_neighbors;
         if let Some(assets) = assets.as_deref() {
             for section in output.sections {
                 let y = (section.index as i32 * super::data::SECTION_HEIGHT) as f32;
                 let terrain = section.terrain.map(|mesh| meshes.add(mesh));
                 let water = section.water.map(|mesh| meshes.add(mesh));
-                let slot = &mut entities.terrain[section.index];
-                update_section(&mut commands, slot, terrain, |commands, mesh| {
-                    commands
-                        .spawn((
-                            Mesh3d(mesh),
-                            MeshMaterial3d(assets.terrain.clone()),
-                            Transform::from_xyz(0.0, y, 0.0),
-                            ChildOf(entity),
-                        ))
-                        .id()
-                });
-                if let Some(terrain) = *slot {
-                    let mut terrain = commands.entity(terrain);
-                    if section.casts_shadow {
-                        terrain.try_remove::<NotShadowCaster>();
-                    } else {
-                        terrain.try_insert(NotShadowCaster);
-                    }
-                }
+                let shadow = section.shadow.map(|mesh| meshes.add(mesh));
+                update_section(
+                    &mut commands,
+                    &mut entities.terrain[section.index],
+                    terrain,
+                    |commands, mesh| {
+                        commands
+                            .spawn((
+                                Mesh3d(mesh),
+                                MeshMaterial3d(assets.terrain.clone()),
+                                Transform::from_xyz(0.0, y, 0.0),
+                                // The shadow entity below casts its shadow.
+                                NotShadowCaster,
+                                ChildOf(entity),
+                            ))
+                            .id()
+                    },
+                );
+                update_section(
+                    &mut commands,
+                    &mut entities.shadow[section.index],
+                    shadow,
+                    |commands, mesh| {
+                        commands
+                            .spawn((
+                                Mesh3d(mesh),
+                                MeshMaterial3d(assets.terrain.clone()),
+                                Transform::from_xyz(0.0, y, 0.0),
+                                RenderLayers::layer(SHADOW_LAYER),
+                                ChildOf(entity),
+                            ))
+                            .id()
+                    },
+                );
                 update_section(
                     &mut commands,
                     &mut entities.water[section.index],
@@ -503,31 +532,43 @@ pub(crate) fn request_chunk_colliders(
     bodies: Query<(&GlobalTransform, &RigidBody)>,
     chunks: Query<(&ChunkVoxels, Has<Collider>, Has<ColliderBuild>)>,
     loaded: Query<(Entity, &VoxelChunk), Or<(With<Collider>, With<ColliderBuild>)>>,
+    mut centers: Local<(Vec<IVec2>, Vec<IVec2>)>,
     mut near: Local<HashSet<IVec2>>,
     mut keep: Local<HashSet<IVec2>>,
 ) {
-    near.clear();
-    keep.clear();
-    for (transform, body) in &bodies {
-        if body.is_static() {
-            continue;
-        }
-        let center = settings.chunk_at(transform.translation());
-        for x in -COLLIDER_KEEP_RADIUS..=COLLIDER_KEEP_RADIUS {
-            for z in -COLLIDER_KEEP_RADIUS..=COLLIDER_KEEP_RADIUS {
-                let position = center + IVec2::new(x, z);
-                keep.insert(position);
-                if x.abs().max(z.abs()) <= COLLIDER_RADIUS {
-                    near.insert(position);
+    // The areas only change when a body enters another chunk.
+    let (previous, current) = &mut *centers;
+    current.clear();
+    current.extend(
+        bodies
+            .iter()
+            .filter(|(_, body)| !body.is_static())
+            .map(|(transform, _)| settings.chunk_at(transform.translation())),
+    );
+    current.sort_unstable_by_key(|position| (position.x, position.y));
+    current.dedup();
+    if current != previous {
+        std::mem::swap(current, previous);
+        near.clear();
+        keep.clear();
+        for &center in previous.iter() {
+            for x in -COLLIDER_KEEP_RADIUS..=COLLIDER_KEEP_RADIUS {
+                for z in -COLLIDER_KEEP_RADIUS..=COLLIDER_KEEP_RADIUS {
+                    let position = center + IVec2::new(x, z);
+                    keep.insert(position);
+                    if x.abs().max(z.abs()) <= COLLIDER_RADIUS {
+                        near.insert(position);
+                    }
                 }
             }
         }
-    }
-    for (entity, chunk) in &loaded {
-        if !keep.contains(&chunk.position) {
-            commands
-                .entity(entity)
-                .try_remove::<(Collider, RigidBody, ColliderBuild)>();
+        // Colliders are only requested near bodies, so none can leave `keep` meanwhile.
+        for (entity, chunk) in &loaded {
+            if !keep.contains(&chunk.position) {
+                commands
+                    .entity(entity)
+                    .try_remove::<(Collider, RigidBody, ColliderBuild)>();
+            }
         }
     }
     let pool = AsyncComputeTaskPool::get();
@@ -617,7 +658,6 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(TaskPoolPlugin::default())
             .insert_resource(VoxelSettings::default())
-            .insert_resource(TexturePack::load(super::super::TexturePackId::default()))
             .init_resource::<ChunkIndex>()
             .init_resource::<Assets<Mesh>>();
         let world = app.world_mut();
@@ -630,7 +670,9 @@ mod tests {
                 NeedsChunkBuild,
             ))
             .id();
-        world.resource_mut::<ChunkIndex>().insert(IVec2::ZERO, entity);
+        world
+            .resource_mut::<ChunkIndex>()
+            .insert(IVec2::ZERO, entity);
         world.run_system_once(start_changed_builds).unwrap();
         assert!(world.get::<ChunkBuild>(entity).is_some());
         // An edit while meshing makes the result stale.
@@ -653,7 +695,11 @@ mod tests {
         assert_eq!(world.get::<ChunkVoxels>(entity).unwrap().dirty_sections, 0);
         assert!(world.get::<NeedsChunkBuild>(entity).is_none());
         assert_eq!(
-            world.get::<ChunkSections>(entity).unwrap().missing_neighbors.count_ones(),
+            world
+                .get::<ChunkSections>(entity)
+                .unwrap()
+                .missing_neighbors
+                .count_ones(),
             8
         );
     }

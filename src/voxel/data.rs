@@ -247,7 +247,10 @@ impl ChunkVoxels {
             revision: 0,
             modified: false,
         };
-        assert!(voxels.section_count() <= 32, "chunk too tall for the section mask");
+        assert!(
+            voxels.section_count() <= 32,
+            "chunk too tall for the section mask"
+        );
         voxels.dirty_sections = voxels.all_sections();
         voxels
     }

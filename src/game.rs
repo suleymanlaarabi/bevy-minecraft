@@ -1,11 +1,17 @@
 use bevy::{
+    camera::visibility::RenderLayers,
     prelude::*,
     window::{CursorGrabMode, CursorOptions},
 };
 
 use crate::{
-    character::CharacterPlugin, dropped_item::DroppedItemPlugin, inventory::InventoryPlugin,
-    menu::GameMenuPlugin, player::PlayerPlugin, spatial::GameSpatialPlugin,
+    character::CharacterPlugin,
+    dropped_item::DroppedItemPlugin,
+    inventory::InventoryPlugin,
+    menu::GameMenuPlugin,
+    player::PlayerPlugin,
+    spatial::GameSpatialPlugin,
+    voxel::{SHADOW_LAYER, SUN_POSITION},
 };
 
 #[derive(Clone, Copy, Default, Eq, PartialEq, Debug, Hash, States)]
@@ -64,7 +70,9 @@ fn setup_game_environment(
             color: Color::srgb(1.0, 0.98, 0.94),
             ..default()
         },
-        Transform::from_xyz(100.0, 200.0, 100.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_translation(SUN_POSITION).looking_at(Vec3::ZERO, Vec3::Y),
+        // Lights the camera's layer and casts terrain shadows from the shadow layer.
+        RenderLayers::from_layers(&[0, SHADOW_LAYER]),
         DespawnOnExit(GameState::Game),
     ));
 

@@ -61,6 +61,9 @@ fn default_restitution() -> Restitution {
     GameCharacter,
     AutoJump,
     RigidBody::Dynamic,
+    // Physics ticks at 64 Hz: ease the position the camera follows between ticks.
+    // Rotation is driven by the mouse every frame and must not be eased.
+    TranslationInterpolation,
     Collider::cuboid(PLAYER_WIDTH, PLAYER_HEIGHT, PLAYER_WIDTH),
     LockedAxes::ROTATION_LOCKED,
     GravityScale(CHARACTER_GRAVITY_SCALE),

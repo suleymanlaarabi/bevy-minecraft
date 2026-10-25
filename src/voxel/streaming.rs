@@ -10,9 +10,9 @@ use bevy::{
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
-use std::{cmp::Reverse, collections::BinaryHeap};
 #[cfg(feature = "dev")]
 use std::time::{Duration, Instant};
+use std::{cmp::Reverse, collections::BinaryHeap};
 
 /// Copies of finished Pumpkin chunks in flight; Pumpkin itself does the generation.
 const MAX_PENDING_COPIES: usize = 16;
@@ -161,7 +161,10 @@ pub(crate) fn stream_chunks(
         let Some(entity) = state.pending_despawns.pop() else {
             break;
         };
-        despawned += sections.get(entity).map_or(1, ChunkSections::mesh_count).max(1);
+        despawned += sections
+            .get(entity)
+            .map_or(1, ChunkSections::mesh_count)
+            .max(1);
         commands.entity(entity).despawn();
     }
 
