@@ -55,8 +55,8 @@ struct BuiltSection {
     cutout: Option<Mesh>,
     models: Option<Mesh>,
     models_cutout: Option<Mesh>,
-    /// Mesh sorted for the eye at build time, its quads, and the eye cell it
-    /// was sorted for (`None` without an eye).
+    /// Mesh sorted for the view at build time, its quads, and the view key it
+    /// was sorted for (`None` without a view).
     translucent: Option<(
         Mesh,
         super::model_mesh::SortData,
@@ -152,10 +152,10 @@ pub(crate) fn start_changed_builds(
         return;
     }
     let available = max_pending_builds().saturating_sub(builds.iter().count());
-    // Translucent quads are sorted for the eye; the viewer stands in before spawn.
+    // Grid-cell order depends on the eye, not its orientation.
     let eye = camera
         .map(|camera| camera.translation())
-        .or(viewer.as_ref().map(|viewer| viewer.translation));
+        .or_else(|| viewer.as_ref().map(|viewer| viewer.translation));
     let center = viewer.map_or(IVec2::ZERO, |viewer| chunk_at(viewer.translation));
     let pool = AsyncComputeTaskPool::get();
     let neighborhood = |position: IVec2, voxels: &ChunkVoxels| {

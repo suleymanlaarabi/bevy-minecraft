@@ -157,6 +157,7 @@ impl VoxelState {
                 .collect()
         })[self.kind().index()]
     }
+    /// Translation of resource-pack models, which are unshifted block-local geometry.
     pub(crate) fn visual_offset(self, world: IVec3) -> Vec3 {
         let (horizontal, vertical) = self.offset_limits();
         if horizontal == 0.0 && vertical == 0.0 {
@@ -197,7 +198,7 @@ impl VoxelState {
         )
     }
     pub(crate) fn collision_boxes(self, world: IVec3) -> impl Iterator<Item = BlockBox> {
-        let delta = self.model_offset(world);
+        let delta = self.shape_offset(world);
         self.native()
             .collision_shapes
             .iter()
@@ -205,15 +206,16 @@ impl VoxelState {
     }
     /// Selection excludes the fluid shape that Pumpkin adds to its outline iterator.
     pub(crate) fn selection_boxes(self, world: IVec3) -> impl Iterator<Item = BlockBox> {
-        let delta = self.model_offset(world);
+        let delta = self.shape_offset(world);
         self.native()
             .outline_shapes
             .iter()
             .map(move |&id| BlockBox::from(COLLISION_SHAPES[id as usize]).translated(delta))
     }
-    /// Pumpkin's extracted shapes already include the offset at the origin. Obtain
-    /// the same delta for both model and outline from its position-aware iterator.
-    pub(crate) fn model_offset(self, world: IVec3) -> Vec3 {
+    /// Pumpkin's shapes were extracted at the origin, whose vanilla offset is
+    /// `(-h, -v, -h)` (its position hash is zero): undo that, then apply this
+    /// position's offset. `offset_limits` relies on the same relation.
+    fn shape_offset(self, world: IVec3) -> Vec3 {
         let (horizontal, vertical) = self.offset_limits();
         self.visual_offset(world) + Vec3::new(horizontal, vertical, horizontal)
     }

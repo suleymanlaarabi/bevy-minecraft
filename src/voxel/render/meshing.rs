@@ -42,9 +42,10 @@ struct LitFace {
     cell: Option<usize>,
 }
 impl LitFace {
-    fn new(face: Face, cell: usize) -> Self {
+    /// `per_cell` keeps even uniform faces from merging with their neighbors.
+    fn new(face: Face, cell: usize, per_cell: bool) -> Self {
         Self {
-            cell: (!face.2.iter().all(|&value| value == face.2[0])).then_some(cell),
+            cell: (per_cell || !face.2.iter().all(|&value| value == face.2[0])).then_some(cell),
             face,
         }
     }
@@ -119,6 +120,11 @@ impl Sample {
     #[inline]
     pub(super) fn occludes(&self) -> bool {
         self.has(cell::OCCLUDES)
+    }
+    /// Whether a neighboring water face is enclosed by this solid material.
+    #[inline]
+    fn hides_water(&self) -> bool {
+        self.has(cell::OCCLUDES | cell::WATER_OCCLUDES)
     }
 }
 
@@ -393,10 +399,121 @@ pub(crate) struct TerrainGeometry<I: TerrainIndex = u16> {
     pub(super) indices: Vec<I>,
 }
 
+// Packed section coordinates span 0..=16. Each grid line stores its existing
+// vertices in a bitset, so finding T-junctions requires no spatial searches.
+const EDGE_GRID: usize = 17;
+const _: () = assert!(CHUNK_SIZE < EDGE_GRID as i32 && SECTION_HEIGHT < EDGE_GRID as i32);
+
+struct EdgeVertices {
+    lines: [[u32; EDGE_GRID * EDGE_GRID]; 3],
+}
+
+impl EdgeVertices {
+    fn new(vertices: impl Iterator<Item = [u32; 2]>, padded: &Padded) -> Self {
+        let mut edges = Self {
+            lines: [[0; EDGE_GRID * EDGE_GRID]; 3],
+        };
+        for vertex in vertices {
+            edges.insert(grid_position(vertex));
+        }
+        // Neighbor sections mesh independently, so a long edge on a shared plane
+        // cannot know where the other side's corners fall. Both sides split at
+        // every point where faces of two sections meet: the eight cells around a
+        // point decide it, and every section sharing the point holds them all.
+        let dimensions = padded.dimensions.map(|size| size as u32);
+        for y in 0..=dimensions[1] {
+            for z in 0..=dimensions[2] {
+                let interior_row =
+                    (1..dimensions[1]).contains(&y) && (1..dimensions[2]).contains(&z);
+                // Interior rows only touch the boundary at their two ends.
+                let step = if interior_row { dimensions[0] as usize } else { 1 };
+                for x in (0..=dimensions[0]).step_by(step) {
+                    let point = [x, y, z];
+                    if shared_point(padded, point) {
+                        edges.insert(point);
+                    }
+                }
+            }
+        }
+        edges
+    }
+
+    fn insert(&mut self, point: [u32; 3]) {
+        for axis in 0..3 {
+            let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+            self.lines[axis][point[u] as usize + EDGE_GRID * point[v] as usize] |= 1 << point[axis];
+        }
+    }
+
+    fn splits(&self, a: [u32; 3], b: [u32; 3], axis: usize) -> u32 {
+        let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+        let points = self.lines[axis][a[u] as usize + EDGE_GRID * a[v] as usize];
+        let (low, high) = (a[axis].min(b[axis]), a[axis].max(b[axis]));
+        points & ((1 << high) - 1) & !((1 << (low + 1)) - 1)
+    }
+}
+
+/// Whether greedy faces of more than one section touch a section-boundary point.
+/// Every face containing the point lies between two of the eight cells around it,
+/// and belongs to the section of its solid cell.
+fn shared_point(padded: &Padded, point: [u32; 3]) -> bool {
+    let point = point.map(|coordinate| coordinate as i32);
+    let cell_at = |corner: usize| {
+        std::array::from_fn::<_, 3, _>(|axis| point[axis] - 1 + (corner >> axis & 1) as i32)
+    };
+    let samples: [Sample; 8] =
+        std::array::from_fn(|corner| padded.get(IVec3::from_array(cell_at(corner))));
+    let mut owner = None;
+    for corner in 0..8 {
+        let from = samples[corner];
+        if !from.has(cell::CUBE | cell::CUTOUT) {
+            continue;
+        }
+        let exposed = (0..3).any(|axis| !samples[corner ^ (1 << axis)].occludes());
+        if !exposed {
+            continue;
+        }
+        let position = cell_at(corner);
+        let section = (0..3).fold(0, |id, axis| {
+            let side = if position[axis] < 0 {
+                0
+            } else if position[axis] >= padded.dimensions[axis] {
+                2
+            } else {
+                1
+            };
+            id * 3 + side
+        });
+        match owner {
+            None => owner = Some(section),
+            Some(first) if first != section => return true,
+            Some(_) => {}
+        }
+    }
+    false
+}
+
+fn grid_position(vertex: [u32; 2]) -> [u32; 3] {
+    [vertex[0] & 31, vertex[0] >> 5 & 31, vertex[0] >> 10 & 31]
+}
+
+/// Face axis and whether the face points toward positive coordinates.
+pub(super) fn face_direction(vertex: [u32; 2]) -> (usize, bool) {
+    let direction = vertex[0] >> 15 & 7;
+    (direction as usize / 2, direction & 1 != 0)
+}
+
+struct EdgeIndices {
+    vertices: [u32; EDGE_GRID],
+    len: usize,
+}
+
 /// Index width of a [`TerrainGeometry`]. Opaque, shadow and water faces stay
 /// under 65 536 vertices per section (a checkerboard has 49 152), so they mesh
 /// straight to `u16`. Cutout cubes keep faces against each other and can
 /// exceed it: they mesh to `u32` and narrow when the vertex count allows it.
+/// Splitting rectangle edges adds at most the vertices of unmerged unit faces,
+/// so the opaque section bound still holds after removing T-junctions.
 pub(crate) trait TerrainIndex: Copy {
     fn new(index: u32) -> Self;
     fn into_indices(indices: Vec<Self>, vertices: usize) -> Indices;
@@ -432,11 +549,7 @@ impl<I: TerrainIndex> Default for TerrainGeometry<I> {
 
 impl TerrainGeometry {
     pub(super) fn position(vertex: [u32; 2]) -> Vec3 {
-        Vec3::new(
-            (vertex[0] & 31) as f32,
-            (vertex[0] >> 5 & 31) as f32,
-            (vertex[0] >> 10 & 31) as f32,
-        )
+        UVec3::from_array(grid_position(vertex)).as_vec3()
     }
 }
 
@@ -469,13 +582,97 @@ impl<I: TerrainIndex> TerrainGeometry<I> {
                 let [x, y, z] = point.map(|value| value as u32);
                 [x | y << 5 | z << 10 | face, u32::from(word1)]
             }));
-        let order = if positive {
-            [0, 1, 2, 0, 2, 3]
-        } else {
-            [0, 2, 1, 0, 3, 2]
+        self.push_triangle([first, first + 1, first + 2], positive);
+        self.push_triangle([first, first + 2, first + 3], positive);
+    }
+
+    /// Match long greedy edges to the short edges that meet them. Positions,
+    /// textures and depth planes remain exact; only the triangulation changes.
+    fn stitch_edges(&mut self, edges: &EdgeVertices) {
+        let original_vertices = self.vertices.len();
+        self.indices.clear();
+        for first in (0..original_vertices).step_by(4) {
+            let corners = std::array::from_fn::<_, 4, _>(|i| self.vertices[first + i]);
+            let points = corners.map(grid_position);
+            let (axis, positive) = face_direction(corners[0]);
+            let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+            let splits = [
+                edges.splits(points[0], points[1], u),
+                edges.splits(points[2], points[1], v),
+                edges.splits(points[2], points[3], u),
+                edges.splits(points[0], points[3], v),
+            ];
+            let first = first as u32;
+            if splits == [0; 4] {
+                self.push_triangle([first, first + 1, first + 2], positive);
+                self.push_triangle([first, first + 2, first + 3], positive);
+                continue;
+            }
+            // Nonuniform lighting is never merged beyond one cell, so every
+            // rectangle with an interior grid point has constant corner light.
+            debug_assert!(corners.iter().all(|vertex| vertex[1] == corners[0][1]));
+            let bottom = self.split_edge(first, first + 1, u, splits[0]);
+            let right = self.split_edge(first + 2, first + 1, v, splits[1]);
+            self.triangulate_chains(&bottom, &right, positive);
+            let top = self.split_edge(first + 2, first + 3, u, splits[2]);
+            let left = self.split_edge(first, first + 3, v, splits[3]);
+            self.triangulate_chains(&top, &left, positive);
+        }
+    }
+
+    fn split_edge(&mut self, first: u32, last: u32, axis: usize, mut splits: u32) -> EdgeIndices {
+        let start = self.vertices[first as usize];
+        let shift = axis * 5;
+        let descending =
+            grid_position(start)[axis] > grid_position(self.vertices[last as usize])[axis];
+        let mut edge = EdgeIndices {
+            vertices: [0; EDGE_GRID],
+            len: 1,
         };
-        self.indices
-            .extend(order.map(|index| I::new(first + index)));
+        edge.vertices[0] = first;
+        while splits != 0 {
+            let coordinate = if descending {
+                31 - splits.leading_zeros()
+            } else {
+                splits.trailing_zeros()
+            };
+            splits &= !(1 << coordinate);
+            edge.vertices[edge.len] = self.vertices.len() as u32;
+            edge.len += 1;
+            self.vertices
+                .push([(start[0] & !(31 << shift)) | coordinate << shift, start[1]]);
+        }
+        edge.vertices[edge.len] = last;
+        edge.len += 1;
+        edge
+    }
+
+    /// Each half-rectangle has two boundary chains meeting at one corner.
+    /// Advance along them alternately to include collinear boundary vertices
+    /// without degenerate triangles or introducing another T-junction inside.
+    fn triangulate_chains(&mut self, a: &EdgeIndices, b: &EdgeIndices, positive: bool) {
+        let (mut i, mut j) = (0, 0);
+        while i + 2 < a.len || j + 2 < b.len {
+            if i + 2 < a.len {
+                self.push_triangle([a.vertices[i], a.vertices[i + 1], b.vertices[j]], positive);
+                i += 1;
+            }
+            if j + 2 < b.len {
+                self.push_triangle([a.vertices[i], b.vertices[j + 1], b.vertices[j]], positive);
+                j += 1;
+            }
+        }
+        self.push_triangle(
+            [a.vertices[i], a.vertices[a.len - 1], b.vertices[j]],
+            positive,
+        );
+    }
+
+    fn push_triangle(&mut self, mut vertices: [u32; 3], positive: bool) {
+        if !positive {
+            vertices.swap(1, 2);
+        }
+        self.indices.extend(vertices.map(I::new));
     }
 
     pub(crate) fn into_mesh(self) -> Mesh {
@@ -542,12 +739,16 @@ pub(crate) fn build_sections(
                     padded,
                     neighborhood.origin + IVec3::Y * (index as i32 * SECTION_HEIGHT),
                 );
+                // Water only needs per-cell sort keys when it shares the
+                // translucent mesh with ice, glass or other translucent models.
+                let interleaved = translucent.is_some();
                 let water = water
                     .then(|| {
                         water_mesh(
                             padded,
                             neighborhood,
                             index as i32 * SECTION_HEIGHT,
+                            interleaved,
                             water_faces,
                             depths,
                         )
@@ -556,17 +757,35 @@ pub(crate) fn build_sections(
                 if let Some(water) = water {
                     translucent.get_or_insert_default().append_water(water);
                 }
+                let mut terrain = opaque
+                    .then(|| greedy_mesh::<u16>(padded, true, cell::CUBE, faces))
+                    .filter(|geometry| !geometry.is_empty());
+                let mut cutout = (opaque && padded.cutout)
+                    .then(|| greedy_mesh::<u32>(padded, true, cell::CUTOUT, faces))
+                    .filter(|geometry| !geometry.is_empty());
+                if terrain.is_some() || cutout.is_some() {
+                    // Share endpoints across material boundaries as well as faces
+                    // and orientations, including where leaves meet solid blocks.
+                    let vertices = terrain
+                        .iter()
+                        .flat_map(|geometry| geometry.vertices.iter())
+                        .chain(cutout.iter().flat_map(|geometry| geometry.vertices.iter()))
+                        .copied();
+                    let edges = EdgeVertices::new(vertices, padded);
+                    if let Some(terrain) = &mut terrain {
+                        terrain.stitch_edges(&edges);
+                    }
+                    if let Some(cutout) = &mut cutout {
+                        cutout.stitch_edges(&edges);
+                    }
+                }
                 SectionMeshes {
                     index,
                     models,
                     models_cutout,
                     translucent,
-                    terrain: opaque
-                        .then(|| greedy_mesh(padded, true, cell::CUBE, faces))
-                        .filter(|geometry| !geometry.is_empty()),
-                    cutout: (opaque && padded.cutout)
-                        .then(|| greedy_mesh(padded, true, cell::CUTOUT, faces))
-                        .filter(|geometry| !geometry.is_empty()),
+                    terrain,
+                    cutout,
                     shadow: (opaque && casts_shadow)
                         .then(|| shadow_mesh(padded, shadow))
                         .filter(|geometry| !geometry.is_empty()),
@@ -634,12 +853,12 @@ fn greedy_mesh<I: TerrainIndex>(
                     mask[negative_offset + index] = None;
                     if layer >= 0 && greedy_face(class, sa, sb) {
                         let face = Face(sa.info.appearance, true, light(cell, axis));
-                        mask[index] = Some(LitFace::new(face, index));
+                        mask[index] = Some(LitFace::new(face, index, false));
                     }
                     if layer + 1 < dimensions[axis] && greedy_face(class, sb, sa) {
                         cell[axis] -= 1;
                         let face = Face(sb.info.appearance, false, light(cell, axis));
-                        mask[negative_offset + index] = Some(LitFace::new(face, index));
+                        mask[negative_offset + index] = Some(LitFace::new(face, index, false));
                     }
                 }
             }
@@ -775,6 +994,7 @@ fn water_mesh(
     padded: &Padded,
     neighborhood: &ChunkNeighborhood,
     base: i32,
+    interleaved: bool,
     mask: &mut Vec<Option<(LitFace, bool)>>,
     depths: &mut Vec<u8>,
 ) -> Option<TerrainGeometry> {
@@ -799,15 +1019,16 @@ fn water_mesh(
                     let a = padded.get(IVec3::from_array(cell));
                     cell[axis] += 1;
                     let b = padded.get(IVec3::from_array(cell));
-                    // Only real air/fluid interfaces. No water plane inside a solid
-                    // ceiling, no interior faces, and no faces owned by a neighbor.
+                    // Only exposed water interfaces. Transparent solid cubes
+                    // also enclose water: their internal contact must not add
+                    // a reflective free surface behind ice or glass.
                     let (positive, water_cell, outside) = match (a.water(), b.water()) {
-                        (true, false) if layer >= 0 && !b.occludes() => {
+                        (true, false) if layer >= 0 && !b.hides_water() => {
                             let mut water_cell = cell;
                             water_cell[axis] -= 1;
                             (true, water_cell, cell)
                         }
-                        (false, true) if layer + 1 < dimensions[axis] && !a.occludes() => {
+                        (false, true) if layer + 1 < dimensions[axis] && !a.hides_water() => {
                             let mut outside = cell;
                             outside[axis] -= 1;
                             (false, cell, outside)
@@ -837,13 +1058,15 @@ fn water_mesh(
                     for (value, depth) in values.iter_mut().zip(depth) {
                         *value |= depth << WATER_DEPTH_SHIFT;
                     }
-                    // Top faces and the upper rim of exposed sides sit at the lowered level.
-                    let lowered =
-                        surface || (axis != 1 && !padded.get(water_cell + IVec3::Y).water());
-                    mask[i + j * width] = Some((
-                        LitFace::new(Face(0, positive, values), i + j * width),
-                        lowered,
-                    ));
+                    // Lower only a free surface. Water beneath a solid ceiling
+                    // fills up to it, including the upper rim of any exposed side.
+                    let above = padded.get(water_cell + IVec3::Y);
+                    let lowered = surface || (axis != 1 && !above.water() && !above.hides_water());
+                    let face = Face(0, positive, values);
+                    // Voxel-sized water faces can interleave with ice and glass:
+                    // even uniform neighbors keep their own depth keys.
+                    mask[i + j * width] =
+                        Some((LitFace::new(face, i + j * width, interleaved), lowered));
                 }
             }
             consume_mask(mask, width, height, |i, j, w, h, (face, lowered)| {
@@ -922,7 +1145,7 @@ mod tests {
         let uniform = Face(1, true, [60; 4]);
         let gradient = Face(1, true, [0, 20, 40, 60]);
         for (face, expected) in [(uniform, 1), (gradient, 2)] {
-            let mut mask = vec![Some(LitFace::new(face, 0)), Some(LitFace::new(face, 1))];
+            let mut mask = vec![Some(LitFace::new(face, 0, false)), Some(LitFace::new(face, 1, false))];
             let mut count = 0;
             consume_mask(&mut mask, 2, 1, |_, _, _, _, _| count += 1);
             assert_eq!(count, expected);

@@ -1,5 +1,5 @@
 import super::voxel_vertex::{PackedVertex, decode, block_uv, face_index, transform_uv, face_layer, face_transform};
-import bevy_pbr::render::{mesh_functions, view_transformations::position_world_to_clip};
+import bevy_pbr::render::mesh_functions;
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0)
 var blocks: texture_2d_array<f32>;
@@ -9,7 +9,7 @@ var blocks_sampler: sampler;
 var<storage, read> faces: array<vec4<f32>>;
 
 struct PrepassVaryings {
-    @builtin(position) position: vec4<f32>,
+    @invariant @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) @interpolate(flat) layer: u32,
     @location(2) @interpolate(linear) unclipped_depth: f32,
@@ -21,12 +21,12 @@ struct PrepassVaryings {
 fn vertex(in: PackedVertex) -> PrepassVaryings {
     let vertex = decode(in.voxel);
     let world_from_local = mesh_functions::get_world_from_local(in.instance_index);
-    let world_position = mesh_functions::mesh_position_local_to_world(
+    var out: PrepassVaryings;
+    // Match the forward pass without changing the geometry or biasing depth.
+    out.position = mesh_functions::mesh_position_local_to_clip(
         world_from_local,
         vec4<f32>(vertex.position, 1.0),
     );
-    var out: PrepassVaryings;
-    out.position = position_world_to_clip(world_position.xyz);
     out.unclipped_depth = out.position.z;
 @if(UNCLIPPED_DEPTH_ORTHO_EMULATION) {
     // Clamp depth to avoid clipping.

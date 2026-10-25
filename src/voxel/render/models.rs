@@ -67,6 +67,8 @@ pub(crate) mod cell {
     pub(crate) const CUTOUT: u8 = 1 << 4;
     /// Explicit model quads.
     pub(crate) const MODEL: u8 = 1 << 5;
+    /// Solid translucent cube: bounds water without hiding block faces or light.
+    pub(crate) const WATER_OCCLUDES: u8 = 1 << 6;
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -216,6 +218,11 @@ impl Appearances {
     }
 }
 
+fn translucent_kind(kind: VoxelKind) -> bool {
+    let name = kind.name();
+    matches!(name, "ice" | "frosted_ice") || name.contains("glass")
+}
+
 fn base_flags(state: VoxelState) -> u8 {
     let mut flags = 0;
     if state.native().is_air() {
@@ -226,6 +233,12 @@ fn base_flags(state: VoxelState) -> u8 {
     }
     if state.is_opaque_cube() {
         flags |= cell::OCCLUDES;
+    }
+    if state.native().is_full_cube() && translucent_kind(state.kind()) {
+        // An ice/water or glass/water contact is not an exposed water surface.
+        // Cache this separately: these blocks must still transmit light and
+        // show the geometry behind them, unlike ordinary opaque occluders.
+        flags |= cell::WATER_OCCLUDES;
     }
     flags
 }
@@ -501,7 +514,7 @@ fn fallback(state: VoxelState, world: IVec3, mut visit: impl FnMut(&ModelQuad)) 
         return;
     }
     let kind = state.kind();
-    let translucent = kind.name().contains("glass") || kind.name() == "ice";
+    let translucent = translucent_kind(kind);
     let mut any = false;
     for b in state
         .selection_boxes(world)
@@ -513,6 +526,7 @@ fn fallback(state: VoxelState, world: IVec3, mut visit: impl FnMut(&ModelQuad)) 
         )
     {
         any = true;
+        let full_cube = b.min == Vec3::ZERO && b.max == Vec3::ONE;
         for axis in 0..3 {
             let u = (axis + 1) % 3;
             let v = (axis + 2) % 3;
@@ -536,7 +550,12 @@ fn fallback(state: VoxelState, world: IVec3, mut visit: impl FnMut(&ModelQuad)) 
                     uv: [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
                     texture: fallback_slot(kind, axis, positive),
                     tinted: false,
-                    cull: [0; 3],
+                    // Full fallback cubes follow the imported models' neighbor culling.
+                    cull: if full_cube {
+                        normal.as_ivec3().to_array()
+                    } else {
+                        [0; 3]
+                    },
                     translucent,
                     shade_up: false,
                 });

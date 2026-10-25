@@ -3,11 +3,11 @@
 use super::{meshing::ATTRIBUTE_VOXEL, texture_pack::block_texture};
 use bevy::{
     mesh::MeshVertexBufferLayoutRef,
-    pbr::{Material, MaterialPipeline, MaterialPipelineKey},
+    pbr::{Material, MaterialPipeline, MaterialPipelineKey, MeshPipelineKey},
     prelude::*,
     render::{
         render_resource::{
-            AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+            AsBindGroup, Face, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
         },
         storage::ShaderBuffer,
     },
@@ -180,9 +180,22 @@ impl Material for VoxelMaterial {
         _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
+        key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        voxel_vertex_layout(descriptor, layout)
+        voxel_vertex_layout(descriptor, layout)?;
+        // Bevy's prepass defaults to drawing both sides, whereas the forward pass
+        // culls back faces. Camera coverage must match so invisible back faces do
+        // not reject visible terrain at grazing edges. Only directional shadow
+        // views stay two-sided: Bevy keys point and spot shadow views exactly like
+        // a perspective camera prepass, so they cull too. Voxel shadow meshes keep
+        // sun-facing faces only (`faces_sun`) and support no other caster anyway.
+        if !key
+            .mesh_key
+            .contains(MeshPipelineKey::UNCLIPPED_DEPTH_ORTHO)
+        {
+            descriptor.primitive.cull_mode = Some(Face::Back);
+        }
+        Ok(())
     }
 }
 

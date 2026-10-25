@@ -46,6 +46,15 @@ pub(super) fn catalog() -> io::Result<Vec<CatalogEntry>> {
         if !entry.file_type()?.is_dir() {
             continue;
         }
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(DELETING_PREFIX))
+        {
+            // Finish a deletion an earlier run was interrupted in.
+            let _ = std::fs::remove_dir_all(entry.path());
+            continue;
+        }
         let path = entry.path().join("world.sqlite3");
         if !path.exists() {
             continue;
@@ -73,6 +82,37 @@ pub(super) fn catalog() -> io::Result<Vec<CatalogEntry>> {
     });
     Ok(worlds)
 }
+
+pub(super) fn delete_world(path: &Path) -> io::Result<()> {
+    let folder = path.parent().ok_or_else(|| err("Invalid world path."))?;
+    // Only catalogued world folders directly inside the configured root may be removed.
+    if path.file_name().is_none_or(|name| name != "world.sqlite3")
+        || std::fs::symlink_metadata(folder)?.file_type().is_symlink()
+    {
+        return Err(err("Invalid world path."));
+    }
+    let folder = folder.canonicalize()?;
+    if folder.parent() != Some(root()?.canonicalize()?.as_path()) {
+        return Err(err("The world is outside the worlds directory."));
+    }
+    let name = folder
+        .file_name()
+        .ok_or_else(|| err("Invalid world path."))?;
+    let mut tombstone = std::ffi::OsString::from(DELETING_PREFIX);
+    tombstone.push(name);
+    let tombstone = folder.with_file_name(tombstone);
+    {
+        // Coordinate with open sessions in this process and other game instances.
+        // Renaming under the lock detaches the world atomically: a waiter that
+        // acquires the lock afterwards finds no lock file at the world's path.
+        let _lock = Database::lock(&folder)?;
+        std::fs::rename(&folder, &tombstone)?;
+    }
+    std::fs::remove_dir_all(tombstone)
+}
+
+/// Prefix of world folders detached by [`delete_world`] and not yet removed.
+const DELETING_PREFIX: &str = ".deleting-";
 
 pub(crate) struct Database {
     /// Writer for checkpoints and Pumpkin's cache.
@@ -155,15 +195,20 @@ impl Database {
     }
 
     fn lock(folder: &Path) -> io::Result<std::fs::File> {
+        let path = folder.join("world.lock");
         let file = std::fs::File::options()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(folder.join("world.lock"))?;
+            .open(&path)?;
         let started = std::time::Instant::now();
         loop {
             match file.try_lock() {
+                // The world may have been deleted while this waited for its lock.
+                Ok(()) if !path.exists() => {
+                    return Err(err("This world no longer exists."));
+                }
                 Ok(()) => return Ok(file),
                 Err(error) => {
                     let error: io::Error = error.into();
@@ -171,7 +216,7 @@ impl Database {
                         || started.elapsed() >= Duration::from_secs(5)
                     {
                         return Err(err(format!(
-                            "Cannot open this world (already in use or locking unavailable): {error}"
+                            "This world is in use by another session (or locking is unavailable): {error}"
                         )));
                     }
                     // The preceding session may still be finishing Pumpkin shutdown.

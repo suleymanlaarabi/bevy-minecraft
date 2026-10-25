@@ -17,6 +17,10 @@ use bevy::{
 struct WorldPage;
 #[derive(Component, Clone, Default)]
 struct WorldRow(usize);
+#[derive(Component, Clone, Default)]
+struct DeleteWorld(usize);
+#[derive(Component, Clone, Default)]
+struct CancelDelete;
 #[derive(Component, Clone, Copy, Default)]
 pub(super) enum Field {
     #[default]
@@ -41,6 +45,32 @@ fn button(label: impl Into<String>, variant: ButtonVariant) -> impl Scene {
     bsn! {
         @FeathersButton { @caption: bsn! { Text(label) ThemedText }, @variant: variant }
         Node { min_width: px(180), min_height: px(38) }
+    }
+}
+
+fn trash_icon() -> impl Scene {
+    let color = Color::srgb_u8(240, 116, 116);
+    bsn! {
+        Node { width: px(20), height: px(22), flex_shrink: 0.0 }
+        Pickable::IGNORE
+        Children [
+            Node { position_type: PositionType::Absolute, left: px(6), top: px(1), width: px(8), height: px(4), border: UiRect::all(px(2)) }
+            BorderColor::all(color)
+            Pickable::IGNORE
+            --
+            Node { position_type: PositionType::Absolute, left: px(1), top: px(5), width: px(18), height: px(2) }
+            BackgroundColor(color)
+            Pickable::IGNORE
+            --
+            Node { position_type: PositionType::Absolute, left: px(3), top: px(8), width: px(14), height: px(13), border: UiRect::all(px(2)), justify_content: JustifyContent::SpaceEvenly, padding: UiRect::vertical(px(2)) }
+            BorderColor::all(color)
+            Pickable::IGNORE
+            Children [
+                Node { width: px(2), height: percent(100) } BackgroundColor(color) Pickable::IGNORE
+                --
+                Node { width: px(2), height: percent(100) } BackgroundColor(color) Pickable::IGNORE
+            ]
+        ]
     }
 }
 
@@ -71,6 +101,47 @@ pub(super) fn replace_world_list(commands: &mut Commands, browser: &Browser) {
 }
 
 fn spawn_world_list(commands: &mut Commands, browser: &Browser) {
+    if let Some(path) = &browser.pending_delete {
+        let name = browser
+            .entries
+            .iter()
+            .find(|entry| &entry.path == path)
+            .and_then(|entry| entry.metadata.as_ref())
+            .map_or("Unreadable world", |metadata| metadata.name.as_str());
+        // Both buttons lock while the deletion runs.
+        let busy = browser.busy();
+        let disabled = || busy.then_some(bsn! { InteractionDisabled });
+        let (cancel_disabled, delete_disabled) = (disabled(), disabled());
+        commands.spawn_scene(bsn! {
+            @page(GameState::WorldSelect)
+            Children [
+                Text("Delete world?") ThemedText
+                --
+                Text({format!("Delete \"{name}\" and all its saved progress? This cannot be undone.")}) ThemedText
+                --
+                Text("") ThemedText BrowserStatus
+                --
+                Node { flex_direction: FlexDirection::Row, column_gap: px(12) }
+                Children [
+                    @button("Cancel", ButtonVariant::Normal) @cancel_disabled CancelDelete on(cancel_delete)
+                    --
+                    @button("Delete World", ButtonVariant::Primary) @delete_disabled on(confirm_delete)
+                ]
+            ]
+        });
+        commands.queue(|world: &mut World| {
+            if let Some(entity) = world
+                .query_filtered::<Entity, With<CancelDelete>>()
+                .iter(world)
+                .next()
+            {
+                world
+                    .resource_mut::<InputFocus>()
+                    .set(entity, bevy::input_focus::FocusCause::Navigated);
+            }
+        });
+        return;
+    }
     let rows: Vec<_> = browser.entries.iter().enumerate().map(|(index, entry)| {
         let caption = match &entry.metadata {
             Some(m) => format!("{}\nSeed: {}  ·  {}  ·  Last played: {}", m.name, m.seed, m.quality.label(), date(m.last_played)),
@@ -80,13 +151,23 @@ fn spawn_world_list(commands: &mut Commands, browser: &Browser) {
         let disabled = error.is_some().then_some(bsn! { InteractionDisabled });
         bsn! {
             @FeathersListRow
-            Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Start, row_gap: px(4), padding: UiRect::all(px(12)) }
+            Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(12), padding: UiRect::all(px(12)) }
             WorldRow(index)
             @disabled
             Children [
-                Text(caption) ThemedText
+                Node { flex_direction: FlexDirection::Column, flex_grow: 1.0, flex_basis: px(0), min_width: px(0), row_gap: px(4) }
+                Children [
+                    Text(caption) ThemedText
+                    --
+                    Text({error.unwrap_or_default()}) ThemedText
+                ]
                 --
-                Text({error.unwrap_or_default()}) ThemedText
+                @FeathersButton { @caption: bsn! { @trash_icon() }, @variant: ButtonVariant::Plain }
+                Node { width: px(38), height: px(38), flex_shrink: 0.0, align_items: AlignItems::Center, justify_content: JustifyContent::Center }
+                Name("Delete world")
+                AccessibleLabel::new("Delete world")
+                DeleteWorld(index)
+                on(request_delete)
             ]
         }
     }).collect();
@@ -118,6 +199,47 @@ fn spawn_world_list(commands: &mut Commands, browser: &Browser) {
             ]
         ]
     });
+}
+
+fn request_delete(
+    event: On<Activate>,
+    buttons: Query<&DeleteWorld>,
+    mut browser: ResMut<Browser>,
+    mut commands: Commands,
+) {
+    if !browser.idle() || browser.catalog_task.is_some() {
+        return;
+    }
+    let Ok(button) = buttons.get(event.entity) else {
+        return;
+    };
+    let Some(entry) = browser.entries.get(button.0) else {
+        return;
+    };
+    browser.pending_delete = Some(entry.path.clone());
+    browser.error = None;
+    replace_world_list(&mut commands, &browser);
+}
+
+fn confirm_delete(_: On<Activate>, mut browser: ResMut<Browser>, mut commands: Commands) {
+    if browser.busy() {
+        return;
+    }
+    let Some(path) = browser.pending_delete.clone() else {
+        return;
+    };
+    browser.error = None;
+    browser.delete_task =
+        Some(IoTaskPool::get().spawn(async move { storage::delete_world(&path) }));
+    replace_world_list(&mut commands, &browser);
+}
+
+fn cancel_delete(_: On<Activate>, mut browser: ResMut<Browser>, mut commands: Commands) {
+    if browser.busy() {
+        return;
+    }
+    browser.pending_delete = None;
+    replace_world_list(&mut commands, &browser);
 }
 
 pub(super) fn create_page(mut commands: Commands, mut browser: ResMut<Browser>) {
@@ -169,17 +291,17 @@ pub(super) fn create_page(mut commands: Commands, mut browser: ResMut<Browser>) 
 }
 
 fn create_world(_: On<Activate>, browser: Res<Browser>, mut next: ResMut<NextState<GameState>>) {
-    if browser.open_task.is_none() {
+    if !browser.busy() {
         next.set(GameState::WorldCreate);
     }
 }
 fn back_to_menu(_: On<Activate>, browser: Res<Browser>, mut next: ResMut<NextState<GameState>>) {
-    if browser.open_task.is_none() {
+    if !browser.busy() {
         next.set(GameState::Menu);
     }
 }
 fn back_to_worlds(_: On<Activate>, browser: Res<Browser>, mut next: ResMut<NextState<GameState>>) {
-    if browser.open_task.is_none() {
+    if !browser.busy() {
         next.set(GameState::WorldSelect);
     }
 }
@@ -206,7 +328,7 @@ fn toggle_quality(
     children: Query<&Children>,
     mut texts: Query<&mut Text>,
 ) {
-    if browser.open_task.is_some() {
+    if browser.busy() {
         return;
     }
     browser.quality = match browser.quality {
@@ -275,7 +397,7 @@ pub(super) fn validate_form(
             text.0 = value.into();
         }
     }
-    let disabled = error.is_some() || browser.open_task.is_some();
+    let disabled = error.is_some() || browser.busy();
     for (entity, was_disabled) in &buttons {
         if disabled != was_disabled {
             if disabled {
@@ -293,7 +415,9 @@ pub(super) fn refresh_status(
     if !browser.is_changed() {
         return;
     }
-    let message = if browser.open_task.is_some() {
+    let message = if browser.delete_task.is_some() {
+        "Deleting world…"
+    } else if browser.open_task.is_some() {
         "Opening world…"
     } else {
         browser.error.as_deref().unwrap_or("")
@@ -307,10 +431,15 @@ pub(super) fn refresh_status(
 pub(super) fn navigate_back(
     keyboard: Res<ButtonInput<KeyCode>>,
     state: Res<State<GameState>>,
-    browser: Res<Browser>,
+    mut browser: ResMut<Browser>,
     mut next: ResMut<NextState<GameState>>,
+    mut commands: Commands,
 ) {
-    if !keyboard.just_pressed(KeyCode::Escape) || browser.open_task.is_some() {
+    if !keyboard.just_pressed(KeyCode::Escape) || browser.busy() {
+        return;
+    }
+    if *state.get() == GameState::WorldSelect && browser.pending_delete.take().is_some() {
+        replace_world_list(&mut commands, &browser);
         return;
     }
     match state.get() {

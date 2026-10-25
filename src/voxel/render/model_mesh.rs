@@ -38,6 +38,8 @@ pub(crate) struct ModelGeometry {
     /// Face-table slot, corner light, tint palette index and water flags.
     pub metadata: Vec<[u32; 4]>,
     pub indices: Vec<u32>,
+    /// Owning cell centers for translucent quads only, before any visual offsets.
+    sort_cells: Vec<Vec3>,
 }
 
 /// Octahedral encoding mapped to 0..=254, so axis-aligned normals stay exact.
@@ -98,6 +100,18 @@ impl ModelGeometry {
         self.indices
             .extend([first, first + 1, first + 2, first, first + 2, first + 3]);
     }
+    /// A translucent quad and the cell it sorts with, kept in step by construction.
+    fn translucent_quad(
+        &mut self,
+        q: &ModelQuad,
+        offset: Vec3,
+        light: [u16; 4],
+        tint: u8,
+        cell: Vec3,
+    ) {
+        self.quad(q, offset, light, tint, None);
+        self.sort_cells.push(cell);
+    }
     pub fn append_water(&mut self, water: TerrainGeometry) {
         for (quad, indices) in water
             .vertices
@@ -105,11 +119,18 @@ impl ModelGeometry {
             .zip(water.indices.chunks_exact(6))
         {
             let first = self.positions.len() as u32;
+            let (axis, positive) = super::meshing::face_direction(quad[0]);
+            let mut normal = Vec3::ZERO;
+            normal[axis] = if positive { 1.0 } else { -1.0 };
+            // Recover the owning water cells (their center for a merged face)
+            // before lowering the free surface, so it sorts with its blocks.
+            let center = quad
+                .iter()
+                .map(|&v| TerrainGeometry::position(v))
+                .sum::<Vec3>()
+                * 0.25;
+            self.sort_cells.push(center - normal * 0.5);
             for &v in quad {
-                let direction = (v[0] >> 15) & 7;
-                let axis = direction as usize / 2;
-                let mut normal = Vec3::ZERO;
-                normal[axis] = if direction & 1 != 0 { 1.0 } else { -1.0 };
                 let mut position = TerrainGeometry::position(v);
                 if v[1] & (1 << 16) != 0 {
                     position.y -= 1.0 / 8.0;
@@ -126,13 +147,16 @@ impl ModelGeometry {
         }
     }
     pub fn sort_data(&self) -> SortData {
+        // Translucent geometry only grows through `translucent_quad` and `append_water`.
+        assert_eq!(self.sort_cells.len() * 4, self.positions.len());
         let quads = self
             .positions
             .chunks_exact(4)
             .zip(self.indices.chunks_exact(6))
-            .map(|(p, indices)| {
+            .zip(&self.sort_cells)
+            .map(|((p, indices), &cell)| {
                 let center = p.iter().map(|&v| Vec3::from_array(v)).sum::<Vec3>() * 0.25;
-                (center, <[u32; 6]>::try_from(indices).unwrap())
+                (cell, center, <[u32; 6]>::try_from(indices).unwrap())
             })
             .collect::<Vec<_>>();
         SortData(Arc::from(quads))
@@ -178,11 +202,12 @@ pub(crate) fn compact_indices(indices: Vec<u32>, vertices: usize) -> Indices {
     }
 }
 
-/// Quad centers and indices of a translucent section, for back-to-front order.
+/// Owning cells, face centers and indices of a translucent section.
 #[derive(Clone, Component)]
-pub(crate) struct SortData(pub Arc<[(Vec3, [u32; 6])]>);
+pub(crate) struct SortData(pub Arc<[(Vec3, Vec3, [u32; 6])]>);
 impl SortData {
-    /// Indices of every quad, farthest from `eye` first.
+    /// Order blocks first, then their faces: a water face must never jump in
+    /// front of ice in a nearer block merely because their face centers differ.
     pub fn indices(&self, eye: Vec3) -> Vec<u32> {
         self.sorted(eye, |index| index)
     }
@@ -195,19 +220,24 @@ impl SortData {
         }
     }
     fn sorted<T>(&self, eye: Vec3, narrow: impl Fn(u32) -> T) -> Vec<T> {
-        // Non-negative floats order like their bits: sort integer keys once.
+        // Equal-sized grid cells have a consistent radial back-to-front order
+        // along each ray. Cache integer keys for the non-negative distances.
         let mut order = self
             .0
             .iter()
             .enumerate()
-            .map(|(index, (center, _))| (center.distance_squared(eye).to_bits(), index as u32))
+            .map(|(index, (cell, center, _))| {
+                let cell = u64::from(cell.distance_squared(eye).to_bits());
+                let center = u64::from(center.distance_squared(eye).to_bits());
+                (cell << 32 | center, index as u32)
+            })
             .collect::<Vec<_>>();
         order.sort_unstable_by(|a, b| b.cmp(a));
         let mut indices = Vec::with_capacity(self.0.len() * 6);
         indices.extend(
             order
                 .into_iter()
-                .flat_map(|(_, quad)| self.0[quad as usize].1.map(&narrow)),
+                .flat_map(|(_, quad)| self.0[quad as usize].2.map(&narrow)),
         );
         indices
     }
@@ -242,8 +272,7 @@ pub(super) fn section(padded: &Padded, origin: IVec3) -> ModelSection {
                     continue;
                 }
                 let world = origin + local;
-                // Native shapes were extracted at their origin offset. Models themselves
-                // are unshifted; see the shared state helper for the absolute offset.
+                // Models and native shapes share the same block-local translation.
                 let model_offset = sample.state.visual_offset(world);
                 let light =
                     (u16::from(sample.light >> 4) * 4) | (u16::from(sample.light & 15) * 4 << 6);
@@ -263,13 +292,6 @@ pub(super) fn section(padded: &Padded, origin: IVec3) -> ModelSection {
                         models::tint_index(sample.kind())
                     } else {
                         0
-                    };
-                    let geometry = if q.translucent {
-                        &mut translucent
-                    } else if models::opaque_texture(q.texture) {
-                        &mut opaque
-                    } else {
-                        &mut cutout
                     };
                     let translation =
                         local.as_vec3() + if fallback { Vec3::ZERO } else { model_offset };
@@ -305,7 +327,14 @@ pub(super) fn section(padded: &Padded, origin: IVec3) -> ModelSection {
                         };
                         channel(0) | (channel(6) << 6)
                     });
-                    geometry.quad(q, translation, face, tint, None);
+                    if q.translucent {
+                        let cell = local.as_vec3() + Vec3::splat(0.5);
+                        translucent.translucent_quad(q, translation, face, tint, cell);
+                    } else if models::opaque_texture(q.texture) {
+                        opaque.quad(q, translation, face, tint, None);
+                    } else {
+                        cutout.quad(q, translation, face, tint, None);
+                    }
                 });
             }
         }

@@ -90,10 +90,25 @@ struct Browser {
     entries: Vec<CatalogEntry>,
     catalog_task: Option<Task<io::Result<Vec<CatalogEntry>>>>,
     open_task: Option<Task<io::Result<OpenedWorld>>>,
+    delete_task: Option<Task<io::Result<()>>>,
+    pending_delete: Option<PathBuf>,
     error: Option<String>,
     quality: WorldQuality,
-    close_after_open: bool,
+    close_after_operation: bool,
     reopen: Option<PathBuf>,
+}
+impl Browser {
+    fn busy(&self) -> bool {
+        self.open_task.is_some() || self.delete_task.is_some()
+    }
+    /// No task runs and no deletion awaits confirmation: a new operation may start.
+    fn idle(&self) -> bool {
+        !self.busy() && self.pending_delete.is_none()
+    }
+    fn rescan(&mut self) {
+        self.entries.clear();
+        self.catalog_task = Some(IoTaskPool::get().spawn(async { storage::catalog() }));
+    }
 }
 struct OpenedWorld {
     session: WorldSession,
@@ -173,8 +188,8 @@ impl Plugin for WorldPlugin {
 
 fn start_catalog(mut browser: ResMut<Browser>) {
     browser.error = None;
-    browser.entries.clear();
-    browser.catalog_task = Some(IoTaskPool::get().spawn(async { storage::catalog() }));
+    browser.pending_delete = None;
+    browser.rescan();
     if let Some(path) = browser.reopen.take() {
         open_world(&mut browser, Some(path), None);
     }
@@ -185,7 +200,7 @@ fn open_world(
     path: Option<PathBuf>,
     creation: Option<(String, i64, WorldQuality)>,
 ) {
-    if browser.open_task.is_some() {
+    if !browser.idle() {
         return;
     }
     browser.error = None;
@@ -242,6 +257,24 @@ fn poll_browser(
             }
         }
     }
+    if let Some(task) = &mut browser.delete_task {
+        if let Some(result) = check_ready(task) {
+            browser.delete_task = None;
+            browser.pending_delete = None;
+            if std::mem::take(&mut browser.close_after_operation) {
+                quit(&mut commands);
+                return;
+            }
+            if let Err(error) = result {
+                browser.error = Some(format!("Could not delete world: {error}"));
+            }
+            // Rescan even after an error: a filesystem failure can leave a partial deletion.
+            browser.rescan();
+            if *state.get() == GameState::WorldSelect {
+                ui::replace_world_list(&mut commands, &browser);
+            }
+        }
+    }
     let Some(task) = &mut browser.open_task else {
         return;
     };
@@ -249,7 +282,7 @@ fn poll_browser(
         return;
     };
     browser.open_task = None;
-    let close = std::mem::take(&mut browser.close_after_open);
+    let close = std::mem::take(&mut browser.close_after_operation);
     match result {
         // Nothing was played: entering the game only to save it again would delay the exit.
         Ok(opened) if close => {
@@ -312,8 +345,8 @@ fn exit_application(
     if *state.get() == GameState::Game && !failed {
         save.destination = Destination::Exit;
         save.exit_requested = true;
-    } else if browser.open_task.is_some() {
-        browser.close_after_open = true;
+    } else if browser.busy() {
+        browser.close_after_operation = true;
     } else {
         quit(&mut commands);
     }

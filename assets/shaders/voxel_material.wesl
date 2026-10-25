@@ -7,7 +7,6 @@ import bevy_pbr::render::{
     mesh_view_bindings as view_bindings,
     mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
     shadows,
-    view_transformations::position_world_to_clip,
 };
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0)
@@ -20,7 +19,7 @@ var blocks_sampler: sampler;
 var<storage, read> faces: array<vec4<f32>>;
 
 struct VoxelVaryings {
-    @builtin(position) position: vec4<f32>,
+    @invariant @builtin(position) position: vec4<f32>,
     @location(0) world_position: vec4<f32>,
     @location(1) world_normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
@@ -38,7 +37,11 @@ fn vertex(in: PackedVertex) -> VoxelVaryings {
         world_from_local,
         vec4<f32>(vertex.position, 1.0),
     );
-    out.position = position_world_to_clip(out.world_position.xyz);
+    // Use exactly the same transform and invariant position as the depth prepass.
+    out.position = mesh_functions::mesh_position_local_to_clip(
+        world_from_local,
+        vec4<f32>(vertex.position, 1.0),
+    );
     out.world_normal = mesh_functions::mesh_normal_local_to_world(
         face_normal(vertex.direction),
         in.instance_index,

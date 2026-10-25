@@ -380,8 +380,8 @@ fn targeted_state(
         sample(cell)?; // An unavailable chunk stops traversal.
         let end = next.min_element().min(BLOCK_REACH);
         let mut best: Option<(f32, BlockTarget)> = None;
-        // Shapes can overhang horizontally or rise above their owning cell (fences).
-        for dy in [-1, 0] {
+        // Shapes can overhang horizontally, rise above fences, or shift below plants.
+        for dy in -1..=1 {
             for dz in -1..=1 {
                 for dx in -1..=1 {
                     let owner = cell + IVec3::new(dx, dy, dz);
