@@ -1,97 +1,140 @@
 # Hollow
 
-Jeu voxel Bevy. Lancer avec `cargo run --release`.
+A Bevy voxel game. See the [architecture](docs/architecture.md) for code organization
+and [world persistence](docs/worlds.md) for the save format and session lifecycle.
 
-Le dépôt voisin `../worldgen` (`pumpkin-worldgen`, façade du générateur vanilla
-de Pumpkin, Minecraft 26.3) est requis (dépendance Cargo locale). Chaque chunk
-vient de `World::generate_chunk` : terrain, biomes, grottes, minerais, arbres et
-structures inclus. Les états de blocs sont convertis en `VoxelKind` (≈100 blocs
-cubiques) ; les blocs non cubiques (plantes, torches, barrières…) sont omis et
-les solides non représentés restent en pierre.
+The neighboring `../worldgen` repository is required through local Cargo path
+dependencies. Its `pumpkin-worldgen` facade embeds Pumpkin's Minecraft 26.3 terrain,
+biomes, caves, ores, vegetation, structures, and lighting. `VoxelKind` uses native
+16-bit block identifiers; `VoxelState` preserves properties such as orientation,
+connections, halves, thickness, and waterlogging.
 
-Les chunks font 16×16×384. Le stockage du jeu reste à Y positif :
-`Y jeu = Y Minecraft + 64`, niveau marin à Y=127. La seed reste un `u32`.
-La génération utilise un pool dédié et un contexte Pumpkin partagé. Un cache
-borné réutilise notamment le chunk calculé au choix du point d'apparition.
-Un chunk peut être affiché avant ses voisins : les bordures absentes sont
-provisoirement de l'air, puis synchronisées dans les deux sens au chargement.
-Les coordonnées négatives et les chunks modifiés suivent le même chemin. Le joueur attend le collider du chunk avant de tomber.
+Chunks are 16×16×384. Gameplay uses positive Y coordinates:
+`game Y = Minecraft Y + 64`, with sea level at Y=127. Seeds are signed 64-bit
+integers. Generation uses its own pool and a shared Pumpkin context per session.
+Negative coordinates and edited chunks follow the same streaming path. The player
+waits for terrain meshes and collision readiness before entering the world.
+
+## Worlds and saves
+
+**Play** opens the world list. Creation accepts a name, an optional signed seed,
+and **Fast** (default) or **Vanilla** terrain quality. These generation settings
+remain fixed for the lifetime of the world.
+
+Each world has a UUID directory containing `world.sqlite3` under the platform's
+user data directory selected by `directories::ProjectDirs::from("org", "hollow",
+"game")`, in `worlds/`. Set `HOLLOW_WORLDS_DIR` to override that root. To copy a
+world, close its session and copy the entire directory; do not copy only the
+SQLite file while the world is open.
+
+Changed state is saved automatically every 30 seconds; an idle world is not
+rewritten. Escape first closes the
+inventory; otherwise it saves and returns to the world list. Closing the window
+also waits for saving. A failed save keeps the window and in-memory data available
+for retry; closing the window again leaves without saving.
+
+Loading restores edited terrain, player position and orientation, inventory,
+cursor stack, and dropped items. Physics stays paused until terrain and collisions
+are ready. Hollow saves are not Minecraft-compatible. Renaming, deletion, and a
+pause menu are outside this first version.
 
 ## Textures
 
-Le pack par défaut **Minecraft** utilise les textures officielles extraites du
-client Minecraft 26.3 téléchargé depuis les serveurs de Mojang (SHA-1 vérifié).
-Elles ne peuvent pas être redistribuées : `blocks_array.png` est ignoré par git
-et doit être généré localement. Sans lui, le jeu se replie sur Faithful :
+The default **Minecraft** pack uses official textures extracted from the Minecraft
+26.3 client downloaded from Mojang, with its SHA-1 verified. Textures and model
+caches are imported locally; `blocks_array.png` and `models.json` are ignored by
+Git. Without them, the game falls back to Faithful.
 
 ```bash
 python3 -m pip install Pillow
-python3 scripts/import_vanilla.py   # version optionnelle en argument, ex. 26.3
+python3 scripts/import_vanilla.py   # optional version argument, e.g. 26.3
 ```
 
-Le script écrit aussi `pack.ron` (une entrée par `VoxelKind::key`) et extrait les
-textures de fissures officielles dans `assets/voxel/breaking/vanilla/` :
-les dix étapes sont appliquées en multiplication sur le bloc pendant la casse,
-quel que soit le pack de blocs choisi. Ces PNG sont ignorés par git ; sans eux,
-les fissures utilisent le pack de repli fourni avec le jeu.
+The importer first checks `~/.minecraft/versions/26.3/26.3.jar`, verifies its
+SHA-1, and downloads the official client if necessary. It resolves inherited
+models, variants, and multipart assemblies in `models.json`, extending the
+texture array to model faces. After changing the importer, regenerate the
+manifest, textures, and models together, then recompile to include the manifest.
 
-Les packs historiques (Faithful, Replete, Meadow, Twilight) n'ont que quelques blocs ; les
-autres utilisent leur repli (`VoxelKind::fallback`, ex. bouleau → chêne → pierre).
-Faithful : voir `assets/voxel/packs/faithful/LICENSE.txt` et
-`scripts/import_faithful.py`.
+It also writes `pack.ron` and extracts the ten official breaking textures into
+`assets/voxel/breaking/vanilla/`. Breaking overlays multiply the already-lit
+block color without adding brightness. These PNG files are ignored by Git;
+without them, the included fallback textures are used.
 
-## Eau et apparition
+Historical packs (Faithful, Replete, Meadow, Twilight) cover fewer blocks and use
+`VoxelKind::fallback` for missing materials. See
+`assets/voxel/packs/faithful/LICENSE.txt` and `scripts/import_faithful.py`.
 
-Le joueur cherche désormais un sol sec et deux cellules libres près de l'origine.
-Les candidats sont sondés sur le terrain seul (`generate_terrain`, sans grottes
-ni décorations), puis le chunk retenu est généré complètement et reste en cache.
-Les blocs immergés (coraux, cornichons de mer, clôtures noyées…) laissent de l'eau.
-Pour la seed 42, l'ancien point fixe était submergé (surface Minecraft Y=63,
-fond Y=26). Les aquifères vanilla sont conservés : les grottes peuvent donc
-contenir de l'eau. Aucun remplissage global ni drainage artificiel n'est ajouté.
-Le mesh d'eau dessine toutes les interfaces avec l'air, y compris les côtés et
-le dessous ; aucune surface n'est émise dans un plafond solide. Les normales des
-côtés sont conservées dans le shader et les vaguelettes concernent le dessus.
+## Water and spawning
 
-## Éclairage
+New players search for dry ground and two free cells near the origin. Candidates
+are probed with terrain-only generation before fully generating the chosen chunk.
+Submerged blocks retain both their native state and water. Aquatic plants and
+waterlogged blocks participate in water rendering and immersion checks; breaking
+them leaves water behind. Vanilla aquifers remain enabled, so caves can contain
+water. No global filling or draining pass is added.
 
-Les chunks conservent la lumière du ciel et des blocs calculée par Pumpkin.
-Les shaders du terrain et de l'eau combinent ces niveaux interpolés avec le soleil
-et les ombres de Bevy. Les endroits abrités s'assombrissent et les sources lumineuses
-existantes éclairent leur environnement avec une teinte légèrement chaude.
-L'éclairage est toujours actif ; aucune option graphique supplémentaire n'est ajoutée.
+Water meshes include every air interface, including sides and bottoms. No face
+is emitted against a solid ceiling. Side normals remain intact; waves affect
+top surfaces.
 
-Les poses et destructions mettent à jour les états Minecraft d'un contexte séparé,
-via un worker dédié. Les propriétés lumineuses modifiées déclenchent un recalcul
-local (chunk concerné et voisins chargés), sans régénération du terrain. Les bordures,
-y compris diagonales, suivent les mises à jour ; les meshes conservent les gradients
-lors des fusions. Une modification de lumière seule ne reconstruit pas les collisions.
-Les résultats en retard ne remplacent pas les éditions plus récentes. Les chunks
-modifiés conservent leurs données et leurs éditions lumineuses lors du déchargement.
+## Lighting
 
-## Limites actuelles
+Chunks retain Pumpkin's sky and block lighting. Terrain and water shaders combine
+interpolated light with sunlight and Bevy shadows. Sheltered areas darken and
+existing emitters light their surroundings. Lighting is always enabled.
 
-- Rendu en cubes uniquement : plantes, barrières, torches, vitres… sont omises ;
-  dalles, escaliers et murets deviennent des cubes de leur matériau. Les blocs
-  sans `VoxelKind` prennent le plus proche (planches de cerisier → chêne, laine →
-  terre cuite, briques de deepslate → deepslate) ; le reste devient de la pierre
-  (journalisé en `debug`). Pas de ticks de fluides/feuilles.
-- Teintes de biome fixes (plaines) ; orientations des troncs non conservées.
-  La lave est un bloc opaque où l'on s'enfonce comme dans l'eau, sans dégâts.
-- Pumpkin partage les dépendances entre chunks voisins pour générer les décorations
-  aux frontières. Les premiers chunks nécessitent aussi ces voisins.
-- L'occlusion ambiante reste à améliorer.
+Placement and breaking update native states in a separate context on a dedicated
+worker. Changed light properties trigger local and neighboring updates without
+regenerating terrain. Borders include diagonal neighbors, and merged faces retain
+light gradients. Light-only changes do not rebuild collisions. Late worker
+results cannot overwrite newer edits. Persisted chunks retain native edited cell
+indices so lighting can reconcile them when reloaded.
 
-Vérification : `cargo check --all-targets --features dev`, `cargo test --lib`.
-Le test GPU peut être lancé avec
-`cargo test --lib terrain_and_water_gpu_pipelines_compile_with_and_without_shadows -- --ignored`.
+## Shapes and interactions
 
-Pour un contrôle du rendu hors fenêtre :
+Rendering imports vanilla models for glass and panes, foliage, grasses, flowers,
+tall and aquatic plants, vines, roots, bamboo, cactus, pointed dripstone, crystals,
+torches, snow layers, carpets, slabs, stairs, fences, gates, walls, doors,
+trapdoors, and bars. Generated states keep their properties. Local placement rules
+orient blocks, merge slabs, update neighboring connections, and manage both halves
+of doors and tall plants with one drop.
 
-```bash
-HOLLOW_BENCH_HEADLESS=1 HOLLOW_DIAGNOSTICS_AUTOPLAY=1 HOLLOW_VOXEL_BENCH=1 HOLLOW_SCREENSHOT_PATH=/tmp/hollow.png cargo run --features dev
-```
+Compatible cubes keep greedy meshing and eight-byte vertices. Models are batched
+by section into cutout or translucent passes. Water and glass share the
+translucent pass; bounded tasks reorder only its indices when the camera changes
+cells. Icons are rasterized from models in the background and drop meshes are
+created on demand.
 
-Les régions affichent les assemblages terminés pendant le chargement, puis se
-complètent à mesure que les chunks arrivent. Les assets sont recherchés près du
-binaire puis dans le dépôt de compilation, ou via `BEVY_ASSET_ROOT`.
+Collision and selection use native shapes independently of opacity. Terrain's
+voxel collider remains separate from convex partial-shape colliders; never nest
+it inside a compound collider. Movement waits for collisions covering the player's
+footprint and next step, and falling below the world restores the last safe point.
+Small steps up to 0.6 blocks are traversed without a jump impulse after checking
+clearance and support across the body. Movement also follows small descents and
+keeps a gap matching the engine's contact tolerance. Auto-jump handles taller
+obstacles.
+
+## Current limitations
+
+- No vanilla ticks: plant growth, falling dripstone, fluids, leaves, damage, and
+  redstone are not simulated. Doors and gates display their state but do not
+  open interactively.
+- Blocks rendered by block entities or specialized renderers use shape and
+  material fallbacks. Their contents and animations are not implemented.
+- Exact model geometry requires the vanilla import. Without it, selection shapes
+  provide a simplified fallback; incomplete packs reuse substitute textures.
+- Biome tint is fixed to plains. Per-section and per-face translucent sorting
+  does not provide exact composition for all intersecting geometry. Ambient
+  occlusion still needs improvement.
+- Lava retains fallback rendering without damage or simulation.
+
+## Verification
+
+Use only `cargo check --all-targets` and
+`cargo check --all-targets --features dev` to verify changes. Tests are compiled
+without execution. Do not launch the game or run tests or benchmarks to verify
+a change, and never compile in release mode.
+
+Completed terrain sections appear progressively during loading. Assets are found
+next to the executable, then in the build repository, or through `BEVY_ASSET_ROOT`.

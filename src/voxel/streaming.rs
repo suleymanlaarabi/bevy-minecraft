@@ -1,9 +1,10 @@
 use super::{
     ChunkVoxels, SetVoxel, VoxelChunk, VoxelSettings, VoxelViewer,
-    data::{ALL_SECTIONS, CHUNK_SIZE, chunk_at},
+    coordinates::neighbor_slot,
+    coordinates::{ALL_SECTIONS, CHUNK_SIZE, chunk_at},
     generation::WorldGenerator,
     lighting::LitEdits,
-    rebuild::{ChunkSections, NeedsChunkBuild, neighbor_slot},
+    render::build::{ChunkSections, NeedsChunkBuild},
 };
 use crate::{game::GameState, spatial::GameLayer};
 use avian3d::prelude::*;
@@ -151,7 +152,7 @@ pub(crate) fn stream_chunks(
                 continue;
             }
             state.missing.insert(position);
-            if stored.contains_key(&position) || generator.is_loaded(position) {
+            if stored.contains_key(&position) || generator.is_ready(position) {
                 state.push_ready(position);
             }
         }
@@ -188,6 +189,7 @@ pub(crate) fn stream_chunks(
             spawn_chunk(&mut commands, &mut index, &mut edits, position, voxels);
         } else {
             let generator = generator.clone();
+            // Decoding is CPU work; the snapshot read uses a WAL reader that never waits on saves.
             let task = AsyncComputeTaskPool::get().spawn(async move {
                 #[cfg(feature = "dev")]
                 let started = Instant::now();
@@ -413,4 +415,53 @@ mod tests {
             assert!(!offsets[..index].contains(offset));
         }
     }
+}
+
+pub(crate) fn cleanup_removed_chunk(
+    event: On<Remove<ChunkVoxels>>,
+    chunks: Query<(&VoxelChunk, &ChunkVoxels)>,
+    mut index: ResMut<ChunkIndex>,
+    mut stored: ResMut<StoredChunks>,
+) {
+    if let Ok((chunk, voxels)) = chunks.get(event.entity) {
+        index.remove(&chunk.position);
+        if voxels.save_revision != voxels.saved_revision {
+            stored.insert(chunk.position, voxels.clone());
+        }
+    }
+}
+
+pub(super) fn cleanup_voxel_world(
+    mut commands: Commands,
+    generator: Option<Res<WorldGenerator>>,
+    chunks: Query<Entity, With<VoxelChunk>>,
+    generations: Query<Entity, With<ChunkGeneration>>,
+) {
+    for entity in &chunks {
+        commands.entity(entity).despawn();
+    }
+    for entity in &generations {
+        commands.entity(entity).despawn();
+    }
+    // Let Pumpkin unload the area; the next session sets its own view.
+    if let Some(generator) = generator {
+        generator.clear_view();
+    }
+    // Despawn observers write back into these resources, so reset them afterwards.
+    commands.queue(|world: &mut World| {
+        world.resource_mut::<ChunkIndex>().clear();
+        world.resource_mut::<PendingChunks>().clear();
+        world.resource_mut::<PendingEdits>().clear();
+        world.resource_mut::<StoredChunks>().clear();
+        // Drop the context on its own worker: Pumpkin shutdown must not stall ECS.
+        if let Some(state) = world.remove_resource::<super::lighting::LightingState>() {
+            bevy::tasks::IoTaskPool::get()
+                .spawn(async move {
+                    drop(state);
+                })
+                .detach();
+        }
+        world.init_resource::<super::lighting::LightingState>();
+        *world.resource_mut::<StreamState>() = StreamState::default();
+    });
 }

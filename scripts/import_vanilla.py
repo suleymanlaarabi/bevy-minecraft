@@ -12,6 +12,7 @@ import json
 import sys
 import zipfile
 from PIL import Image
+from vanilla_models import import_models
 
 VERSION = sys.argv[1] if len(sys.argv) > 1 else '26.3'
 MANIFEST = 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json'
@@ -55,10 +56,17 @@ def download(url):
         return response.read()
 
 def client_jar():
-    versions = json.loads(download(MANIFEST))['versions']
-    entry = next(v for v in versions if v['id'] == VERSION)
-    client = json.loads(download(entry['url']))['downloads']['client']
-    data = download(client['url'])
+    local = Path.home() / '.minecraft' / 'versions' / VERSION
+    manifest = local / f'{VERSION}.json'
+    archive = local / f'{VERSION}.jar'
+    if manifest.is_file() and archive.is_file():
+        client = json.loads(manifest.read_text())['downloads']['client']
+        data = archive.read_bytes()
+    else:
+        versions = json.loads(download(MANIFEST))['versions']
+        entry = next(v for v in versions if v['id'] == VERSION)
+        client = json.loads(download(entry['url']))['downloads']['client']
+        data = download(client['url'])
     if hashlib.sha1(data).hexdigest() != client['sha1']:
         raise ValueError('client jar SHA-1 mismatch')
     return zipfile.ZipFile(BytesIO(data)), client['sha1']
@@ -82,9 +90,17 @@ def main():
         # Animated/oversized textures: keep the first 16x16 frame.
         return tile.crop((0, 0, 16, 16))
     DEST.mkdir(parents=True, exist_ok=True)
-    names = sorted({name for top, side, bottom, _ in BLOCKS.values() for name in (top, side, bottom)})
+    models, model_textures = import_models(jar)
+    models['minecraft'] = VERSION
+    models['client_sha1'] = sha1
+    names = sorted(model_textures | {name for top, side, bottom, _ in BLOCKS.values() for name in (top, side, bottom)})
     layers = {name: layer for layer, name in enumerate(names)}
+    if len(names) > 2048:
+        raise ValueError('block texture array exceeds the portable 2048-layer limit')
     atlas = Image.new('RGBA', (16, 16 * len(names)))
+    # Layers without any transparent texel: their model quads skip alpha testing,
+    # which keeps early depth tests enabled on the GPU.
+    opaque = [False] * len(names)
     for name, layer in layers.items():
         tile = texture(name)
         if name == 'grass_block_side':
@@ -93,8 +109,15 @@ def main():
             tinted = Image.new('RGBA', overlay.size)
             tinted.putdata([(r * GRASS[0] // 255, g * GRASS[1] // 255, b * GRASS[2] // 255, a) for r, g, b, a in overlay.get_flattened_data()])
             tile.alpha_composite(tinted)
+        opaque[layer] = min(tile.getchannel('A').getdata()) == 255
         atlas.paste(tile, (0, layer * 16))
     atlas.save(DEST / 'blocks_array.png')
+    for quads in models['models'].values():
+        for quad in quads:
+            quad['texture'] = layers[quad['texture']]
+    models['textures'] = names
+    models['opaque_textures'] = opaque
+    (DEST / 'models.json').write_text(json.dumps(models, separators=(',', ':')))
     # Still water keeps all its flipbook frames: a 16x512 strip of grey frames
     # tinted in the shader and cross-faded at the game's 10 frames per second.
     Image.open(BytesIO(jar.read('assets/minecraft/textures/block/water_still.png'))).convert('RGBA').save(DEST / 'water_still.png')

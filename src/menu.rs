@@ -5,7 +5,6 @@ use bevy::{
         tokens,
     },
     prelude::*,
-    settings::SaveSettingsSync,
     ui_widgets::Activate,
 };
 
@@ -56,14 +55,13 @@ fn menu() -> impl SceneList {
 }
 
 fn play(_activate: On<Activate>, mut next_state: ResMut<NextState<GameState>>) {
-    next_state.set(GameState::Game);
+    next_state.set(GameState::WorldSelect);
 }
 
 fn open_settings(_activate: On<Activate>, mut next_state: ResMut<NextState<GameState>>) {
     next_state.set(GameState::Settings);
 }
 
-fn exit(_activate: On<Activate>, mut commands: Commands, mut app_exit: MessageWriter<AppExit>) {
-    commands.queue(SaveSettingsSync::IfChanged);
-    app_exit.write(AppExit::Success);
+fn exit(_activate: On<Activate>, mut commands: Commands) {
+    crate::world::request_exit(&mut commands);
 }

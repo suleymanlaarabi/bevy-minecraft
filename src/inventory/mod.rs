@@ -1,8 +1,10 @@
 mod icons;
+mod input;
 mod model;
 mod ui;
 
-use bevy::{input::mouse::AccumulatedMouseScroll, prelude::*};
+use bevy::prelude::*;
+use input::{handle_hotbar_scroll, handle_number_keys};
 
 use crate::{game::GameState, player::Player};
 
@@ -49,6 +51,10 @@ impl Plugin for InventoryPlugin {
                 ),
             )
             .add_systems(OnExit(GameState::Game), reset_inventory_cursor)
+            .add_systems(
+                OnEnter(crate::world::WorldSessionPhase::Playing),
+                ui::return_cursor_stack,
+            )
             .add_systems(OnEnter(GameState::Game), ui::spawn_hotbar_hud)
             .add_systems(
                 OnEnter(InventoryState::Open),
@@ -66,7 +72,7 @@ impl Plugin for InventoryPlugin {
             .add_systems(
                 Update,
                 toggle_inventory
-                    .run_if(in_state(GameState::Game))
+                    .run_if(crate::world::playing)
                     // Nothing to open while the world is still loading.
                     .run_if(any_with_component::<Player>),
             )
@@ -74,7 +80,7 @@ impl Plugin for InventoryPlugin {
                 Update,
                 (handle_number_keys, handle_hotbar_scroll, ui::refresh_slots)
                     .chain()
-                    .run_if(in_state(GameState::Game)),
+                    .run_if(crate::world::playing),
             )
             .add_systems(
                 Update,
@@ -96,74 +102,6 @@ fn toggle_inventory(
         InventoryState::Closed => InventoryState::Open,
         InventoryState::Open => InventoryState::Closed,
     });
-}
-
-fn pressed_hotbar_key(keyboard: &ButtonInput<KeyCode>) -> Option<usize> {
-    [
-        KeyCode::Digit1,
-        KeyCode::Digit2,
-        KeyCode::Digit3,
-        KeyCode::Digit4,
-        KeyCode::Digit5,
-        KeyCode::Digit6,
-        KeyCode::Digit7,
-        KeyCode::Digit8,
-        KeyCode::Digit9,
-    ]
-    .into_iter()
-    .position(|key| keyboard.just_pressed(key))
-}
-
-fn handle_number_keys(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    state: Res<State<InventoryState>>,
-    cursor: Res<InventoryCursor>,
-    mut inventory: Single<&mut PlayerInventory, With<Player>>,
-) {
-    let Some(hotbar_index) = pressed_hotbar_key(&keyboard) else {
-        return;
-    };
-
-    match state.get() {
-        InventoryState::Closed => {
-            PlayerInventory::edit(&mut inventory, |inventory| {
-                inventory.set_selected_hotbar(hotbar_index)
-            });
-        }
-        InventoryState::Open => {
-            let Some(slot_index) = cursor.hovered_slot else {
-                return;
-            };
-
-            PlayerInventory::edit(&mut inventory, |inventory| {
-                inventory.swap_slots(slot_index, hotbar_index)
-            });
-        }
-    }
-}
-
-fn handle_hotbar_scroll(
-    scroll: Res<AccumulatedMouseScroll>,
-    state: Res<State<InventoryState>>,
-    mut inventory: Single<&mut PlayerInventory, With<Player>>,
-) {
-    if *state.get() != InventoryState::Closed {
-        return;
-    }
-
-    if scroll.delta.y == 0.0 {
-        return;
-    }
-
-    let current = inventory.selected_hotbar();
-
-    let next = if scroll.delta.y > 0.0 {
-        (current + HOTBAR_SIZE - 1) % HOTBAR_SIZE
-    } else {
-        (current + 1) % HOTBAR_SIZE
-    };
-
-    inventory.set_selected_hotbar(next);
 }
 
 fn reset_inventory_cursor(mut cursor: ResMut<InventoryCursor>) {

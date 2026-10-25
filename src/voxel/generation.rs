@@ -1,6 +1,6 @@
 use super::{
     ChunkVoxels, VoxelKind,
-    data::{CHUNK_HEIGHT, CHUNK_VOLUME},
+    coordinates::{CHUNK_HEIGHT, CHUNK_VOLUME},
 };
 use bevy::prelude::*;
 use pumpkin_worldgen::{BlockInfo, GeneratedChunk, World, block_info};
@@ -49,27 +49,6 @@ impl std::ops::Deref for ChunkSource {
     }
 }
 
-/// Resolve aliases used by the game's full-cube material catalogue once.
-pub(crate) fn native_state(kind: VoxelKind) -> u16 {
-    static STATES: OnceLock<Box<[u16]>> = OnceLock::new();
-    STATES.get_or_init(|| {
-        VoxelKind::ALL
-            .iter()
-            .map(|kind| {
-                let name = match kind {
-                    VoxelKind::Grass => "grass_block",
-                    VoxelKind::Wood => "oak_log",
-                    VoxelKind::Leaves => "oak_leaves",
-                    VoxelKind::Snow => "snow_block",
-                    _ => kind.key(),
-                };
-                pumpkin_worldgen::default_block_state(name)
-                    .expect("voxel material has a Minecraft block")
-            })
-            .collect()
-    })[kind as usize]
-}
-
 /// Vanilla chunks from `pumpkin-worldgen` (terrain, caves, ores, trees, structures).
 ///
 /// Streaming keeps Pumpkin's chunk system loaded around the viewer with one ticket,
@@ -77,20 +56,23 @@ pub(crate) fn native_state(kind: VoxelKind) -> u16 {
 #[derive(Resource, Clone)]
 pub(crate) struct WorldGenerator {
     world: Arc<OnceLock<World>>,
-    seed: u32,
+    seed: i64,
     /// View changes go to a dedicated thread: retargeting Pumpkin's tickets recomputes
     /// thousands of chunk levels under a lock its scheduler also takes.
     views: mpsc::Sender<Option<(IVec2, u8)>>,
+    storage: Option<Arc<crate::world::storage::Database>>,
+    errors: Arc<std::sync::Mutex<Vec<String>>>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
-fn init_world(world: &OnceLock<World>, seed: u32) -> &World {
-    world.get_or_init(|| World::new(i64::from(seed)))
+fn init_world(world: &OnceLock<World>, seed: i64) -> &World {
+    world.get_or_init(|| World::new(seed))
 }
 
 /// Applies the latest requested view; older pending ones are skipped.
 fn run_view_thread(
     world: Arc<OnceLock<World>>,
-    seed: u32,
+    seed: i64,
     views: mpsc::Receiver<Option<(IVec2, u8)>>,
 ) {
     while let Ok(mut view) = views.recv() {
@@ -135,7 +117,7 @@ fn kinds() -> &'static [VoxelKind] {
 }
 
 impl WorldGenerator {
-    pub(crate) fn new(seed: u32) -> Self {
+    pub(crate) fn new(seed: i64) -> Self {
         let world = Arc::<OnceLock<World>>::default();
         let (views, receiver) = mpsc::channel();
         let thread_world = world.clone();
@@ -143,7 +125,66 @@ impl WorldGenerator {
             .name("worldgen view".into())
             .spawn(move || run_view_thread(thread_world, seed, receiver))
             .expect("spawn worldgen view thread");
-        Self { world, seed, views }
+        Self {
+            world,
+            seed,
+            views,
+            storage: None,
+            errors: Arc::default(),
+            cancelled: Arc::default(),
+        }
+    }
+
+    pub(crate) fn persistent(
+        seed: i64,
+        quality: crate::world::WorldQuality,
+        storage: Arc<crate::world::storage::Database>,
+    ) -> Self {
+        let world = Arc::new(OnceLock::new());
+        let options = pumpkin_worldgen::WorldOptions {
+            quality: quality.native(),
+            ..Default::default()
+        };
+        let _ = world.set(World::with_storage(
+            seed,
+            pumpkin_worldgen::Dimension::Overworld,
+            options,
+            storage.clone(),
+        ));
+        let (views, receiver) = mpsc::channel();
+        let thread_world = world.clone();
+        std::thread::Builder::new()
+            .name("worldgen view".into())
+            .spawn(move || run_view_thread(thread_world, seed, receiver))
+            .expect("spawn worldgen view thread");
+        Self {
+            world,
+            seed,
+            views,
+            storage: Some(storage),
+            errors: Arc::default(),
+            cancelled: Arc::default(),
+        }
+    }
+
+    pub(crate) fn take_errors(&self) -> Vec<String> {
+        let mut errors = std::mem::take(
+            &mut *self
+                .errors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        if let Some(world) = self.world.get() {
+            errors.extend(world.take_storage_errors());
+        }
+        errors
+    }
+
+    pub(crate) fn flush(&self) -> std::io::Result<()> {
+        if let Some(world) = self.world.get() {
+            world.flush_storage()?;
+        }
+        Ok(())
     }
 
     fn world(&self) -> &World {
@@ -167,25 +208,59 @@ impl WorldGenerator {
             .map(|(x, z)| IVec2::new(x, z))
     }
 
-    pub(crate) fn is_loaded(&self, position: IVec2) -> bool {
-        self.world().is_loaded(position.x, position.y)
+    /// Whether `loaded_chunk` can return data now: a saved snapshot never waits for Pumpkin.
+    pub(crate) fn is_ready(&self, position: IVec2) -> bool {
+        self.storage
+            .as_ref()
+            .is_some_and(|storage| storage.is_edited(position.x, position.y))
+            || self.world().is_loaded(position.x, position.y)
     }
 
-    /// Converts a chunk Pumpkin already holds; `None` once it was unloaded.
+    /// Reads a saved snapshot, else converts a chunk Pumpkin already holds;
+    /// `None` once it was unloaded.
     pub(crate) fn loaded_chunk(&self, position: IVec2) -> Option<ChunkVoxels> {
+        if let Some(storage) = &self.storage {
+            match storage
+                .edited(position.x, position.y)
+                .and_then(|bytes| bytes.map(|b| ChunkVoxels::decode_saved(&b)).transpose())
+            {
+                Ok(Some(chunk)) => return Some(chunk),
+                Ok(None) => {}
+                Err(error) => {
+                    self.errors
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(error.to_string());
+                    return None;
+                }
+            }
+        }
         let generated = self.world().loaded_chunk(position.x, position.y)?;
         Some(ChunkSource::new(&generated).into_voxels())
     }
 
-    fn chunk(&self, position: IVec2) -> ChunkSource {
+    fn chunk(&self, position: IVec2) -> std::io::Result<ChunkSource> {
         let world = self.world();
         let generated = world
             .loaded_chunk(position.x, position.y)
-            .unwrap_or_else(|| world.generate_chunk(position.x, position.y));
-        ChunkSource::new(&generated)
+            .map_or_else(|| world.try_generate_chunk(position.x, position.y), Ok)?;
+        Ok(ChunkSource::new(&generated))
     }
 
-    pub(crate) fn spawn_position(&self) -> Vec3 {
+    #[cfg(test)]
+    fn spawn_position(&self) -> Vec3 {
+        self.try_spawn_position().expect("spawn position")
+    }
+
+    pub(crate) fn cancel_requests(&self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(world) = self.world.get() {
+            world.cancel_requests();
+        }
+    }
+
+    pub(crate) fn try_spawn_position(&self) -> std::io::Result<Vec3> {
         // Prefer dry ground near the origin, which can be ocean.
         // Candidates are probed on terrain-only chunks, far cheaper than full ones.
         let kinds = kinds();
@@ -197,6 +272,9 @@ impl WorldGenerator {
         for radius in 0i32..=16 {
             for dx in -radius..=radius {
                 for dz in -radius..=radius {
+                    if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Err(std::io::Error::other("World request cancelled"));
+                    }
                     if dx.abs().max(dz.abs()) != radius {
                         continue;
                     }
@@ -210,116 +288,33 @@ impl WorldGenerator {
                         continue;
                     }
                     // Trees only exist in the full chunk.
-                    let cells = self.chunk(IVec2::new(dx, dz));
+                    let cells = self.chunk(IVec2::new(dx, dz))?;
                     let surface = top(&|i| cells[i]).unwrap_or(ground);
                     if surface + 2 >= HEIGHT {
                         continue;
                     }
-                    return Vec3::new(
+                    return Ok(Vec3::new(
                         (dx * 16 + 8) as f32,
                         surface as f32 + 3.0,
                         (dz * 16 + 8) as f32,
-                    );
+                    ));
                 }
             }
         }
-        Vec3::new(8.0, 200.0, 8.0)
+        Ok(Vec3::new(8.0, 200.0, 8.0))
     }
 }
 
 fn map_info(info: BlockInfo) -> VoxelKind {
     if info.is_air {
-        return VoxelKind::Air;
+        VoxelKind::Air
+    } else {
+        VoxelKind::from_key(info.name).unwrap_or(VoxelKind::Stone)
     }
-    if let Some(kind) = map_block(info.name) {
-        return kind;
-    }
-    // Plants, torches, vines, fences... cannot be drawn as cubes: omit them.
-    // Slabs and stairs stay solid so structures keep their floors and roofs.
-    if info.hardness == 0.0
-        || (info.opacity == 0 && !info.name.ends_with("_slab") && !info.name.ends_with("_stairs"))
-    {
-        // Coral, sea pickles, submerged fences... leave their water behind.
-        return if info.is_waterlogged || info.is_liquid {
-            VoxelKind::Water
-        } else {
-            VoxelKind::Air
-        };
-    }
-    // Unrepresented solid materials remain solid instead of leaving holes.
-    VoxelKind::Stone
 }
 
-/// Minecraft block name -> game block, independent of properties.
 fn map_block(name: &str) -> Option<VoxelKind> {
-    let name = name.strip_prefix("minecraft:").unwrap_or(name);
-    let name = name.strip_prefix("infested_").unwrap_or(name);
-    let name = name.strip_prefix("stripped_").unwrap_or(name);
-    let kind = match name {
-        "air" | "cave_air" | "void_air" => VoxelKind::Air,
-        "water" | "bubble_column" | "seagrass" | "tall_seagrass" | "kelp" | "kelp_plant" => {
-            VoxelKind::Water
-        }
-        "grass_block" => VoxelKind::Grass,
-        "oak_log" | "oak_wood" => VoxelKind::Wood,
-        "oak_leaves" => VoxelKind::Leaves,
-        "suspicious_sand" => VoxelKind::Sand,
-        "suspicious_gravel" => VoxelKind::Gravel,
-        "chiseled_stone_bricks" => VoxelKind::StoneBricks,
-        "cut_sandstone" | "chiseled_sandstone" | "smooth_sandstone" => VoxelKind::Sandstone,
-        "cut_red_sandstone" | "chiseled_red_sandstone" | "smooth_red_sandstone" => {
-            VoxelKind::RedSandstone
-        }
-        "packed_mud" | "mud_bricks" => VoxelKind::Mud,
-        "carved_pumpkin" | "jack_o_lantern" => VoxelKind::Pumpkin,
-        name if name.ends_with("_wood") => {
-            return VoxelKind::from_key(&format!("{}_log", name.trim_end_matches("_wood")));
-        }
-        name if name.ends_with("_terracotta") && !name.contains("glazed") => {
-            VoxelKind::from_key(name).unwrap_or(VoxelKind::Terracotta)
-        }
-        "smooth_stone" => VoxelKind::Stone,
-        name => return VoxelKind::from_key(name).or_else(|| similar_block(name)),
-    };
-    Some(kind)
-}
-
-/// Blocks without their own kind -> closest material, so structures keep their look.
-fn similar_block(name: &str) -> Option<VoxelKind> {
-    // Shapes take their material: "stone_brick_stairs" -> "stone_bricks", "oak_slab" -> "oak_planks".
-    for suffix in ["_slab", "_stairs", "_wall"] {
-        if let Some(base) = name.strip_suffix(suffix) {
-            return [
-                base.to_owned(),
-                format!("{base}s"),
-                format!("{base}_planks"),
-            ]
-            .iter()
-            .find_map(|base| map_block(base));
-        }
-    }
-    for prefix in ["polished_", "chiseled_", "cracked_", "cut_", "smooth_"] {
-        if let Some(kind) = name.strip_prefix(prefix).and_then(map_block) {
-            return Some(kind);
-        }
-    }
-    // Carpets are thin: left to `map_info`, which omits non-cube blocks.
-    let dyed = ["_wool", "_concrete", "_concrete_powder"]
-        .iter()
-        .find_map(|suffix| name.strip_suffix(suffix));
-    let kind = match name {
-        _ if dyed.is_some() => VoxelKind::from_key(&format!("{}_terracotta", dyed.unwrap()))
-            .unwrap_or(VoxelKind::Terracotta),
-        // Mangrove, cherry, pale oak, bamboo, crimson and warped planks.
-        name if name.ends_with("_planks") || name == "bamboo_mosaic" => VoxelKind::OakPlanks,
-        // Crimson and warped stems; crop stems (pumpkin, melon) are plants.
-        "crimson_stem" | "warped_stem" | "crimson_hyphae" | "warped_hyphae" | "bamboo_block" => {
-            VoxelKind::DarkOakLog
-        }
-        name if name.contains("deepslate") => VoxelKind::Deepslate,
-        _ => return None,
-    };
-    Some(kind)
+    VoxelKind::from_key(name)
 }
 
 #[cfg(test)]
@@ -328,25 +323,31 @@ mod tests {
 
     #[test]
     fn native_materials_preserve_air_water_and_solid_terrain() {
-        assert_eq!(map_block("minecraft:cave_air"), Some(VoxelKind::Air));
-        assert_eq!(map_block("water"), Some(VoxelKind::Water));
-        assert_eq!(map_block("grass_block"), Some(VoxelKind::Grass));
-        assert_eq!(map_block("stripped_birch_wood"), Some(VoxelKind::BirchLog));
-        assert_eq!(map_block("bedrock"), Some(VoxelKind::Bedrock));
-        assert_eq!(map_block("oak_fence"), None);
-        assert_eq!(map_block("oak_stairs"), Some(VoxelKind::OakPlanks));
-        assert_eq!(map_block("stone_brick_slab"), Some(VoxelKind::StoneBricks));
-        assert_eq!(map_block("cherry_planks"), Some(VoxelKind::OakPlanks));
-        assert_eq!(
-            map_block("deepslate_tile_stairs"),
-            Some(VoxelKind::Deepslate)
-        );
-        assert_eq!(map_block("lava"), Some(VoxelKind::Lava));
-        assert_eq!(map_block("moss_carpet"), None);
-        assert_eq!(map_block("white_carpet"), None);
-        assert_eq!(map_block("pumpkin_stem"), None);
-        assert_eq!(map_block("attached_melon_stem"), None);
-        assert_eq!(map_block("warped_stem"), Some(VoxelKind::DarkOakLog));
+        for name in [
+            "cave_air",
+            "water",
+            "grass_block",
+            "stripped_birch_wood",
+            "bedrock",
+            "oak_fence",
+            "oak_stairs",
+            "stone_brick_slab",
+            "cherry_planks",
+            "deepslate_tile_stairs",
+            "lava",
+            "moss_carpet",
+            "white_carpet",
+            "pumpkin_stem",
+            "attached_melon_stem",
+            "warped_stem",
+            "glass",
+            "short_grass",
+            "pointed_dripstone",
+        ] {
+            let native = map_block(name).expect("native block");
+            assert_eq!(native.name(), name);
+        }
+        assert_eq!(map_block("minecraft:grass_block"), Some(VoxelKind::Grass));
         let kinds = kinds();
         assert!(kinds.contains(&VoxelKind::Leaves) && kinds.contains(&VoxelKind::Water));
     }
@@ -360,7 +361,7 @@ mod tests {
             (spawn.x as i32).div_euclid(16),
             (spawn.z as i32).div_euclid(16),
         );
-        let chunk = generator.chunk(position);
+        let chunk = generator.chunk(position).unwrap();
         let x = (spawn.x as i32).rem_euclid(16) as usize;
         let z = (spawn.z as i32).rem_euclid(16) as usize;
         assert_ne!(chunk[index(x, spawn.y as usize - 3, z)], VoxelKind::Air);

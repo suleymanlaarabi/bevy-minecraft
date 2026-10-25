@@ -16,7 +16,7 @@ use crate::{
     inventory::{InventoryState, ItemKind, ItemStack},
     player::{Player, PlayerCamera},
     spatial::FollowSystems,
-    voxel::{VoxelCommandsExt, VoxelKind, VoxelWorld},
+    voxel::{VoxelCommandsExt, VoxelKind, VoxelState, VoxelWorld},
 };
 
 const BLOCK_REACH: f32 = 5.0;
@@ -27,6 +27,7 @@ struct BlockTarget {
     destroy: IVec3,
     place: IVec3,
     normal: Vec3,
+    hit: Vec3,
 }
 
 #[derive(Component, Default)]
@@ -36,6 +37,7 @@ pub(super) struct BlockTargetState(Option<BlockTarget>);
 struct BreakProgress {
     position: IVec3,
     kind: VoxelKind,
+    state: VoxelState,
     elapsed: f32,
 }
 
@@ -48,35 +50,39 @@ struct BreakingOverlay;
 #[derive(Resource)]
 struct BreakingAssets {
     mesh: Handle<Mesh>,
-    materials: [Handle<StandardMaterial>; 10],
+    materials: [Handle<crate::voxel::render::ModelMaterial>; 10],
 }
 
 pub(super) fn register(app: &mut App) {
-    app.add_systems(PreStartup, prepare_breaking_assets)
-        .add_systems(OnEnter(GameState::Game), spawn_breaking_overlay)
-        .add_systems(OnEnter(InventoryState::Open), cancel_breaking)
-        .add_systems(
-            PostUpdate,
-            (
-                update_block_target,
-                update_breaking,
-                handle_block_placement,
-                sync_breaking_overlay,
-                draw_targeted_block,
-            )
-                .chain()
-                .after(FollowSystems)
-                .before(TransformSystems::Propagate)
-                .run_if(in_state(GameState::Game))
-                .run_if(in_state(InventoryState::Closed)),
-        );
+    app.add_systems(
+        PreStartup,
+        prepare_breaking_assets.after(crate::voxel::prepare_assets),
+    )
+    .add_systems(OnEnter(GameState::Game), spawn_breaking_overlay)
+    .add_systems(OnEnter(InventoryState::Open), cancel_breaking)
+    .add_systems(
+        PostUpdate,
+        (
+            update_block_target,
+            update_breaking,
+            handle_block_placement,
+            sync_breaking_overlay,
+            draw_targeted_block,
+        )
+            .chain()
+            .after(FollowSystems)
+            .before(TransformSystems::Propagate)
+            .run_if(crate::world::playing)
+            .run_if(in_state(InventoryState::Closed)),
+    );
 }
 
 fn prepare_breaking_assets(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<crate::voxel::render::ModelMaterial>>,
+    voxel_assets: Res<crate::voxel::VoxelAssets>,
 ) {
     // Keep a single reusable overlay; changing stages only swaps its material handle.
     let mesh = meshes.add(Cuboid::new(1.002, 1.002, 1.002));
@@ -91,29 +97,26 @@ fn prepare_breaking_assets(
         } else {
             format!("voxel/breaking/stage_{stage}.png")
         };
-        materials.add(StandardMaterial {
-            base_color_texture: Some(
-                asset_server
-                    .load_builder()
-                    .with_settings(|settings: &mut ImageLoaderSettings| {
-                        settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-                            address_mode_u: ImageAddressMode::ClampToEdge,
-                            address_mode_v: ImageAddressMode::ClampToEdge,
-                            mag_filter: ImageFilterMode::Nearest,
-                            min_filter: ImageFilterMode::Nearest,
-                            mipmap_filter: ImageFilterMode::Nearest,
-                            ..default()
-                        });
-                    })
-                    .load(texture),
-            ),
-            // Cracks darken the underlying block, preserving its texture and lighting.
-            alpha_mode: AlphaMode::Multiply,
-            unlit: true,
-            fog_enabled: false,
-            depth_bias: 1.0,
-            ..default()
-        })
+        let mut material = materials
+            .get(&voxel_assets.models)
+            .expect("shared block material")
+            .clone();
+        material.cracks = Some(
+            asset_server
+                .load_builder()
+                .with_settings(|settings: &mut ImageLoaderSettings| {
+                    settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+                        address_mode_u: ImageAddressMode::ClampToEdge,
+                        address_mode_v: ImageAddressMode::ClampToEdge,
+                        mag_filter: ImageFilterMode::Nearest,
+                        min_filter: ImageFilterMode::Nearest,
+                        mipmap_filter: ImageFilterMode::Nearest,
+                        ..default()
+                    });
+                })
+                .load(texture),
+        );
+        materials.add(material)
     });
     commands.insert_resource(BreakingAssets {
         mesh,
@@ -144,8 +147,8 @@ fn update_block_target(
         .compute_global_transform(entity)
         .ok()
         .and_then(|transform| {
-            targeted_voxel(transform.translation(), transform.forward(), |position| {
-                voxel_world.get(position)
+            targeted_state(transform.translation(), transform.forward(), |position| {
+                voxel_world.state(position)
             })
         });
 }
@@ -166,32 +169,42 @@ fn update_breaking(
         breaking.0 = None;
         return;
     };
-    let Some(kind) = voxel_world.get(target.destroy) else {
+    let Some(state) = voxel_world.state(target.destroy) else {
         breaking.0 = None;
         return;
     };
+    let kind = state.kind();
     let Some(duration) = kind.break_duration() else {
         breaking.0 = None;
         return;
     };
 
-    let progress = match breaking.0.as_mut() {
-        Some(progress) if progress.position == target.destroy && progress.kind == kind => progress,
-        _ => {
-            breaking.0 = Some(BreakProgress {
-                position: target.destroy,
-                kind,
-                elapsed: 0.0,
-            });
-            return;
-        }
-    };
+    if breaking
+        .0
+        .as_ref()
+        .is_none_or(|progress| progress.position != target.destroy || progress.state != state)
+    {
+        breaking.0 = Some(BreakProgress {
+            position: target.destroy,
+            kind,
+            state,
+            elapsed: 0.0,
+        });
+    }
+    let progress = breaking.0.as_mut().unwrap();
     progress.elapsed += time.delta_secs();
-    if progress.elapsed < duration || voxel_world.get(target.destroy) != Some(kind) {
+    if progress.elapsed < duration || voxel_world.state(target.destroy) != Some(state) {
         return;
     }
 
-    commands.set_voxel(target.destroy, VoxelKind::Air);
+    commands.set_voxel_state(target.destroy, state.removed());
+    if let Some(other) = crate::voxel::rules::paired_position(state, target.destroy)
+        && let Some(other_state) = voxel_world.state(other)
+        && other_state.kind() == kind
+        && other_state.property("half") != state.property("half")
+    {
+        commands.set_voxel_state(other, other_state.removed());
+    }
     if let Some(item) = ItemKind::from_voxel(kind) {
         let center = target.destroy.as_vec3() + Vec3::splat(0.5);
         commands.spawn_dropped_item(
@@ -209,25 +222,40 @@ fn handle_block_placement(
     target: Single<&BlockTargetState, With<PlayerCamera>>,
     voxel_world: VoxelWorld,
     spatial_query: SpatialQuery,
+    camera_forward: Option<Single<&GlobalTransform, With<PlayerCamera>>>,
     players: Query<(), With<Player>>,
     mut inventory: Single<&mut crate::inventory::PlayerInventory, With<Player>>,
 ) {
     let Some(target) = target.0 else {
         return;
     };
-    if !mouse.just_pressed(MouseButton::Right)
-        || voxel_world.get(target.place) != Some(VoxelKind::Air)
-    {
+    if !mouse.just_pressed(MouseButton::Right) {
         return;
     }
     let Some(ItemKind::Block(kind)) = inventory.selected_stack().map(|stack| stack.item()) else {
         return;
     };
-    if block_contains_player(&spatial_query, &players, target.place) {
+    let look = camera_forward.map_or(Vec3::NEG_Z, |camera| camera.forward().as_vec3());
+    let Some(edits) = crate::voxel::rules::placement(
+        &voxel_world,
+        kind,
+        target.destroy,
+        target.place,
+        target.hit,
+        target.normal,
+        look,
+    ) else {
         return;
+    };
+    for &(position, state) in &edits {
+        if block_contains_player(&spatial_query, &players, position, state) {
+            return;
+        }
     }
     if inventory.consume_selected(1) {
-        commands.set_voxel(target.place, kind);
+        for (position, state) in edits {
+            commands.set_voxel_state(position, state);
+        }
     }
 }
 
@@ -237,19 +265,34 @@ fn sync_breaking_overlay(
         (
             &mut Transform,
             &mut Visibility,
-            &mut MeshMaterial3d<StandardMaterial>,
+            &mut MeshMaterial3d<crate::voxel::render::ModelMaterial>,
+            &mut Mesh3d,
         ),
         With<BreakingOverlay>,
     >,
     assets: Res<BreakingAssets>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut previous: Local<Option<(IVec3, VoxelState)>>,
 ) {
-    let (mut transform, mut visibility, mut material) = overlay.into_inner();
+    let (mut transform, mut visibility, mut material, mut mesh) = overlay.into_inner();
     let Some(progress) = breaking.0 else {
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };
     visibility.set_if_neq(Visibility::Visible);
-    let translation = progress.position.as_vec3() + Vec3::splat(0.5);
+    let key = (progress.position, progress.state);
+    if *previous != Some(key) {
+        let geometry =
+            crate::voxel::render::model_mesh::state_geometry(progress.state, progress.position)
+                .into_dynamic_mesh();
+        if let Some(mut target) = meshes.get_mut(&mesh.0) {
+            *target = geometry;
+        } else {
+            mesh.0 = meshes.add(geometry);
+        }
+        *previous = Some(key);
+    }
+    let translation = progress.position.as_vec3();
     if transform.translation != translation {
         transform.translation = translation;
     }
@@ -257,7 +300,7 @@ fn sync_breaking_overlay(
         .kind
         .break_duration()
         .expect("active breaking state is breakable");
-    let stage = ((progress.elapsed / duration * 10.0).floor() as usize).min(9);
+    let stage = ((progress.elapsed / duration.max(0.001) * 10.0).floor() as usize).min(9);
     if material.0 != assets.materials[stage] {
         material.0 = assets.materials[stage].clone();
     }
@@ -279,34 +322,52 @@ fn block_contains_player(
     spatial_query: &SpatialQuery,
     players: &Query<(), With<Player>>,
     position: IVec3,
+    state: VoxelState,
 ) -> bool {
-    let mut contains_player = false;
-    spatial_query.shape_intersections_callback(
-        &Collider::cuboid(0.999, 0.999, 0.999),
-        position.as_vec3() + Vec3::splat(0.5),
-        Quat::IDENTITY,
-        &SpatialQueryFilter::DEFAULT,
-        |entity| {
-            contains_player = players.contains(entity);
-            !contains_player
-        },
-    );
-    contains_player
+    for shape in state.collision_boxes(position) {
+        let size = (shape.size() - Vec3::splat(0.001)).max(Vec3::splat(0.001));
+        let mut contains = false;
+        spatial_query.shape_intersections_callback(
+            &Collider::cuboid(size.x, size.y, size.z),
+            position.as_vec3() + shape.center(),
+            Quat::IDENTITY,
+            &SpatialQueryFilter::DEFAULT,
+            |entity| {
+                contains = players.contains(entity);
+                !contains
+            },
+        );
+        if contains {
+            return true;
+        }
+    }
+    false
 }
 
-fn draw_targeted_block(mut gizmos: Gizmos, target: Single<&BlockTargetState, With<PlayerCamera>>) {
-    let Some(target) = target.0 else { return };
-    gizmos.cube(
-        Transform::from_translation(target.destroy.as_vec3() + Vec3::splat(0.5))
-            .with_scale(Vec3::splat(BLOCK_OUTLINE_SIZE)),
-        BLACK,
-    );
+fn draw_targeted_block(
+    mut gizmos: Gizmos,
+    target: Single<&BlockTargetState, With<PlayerCamera>>,
+    world: VoxelWorld,
+) {
+    let Some(target) = target.0 else {
+        return;
+    };
+    let Some(state) = world.state(target.destroy) else {
+        return;
+    };
+    for shape in state.selection_boxes(target.destroy) {
+        gizmos.cube(
+            Transform::from_translation(target.destroy.as_vec3() + shape.center())
+                .with_scale(shape.size() * BLOCK_OUTLINE_SIZE),
+            BLACK,
+        );
+    }
 }
 
-fn targeted_voxel(
+fn targeted_state(
     origin: Vec3,
     direction: Dir3,
-    mut sample: impl FnMut(IVec3) -> Option<VoxelKind>,
+    mut sample: impl FnMut(IVec3) -> Option<VoxelState>,
 ) -> Option<BlockTarget> {
     let direction = direction.as_vec3();
     let mut cell = origin.floor().as_ivec3();
@@ -319,15 +380,61 @@ fn targeted_voxel(
             next[axis] = (boundary - origin[axis]) / direction[axis];
         }
     }
-    let mut normal = IVec3::ZERO;
+    let mut entered = 0.0;
     loop {
-        // Unbreakable blocks (bedrock, lava) still stop the ray: nothing is mined through them.
-        if sample(cell)?.is_opaque() {
-            return Some(BlockTarget {
-                destroy: cell,
-                place: cell + normal,
-                normal: normal.as_vec3(),
-            });
+        sample(cell)?; // An unavailable chunk stops traversal.
+        let end = next.min_element().min(BLOCK_REACH);
+        let mut best: Option<(f32, BlockTarget)> = None;
+        // Shapes can overhang horizontally or rise above their owning cell (fences).
+        for dy in [-1, 0] {
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    let owner = cell + IVec3::new(dx, dy, dz);
+                    let Some(state) = sample(owner) else {
+                        continue;
+                    };
+                    if state.native().is_air() || state.kind() == VoxelKind::Water {
+                        continue;
+                    }
+                    let mut inspect = |shape: crate::voxel::state::BlockBox| {
+                        let Some((distance, normal)) =
+                            shape.translated(owner.as_vec3()).ray(origin, direction)
+                        else {
+                            return;
+                        };
+                        if distance + 1e-5 < entered
+                            || distance > end + 1e-5
+                            || distance > BLOCK_REACH
+                        {
+                            return;
+                        }
+                        if best.as_ref().is_none_or(|(old, _)| distance < *old) {
+                            best = Some((
+                                distance,
+                                BlockTarget {
+                                    destroy: owner,
+                                    place: owner + normal.round().as_ivec3(),
+                                    normal,
+                                    hit: origin + direction * distance,
+                                },
+                            ));
+                        }
+                    };
+                    if state.kind() == VoxelKind::Lava {
+                        inspect(crate::voxel::state::BlockBox {
+                            min: Vec3::ZERO,
+                            max: Vec3::ONE,
+                        });
+                    } else {
+                        for shape in state.selection_boxes(owner) {
+                            inspect(shape);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((_, target)) = best {
+            return Some(target);
         }
         let axis = if next.x <= next.y && next.x <= next.z {
             0
@@ -339,11 +446,20 @@ fn targeted_voxel(
         if next[axis] > BLOCK_REACH {
             return None;
         }
+        entered = next[axis];
         cell[axis] += step[axis];
         next[axis] += delta[axis];
-        normal = IVec3::ZERO;
-        normal[axis] = -step[axis];
     }
+}
+#[cfg(test)]
+fn targeted_voxel(
+    origin: Vec3,
+    direction: Dir3,
+    mut sample: impl FnMut(IVec3) -> Option<VoxelKind>,
+) -> Option<BlockTarget> {
+    targeted_state(origin, direction, |p| {
+        sample(p).map(VoxelKind::default_state)
+    })
 }
 
 #[cfg(test)]
@@ -419,6 +535,7 @@ mod tests {
     fn overlay_global_transform_is_current_in_the_render_frame() {
         let mut app = App::new();
         app.add_plugins(TransformPlugin);
+        app.init_resource::<Assets<Mesh>>();
         app.insert_resource(BreakingAssets {
             mesh: default(),
             materials: default(),
@@ -432,6 +549,7 @@ mod tests {
             BreakingState(Some(BreakProgress {
                 position: IVec3::new(3, 4, 5),
                 kind: VoxelKind::Stone,
+                state: VoxelKind::Stone.default_state(),
                 elapsed: 0.1,
             })),
         ));
@@ -441,7 +559,8 @@ mod tests {
                 BreakingOverlay,
                 Transform::default(),
                 Visibility::Hidden,
-                MeshMaterial3d::<StandardMaterial>::default(),
+                MeshMaterial3d::<crate::voxel::render::ModelMaterial>::default(),
+                Mesh3d::default(),
             ))
             .id();
         app.update();
@@ -450,7 +569,7 @@ mod tests {
                 .get::<GlobalTransform>(overlay)
                 .unwrap()
                 .translation(),
-            Vec3::new(3.5, 4.5, 5.5)
+            Vec3::new(3.0, 4.0, 5.0)
         );
     }
 }

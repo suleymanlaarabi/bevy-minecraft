@@ -11,8 +11,16 @@ dev = ["bevy/bevy_dev_tools", "bevy/render_dev_tools", "avian3d/bevy_diagnostic"
 avian3d = { version = "0.8", default-features = false, features = ["3d", "parry-f32", "parallel"] }
 bevy = { version = "0.20", default-features = false, features = ["ui", "3d", "bevy_feathers", "bevy_settings"] }
 pumpkin-worldgen = { path = "../worldgen" }
-ron = "0.10"
+pumpkin-data = { path = "../worldgen/crates/pumpkin-data" }
+pumpkin-util = { path = "../worldgen/crates/pumpkin-util" }
+serde_json = "1.0"
+ron = "0.12"
 serde = { version = "1.0", features = ["derive"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
+lz4_flex = "0.13"
+directories = "6"
+uuid = { version = "1", features = ["v4"] }
+crc32fast = "1"
 
 [profile.dev]
 opt-level = 2
@@ -38,8 +46,3 @@ opt-level = 3
 # Re-enable GPU validation when debugging shaders: `env WGPU_VALIDATION=1 cargo run`.
 debug-assertions = false
 overflow-checks = false
-
-# `[patch]` only applies at the root: keep worldgen's modified Pumpkin crates together.
-[patch."https://github.com/Pumpkin-MC/Pumpkin.git"]
-pumpkin-world = { path = "../worldgen/vendor/pumpkin/crates/pumpkin-world" }
-pumpkin-util = { path = "../worldgen/vendor/pumpkin/crates/pumpkin-util" }

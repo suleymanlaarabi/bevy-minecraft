@@ -7,7 +7,7 @@ use bevy::{
 use crate::{
     character::CharacterPlugin,
     dropped_item::DroppedItemPlugin,
-    inventory::InventoryPlugin,
+    inventory::{InventoryPlugin, InventoryState},
     menu::GameMenuPlugin,
     player::PlayerPlugin,
     spatial::GameSpatialPlugin,
@@ -19,6 +19,8 @@ pub enum GameState {
     #[default]
     Menu,
     Settings,
+    WorldSelect,
+    WorldCreate,
     Game,
 }
 
@@ -28,6 +30,7 @@ impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
         app.insert_state(GameState::Menu)
             .add_plugins((
+                crate::world::WorldPlugin,
                 InventoryPlugin,
                 PlayerPlugin,
                 GameMenuPlugin,
@@ -37,6 +40,8 @@ impl Plugin for GamePlugin {
             ))
             .add_systems(OnEnter(GameState::Menu), setup_menu_environment)
             .add_systems(OnEnter(GameState::Settings), setup_menu_environment)
+            .add_systems(OnEnter(GameState::WorldSelect), setup_menu_environment)
+            .add_systems(OnEnter(GameState::WorldCreate), setup_menu_environment)
             .add_systems(OnEnter(GameState::Game), setup_game_environment);
     }
 }
@@ -81,4 +86,28 @@ fn setup_game_environment(
         cursor.grab_mode = CursorGrabMode::Locked;
     }
     clear_color.0 = Color::srgb_u8(148, 195, 255);
+}
+
+pub(crate) fn handle_escape(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    inventory_state: Res<State<InventoryState>>,
+    mut next_inventory_state: ResMut<NextState<InventoryState>>,
+    mut commands: Commands,
+    phase: Res<State<crate::world::WorldSessionPhase>>,
+) {
+    if !keyboard_input.just_pressed(KeyCode::Escape) {
+        return;
+    }
+    if !matches!(
+        phase.get(),
+        crate::world::WorldSessionPhase::Playing | crate::world::WorldSessionPhase::Loading
+    ) {
+        return;
+    }
+
+    if *inventory_state.get() == InventoryState::Open {
+        next_inventory_state.set(InventoryState::Closed);
+    } else {
+        crate::world::request_leave(commands.reborrow());
+    }
 }

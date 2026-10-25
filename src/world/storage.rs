@@ -1,0 +1,419 @@
+//! Blocking transactional storage. Call only from workers, never ECS systems.
+use super::model::{Checkpoint, WorldMetadata};
+use pumpkin_worldgen::ChunkStorage;
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use std::{
+    collections::HashSet,
+    io,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, PoisonError, RwLock},
+    time::Duration,
+};
+
+const MAX_RECORD_BYTES: usize = 8 * 1024 * 1024;
+const SCHEMA: &str = "
+    CREATE TABLE records(key TEXT PRIMARY KEY, value BLOB NOT NULL);
+    CREATE TABLE generated(x INTEGER NOT NULL,z INTEGER NOT NULL,stage INTEGER NOT NULL,value BLOB NOT NULL,PRIMARY KEY(x,z)) WITHOUT ROWID;
+    CREATE TABLE edited(x INTEGER NOT NULL,z INTEGER NOT NULL,value BLOB NOT NULL,PRIMARY KEY(x,z)) WITHOUT ROWID;
+";
+
+fn err(e: impl std::fmt::Display) -> io::Error {
+    io::Error::other(e.to_string())
+}
+
+pub(super) fn root() -> io::Result<PathBuf> {
+    if let Some(path) = std::env::var_os("HOLLOW_WORLDS_DIR") {
+        return Ok(path.into());
+    }
+    directories::ProjectDirs::from("org", "hollow", "game")
+        .map(|p| p.data_dir().join("worlds"))
+        .ok_or_else(|| err("User data directory is unavailable."))
+}
+
+#[derive(Clone)]
+pub(super) struct CatalogEntry {
+    pub path: PathBuf,
+    pub metadata: Option<WorldMetadata>,
+    pub error: Option<String>,
+}
+
+pub(super) fn catalog() -> io::Result<Vec<CatalogEntry>> {
+    let root = root()?;
+    std::fs::create_dir_all(&root)?;
+    let mut worlds = Vec::new();
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path().join("world.sqlite3");
+        if !path.exists() {
+            continue;
+        }
+        let metadata = (|| -> io::Result<WorldMetadata> {
+            let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(err)?;
+            read_json(&conn, "metadata")?.ok_or_else(|| err("Missing world metadata."))
+        })();
+        let (metadata, error) = match metadata {
+            Ok(m) => {
+                let error = m.validate().err().map(|e| e.to_string());
+                (Some(m), error)
+            }
+            Err(e) => (None, Some(e.to_string())),
+        };
+        worlds.push(CatalogEntry {
+            path,
+            metadata,
+            error,
+        });
+    }
+    worlds.sort_by_key(|entry| {
+        std::cmp::Reverse(entry.metadata.as_ref().map_or(0, |m| m.last_played))
+    });
+    Ok(worlds)
+}
+
+pub(crate) struct Database {
+    /// Writer for checkpoints and Pumpkin's cache.
+    connection: Mutex<Connection>,
+    /// WAL reader: chunk streaming never waits on a checkpoint transaction or its fsync.
+    reader: Mutex<Connection>,
+    /// Columns with a saved snapshot. Streaming skips SQLite for every other column.
+    edited: RwLock<HashSet<(i32, i32)>>,
+    _lock: std::fs::File,
+}
+impl Database {
+    fn from_connection(conn: Connection, path: &Path, lock: std::fs::File) -> io::Result<Self> {
+        let reader =
+            Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
+        reader.busy_timeout(Duration::from_secs(5)).map_err(err)?;
+        let edited = conn
+            .prepare("SELECT x,z FROM edited")
+            .map_err(err)?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?;
+        Ok(Self {
+            connection: Mutex::new(conn),
+            reader: Mutex::new(reader),
+            edited: RwLock::new(edited),
+            _lock: lock,
+        })
+    }
+
+    pub(super) fn create(metadata: &WorldMetadata) -> io::Result<Arc<Self>> {
+        let root = root()?;
+        std::fs::create_dir_all(&root)?;
+        let folder = root.join(&metadata.id);
+        std::fs::create_dir(&folder)?;
+        let result = (|| {
+            let lock = Self::lock(&folder)?;
+            let path = folder.join("world.sqlite3");
+            let conn = Connection::open(&path).map_err(err)?;
+            Self::configure(&conn)?;
+            conn.execute_batch(SCHEMA).map_err(err)?;
+            conn.execute(
+                "INSERT INTO records VALUES('metadata',?1)",
+                [serde_json::to_vec(metadata).map_err(err)?],
+            )
+            .map_err(err)?;
+            Self::from_connection(conn, &path, lock).map(Arc::new)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_dir_all(&folder);
+        }
+        result
+    }
+
+    pub(super) fn open(path: &Path) -> io::Result<(Arc<Self>, WorldMetadata, Checkpoint)> {
+        let lock = Self::lock(path.parent().ok_or_else(|| err("Invalid world path."))?)?;
+        let conn =
+            Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(err)?;
+        let metadata: WorldMetadata =
+            read_json(&conn, "metadata")?.ok_or_else(|| err("Missing world metadata."))?;
+        metadata.validate()?;
+        Self::configure(&conn)?;
+        let checkpoint: Checkpoint = read_json(&conn, "checkpoint")?.unwrap_or_default();
+        if let Some(player) = &checkpoint.player {
+            player.inventory()?;
+        }
+        for drop in &checkpoint.drops {
+            drop.validate()?;
+        }
+        if checkpoint.pending.iter().any(|(p, s)| {
+            !(0..384).contains(&p[1]) || crate::voxel::VoxelState::from_id(*s).is_none()
+        }) {
+            return Err(err("Invalid pending block edits."));
+        }
+        Ok((
+            Arc::new(Self::from_connection(conn, path, lock)?),
+            metadata,
+            checkpoint,
+        ))
+    }
+
+    fn lock(folder: &Path) -> io::Result<std::fs::File> {
+        let file = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(folder.join("world.lock"))?;
+        let started = std::time::Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(file),
+                Err(error) => {
+                    let error: io::Error = error.into();
+                    if error.kind() != io::ErrorKind::WouldBlock
+                        || started.elapsed() >= Duration::from_secs(5)
+                    {
+                        return Err(err(format!(
+                            "Cannot open this world (already in use or locking unavailable): {error}"
+                        )));
+                    }
+                    // The preceding session may still be finishing Pumpkin shutdown.
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+    }
+
+    fn configure(conn: &Connection) -> io::Result<()> {
+        conn.busy_timeout(Duration::from_secs(5)).map_err(err)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-16384; PRAGMA wal_autocheckpoint=2048;").map_err(err)
+    }
+
+    /// Whether a saved snapshot replaces Pumpkin's column. Never touches SQLite.
+    pub(crate) fn is_edited(&self, x: i32, z: i32) -> bool {
+        self.edited
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&(x, z))
+    }
+
+    pub(crate) fn edited(&self, x: i32, z: i32) -> io::Result<Option<Vec<u8>>> {
+        if !self.is_edited(x, z) {
+            return Ok(None);
+        }
+        let value: Option<Vec<u8>> = self
+            .reader
+            .lock()
+            .map_err(err)?
+            .query_row(
+                "SELECT value FROM edited WHERE x=?1 AND z=?2",
+                params![x, z],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(err)?;
+        value.map(|v| decompress(&v)).transpose()
+    }
+
+    pub(super) fn checkpoint(
+        &self,
+        metadata: &WorldMetadata,
+        checkpoint: &Checkpoint,
+        chunks: Vec<((i32, i32), Vec<u8>)>,
+    ) -> io::Result<()> {
+        let chunks: Vec<_> = chunks
+            .into_iter()
+            .map(|(p, bytes)| (p, compress(&bytes)))
+            .collect();
+        let positions: Vec<_> = chunks.iter().map(|&(p, _)| p).collect();
+        let metadata = serde_json::to_vec(metadata).map_err(err)?;
+        let checkpoint = serde_json::to_vec(checkpoint).map_err(err)?;
+        let mut conn = self.connection.lock().map_err(err)?;
+        let tx = conn.transaction().map_err(err)?;
+        {
+            let mut insert = tx.prepare_cached("INSERT INTO edited VALUES(?1,?2,?3) ON CONFLICT(x,z) DO UPDATE SET value=excluded.value").map_err(err)?;
+            for ((x, z), bytes) in chunks {
+                insert.execute(params![x, z, bytes]).map_err(err)?;
+            }
+        }
+        for (key, bytes) in [("metadata", metadata), ("checkpoint", checkpoint)] {
+            tx.execute("INSERT INTO records VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key,bytes]).map_err(err)?;
+        }
+        tx.commit().map_err(err)?;
+        drop(conn);
+        // Published before the save acknowledgement drops the in-memory copies.
+        self.edited
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend(positions);
+        Ok(())
+    }
+}
+
+impl ChunkStorage for Database {
+    fn read_chunks(&self, positions: &[(i32, i32)]) -> io::Result<Vec<Option<Vec<u8>>>> {
+        // Release SQLite's connection before decompression.
+        let records = {
+            let conn = self.reader.lock().map_err(err)?;
+            let mut query = conn
+                .prepare_cached("SELECT value FROM generated WHERE x=?1 AND z=?2")
+                .map_err(err)?;
+            positions
+                .iter()
+                .map(|&(x, z)| {
+                    query
+                        .query_row(params![x, z], |r| r.get::<_, Vec<u8>>(0))
+                        .optional()
+                        .map_err(err)
+                })
+                .collect::<io::Result<Vec<_>>>()?
+        };
+        records
+            .into_iter()
+            .map(|r| r.map(|r| decompress(&r)).transpose())
+            .collect()
+    }
+    fn write_chunks(&self, chunks: Vec<((i32, i32), Vec<u8>)>) -> io::Result<()> {
+        let records: Vec<_> = chunks
+            .into_iter()
+            .map(|(p, bytes)| {
+                let stage = *bytes.get(21).unwrap_or(&0);
+                (p, stage, compress(&bytes))
+            })
+            .collect();
+        let mut conn = self.connection.lock().map_err(err)?;
+        let tx = conn.transaction().map_err(err)?;
+        {
+            let mut insert = tx.prepare_cached("INSERT INTO generated VALUES(?1,?2,?3,?4) ON CONFLICT(x,z) DO UPDATE SET stage=excluded.stage,value=excluded.value WHERE excluded.stage>=generated.stage").map_err(err)?;
+            for ((x, z), stage, bytes) in records {
+                insert.execute(params![x, z, stage, bytes]).map_err(err)?;
+            }
+        }
+        tx.commit().map_err(err)
+    }
+    fn flush(&self) -> io::Result<()> {
+        self.connection
+            .lock()
+            .map_err(err)?
+            .execute_batch("PRAGMA wal_checkpoint(PASSIVE);")
+            .map_err(err)
+    }
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(
+    conn: &Connection,
+    key: &str,
+) -> io::Result<Option<T>> {
+    let bytes: Option<Vec<u8>> = conn
+        .query_row("SELECT value FROM records WHERE key=?1", [key], |r| {
+            r.get(0)
+        })
+        .optional()
+        .map_err(err)?;
+    bytes
+        .map(|b| serde_json::from_slice(&b).map_err(err))
+        .transpose()
+}
+fn decompress(bytes: &[u8]) -> io::Result<Vec<u8>> {
+    let checksum = bytes
+        .get(..4)
+        .ok_or_else(|| err("Truncated compressed chunk."))?;
+    let bytes = &bytes[4..];
+    let size = bytes
+        .get(..4)
+        .ok_or_else(|| err("Truncated compressed chunk."))?;
+    if u32::from_le_bytes(size.try_into().unwrap()) as usize > MAX_RECORD_BYTES {
+        return Err(err("Invalid chunk size."));
+    }
+    let record = lz4_flex::decompress_size_prepended(bytes).map_err(err)?;
+    if crc32fast::hash(&record) != u32::from_le_bytes(checksum.try_into().unwrap()) {
+        return Err(err("Chunk checksum mismatch."));
+    }
+    Ok(record)
+}
+fn compress(bytes: &[u8]) -> Vec<u8> {
+    let mut record = crc32fast::hash(bytes).to_le_bytes().to_vec();
+    record.extend_from_slice(&lz4_flex::compress_prepend_size(bytes));
+    record
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn records_reject_corruption_and_oversized_allocations() {
+        let bytes = compress(b"Hollow chunk record");
+        assert_eq!(decompress(&bytes).unwrap(), b"Hollow chunk record");
+        let mut corrupt = bytes.clone();
+        corrupt[0] ^= 1;
+        assert!(decompress(&corrupt).is_err());
+        assert!(decompress(&bytes[..7]).is_err());
+        let mut oversized = bytes;
+        oversized[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decompress(&oversized).is_err());
+    }
+
+    fn with_database(run: impl FnOnce(&Database, &WorldMetadata)) {
+        struct Directory(PathBuf);
+        impl Drop for Directory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory = Directory(
+            std::env::temp_dir().join(format!("hollow-storage-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir(&directory.0).unwrap();
+        let lock = Database::lock(&directory.0).unwrap();
+        let path = directory.0.join("world.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        Database::configure(&conn).unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        let database = Database::from_connection(conn, &path, lock).unwrap();
+        let metadata = WorldMetadata::new("World".into(), -42, super::super::WorldQuality::Fast);
+        database
+            .checkpoint(&metadata, &Checkpoint::default(), vec![])
+            .unwrap();
+        run(&database, &metadata);
+    }
+
+    #[test]
+    fn failed_checkpoint_rolls_back_chunks_and_player_metadata_together() {
+        with_database(|database, original| {
+            database.connection.lock().unwrap().execute_batch("CREATE TRIGGER reject_checkpoint BEFORE UPDATE ON records WHEN NEW.key='checkpoint' BEGIN SELECT RAISE(ABORT,'simulated write failure'); END;").unwrap();
+            let mut updated = original.clone();
+            updated.name = "Updated World".into();
+            assert!(
+                database
+                    .checkpoint(
+                        &updated,
+                        &Checkpoint::default(),
+                        vec![((-2, 3), b"chunk snapshot".to_vec())]
+                    )
+                    .is_err()
+            );
+            assert!(database.edited(-2, 3).unwrap().is_none());
+            let stored: WorldMetadata = read_json(&database.connection.lock().unwrap(), "metadata")
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.name, original.name);
+        });
+    }
+
+    #[test]
+    fn lower_generation_stage_cannot_replace_a_complete_cached_chunk() {
+        with_database(|database, _| {
+            let mut full = vec![0; 22];
+            full[..4].copy_from_slice(b"PCHK");
+            full[21] = 9;
+            let mut partial = full.clone();
+            partial[21] = 4;
+            database
+                .write_chunks(vec![((-2, 3), full.clone())])
+                .unwrap();
+            database.write_chunks(vec![((-2, 3), partial)]).unwrap();
+            assert_eq!(
+                database.read_chunks(&[(-2, 3), (3, -2)]).unwrap(),
+                vec![Some(full), None]
+            );
+        });
+    }
+}

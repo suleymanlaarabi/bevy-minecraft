@@ -4,41 +4,39 @@ use avian3d::{
     collision::collider::Collider,
     dynamics::rigid_body::{
         GravityScale, LinearDamping, LinearVelocity,
-        forces::{Forces, WriteRigidBodyForces},
+        forces::{Forces, ReadRigidBodyForces, WriteRigidBodyForces},
     },
-    prelude::{Position, Rotation},
+    prelude::{NarrowPhaseConfig, PhysicsLengthUnit, Position, Rotation},
     schedule::PhysicsSystems,
-    spatial_query::{ShapeCastConfig, ShapeCaster, ShapeHits, SpatialQuery, SpatialQueryFilter},
+    spatial_query::{ShapeCastConfig, SpatialQuery, SpatialQueryFilter},
 };
 use bevy::prelude::*;
 
-use crate::{game::GameState, voxel::VoxelWorld};
+use crate::{spatial::GameLayer, voxel::VoxelWorld};
 
 pub const CHARACTER_GRAVITY_SCALE: f32 = 2.8;
 pub const CHARACTER_WATER_GRAVITY_SCALE: f32 = 0.15;
 const WATER_DAMPING: f32 = 4.0;
 const SWIM_VERTICAL_ACCELERATION: f32 = 8.0;
-const STEP_CLEARANCE: f32 = 0.05;
+const STEP_CLEARANCE: f32 = 0.02;
+// Rest beyond Avian's contact tolerance so an edge below the feet cannot
+// create a speculative sideways contact and steal walking speed.
+const CONTACT_CLEARANCE: f32 = 0.005;
+const GROUND_REACH: f32 = 0.1;
+// Ignore tiny upward corrections from the contact solver, but never a jump.
+const GROUND_UP_SPEED: f32 = 0.5;
 
 pub struct CharacterPlugin;
-
-fn caster() -> ShapeCaster {
-    ShapeCaster::new(
-        Collider::sphere(0.25),
-        Vec3::ZERO,
-        Quat::IDENTITY,
-        Dir3::NEG_Y,
-    )
-    .with_max_distance(0.75)
-    .with_ignore_self(true)
-}
 
 #[derive(Component)]
 pub struct OnGround;
 
 #[derive(Component, Default)]
-#[require(ShapeCaster = caster())]
+#[require(GroundSupport)]
 pub struct OnGroundSensor;
+
+#[derive(Component, Default)]
+struct GroundSupport(Option<f32>);
 
 #[derive(Component)]
 pub struct InWater;
@@ -62,6 +60,8 @@ pub struct CharacterController {
     pub swim_sprint_speed: f32,
 
     pub max_step_height: f32,
+    /// Ledges climbed directly, without applying the jump impulse.
+    pub walk_step_height: f32,
     pub step_probe_distance: f32,
 }
 
@@ -87,6 +87,7 @@ impl Default for CharacterController {
             swim_speed: 2.2,
             swim_sprint_speed: 5.612,
             max_step_height: 1.0,
+            walk_step_height: 0.6,
             step_probe_distance: 0.25,
         }
     }
@@ -103,42 +104,72 @@ impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             FixedUpdate,
-            (
-                add_grounded_state,
-                remove_grounded_state,
-                add_in_water_state,
-                remove_in_water_state,
-            )
-                .run_if(in_state(GameState::Game)),
+            (add_in_water_state, remove_in_water_state).run_if(crate::world::playing),
         )
         .add_systems(
             FixedPostUpdate,
-            (character_land_movement, character_swim_movement)
+            (
+                update_grounded_state,
+                (character_land_movement, character_swim_movement),
+            )
+                .chain()
                 .after(PhysicsSystems::Prepare)
                 .before(PhysicsSystems::StepSimulation)
-                .run_if(in_state(GameState::Game)),
+                .run_if(crate::world::playing),
+        )
+        .add_systems(
+            FixedPostUpdate,
+            follow_ground
+                .after(PhysicsSystems::StepSimulation)
+                .before(PhysicsSystems::Writeback)
+                .run_if(crate::world::playing),
         );
     }
 }
 
-fn add_grounded_state(
-    mut query: Query<(Entity, &ShapeHits), (With<OnGroundSensor>, Without<OnGround>)>,
+fn update_grounded_state(
+    spatial_query: SpatialQuery,
+    narrow_phase: Res<NarrowPhaseConfig>,
+    length_unit: Res<PhysicsLengthUnit>,
+    mut characters: Query<
+        (
+            Entity,
+            &Position,
+            &Rotation,
+            &Collider,
+            &LinearVelocity,
+            &mut GroundSupport,
+            Has<OnGround>,
+        ),
+        With<OnGroundSensor>,
+    >,
     mut commands: Commands,
 ) {
-    for (entity, hits) in &mut query {
-        if hits.iter().any(|hit| hit.normal1.y > 0.5) {
-            commands.entity(entity).insert(OnGround);
-        }
-    }
-}
-
-fn remove_grounded_state(
-    mut query: Query<(Entity, &ShapeHits), (With<OnGroundSensor>, With<OnGround>)>,
-    mut commands: Commands,
-) {
-    for (entity, hits) in &mut query {
-        if !hits.iter().any(|hit| hit.normal1.y > 0.5) {
-            commands.entity(entity).remove::<OnGround>();
+    let skin = narrow_phase.contact_tolerance * length_unit.0 + CONTACT_CLEARANCE;
+    for (entity, position, rotation, collider, velocity, mut support, was_grounded) in
+        &mut characters
+    {
+        // Read the current physics pose and the full footprint. A narrower
+        // sphere misses support at corners, and last tick's ShapeHits lag a step.
+        support.0 = if velocity.y <= GROUND_UP_SPEED {
+            ground_height(
+                &spatial_query,
+                entity,
+                collider,
+                position.0,
+                rotation.0,
+                skin,
+            )
+        } else {
+            None
+        };
+        let grounded = support.0.is_some();
+        if grounded != was_grounded {
+            if grounded {
+                commands.entity(entity).insert(OnGround);
+            } else {
+                commands.entity(entity).remove::<OnGround>();
+            }
         }
     }
 }
@@ -150,10 +181,7 @@ fn add_in_water_state(
     mut commands: Commands,
 ) {
     for (entity, transform) in &mut query {
-        if voxel_world
-            .get_at(transform.translation)
-            .is_some_and(|kind| kind.is_liquid())
-        {
+        if voxel_world.is_liquid_at(transform.translation) {
             commands.entity(entity).insert(InWater);
         }
     }
@@ -166,19 +194,19 @@ fn remove_in_water_state(
     mut commands: Commands,
 ) {
     for (entity, transform) in &mut query {
-        if !voxel_world
-            .get_at(transform.translation)
-            .is_some_and(|kind| kind.is_liquid())
-        {
+        if !voxel_world.is_liquid_at(transform.translation) {
             commands.entity(entity).remove::<InWater>();
         }
     }
 }
 
 fn character_land_movement(
+    mut commands: Commands,
     voxel_world: crate::voxel::VoxelWorld,
     time: Res<Time>,
     spatial_query: SpatialQuery,
+    narrow_phase: Res<NarrowPhaseConfig>,
+    length_unit: Res<PhysicsLengthUnit>,
     mut characters: Query<
         (
             Entity,
@@ -188,6 +216,7 @@ fn character_land_movement(
             &mut LinearVelocity,
             &CharacterController,
             &CharacterMovement,
+            &GroundSupport,
             &mut GravityScale,
             &mut LinearDamping,
             Has<OnGround>,
@@ -197,6 +226,7 @@ fn character_land_movement(
     >,
 ) {
     let dt = time.delta_secs();
+    let skin = narrow_phase.contact_tolerance * length_unit.0 + CONTACT_CLEARANCE;
 
     for (
         entity,
@@ -206,13 +236,14 @@ fn character_land_movement(
         mut velocity,
         controller,
         movement,
+        support,
         mut gravity,
         mut damping,
         grounded,
         auto_jump,
     ) in &mut characters
     {
-        if !voxel_world.collision_ready(position.0) {
+        if !voxel_world.collision_ready_for_motion(position.0, velocity.0, dt) {
             gravity.0 = 0.0;
             velocity.0 = Vec3::ZERO;
             continue;
@@ -255,22 +286,56 @@ fn character_land_movement(
                 }
             }
 
-            let should_jump = movement.jump
-                || (auto_jump
-                    && velocity.y <= 0.0
+            if movement.jump {
+                velocity.y = controller.jump_speed;
+            } else if velocity.y <= GROUND_UP_SPEED {
+                let horizontal_velocity = Vec3::new(velocity.x, 0.0, velocity.z);
+                let travel = horizontal_velocity * dt;
+                // Do not raise the body before its next footprint reaches the
+                // ledge: otherwise gravity pulls it back onto the lower floor.
+                let probe = travel.length().min(controller.step_probe_distance);
+                let step = step_height(
+                    &spatial_query,
+                    entity,
+                    collider,
+                    position.0,
+                    rotation.0,
+                    horizontal_velocity.normalize_or_zero(),
+                    probe,
+                    controller.walk_step_height,
+                    skin,
+                );
+                let auto_jump = step.is_none()
+                    && auto_jump
                     && wish_dir != Vec3::ZERO
-                    && can_clear_step(
+                    && step_height(
                         &spatial_query,
                         entity,
                         collider,
                         position.0,
                         rotation.0,
                         wish_dir,
-                        controller,
-                    ));
-
-            if should_jump {
-                velocity.y = controller.jump_speed;
+                        controller.step_probe_distance,
+                        controller.max_step_height,
+                        skin,
+                    )
+                    .is_some_and(|height| height > controller.walk_step_height + CONTACT_CLEARANCE);
+                if auto_jump {
+                    velocity.y = controller.jump_speed;
+                } else if let Some(height) = step.or(support.0) {
+                    if height.abs() > 0.0001 {
+                        // SpatialQuery reads Position for all colliders. Queue
+                        // the correction; the chain flushes it before physics.
+                        commands
+                            .entity(entity)
+                            .insert(Position(position.0 + Vec3::Y * height));
+                    }
+                    // Hold the verified support height through this tick. A
+                    // gravity impulse here would hit the riser's edge again,
+                    // losing horizontal speed and making the player bob.
+                    gravity.0 = 0.0;
+                    velocity.y = 0.0;
+                }
             }
         } else if wish_dir != Vec3::ZERO {
             let change = (target - current).clamp_length_max(controller.air_acceleration * dt);
@@ -282,7 +347,11 @@ fn character_land_movement(
 }
 
 fn character_swim_movement(
+    voxel_world: VoxelWorld,
+    time: Res<Time>,
     spatial_query: SpatialQuery,
+    narrow_phase: Res<NarrowPhaseConfig>,
+    length_unit: Res<PhysicsLengthUnit>,
     mut characters: Query<
         (
             Entity,
@@ -298,6 +367,7 @@ fn character_swim_movement(
         (With<GameCharacter>, With<InWater>),
     >,
 ) {
+    let skin = narrow_phase.contact_tolerance * length_unit.0 + CONTACT_CLEARANCE;
     for (
         entity,
         mut forces,
@@ -310,21 +380,30 @@ fn character_swim_movement(
         mut damping,
     ) in &mut characters
     {
+        let velocity = forces.linear_velocity();
+        if !voxel_world.collision_ready_for_motion(position.0, velocity, time.delta_secs()) {
+            gravity.0 = 0.0;
+            *forces.linear_velocity_mut() = Vec3::ZERO;
+            continue;
+        }
         let horizontal_direction =
             Vec3::new(movement.direction.x, 0.0, movement.direction.z).normalize_or_zero();
 
         if movement.jump
             && !movement.sneak
             && horizontal_direction != Vec3::ZERO
-            && can_clear_step(
+            && step_height(
                 &spatial_query,
                 entity,
                 collider,
                 position.0,
                 rotation.0,
                 horizontal_direction,
-                controller,
+                controller.step_probe_distance,
+                controller.max_step_height,
+                skin,
             )
+            .is_some()
         {
             gravity.0 = CHARACTER_GRAVITY_SCALE;
             damping.0 = 0.0;
@@ -368,39 +447,124 @@ fn character_swim_movement(
     }
 }
 
-fn can_clear_step(
+/// Snap down only after horizontal integration has cleared the old floor.
+/// Applying a projected descent before moving would put the rear of the body
+/// inside the higher block, making the solver push it up and slow it down.
+fn follow_ground(
+    mut commands: Commands,
+    spatial_query: SpatialQuery,
+    narrow_phase: Res<NarrowPhaseConfig>,
+    length_unit: Res<PhysicsLengthUnit>,
+    mut characters: Query<
+        (Entity, &Position, &Rotation, &Collider, &mut LinearVelocity),
+        (With<GameCharacter>, With<OnGround>, Without<InWater>),
+    >,
+) {
+    let skin = narrow_phase.contact_tolerance * length_unit.0 + CONTACT_CLEARANCE;
+    for (entity, position, rotation, collider, mut velocity) in &mut characters {
+        if velocity.y > GROUND_UP_SPEED {
+            continue;
+        }
+        if let Some(height) = ground_height(
+            &spatial_query,
+            entity,
+            collider,
+            position.0,
+            rotation.0,
+            skin,
+        ) && height < -0.0001
+        {
+            commands
+                .entity(entity)
+                .insert(Position(position.0 + Vec3::Y * height));
+            velocity.y = 0.0;
+        }
+    }
+}
+
+/// Vertical correction to rest on a nearby floor with a small stable gap.
+fn ground_height(
+    spatial_query: &SpatialQuery,
+    entity: Entity,
+    collider: &Collider,
+    position: Vec3,
+    rotation: Quat,
+    skin: f32,
+) -> Option<f32> {
+    let filter = SpatialQueryFilter::from_excluded_entities([entity])
+        .with_mask([GameLayer::Default, GameLayer::World]);
+    let hit = spatial_query.cast_shape(
+        collider,
+        position + Vec3::Y * STEP_CLEARANCE,
+        rotation,
+        Dir3::NEG_Y,
+        &ShapeCastConfig::from_max_distance(STEP_CLEARANCE + GROUND_REACH),
+        &filter,
+    )?;
+    // An initial overlap with the side of a higher step is not floor support.
+    (hit.distance > CONTACT_CLEARANCE && hit.normal1.y > 0.5)
+        .then_some(STEP_CLEARANCE - hit.distance + skin)
+}
+
+/// Returns the supported rise after an up/forward/down sweep. Every leg of
+/// the path must fit the whole body, including its head, before moving it.
+fn step_height(
     spatial_query: &SpatialQuery,
     entity: Entity,
     collider: &Collider,
     position: Vec3,
     rotation: Quat,
     direction: Vec3,
-    controller: &CharacterController,
-) -> bool {
-    let Ok(direction) = Dir3::new(direction) else {
-        return false;
-    };
-    let config = ShapeCastConfig::from_max_distance(controller.step_probe_distance);
-    let filter = SpatialQueryFilter::from_excluded_entities([entity]);
-    let origin = position + Vec3::Y * STEP_CLEARANCE;
+    probe_distance: f32,
+    max_height: f32,
+    skin: f32,
+) -> Option<f32> {
+    let direction = Dir3::new(direction).ok()?;
+    let config = ShapeCastConfig::from_max_distance(probe_distance);
+    // Loose items must never act as stairs or trigger an automatic jump.
+    let filter = SpatialQueryFilter::from_excluded_entities([entity])
+        .with_mask([GameLayer::Default, GameLayer::World]);
+    // The grounded body already has a stable clearance. Raising this initial
+    // sweep would hide risers smaller than that extra offset.
+    let origin = position;
 
-    let Some(obstacle) =
-        spatial_query.cast_shape(collider, origin, rotation, direction, &config, &filter)
-    else {
-        return false;
-    };
+    let obstacle =
+        spatial_query.cast_shape(collider, origin, rotation, direction, &config, &filter)?;
 
-    // A small ground penetration can produce a hit at the cast origin. Only a
-    // surface facing the movement direction is an obstacle to step over.
-    obstacle.normal1.dot(*direction) < -0.5
-        && spatial_query
-            .cast_shape(
-                collider,
-                origin + Vec3::Y * controller.max_step_height,
-                rotation,
-                direction,
-                &config,
-                &filter,
-            )
-            .is_none()
+    // Ignore floor contacts, but accept shallow approaches to a riser as well
+    // as head-on ones; a steep dot threshold catches the feet while strafing.
+    if obstacle.normal1.dot(*direction) >= -0.001 {
+        return None;
+    }
+
+    let up_config = ShapeCastConfig {
+        ignore_origin_penetration: true,
+        ..ShapeCastConfig::from_max_distance(max_height)
+    };
+    let lift = spatial_query
+        .cast_shape(collider, origin, rotation, Dir3::Y, &up_config, &filter)
+        .map_or(max_height, |ceiling| (ceiling.distance - skin).max(0.0));
+    if lift <= CONTACT_CLEARANCE {
+        return None;
+    }
+    let raised = origin + Vec3::Y * lift;
+    if spatial_query
+        .cast_shape(collider, raised, rotation, direction, &config, &filter)
+        .is_some()
+    {
+        return None;
+    }
+    let landing = spatial_query.cast_shape(
+        collider,
+        raised + *direction * probe_distance,
+        rotation,
+        Dir3::NEG_Y,
+        &ShapeCastConfig::from_max_distance(lift + STEP_CLEARANCE),
+        &filter,
+    )?;
+    let height = lift - landing.distance + skin;
+    (landing.normal1.y > 0.5
+        && height > CONTACT_CLEARANCE
+        && height <= max_height + CONTACT_CLEARANCE)
+        .then_some(height)
 }

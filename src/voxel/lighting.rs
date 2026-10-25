@@ -2,7 +2,7 @@
 //!
 //! Streamed chunks keep the light Pumpkin computed during generation. Only the
 //! neighborhood of edited chunks is mirrored into the lighting context.
-use super::{ChunkVoxels, VoxelChunk, data::Layer, streaming::ChunkIndex};
+use super::{ChunkVoxels, VoxelChunk, storage::Layer, streaming::ChunkIndex};
 use bevy::{
     platform::collections::{HashMap, HashSet},
     prelude::*,

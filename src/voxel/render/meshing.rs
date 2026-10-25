@@ -1,8 +1,10 @@
-use super::{
-    ChunkVoxels, SUN_POSITION, VoxelKind,
-    data::{
-        CHUNK_HEIGHT, CHUNK_SIZE, FULL_SKY, Layer, SECTION_COUNT, SECTION_HEIGHT, SECTION_VOLUME,
+use super::models::{CellInfo, cell};
+use crate::voxel::{
+    ChunkVoxels, SUN_POSITION, VoxelKind, VoxelState,
+    coordinates::{
+        CHUNK_HEIGHT, CHUNK_SIZE, FULL_SKY, SECTION_COUNT, SECTION_HEIGHT, SECTION_VOLUME,
     },
+    storage::Layer,
 };
 use bevy::{
     asset::RenderAssetUsages,
@@ -15,7 +17,7 @@ use std::cell::RefCell;
 
 /// Packed terrain and water vertex, decoded by `voxel_vertex.wesl`:
 /// - word 0: x, y, z (5 bits each, section-local 0..=16), face direction (3 bits,
-///   `axis * 2 + positive`), block kind (8 bits);
+///   `axis * 2 + positive`), cube appearance (14 bits, see `models::Appearance`);
 /// - word 1: corner sky light and block light (6 bits each, 0..=60); water adds the
 ///   corner column depth (4 bits) and the lowered surface flag (1 bit) above them.
 ///
@@ -25,16 +27,12 @@ pub(crate) const ATTRIBUTE_VOXEL: MeshVertexAttribute =
     MeshVertexAttribute::new("Voxel", 0x766f_7865_6c5f_7631, VertexFormat::Uint32x2);
 
 const _: () = assert!(
-    VoxelKind::ALL.len() <= 256,
-    "block kinds must fit in 8 bits"
-);
-const _: () = assert!(
     SECTION_HEIGHT <= 16,
     "section coordinates must fit in 5 bits"
 );
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct Face(VoxelKind, bool, [u16; 4]);
+struct Face(u16, bool, [u16; 4]);
 
 // Nonuniform quads remain one cell wide: repeating the same corner pattern on
 // several cells is not equivalent to interpolating once across the merged quad.
@@ -52,40 +50,82 @@ impl LitFace {
     }
 }
 
-/// What the mesher needs to know about one cell.
+/// What the mesher needs to know about one cell: its state and one table read.
 #[derive(Clone, Copy)]
-struct Sample {
-    kind: VoxelKind,
-    light: u8,
-    /// Whether the cell darkens the corners of an adjacent face.
-    occludes: bool,
+pub(super) struct Sample {
+    pub(super) state: VoxelState,
+    info: CellInfo,
+    pub(super) light: u8,
 }
 
 const ABOVE_WORLD: Sample = Sample {
-    kind: VoxelKind::Air,
+    state: VoxelKind::Air.default_state(),
+    info: CellInfo {
+        appearance: 0,
+        flags: cell::AIR,
+    },
     light: FULL_SKY,
-    occludes: false,
 };
 const BELOW_WORLD: Sample = Sample {
-    kind: VoxelKind::Air,
+    state: VoxelKind::Air.default_state(),
+    info: CellInfo {
+        appearance: 0,
+        flags: cell::AIR | cell::OCCLUDES,
+    },
     light: 0,
-    occludes: true,
 };
 
 impl Sample {
+    #[cfg(test)]
     #[inline]
     fn new(kind: VoxelKind, light: u8) -> Self {
+        Self::state(kind.default_state(), light)
+    }
+    #[inline]
+    fn state(state: VoxelState, light: u8) -> Self {
         Self {
-            kind,
+            state,
+            info: super::models::cell_info(state),
             light,
-            occludes: kind.is_opaque(),
         }
+    }
+    #[inline]
+    pub(super) fn kind(&self) -> VoxelKind {
+        self.state.kind()
+    }
+    #[inline]
+    fn has(&self, flag: u8) -> bool {
+        self.info.flags & flag != 0
+    }
+    /// Opaque greedy cube.
+    #[inline]
+    pub(super) fn cube(&self) -> bool {
+        self.has(cell::CUBE)
+    }
+    /// Alpha-tested greedy cube.
+    #[inline]
+    pub(super) fn cutout(&self) -> bool {
+        self.has(cell::CUTOUT)
+    }
+    #[inline]
+    pub(super) fn water(&self) -> bool {
+        self.has(cell::WATER)
+    }
+    #[inline]
+    pub(super) fn model(&self) -> bool {
+        self.has(cell::MODEL)
+    }
+    /// Whether the cell hides adjacent faces and darkens their corners.
+    #[inline]
+    pub(super) fn occludes(&self) -> bool {
+        self.has(cell::OCCLUDES)
     }
 }
 
 #[derive(Clone)]
 struct Column {
     cells: Layer<VoxelKind>,
+    states: Option<Layer<u16>>,
     light: Layer<u8>,
 }
 
@@ -95,6 +135,7 @@ struct Column {
 /// edge light, so world borders are neither dark nor artificially lit.
 #[derive(Clone)]
 pub(crate) struct ChunkNeighborhood {
+    pub(super) origin: IVec3,
     columns: [Option<Column>; 9],
 }
 
@@ -123,6 +164,7 @@ impl ChunkNeighborhood {
     ) -> Self {
         let column = |voxels: &ChunkVoxels| Column {
             cells: voxels.cells().clone(),
+            states: voxels.native_states.clone(),
             light: voxels.render_light().clone(),
         };
         let columns = std::array::from_fn(|slot| {
@@ -132,7 +174,15 @@ impl ChunkNeighborhood {
             }
             neighbor(offset).map(column)
         });
-        Self { columns }
+        Self {
+            columns,
+            origin: IVec3::ZERO,
+        }
+    }
+
+    pub(crate) fn at(mut self, chunk: IVec2) -> Self {
+        self.origin = IVec3::new(chunk.x * CHUNK_SIZE, 0, chunk.y * CHUNK_SIZE);
+        self
     }
 
     /// Bits of the 3x3 slots without a loaded neighbor.
@@ -157,7 +207,12 @@ impl ChunkNeighborhood {
         }
         if let Some(column) = &self.columns[slot(local.x) + 3 * slot(local.z)] {
             let index = column_index(local.x, local.y, local.z);
-            return Sample::new(column.cells.get(index), column.light.get(index));
+            let state = column
+                .states
+                .as_ref()
+                .and_then(|states| VoxelState::from_id(states.get(index)))
+                .unwrap_or_else(|| column.cells.get(index).default_state());
+            return Sample::state(state, column.light.get(index));
         }
         let center = self.center();
         let index = column_index(
@@ -166,9 +221,12 @@ impl ChunkNeighborhood {
             local.z.clamp(0, CHUNK_SIZE - 1),
         );
         Sample {
-            kind: VoxelKind::Air,
             light: center.light.get(index),
-            occludes: center.cells.get(index).is_opaque(),
+            ..if center.cells.get(index).is_opaque() {
+                BELOW_WORLD
+            } else {
+                ABOVE_WORLD
+            }
         }
     }
 
@@ -176,8 +234,15 @@ impl ChunkNeighborhood {
     fn section_contents(&self, section: usize) -> (bool, bool) {
         let cells = self.center().cells.section(section);
         (
-            cells.any(VoxelKind::is_opaque),
-            cells.any(|kind| kind == VoxelKind::Water),
+            cells.any(|kind| !matches!(kind, VoxelKind::Air | VoxelKind::Water)),
+            self.center().states.as_ref().map_or_else(
+                || cells.any(|kind| kind == VoxelKind::Water),
+                |states| {
+                    states
+                        .section(section)
+                        .any(|id| VoxelState::from_id(id).is_some_and(VoxelState::has_water))
+                },
+            ),
         )
     }
 }
@@ -187,9 +252,11 @@ const PADDED_SIZE: i32 = CHUNK_SIZE + 2;
 
 /// One section plus a one-cell border, copied once so meshing indexes a flat array.
 #[derive(Default)]
-struct Padded {
+pub(super) struct Padded {
     dimensions: [i32; 3],
     samples: Vec<Sample>,
+    /// Whether the section itself, border excluded, holds alpha-tested cubes.
+    cutout: bool,
 }
 
 impl Padded {
@@ -199,10 +266,12 @@ impl Padded {
         let base = section as i32 * SECTION_HEIGHT;
         self.dimensions = [CHUNK_SIZE, SECTION_HEIGHT, CHUNK_SIZE];
         self.samples.clear();
+        self.cutout = false;
         self.samples
             .reserve((PADDED_SIZE * PADDED_SIZE * (SECTION_HEIGHT + 2)) as usize);
         let mut kinds = [VoxelKind::Air; CHUNK_SIZE as usize];
         let mut light = [0; CHUNK_SIZE as usize];
+        let mut states = [0; CHUNK_SIZE as usize];
         for y in base - 1..=base + SECTION_HEIGHT {
             for z in -1..=CHUNK_SIZE {
                 self.samples.push(neighborhood.sample(IVec3::new(-1, y, z)));
@@ -213,14 +282,29 @@ impl Padded {
                 if let Some(column) = column {
                     let section = (y / SECTION_HEIGHT) as usize;
                     let start = column_index(0, y, z) % SECTION_VOLUME;
-                    column.cells.section(section).copy_cells(start, &mut kinds);
                     column.light.section(section).copy_cells(start, &mut light);
-                    self.samples.extend(
-                        kinds
+                    if let Some(native) = &column.states {
+                        native.section(section).copy_cells(start, &mut states);
+                    } else {
+                        column.cells.section(section).copy_cells(start, &mut kinds);
+                        for (id, kind) in states.iter_mut().zip(kinds) {
+                            *id = kind.default_state().id();
+                        }
+                    }
+                    self.samples
+                        .extend(states.iter().zip(&light).map(|(&id, &light)| {
+                            Sample::state(
+                                VoxelState::from_id(id).unwrap_or(VoxelKind::Air.default_state()),
+                                light,
+                            )
+                        }));
+                    // Interior rows always come from the center column.
+                    let interior =
+                        (base..base + SECTION_HEIGHT).contains(&y) && (0..CHUNK_SIZE).contains(&z);
+                    self.cutout |= interior
+                        && self.samples[self.samples.len() - CHUNK_SIZE as usize..]
                             .iter()
-                            .zip(&light)
-                            .map(|(&kind, &light)| Sample::new(kind, light)),
-                    );
+                            .any(Sample::cutout);
                 } else {
                     self.samples
                         .extend((0..CHUNK_SIZE).map(|x| neighborhood.sample(IVec3::new(x, y, z))));
@@ -231,16 +315,18 @@ impl Padded {
         }
     }
 
+    #[cfg(test)]
     fn single(kind: VoxelKind) -> Self {
         let mut samples = vec![ABOVE_WORLD; 27];
         samples[13] = Sample::new(kind, FULL_SKY);
         Self {
             dimensions: [1, 1, 1],
+            cutout: samples[13].cutout(),
             samples,
         }
     }
 
-    fn get(&self, local: IVec3) -> Sample {
+    pub(super) fn get(&self, local: IVec3) -> Sample {
         let width = self.dimensions[0] + 2;
         let depth = self.dimensions[2] + 2;
         self.samples[((local.x + 1) + width * ((local.z + 1) + depth * (local.y + 1))) as usize]
@@ -261,7 +347,7 @@ thread_local! {
     static SCRATCH: RefCell<Scratch> = RefCell::default();
 }
 
-fn face_light(padded: &Padded, outside: [i32; 3], axis: usize) -> [u16; 4] {
+pub(super) fn face_light(padded: &Padded, outside: [i32; 3], axis: usize) -> [u16; 4] {
     let u = (axis + 1) % 3;
     let v = (axis + 2) % 3;
     [(0, 0), (1, 0), (1, 1), (0, 1)].map(|(cu, cv)| {
@@ -274,7 +360,7 @@ fn face_light(padded: &Padded, outside: [i32; 3], axis: usize) -> [u16; 4] {
                 cell[v] += dv;
                 let sample = padded.get(IVec3::from_array(cell));
                 // Solid neighbors must not darken an exposed surface corner.
-                if (du != 0 || dv != 0) && sample.occludes {
+                if (du != 0 || dv != 0) && sample.occludes() {
                     continue;
                 }
                 sum[0] += u32::from(sample.light >> 4);
@@ -289,23 +375,72 @@ fn face_light(padded: &Padded, outside: [i32; 3], axis: usize) -> [u16; 4] {
 
 /// Geometry of one render section, in section-local coordinates.
 pub(crate) struct SectionMeshes {
+    /// Alpha-tested greedy cubes (leaves), drawn and shadowed with discard.
+    pub(crate) cutout: Option<TerrainGeometry<u32>>,
+    pub(crate) models: Option<super::model_mesh::ModelGeometry>,
+    pub(crate) models_cutout: Option<super::model_mesh::ModelGeometry>,
+    pub(crate) translucent: Option<super::model_mesh::ModelGeometry>,
     pub(crate) index: usize,
     pub(crate) terrain: Option<TerrainGeometry>,
-    pub(crate) water: Option<TerrainGeometry>,
     /// Depth-only terrain for the shadow maps. Only built when sunlight reaches the
     /// section or its border; otherwise its faces are buried beneath other geometry.
     pub(crate) shadow: Option<TerrainGeometry>,
 }
 
 /// Terrain or water in the packed [`ATTRIBUTE_VOXEL`] format.
-#[derive(Default)]
-pub(crate) struct TerrainGeometry {
-    vertices: Vec<[u32; 2]>,
-    /// A 16³ section has at most 49 152 vertices (a checkerboard): `u16` always fits.
-    indices: Vec<u16>,
+pub(crate) struct TerrainGeometry<I: TerrainIndex = u16> {
+    pub(super) vertices: Vec<[u32; 2]>,
+    pub(super) indices: Vec<I>,
+}
+
+/// Index width of a [`TerrainGeometry`]. Opaque, shadow and water faces stay
+/// under 65 536 vertices per section (a checkerboard has 49 152), so they mesh
+/// straight to `u16`. Cutout cubes keep faces against each other and can
+/// exceed it: they mesh to `u32` and narrow when the vertex count allows it.
+pub(crate) trait TerrainIndex: Copy {
+    fn new(index: u32) -> Self;
+    fn into_indices(indices: Vec<Self>, vertices: usize) -> Indices;
+}
+impl TerrainIndex for u16 {
+    #[inline]
+    fn new(index: u32) -> Self {
+        index as u16
+    }
+    fn into_indices(indices: Vec<Self>, vertices: usize) -> Indices {
+        debug_assert!(vertices <= usize::from(u16::MAX) + 1);
+        Indices::U16(indices)
+    }
+}
+impl TerrainIndex for u32 {
+    #[inline]
+    fn new(index: u32) -> Self {
+        index
+    }
+    fn into_indices(indices: Vec<Self>, vertices: usize) -> Indices {
+        super::model_mesh::compact_indices(indices, vertices)
+    }
+}
+
+impl<I: TerrainIndex> Default for TerrainGeometry<I> {
+    fn default() -> Self {
+        Self {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+        }
+    }
 }
 
 impl TerrainGeometry {
+    pub(super) fn position(vertex: [u32; 2]) -> Vec3 {
+        Vec3::new(
+            (vertex[0] & 31) as f32,
+            (vertex[0] >> 5 & 31) as f32,
+            (vertex[0] >> 10 & 31) as f32,
+        )
+    }
+}
+
+impl<I: TerrainIndex> TerrainGeometry<I> {
     pub(crate) fn is_empty(&self) -> bool {
         self.indices.is_empty()
     }
@@ -317,7 +452,7 @@ impl TerrainGeometry {
         dv: [i32; 3],
         axis: usize,
         positive: bool,
-        kind: VoxelKind,
+        appearance: u16,
         word1: [u16; 4],
     ) {
         let add = |a: [i32; 3], b: [i32; 3]| [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
@@ -327,8 +462,8 @@ impl TerrainGeometry {
             add(add(corner, du), dv),
             add(corner, dv),
         ];
-        let first = self.vertices.len() as u16;
-        let face = (axis as u32 * 2 + u32::from(positive)) << 15 | (kind as u32) << 18;
+        let first = self.vertices.len() as u32;
+        let face = (axis as u32 * 2 + u32::from(positive)) << 15 | u32::from(appearance) << 18;
         self.vertices
             .extend(corners.into_iter().zip(word1).map(|(point, word1)| {
                 let [x, y, z] = point.map(|value| value as u32);
@@ -339,31 +474,25 @@ impl TerrainGeometry {
         } else {
             [0, 2, 1, 0, 3, 2]
         };
-        self.indices.extend(order.map(|index| first + index));
-    }
-
-    fn position(vertex: [u32; 2]) -> Vec3 {
-        Vec3::new(
-            (vertex[0] & 31) as f32,
-            (vertex[0] >> 5 & 31) as f32,
-            (vertex[0] >> 10 & 31) as f32,
-        )
+        self.indices
+            .extend(order.map(|index| I::new(first + index)));
     }
 
     pub(crate) fn into_mesh(self) -> Mesh {
         let (min, max) = self
             .vertices
             .iter()
-            .map(|&vertex| Self::position(vertex))
+            .map(|&vertex| TerrainGeometry::position(vertex))
             .fold((Vec3::MAX, Vec3::MIN), |(min, max), position| {
                 (min.min(position), max.max(position))
             });
+        let indices = I::into_indices(self.indices, self.vertices.len());
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::RENDER_WORLD,
         )
         .with_inserted_attribute(ATTRIBUTE_VOXEL, self.vertices)
-        .with_inserted_indices(Indices::U16(self.indices));
+        .with_inserted_indices(indices);
         // Bevy derives bounds from `ATTRIBUTE_POSITION`, which packed meshes lack.
         mesh.final_aabb = min.cmple(max).all().then(|| Aabb3d::from_min_max(min, max));
         mesh
@@ -395,32 +524,52 @@ pub(crate) fn build_sections(
                 if !opaque && !water {
                     return SectionMeshes {
                         index,
+                        cutout: None,
                         terrain: None,
-                        water: None,
+                        models: None,
+                        models_cutout: None,
+                        translucent: None,
                         shadow: None,
                     };
                 }
                 padded.fill_section(neighborhood, index);
                 let casts_shadow = padded.samples.iter().any(|sample| sample.light >> 4 != 0);
+                let super::model_mesh::ModelSection {
+                    opaque: models,
+                    cutout: models_cutout,
+                    mut translucent,
+                } = super::model_mesh::section(
+                    padded,
+                    neighborhood.origin + IVec3::Y * (index as i32 * SECTION_HEIGHT),
+                );
+                let water = water
+                    .then(|| {
+                        water_mesh(
+                            padded,
+                            neighborhood,
+                            index as i32 * SECTION_HEIGHT,
+                            water_faces,
+                            depths,
+                        )
+                    })
+                    .flatten();
+                if let Some(water) = water {
+                    translucent.get_or_insert_default().append_water(water);
+                }
                 SectionMeshes {
                     index,
+                    models,
+                    models_cutout,
+                    translucent,
                     terrain: opaque
-                        .then(|| greedy_mesh(padded, true, faces))
+                        .then(|| greedy_mesh(padded, true, cell::CUBE, faces))
+                        .filter(|geometry| !geometry.is_empty()),
+                    cutout: (opaque && padded.cutout)
+                        .then(|| greedy_mesh(padded, true, cell::CUTOUT, faces))
                         .filter(|geometry| !geometry.is_empty()),
                     shadow: (opaque && casts_shadow)
                         .then(|| shadow_mesh(padded, shadow))
                         .filter(|geometry| !geometry.is_empty()),
-                    water: water
-                        .then(|| {
-                            water_mesh(
-                                padded,
-                                neighborhood,
-                                index as i32 * SECTION_HEIGHT,
-                                water_faces,
-                                depths,
-                            )
-                        })
-                        .flatten(),
                 }
             })
             .collect()
@@ -428,64 +577,85 @@ pub(crate) fn build_sections(
 }
 
 /// A unit block spanning 0..1 on every axis.
+#[cfg(test)]
 pub(crate) fn build_block_item_mesh(kind: VoxelKind) -> Mesh {
-    greedy_mesh(&Padded::single(kind), false, &mut Vec::new()).into_mesh()
+    greedy_mesh::<u16>(&Padded::single(kind), false, cell::CUBE, &mut Vec::new()).into_mesh()
 }
 
-fn greedy_mesh(padded: &Padded, lit: bool, mask: &mut Vec<Option<LitFace>>) -> TerrainGeometry {
+/// Whether `from` (of greedy `class`) shows its face toward `to`. Cutout cubes
+/// keep faces against each other, as vanilla fancy leaves do: the holes of a
+/// single-sided hull would otherwise show the sky instead of inner leaves.
+#[inline]
+fn greedy_face(class: u8, from: Sample, to: Sample) -> bool {
+    from.has(class) && !to.occludes()
+}
+
+fn greedy_mesh<I: TerrainIndex>(
+    padded: &Padded,
+    lit: bool,
+    class: u8,
+    mask: &mut Vec<Option<LitFace>>,
+) -> TerrainGeometry<I> {
     let dimensions = padded.dimensions;
     let mut geometry = TerrainGeometry::default();
-    let largest = dimensions[0].max(dimensions[1]).max(dimensions[2]);
+    let largest = dimensions[0].max(dimensions[1]).max(dimensions[2]) as usize;
+    // Opaque cubes hide each other, so a plane holds at most one face per cell.
+    // Two adjacent cutouts both show theirs: one scan fills a mask per orientation.
+    let planes = if class == cell::CUTOUT { 2 } else { 1 };
     mask.clear();
-    mask.resize((largest * largest) as usize, None);
+    mask.resize(largest * largest * planes, None);
+    let light = |cell: [i32; 3], axis: usize| {
+        if lit {
+            face_light(padded, cell, axis)
+        } else {
+            [60; 4]
+        }
+    };
     for axis in 0..3 {
         let u = (axis + 1) % 3;
         let v = (axis + 2) % 3;
         let (width, height) = (dimensions[u] as usize, dimensions[v] as usize);
+        let area = width * height;
+        // Negative faces share the positive mask when the two never overlap.
+        let negative_offset = if planes == 2 { area } else { 0 };
 
         for layer in -1..dimensions[axis] {
             for j in 0..height {
                 for i in 0..width {
+                    let index = i + j * width;
                     let mut cell = [0; 3];
                     cell[axis] = layer;
                     cell[u] = i as i32;
                     cell[v] = j as i32;
-                    let a = padded.get(IVec3::from_array(cell)).kind;
+                    let sa = padded.get(IVec3::from_array(cell));
                     cell[axis] += 1;
-                    let b = padded.get(IVec3::from_array(cell)).kind;
-                    mask[i + j * width] = match (a.is_opaque(), b.is_opaque()) {
-                        (true, false) if layer >= 0 => {
-                            let values = if lit {
-                                face_light(padded, cell, axis)
-                            } else {
-                                [60; 4]
-                            };
-                            Some(LitFace::new(Face(a, true, values), i + j * width))
-                        }
-                        (false, true) if layer + 1 < dimensions[axis] => {
-                            cell[axis] -= 1;
-                            let values = if lit {
-                                face_light(padded, cell, axis)
-                            } else {
-                                [60; 4]
-                            };
-                            Some(LitFace::new(Face(b, false, values), i + j * width))
-                        }
-                        _ => None,
-                    };
+                    let sb = padded.get(IVec3::from_array(cell));
+                    mask[index] = None;
+                    mask[negative_offset + index] = None;
+                    if layer >= 0 && greedy_face(class, sa, sb) {
+                        let face = Face(sa.info.appearance, true, light(cell, axis));
+                        mask[index] = Some(LitFace::new(face, index));
+                    }
+                    if layer + 1 < dimensions[axis] && greedy_face(class, sb, sa) {
+                        cell[axis] -= 1;
+                        let face = Face(sb.info.appearance, false, light(cell, axis));
+                        mask[negative_offset + index] = Some(LitFace::new(face, index));
+                    }
                 }
             }
 
-            consume_mask(
-                &mut mask[..width * height],
-                width,
-                height,
-                |i, j, quad_width, quad_height, face| {
-                    let (corner, du, dv) = quad(axis, layer, i, j, quad_width, quad_height);
-                    let Face(kind, positive, light) = face.face;
-                    geometry.push_quad(corner, du, dv, axis, positive, kind, light);
-                },
-            );
+            for plane in mask[..area * planes].chunks_exact_mut(area) {
+                consume_mask(
+                    plane,
+                    width,
+                    height,
+                    |i, j, quad_width, quad_height, face| {
+                        let (corner, du, dv) = quad(axis, layer, i, j, quad_width, quad_height);
+                        let Face(appearance, positive, light) = face.face;
+                        geometry.push_quad(corner, du, dv, axis, positive, appearance, light);
+                    },
+                );
+            }
         }
     }
     geometry
@@ -543,9 +713,9 @@ fn shadow_mesh(padded: &Padded, mask: &mut Vec<Option<bool>>) -> TerrainGeometry
                     cell[axis] = layer;
                     cell[u] = i as i32;
                     cell[v] = j as i32;
-                    let a = padded.get(IVec3::from_array(cell)).kind.is_opaque();
+                    let a = padded.get(IVec3::from_array(cell)).cube();
                     cell[axis] += 1;
-                    let b = padded.get(IVec3::from_array(cell)).kind.is_opaque();
+                    let b = padded.get(IVec3::from_array(cell)).cube();
                     mask[i + j * width] = match (a, b) {
                         (true, false) if keep_positive && layer >= 0 => Some(true),
                         (false, true) if keep_negative && layer + 1 < dimensions[axis] => {
@@ -562,7 +732,7 @@ fn shadow_mesh(padded: &Padded, mask: &mut Vec<Option<bool>>) -> TerrainGeometry
                 height,
                 |i, j, quad_width, quad_height, positive| {
                     let (corner, du, dv) = quad(axis, layer, i, j, quad_width, quad_height);
-                    geometry.push_quad(corner, du, dv, axis, positive, VoxelKind::Air, [0; 4]);
+                    geometry.push_quad(corner, du, dv, axis, positive, 0, [0; 4]);
                 },
             );
         }
@@ -582,7 +752,7 @@ const WATER_LOWERED: u32 = 1 << 16;
 /// Water cells stacked downward from `top` (inclusive), capped at [`WATER_DEPTH_CAP`].
 fn water_depth(neighborhood: &ChunkNeighborhood, top: IVec3) -> u8 {
     (0..WATER_DEPTH_CAP as i32)
-        .take_while(|&below| neighborhood.sample(top - IVec3::Y * below).kind == VoxelKind::Water)
+        .take_while(|&below| neighborhood.sample(top - IVec3::Y * below).water())
         .count() as u8
 }
 
@@ -626,18 +796,18 @@ fn water_mesh(
                     cell[axis] = layer;
                     cell[u] = i as i32;
                     cell[v] = j as i32;
-                    let a = padded.get(IVec3::from_array(cell)).kind;
+                    let a = padded.get(IVec3::from_array(cell));
                     cell[axis] += 1;
-                    let b = padded.get(IVec3::from_array(cell)).kind;
+                    let b = padded.get(IVec3::from_array(cell));
                     // Only real air/fluid interfaces. No water plane inside a solid
                     // ceiling, no interior faces, and no faces owned by a neighbor.
-                    let (positive, water_cell, outside) = match (a, b) {
-                        (VoxelKind::Water, VoxelKind::Air) if layer >= 0 => {
+                    let (positive, water_cell, outside) = match (a.water(), b.water()) {
+                        (true, false) if layer >= 0 && !b.occludes() => {
                             let mut water_cell = cell;
                             water_cell[axis] -= 1;
                             (true, water_cell, cell)
                         }
-                        (VoxelKind::Air, VoxelKind::Water) if layer + 1 < dimensions[axis] => {
+                        (false, true) if layer + 1 < dimensions[axis] && !a.occludes() => {
                             let mut outside = cell;
                             outside[axis] -= 1;
                             (false, cell, outside)
@@ -668,19 +838,18 @@ fn water_mesh(
                         *value |= depth << WATER_DEPTH_SHIFT;
                     }
                     // Top faces and the upper rim of exposed sides sit at the lowered level.
-                    let lowered = surface
-                        || (axis != 1
-                            && padded.get(water_cell + IVec3::Y).kind != VoxelKind::Water);
+                    let lowered =
+                        surface || (axis != 1 && !padded.get(water_cell + IVec3::Y).water());
                     mask[i + j * width] = Some((
-                        LitFace::new(Face(VoxelKind::Water, positive, values), i + j * width),
+                        LitFace::new(Face(0, positive, values), i + j * width),
                         lowered,
                     ));
                 }
             }
             consume_mask(mask, width, height, |i, j, w, h, (face, lowered)| {
                 let (corner, du, dv) = quad(axis, layer, i, j, w, h);
-                let Face(kind, positive, values) = face.face;
-                geometry.push_quad(corner, du, dv, axis, positive, kind, values);
+                let Face(appearance, positive, values) = face.face;
+                geometry.push_quad(corner, du, dv, axis, positive, appearance, values);
                 if lowered {
                     // A lowered side never merges vertically: the cell above it is
                     // not water, so the next cell up has no side face to join.
@@ -750,8 +919,8 @@ mod tests {
 
     #[test]
     fn light_gradients_are_not_collapsed_across_greedy_faces() {
-        let uniform = Face(VoxelKind::Stone, true, [60; 4]);
-        let gradient = Face(VoxelKind::Stone, true, [0, 20, 40, 60]);
+        let uniform = Face(1, true, [60; 4]);
+        let gradient = Face(1, true, [0, 20, 40, 60]);
         for (face, expected) in [(uniform, 1), (gradient, 2)] {
             let mut mask = vec![Some(LitFace::new(face, 0)), Some(LitFace::new(face, 1))];
             let mut count = 0;
@@ -797,14 +966,14 @@ mod tests {
             ChunkNeighborhood::new(&center, |offset| (offset == IVec2::NEG_X).then_some(&lit));
         let sample = neighborhood.sample(IVec3::new(-1, 0, 0));
         assert_eq!(sample.light, 0x37);
-        assert!(!sample.occludes);
+        assert!(!sample.occludes());
         assert_eq!(
             neighborhood.sample(IVec3::new(0, CHUNK_HEIGHT, 0)).light,
             FULL_SKY
         );
-        assert!(neighborhood.sample(IVec3::NEG_Y).occludes);
+        assert!(neighborhood.sample(IVec3::NEG_Y).occludes());
         // A missing neighbor repeats the chunk's own edge.
-        assert!(neighborhood.sample(IVec3::new(CHUNK_SIZE, 0, 0)).occludes);
+        assert!(neighborhood.sample(IVec3::new(CHUNK_SIZE, 0, 0)).occludes());
     }
 
     #[test]
@@ -827,8 +996,8 @@ mod tests {
                         let expected = neighborhood.sample(IVec3::new(x, base + y, z));
                         let actual = padded.get(IVec3::new(x, y, z));
                         assert_eq!(
-                            (actual.kind, actual.light, actual.occludes),
-                            (expected.kind, expected.light, expected.occludes)
+                            (actual.kind(), actual.light, actual.occludes()),
+                            (expected.kind(), expected.light, expected.occludes())
                         );
                     }
                 }
@@ -840,28 +1009,18 @@ mod tests {
     fn water_has_side_faces_and_no_faces_inside_solid_ceilings() {
         let cell = IVec3::new(5, 5, 5);
         let mut water = chunk(&[(cell, VoxelKind::Water)]);
-        let has_face = |geometry: &TerrainGeometry, direction: u32| {
-            geometry
-                .vertices
-                .iter()
-                .any(|vertex| vertex[0] >> 15 & 7 == direction)
+        let has_face = |geometry: &super::super::model_mesh::ModelGeometry, normal: [f32; 3]| {
+            geometry.normals.contains(&normal)
         };
-        let geometry = mesh(&water, None).water.unwrap();
+        let geometry = mesh(&water, None).translucent.unwrap();
         assert_eq!(geometry.indices.len(), 6 * 6);
-        assert!(has_face(&geometry, 1));
-        assert!(has_face(&geometry, 3));
-        // The surface and the upper rim of the sides sit at the lowered level.
-        assert!(
-            geometry
-                .vertices
-                .iter()
-                .all(|vertex| (vertex[1] & WATER_LOWERED != 0)
-                    == (TerrainGeometry::position(*vertex).y == 6.0))
-        );
+        assert!(has_face(&geometry, [1.0, 0.0, 0.0]));
+        assert!(has_face(&geometry, [0.0, 1.0, 0.0]));
+        assert!(geometry.positions.iter().all(|vertex| vertex[1] <= 5.875));
         water.set(cell + IVec3::Y, VoxelKind::Stone);
-        let geometry = mesh(&water, None).water.unwrap();
+        let geometry = mesh(&water, None).translucent.unwrap();
         assert_eq!(geometry.indices.len(), 5 * 6);
-        assert!(!has_face(&geometry, 3));
+        assert!(!has_face(&geometry, [0.0, 1.0, 0.0]));
     }
 
     #[test]
@@ -907,14 +1066,14 @@ mod tests {
 
     #[test]
     fn packed_vertices_round_trip_positions_and_light() {
-        let mut geometry = TerrainGeometry::default();
+        let mut geometry = TerrainGeometry::<u16>::default();
         geometry.push_quad(
             [16, 0, 3],
             [0, 16, 0],
             [0, 0, 2],
             0,
             true,
-            VoxelKind::Grass,
+            super::super::models::cell_info(VoxelKind::Grass.default_state()).appearance,
             [0, 60 | 15 << 6, 7, 60],
         );
         let corners: Vec<_> = geometry
@@ -925,7 +1084,10 @@ mod tests {
         assert_eq!(corners[0], Vec3::new(16.0, 0.0, 3.0));
         assert_eq!(corners[2], Vec3::new(16.0, 16.0, 5.0));
         assert_eq!(geometry.vertices[1][1], 60 | 15 << 6);
-        assert_eq!(geometry.vertices[0][0] >> 18 & 255, VoxelKind::Grass as u32);
+        assert_eq!(
+            geometry.vertices[0][0] >> 18 & 16383,
+            u32::from(super::super::models::cell_info(VoxelKind::Grass.default_state()).appearance)
+        );
         assert_eq!(geometry.vertices[0][0] >> 15 & 7, 1);
     }
 }

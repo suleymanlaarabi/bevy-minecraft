@@ -25,7 +25,14 @@ impl ItemKind {
         }
     }
 
-    pub const fn from_voxel(kind: VoxelKind) -> Option<Self> {
+    pub fn from_voxel(kind: VoxelKind) -> Option<Self> {
+        let kind = match kind.name() {
+            "wall_torch" => VoxelKind::from_key("torch").unwrap(),
+            "soul_wall_torch" => VoxelKind::from_key("soul_torch").unwrap(),
+            "redstone_wall_torch" => VoxelKind::from_key("redstone_torch").unwrap(),
+            "kelp_plant" => VoxelKind::from_key("kelp").unwrap(),
+            _ => kind,
+        };
         if kind.is_itemizable() {
             Some(Self::Block(kind))
         } else {
@@ -88,6 +95,15 @@ impl Default for PlayerInventory {
 }
 
 impl PlayerInventory {
+    pub(crate) fn from_saved(
+        slots: [Option<ItemStack>; INVENTORY_SIZE],
+        selected_hotbar: usize,
+    ) -> Self {
+        Self {
+            slots,
+            selected_hotbar,
+        }
+    }
     /// Applies `edit` and flags the inventory as changed only when its contents differ,
     /// so no-op clicks and pickups do not refresh the slot views.
     pub fn edit<R>(inventory: &mut Mut<Self>, edit: impl FnOnce(&mut Self) -> R) -> R {

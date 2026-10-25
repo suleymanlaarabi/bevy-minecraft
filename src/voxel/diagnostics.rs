@@ -1,6 +1,6 @@
 use super::{
     ChunkVoxels, VoxelChunk, VoxelCommandsExt, VoxelKind, VoxelWorld,
-    rebuild::{ChunkBuild, ChunkSections},
+    render::build::{ChunkBuild, ChunkSections},
     streaming::{AwaitingNeighbors, PendingChunks},
 };
 use avian3d::{prelude::Physics, schedule::PhysicsTime};
@@ -386,7 +386,7 @@ fn run_voxel_benchmark(
                 );
                 benchmark.phase = BenchmarkPhase::Done;
                 if std::env::var_os("HOLLOW_BENCH_EXIT").is_some() {
-                    commands.write_message(AppExit::Success);
+                    crate::world::request_exit(&mut commands);
                 }
             }
         }

@@ -1,5 +1,3 @@
-use core::time::Duration;
-
 use bevy::{
     feathers::{
         containers::{pane, pane_body, pane_header},
@@ -9,146 +7,21 @@ use bevy::{
         theme::{InheritableThemeTextColor, ThemeBackgroundColor, ThemedText},
         tokens,
     },
-    input::common_conditions::input_just_pressed,
     prelude::*,
-    settings::{
-        ReflectSettingsGroup, SaveSettingsDeferred, SaveSettingsSync, SettingsGroup, SettingsPlugin,
-    },
+    settings::SaveSettingsDeferred,
     ui::Checked,
     ui_widgets::{
         Activate, RadioGroup, SliderPrecision, SliderStep, SliderValue, ValueChange,
         checkbox_self_update, radio_self_update, slider_self_update,
     },
-    window::WindowCloseRequested,
 };
 
 use crate::{game::GameState, voxel::TexturePackId};
 
-mod apply;
+use super::model::{FOV_MAX, FOV_MIN, VIEW_DISTANCE_MAX, VIEW_DISTANCE_MIN, normalized_fov};
+use super::{AntiAliasingMode, DisplayMode, GraphicsSettings, ShadowQuality};
 
-const SETTINGS_APP_NAME: &str = "org.hollow.game";
-const FOV_MIN: f32 = 60.0;
-const FOV_MAX: f32 = 110.0;
-const VIEW_DISTANCE_MIN: u32 = 4;
-const VIEW_DISTANCE_MAX: u32 = 32;
-const SAVE_DELAY: Duration = Duration::from_millis(250);
-
-#[derive(Component, Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum AntiAliasingMode {
-    Off,
-    Fxaa,
-    Msaa2x,
-    #[default]
-    Msaa4x,
-    Msaa8x,
-}
-
-impl AntiAliasingMode {
-    const fn msaa(self) -> Msaa {
-        match self {
-            Self::Off | Self::Fxaa => Msaa::Off,
-            Self::Msaa2x => Msaa::Sample2,
-            Self::Msaa4x => Msaa::Sample4,
-            Self::Msaa8x => Msaa::Sample8,
-        }
-    }
-}
-
-#[derive(Component, Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ShadowQuality {
-    Off,
-    Low,
-    #[default]
-    Medium,
-    High,
-}
-
-impl ShadowQuality {
-    const fn map_size(self) -> Option<usize> {
-        match self {
-            Self::Off => None,
-            Self::Low => Some(1024),
-            Self::Medium => Some(2048),
-            Self::High => Some(4096),
-        }
-    }
-}
-
-#[derive(Component, Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum DisplayMode {
-    Windowed,
-    #[default]
-    BorderlessFullscreen,
-}
-
-#[derive(Resource, SettingsGroup, Reflect, Clone, Copy, Debug, PartialEq)]
-#[component(immutable)]
-#[reflect(Resource, SettingsGroup, Default)]
-#[settings_group(group = "graphics")]
-pub struct GraphicsSettings {
-    pub anti_aliasing: AntiAliasingMode,
-    pub vsync: bool,
-    /// GPU occlusion culling (experimental in Bevy): skips terrain hidden behind terrain.
-    pub occlusion_culling: bool,
-    pub shadow_quality: ShadowQuality,
-    pub texture_pack: TexturePackId,
-    pub field_of_view: f32,
-    pub view_distance: u32,
-    pub display_mode: DisplayMode,
-}
-
-impl Default for GraphicsSettings {
-    fn default() -> Self {
-        Self {
-            anti_aliasing: AntiAliasingMode::Msaa4x,
-            vsync: true,
-            occlusion_culling: true,
-            shadow_quality: ShadowQuality::Medium,
-            texture_pack: TexturePackId::default(),
-            field_of_view: 85.0,
-            view_distance: 10,
-            display_mode: DisplayMode::BorderlessFullscreen,
-        }
-    }
-}
-
-impl GraphicsSettings {
-    fn normalized(mut self) -> Self {
-        self.field_of_view = normalized_fov(self.field_of_view);
-        self.view_distance = self.effective_view_distance();
-        if !self.texture_pack.is_available() {
-            self.texture_pack = TexturePackId::Faithful;
-        }
-        self
-    }
-
-    pub(crate) fn effective_view_distance(&self) -> u32 {
-        self.view_distance
-            .clamp(VIEW_DISTANCE_MIN, VIEW_DISTANCE_MAX)
-    }
-}
-
-pub struct GameSettingsPlugin;
-
-impl Plugin for GameSettingsPlugin {
-    fn build(&self, app: &mut App) {
-        app.register_type::<AntiAliasingMode>()
-            .register_type::<ShadowQuality>()
-            .register_type::<DisplayMode>()
-            .register_type::<TexturePackId>()
-            .register_type::<GraphicsSettings>();
-        apply::register(app);
-        app.add_plugins(SettingsPlugin::new(SETTINGS_APP_NAME))
-            .add_systems(OnEnter(GameState::Settings), spawn_settings_page)
-            .add_systems(
-                Update,
-                back_to_menu
-                    .run_if(in_state(GameState::Settings))
-                    .run_if(input_just_pressed(KeyCode::Escape)),
-            )
-            .add_systems(Update, handle_window_close);
-    }
-}
+const SAVE_DELAY: core::time::Duration = core::time::Duration::from_millis(250);
 
 #[derive(Component, Clone, Copy, Debug, Default)]
 struct SettingsPage;
@@ -181,7 +54,7 @@ impl GraphicsChoice for DisplayMode {
     }
 }
 
-fn spawn_settings_page(mut commands: Commands, settings: Res<GraphicsSettings>) {
+pub(super) fn spawn_settings_page(mut commands: Commands, settings: Res<GraphicsSettings>) {
     commands.spawn_scene(settings_page(settings.normalized()));
 }
 
@@ -503,30 +376,8 @@ fn store_settings(current: GraphicsSettings, updated: GraphicsSettings, commands
     }
 }
 
-fn normalized_fov(value: f32) -> f32 {
-    if value.is_finite() {
-        value.clamp(FOV_MIN, FOV_MAX)
-    } else {
-        GraphicsSettings::default().field_of_view
-    }
-}
-
-fn back_to_menu(mut next_state: ResMut<NextState<GameState>>) {
-    next_state.set(GameState::Menu);
-}
-
 fn back_to_menu_on_activate(_activate: On<Activate>, mut next_state: ResMut<NextState<GameState>>) {
     next_state.set(GameState::Menu);
-}
-
-fn handle_window_close(
-    mut close_events: MessageReader<WindowCloseRequested>,
-    mut commands: Commands,
-) {
-    if close_events.read().next().is_some() {
-        commands.queue(SaveSettingsSync::IfChanged);
-        commands.write_message(AppExit::Success);
-    }
 }
 
 #[cfg(test)]

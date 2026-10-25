@@ -1,6 +1,6 @@
 import super::block_lighting::{sky_visibility, block_irradiance};
 import super::voxel_fog::apply_voxel_fog;
-import super::voxel_vertex::{PackedVertex, decode, face_normal, block_uv, face_index};
+import super::voxel_vertex::{PackedVertex, decode, face_normal, block_uv, face_index, transform_uv, face_layer, face_transform};
 import bevy_pbr::render::{
     forward_io::FragmentOutput,
     mesh_functions,
@@ -14,7 +14,7 @@ import bevy_pbr::render::{
 var blocks: texture_2d_array<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(1)
 var blocks_sampler: sampler;
-// Tint in RGB and texture layer in A, indexed by `face_index`. Read once per vertex:
+// Tint in RGB and packed layer/UV transform in A, indexed by `face_index`. Read once per vertex:
 // a per-fragment lookup would put a dependent storage read before every texture sample.
 @group(constants::MATERIAL_BIND_GROUP) @binding(2)
 var<storage, read> faces: array<vec4<f32>>;
@@ -43,11 +43,12 @@ fn vertex(in: PackedVertex) -> VoxelVaryings {
         face_normal(vertex.direction),
         in.instance_index,
     );
-    out.uv = block_uv(vertex.position, vertex.direction >> 1u);
     out.light = vertex.light;
-    // Constant over a quad, whose four vertices share kind and direction.
+    // Constant over a quad, whose four vertices share appearance and direction.
     let face = faces[face_index(vertex)];
-    out.layer = u32(face.a + 0.5);
+    let packed = u32(face.a + 0.5);
+    out.uv = transform_uv(block_uv(vertex.position, vertex.direction >> 1u), face_transform(packed));
+    out.layer = face_layer(packed);
     out.tint = face.rgb;
     return out;
 }
@@ -57,13 +58,18 @@ fn fragment(
     in: VoxelVaryings,
 ) -> FragmentOutput {
     var texture_color = textureSample(blocks, blocks_sampler, in.uv, in.layer);
-    // Terrain is opaque: close leaf cutouts (any layer with alpha) with a dark tone.
+@if(VOXEL_CUTOUT) {
+    // Leaves and other cutout cubes: real holes, alpha-tested like vanilla.
+    if texture_color.a < 0.5 { discard; }
+} @else {
+    // Opaque terrain: close stray cutouts (any layer with alpha) with a dark tone.
     if texture_color.a < 1.0 {
         texture_color = vec4<f32>(
             mix(vec3<f32>(0.32), texture_color.rgb, texture_color.a),
             1.0,
         );
     }
+}
     let albedo = texture_color.rgb * in.tint;
     let normal = normalize(in.world_normal);
     let voxel_light = in.light;

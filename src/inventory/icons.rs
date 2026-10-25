@@ -1,80 +1,66 @@
+//! Inventory models are rasterized once per texture revision, off the ECS thread.
+use crate::{
+    inventory::ItemKind,
+    voxel::{TexturePack, VoxelAssets, VoxelKind, VoxelMaterial, render::models},
+};
 use bevy::{
     asset::RenderAssetUsages,
     prelude::*,
     render::render_resource::{Extent3d, TextureDataOrder, TextureDimension, TextureFormat},
-    tasks::{ComputeTaskPool, ParallelSliceMut},
+    tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
 
-use crate::{
-    inventory::ItemKind,
-    voxel::{TexturePack, VoxelAssets, VoxelKind, VoxelMaterial},
-};
-
-/// Pixels per side of a rendered icon; the UI draws them at half size.
 const ICON_SIZE: usize = 64;
 const ICON_BYTES: usize = ICON_SIZE * ICON_SIZE * 4;
-const ICON_COUNT: usize = VoxelKind::ITEMIZABLE.len();
-// Icons are stacked vertically so each one is a contiguous slice of the atlas.
-const _: () = assert!(
-    ICON_SIZE * ICON_COUNT <= 8192,
-    "icon atlas exceeds texture limits"
-);
-
-/// Atlas index of each `VoxelKind`; only itemizable kinds are meaningful.
-const ICON_INDICES: [usize; VoxelKind::ALL.len()] = {
-    let mut indices = [0; VoxelKind::ALL.len()];
-    let mut index = 0;
-    while index < ICON_COUNT {
-        indices[VoxelKind::ITEMIZABLE[index] as usize] = index;
-        index += 1;
-    }
-    indices
-};
-
-/// Isometric projection of the cube axes, the hexagon spanning [-1, 1] vertically.
+const ICON_COLUMNS: usize = 32;
 const ISO_X: f32 = 0.866_025_4;
-const ISO_Y: f32 = 0.5;
-/// Leaves a little room around the hexagon.
-const ICON_EXTENT: f32 = 1.04;
-/// Brightness of the top, left (+Z) and right (+X) faces, as in Minecraft's inventory.
-const FACE_SHADES: [f32; 3] = [1.0, 0.8, 0.6];
-/// Faces drawn by an icon as (axis, positive), in `FACE_SHADES` order.
-const ICON_FACES: [(usize, bool); 3] = [(1, true), (2, true), (0, true)];
-/// Tone closing leaf cutouts, matching `voxel_material.wesl`.
-const CUTOUT_TONE: f32 = 0.32;
-
-/// Isometric block icons rendered from the active texture pack.
+fn icon_count() -> usize {
+    VoxelKind::itemizable().len()
+}
+fn icon_index(kind: VoxelKind) -> usize {
+    static INDICES: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+    INDICES.get_or_init(|| {
+        let mut indices = vec![0; VoxelKind::ALL.len()];
+        for (index, &kind) in VoxelKind::itemizable().iter().enumerate() {
+            indices[kind.index()] = index;
+        }
+        indices
+    })[kind.index()]
+}
+struct IconOutput {
+    revision: u64,
+    pixels: Vec<u8>,
+}
 #[derive(Resource, Default)]
 pub(crate) struct BlockIcons {
     image: Handle<Image>,
     layout: Handle<TextureAtlasLayout>,
-    /// Block texture the atlas was rendered from.
     source: Option<AssetId<Image>>,
+    revision: u64,
+    finished: Option<u64>,
+    task: Option<Task<IconOutput>>,
 }
-
 impl BlockIcons {
     pub(crate) fn image(&self) -> &Handle<Image> {
         &self.image
     }
-
     pub(crate) fn atlas(&self, item: ItemKind) -> TextureAtlas {
         let ItemKind::Block(kind) = item;
         TextureAtlas {
             layout: self.layout.clone(),
-            index: ICON_INDICES[kind as usize],
+            index: icon_index(kind),
         }
     }
 }
-
-/// Allocates the atlas, transparent until the block texture is loaded.
 pub(crate) fn setup_block_icons(
     mut icons: ResMut<BlockIcons>,
     mut images: ResMut<Assets<Image>>,
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
 ) {
+    let rows = icon_count().div_ceil(ICON_COLUMNS);
     let size = Extent3d {
-        width: ICON_SIZE as u32,
-        height: (ICON_SIZE * ICON_COUNT) as u32,
+        width: (ICON_SIZE * ICON_COLUMNS) as u32,
+        height: (ICON_SIZE * rows) as u32,
         depth_or_array_layers: 1,
     };
     icons.image = images.add(Image::new_fill(
@@ -86,15 +72,12 @@ pub(crate) fn setup_block_icons(
     ));
     icons.layout = layouts.add(TextureAtlasLayout::from_grid(
         UVec2::splat(ICON_SIZE as u32),
-        1,
-        ICON_COUNT as u32,
+        ICON_COLUMNS as u32,
+        rows as u32,
         None,
         None,
     ));
-    icons.source = None;
 }
-
-/// Renders the atlas once the block texture is loaded, again when the pack changes.
 pub(crate) fn render_block_icons(
     mut icons: ResMut<BlockIcons>,
     mut events: MessageReader<AssetEvent<Image>>,
@@ -103,157 +86,222 @@ pub(crate) fn render_block_icons(
     texture_pack: Res<TexturePack>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    let Some(source) = materials
-        .get(&voxel_assets.terrain)
-        .map(|material| material.blocks.id())
-    else {
+    let Some(source) = materials.get(&voxel_assets.terrain).map(|m| m.blocks.id()) else {
         return;
     };
     let modified = events
         .read()
-        .any(|event| matches!(event, AssetEvent::Modified { id } if *id == source));
-    if icons.source == Some(source) && !modified {
+        .any(|e| matches!(e,AssetEvent::Modified{id} if *id==source));
+    if icons.source != Some(source) || modified {
+        icons.source = Some(source);
+        icons.revision = icons.revision.wrapping_add(1);
+        icons.task = None;
+    }
+    if let Some(task) = icons.task.as_mut()
+        && let Some(output) = check_ready(task)
+    {
+        icons.task = None;
+        if output.revision == icons.revision {
+            if let Some(mut image) = images.get_mut(&icons.image) {
+                image.data = Some(output.pixels);
+            }
+            icons.finished = Some(output.revision);
+        }
+    }
+    if icons.task.is_some() || icons.finished == Some(icons.revision) {
         return;
     }
-    // Still loading: retried next frame.
     let Some(blocks) = images.get(source) else {
         return;
     };
-    let pixels = render_icons(blocks, &texture_pack);
-    icons.source = Some(source);
-    let Some(pixels) = pixels else {
+    if !matches!(
+        blocks.texture_descriptor.format,
+        TextureFormat::Rgba8UnormSrgb | TextureFormat::Rgba8Unorm
+    ) || blocks.data.is_none()
+    {
         return;
-    };
-    if let Some(mut atlas) = images.get_mut(&icons.image) {
-        atlas.data = Some(pixels);
     }
+    let blocks = blocks.clone();
+    let table = texture_pack.model_face_table();
+    let revision = icons.revision;
+    icons.task = Some(AsyncComputeTaskPool::get().spawn(async move {
+        IconOutput {
+            revision,
+            pixels: render_icons(&blocks, &table),
+        }
+    }));
 }
-
 struct BlockTexture<'a> {
     data: &'a [u8],
     width: usize,
     height: usize,
-    /// Bytes from one layer to the next: layer-major data interleaves each layer's mips.
-    layer_stride: usize,
-    /// sRGB bytes decoded to linear.
+    stride: usize,
     decode: [f32; 256],
 }
-
 impl BlockTexture<'_> {
-    /// Linear color of a texel, cutouts closed as the terrain shader does.
-    fn sample(&self, layer: u32, uv: Vec2) -> Vec3 {
-        let x = ((uv.x * self.width as f32) as usize).min(self.width - 1);
-        let y = ((uv.y * self.height as f32) as usize).min(self.height - 1);
-        let offset = layer as usize * self.layer_stride + (y * self.width + x) * 4;
+    fn sample(&self, layer: u32, uv: Vec2) -> Vec4 {
+        // Model endpoints at 1 are the last texel, rather than the first texel of a repeated face.
+        let x = (uv.x.clamp(0.0, 0.999999) * self.width as f32) as usize;
+        let y = (uv.y.clamp(0.0, 0.999999) * self.height as f32) as usize;
+        let offset = layer as usize * self.stride + (y * self.width + x) * 4;
         let Some(&[r, g, b, a]) = self.data.get(offset..offset + 4) else {
-            return Vec3::ZERO;
+            return Vec4::ZERO;
         };
-        let rgb = Vec3::new(
+        Vec4::new(
             self.decode[r as usize],
             self.decode[g as usize],
             self.decode[b as usize],
-        );
-        Vec3::splat(CUTOUT_TONE).lerp(rgb, f32::from(a) / 255.0)
+            a as f32 / 255.0,
+        )
     }
 }
-
-fn render_icons(blocks: &Image, texture_pack: &TexturePack) -> Option<Vec<u8>> {
-    let format = blocks.texture_descriptor.format;
-    if !matches!(
-        format,
-        TextureFormat::Rgba8UnormSrgb | TextureFormat::Rgba8Unorm
-    ) {
-        warn!("Unable to render block icons from a {format:?} texture");
-        return None;
-    }
+fn render_icons(blocks: &Image, table: &[[f32; 4]]) -> Vec<u8> {
     let size = blocks.texture_descriptor.size;
     let (width, height) = (size.width as usize, size.height as usize);
-    // Mip-major data stores every layer's base level first.
-    let layer_stride = match blocks.data_order {
+    let stride = match blocks.data_order {
         TextureDataOrder::LayerMajor => (0..blocks.texture_descriptor.mip_level_count)
             .map(|level| (width >> level).max(1) * (height >> level).max(1) * 4)
             .sum(),
         TextureDataOrder::MipMajor => width * height * 4,
     };
     let texture = BlockTexture {
-        data: blocks.data.as_deref()?,
+        data: blocks.data.as_deref().unwrap_or(&[]),
         width,
         height,
-        layer_stride,
+        stride,
         decode: std::array::from_fn(|byte| {
             let value = byte as f32 / 255.0;
-            if format.is_srgb() {
+            if blocks.texture_descriptor.format.is_srgb() {
                 Srgba::gamma_function(value)
             } else {
                 value
             }
         }),
     };
-    let mut pixels = vec![0; ICON_BYTES * ICON_COUNT];
-    pixels.par_chunk_map_mut(ComputeTaskPool::get(), ICON_BYTES, |index, icon| {
-        render_icon(&texture, texture_pack, VoxelKind::ITEMIZABLE[index], icon);
-    });
-    Some(pixels)
+    let rows = icon_count().div_ceil(ICON_COLUMNS);
+    let grid_width = ICON_COLUMNS * ICON_SIZE;
+    let mut grid = vec![0; ICON_BYTES * ICON_COLUMNS * rows];
+    let mut icon = vec![Vec4::ZERO; ICON_SIZE * ICON_SIZE];
+    let mut depths = vec![f32::NEG_INFINITY; ICON_SIZE * ICON_SIZE];
+    for (index, &kind) in VoxelKind::itemizable().iter().enumerate() {
+        icon.fill(Vec4::ZERO);
+        depths.fill(f32::NEG_INFINITY);
+        render_icon(&texture, table, kind, &mut icon, &mut depths);
+        for (pixel, &color) in icon.iter().enumerate() {
+            let offset = (((index / ICON_COLUMNS) * ICON_SIZE + pixel / ICON_SIZE) * grid_width
+                + (index % ICON_COLUMNS) * ICON_SIZE
+                + pixel % ICON_SIZE)
+                * 4;
+            let rgb = color
+                .truncate()
+                .map(|v| Srgba::gamma_function_inverse(v.clamp(0.0, 1.0)));
+            grid[offset..offset + 4].copy_from_slice(&[
+                (rgb.x * 255.0).round() as u8,
+                (rgb.y * 255.0).round() as u8,
+                (rgb.z * 255.0).round() as u8,
+                (color.w * 255.0).round() as u8,
+            ]);
+        }
+    }
+    grid
 }
-
 fn render_icon(
     texture: &BlockTexture,
-    texture_pack: &TexturePack,
+    table: &[[f32; 4]],
     kind: VoxelKind,
-    icon: &mut [u8],
+    pixels: &mut [Vec4],
+    depths: &mut [f32],
 ) {
-    let faces = ICON_FACES.map(|(axis, positive)| {
-        (
-            texture_pack.texture_layer(kind, axis, positive),
-            Vec3::from_array(texture_pack.texture_tint(kind, axis, positive)),
-        )
+    let mut quads = Vec::new();
+    models::visit_quads(kind.default_state(), IVec3::ZERO, |q| quads.push(q.clone()));
+    let eye = Vec3::ONE.normalize();
+    quads.sort_unstable_by(|a, b| {
+        let depth = |q: &models::ModelQuad| {
+            q.positions
+                .iter()
+                .map(|&p| Vec3::from_array(p).dot(eye))
+                .sum::<f32>()
+        };
+        depth(a).total_cmp(&depth(b))
     });
-    for (pixel, rgba) in icon.chunks_exact_mut(4).enumerate() {
-        let screen = (Vec2::new(
-            (pixel % ICON_SIZE) as f32 + 0.5,
-            (pixel / ICON_SIZE) as f32 + 0.5,
-        ) / ICON_SIZE as f32
-            * 2.0
-            - 1.0)
-            * ICON_EXTENT;
-        let Some((face, uv)) = project(screen) else {
+    for q in quads {
+        let normal = Vec3::from_array(q.normal);
+        if normal.dot(eye) <= 0.0001 {
+            continue;
+        }
+        let Some(face) = table.get(q.texture as usize) else {
             continue;
         };
-        let (layer, tint) = faces[face];
-        let color = texture.sample(layer, uv) * tint * FACE_SHADES[face];
-        let srgb = color.map(|value| Srgba::gamma_function_inverse(value.clamp(0.0, 1.0)));
-        rgba.copy_from_slice(&[
-            (srgb.x * 255.0).round() as u8,
-            (srgb.y * 255.0).round() as u8,
-            (srgb.z * 255.0).round() as u8,
-            u8::MAX,
-        ]);
+        let tint = Vec3::new(face[0], face[1], face[2])
+            * if q.tinted {
+                Vec3::from_array(models::tint(kind))
+            } else {
+                Vec3::ONE
+            };
+        let shade = if q.shade_up {
+            1.0
+        } else {
+            normal.abs().dot(Vec3::new(0.6, 1.0, 0.8)).min(1.0)
+        };
+        let points = q.positions.map(|p| {
+            let p = Vec3::from_array(p) - Vec3::splat(0.5);
+            Vec3::new(
+                (ISO_X * (p.x - p.z) / 1.04 + 1.0) * 0.5 * ICON_SIZE as f32,
+                ((0.5 * (p.x + p.z) - p.y) / 1.04 + 1.0) * 0.5 * ICON_SIZE as f32,
+                p.dot(eye),
+            )
+        });
+        for triangle in [[0, 1, 2], [0, 2, 3]] {
+            let [a, b, c] = triangle.map(|i| points[i]);
+            let [ua, ub, uc] = triangle.map(|i| Vec2::from_array(q.uv[i]));
+            let edge = |a: Vec2, b: Vec2, p: Vec2| (b - a).perp_dot(p - a);
+            let area = edge(a.truncate(), b.truncate(), c.truncate());
+            if area.abs() < 1e-6 {
+                continue;
+            }
+            let min = a
+                .min(b)
+                .min(c)
+                .truncate()
+                .floor()
+                .max(Vec2::ZERO)
+                .as_uvec2();
+            let max = a
+                .max(b)
+                .max(c)
+                .truncate()
+                .ceil()
+                .min(Vec2::splat(ICON_SIZE as f32))
+                .max(Vec2::ZERO)
+                .as_uvec2();
+            for y in min.y..max.y {
+                for x in min.x..max.x {
+                    let p = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+                    let w0 = edge(b.truncate(), c.truncate(), p) / area;
+                    let w1 = edge(c.truncate(), a.truncate(), p) / area;
+                    let w2 = 1.0 - w0 - w1;
+                    if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                        continue;
+                    }
+                    let index = y as usize * ICON_SIZE + x as usize;
+                    let z = a.z * w0 + b.z * w1 + c.z * w2;
+                    if z <= depths[index] + 1e-6 {
+                        continue;
+                    }
+                    let color = texture.sample(face[3] as u32, ua * w0 + ub * w1 + uc * w2);
+                    if color.w < if q.translucent { 0.004 } else { 0.5 } {
+                        continue;
+                    }
+                    let alpha = if q.translucent { color.w } else { 1.0 };
+                    let rgb = color.truncate() * tint * shade;
+                    let old = pixels[index];
+                    let out_alpha = alpha + old.w * (1.0 - alpha);
+                    let out_rgb = (rgb * alpha + old.truncate() * old.w * (1.0 - alpha))
+                        / out_alpha.max(1e-6);
+                    pixels[index] = out_rgb.extend(out_alpha);
+                    depths[index] = z;
+                }
+            }
+        }
     }
-}
-
-/// Visible face under a screen point (y down) and its texture coordinates.
-///
-/// Cube coordinates are centered: X goes right-down, Z left-down and Y up,
-/// with the same UV orientation as the terrain mesh.
-fn project(screen: Vec2) -> Option<(usize, Vec2)> {
-    let inside = |a: f32, b: f32| a.abs() <= 0.5 && b.abs() <= 0.5;
-
-    // Top (Y = 0.5): u follows Z and v follows X.
-    let (sx, sy) = (screen.x / ISO_X, (screen.y + 0.5) / ISO_Y);
-    let (x, z) = ((sx + sy) * 0.5, (sy - sx) * 0.5);
-    if inside(x, z) {
-        return Some((0, Vec2::new(z, x) + 0.5));
-    }
-
-    // Left (Z = 0.5): u follows X.
-    let x = (screen.x + 0.5 * ISO_X) / ISO_X;
-    let y = ISO_Y * x - (screen.y - 0.5 * ISO_Y);
-    if inside(x, y) {
-        return Some((1, Vec2::new(x + 0.5, 0.5 - y)));
-    }
-
-    // Right (X = 0.5): u follows Z.
-    let z = -(screen.x - 0.5 * ISO_X) / ISO_X;
-    let y = ISO_Y * z - (screen.y - 0.5 * ISO_Y);
-    inside(z, y).then(|| (2, Vec2::new(z + 0.5, 0.5 - y)))
 }
