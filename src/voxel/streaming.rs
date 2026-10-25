@@ -1,6 +1,8 @@
 use super::{
-    ChunkVoxels, VoxelChunk, VoxelSettings, VoxelViewer,
+    ChunkVoxels, SetVoxel, VoxelChunk, VoxelSettings, VoxelViewer,
+    data::{ALL_SECTIONS, CHUNK_SIZE, chunk_at},
     generation::WorldGenerator,
+    lighting::LitEdits,
     rebuild::{ChunkSections, NeedsChunkBuild, neighbor_slot},
 };
 use crate::{game::GameState, spatial::GameLayer};
@@ -23,6 +25,10 @@ pub(crate) struct ChunkIndex(HashMap<IVec2, Entity>);
 pub(crate) struct StoredChunks(HashMap<IVec2, ChunkVoxels>);
 #[derive(Resource, Default, Deref, DerefMut)]
 pub(crate) struct PendingChunks(HashMap<IVec2, Entity>);
+/// Edits aimed at chunks that are neither loaded nor stored, replayed when they spawn.
+/// Generating a chunk just to edit it would block the main thread.
+#[derive(Resource, Default, Deref, DerefMut)]
+pub(crate) struct PendingEdits(HashMap<IVec2, Vec<SetVoxel>>);
 
 #[derive(Component)]
 pub(crate) struct ChunkGeneration {
@@ -112,11 +118,12 @@ pub(crate) fn stream_chunks(
     offsets: Res<StreamOffsets>,
     mut stored: ResMut<StoredChunks>,
     mut pending: ResMut<PendingChunks>,
+    mut edits: ResMut<PendingEdits>,
     mut index: ResMut<ChunkIndex>,
     mut state: ResMut<StreamState>,
     sections: Query<&ChunkSections>,
 ) {
-    let center = settings.chunk_at(viewer.translation());
+    let center = chunk_at(viewer.translation());
     let radius_squared = (offsets.radius * offsets.radius) as i32;
     if state.center != Some(center) {
         state.pending_despawns.clear();
@@ -178,14 +185,13 @@ pub(crate) fn stream_chunks(
             continue;
         }
         if let Some(voxels) = stored.remove(&position) {
-            spawn_chunk(&mut commands, &settings, &mut index, position, voxels);
+            spawn_chunk(&mut commands, &mut index, &mut edits, position, voxels);
         } else {
-            let settings = settings.clone();
             let generator = generator.clone();
             let task = AsyncComputeTaskPool::get().spawn(async move {
                 #[cfg(feature = "dev")]
                 let started = Instant::now();
-                let voxels = generator.loaded_chunk(position, &settings)?;
+                let voxels = generator.loaded_chunk(position)?;
                 Some(GeneratedChunk {
                     voxels,
                     #[cfg(feature = "dev")]
@@ -210,6 +216,7 @@ pub(crate) fn poll_chunk_generations(
     mut generations: Query<(Entity, &mut ChunkGeneration)>,
     mut stored: ResMut<StoredChunks>,
     mut pending: ResMut<PendingChunks>,
+    mut edits: ResMut<PendingEdits>,
     mut index: ResMut<ChunkIndex>,
     mut state: ResMut<StreamState>,
     offsets: Res<StreamOffsets>,
@@ -239,44 +246,51 @@ pub(crate) fn poll_chunk_generations(
             continue;
         }
         let voxels = stored.remove(&position).unwrap_or(generated.voxels);
-        spawn_chunk(&mut commands, &settings, &mut index, position, voxels);
+        spawn_chunk(&mut commands, &mut index, &mut edits, position, voxels);
         completed += 1;
     }
 }
 
 fn spawn_chunk(
     commands: &mut Commands,
-    settings: &VoxelSettings,
     index: &mut ChunkIndex,
+    edits: &mut PendingEdits,
     position: IVec2,
     mut voxels: ChunkVoxels,
 ) {
     let Entry::Vacant(index_entry) = index.entry(position) else {
         return;
     };
-    voxels.dirty_sections = voxels.all_sections();
+    voxels.dirty_sections = ALL_SECTIONS;
     voxels.collider_dirty = true;
-    let origin = position * settings.chunk_size;
-    let entity = commands
-        .spawn((
-            VoxelChunk { position },
-            voxels,
-            Transform::from_xyz(origin.x as f32, 0.0, origin.y as f32),
-            CollisionLayers::new(
-                GameLayer::World,
-                [
-                    GameLayer::Default,
-                    GameLayer::Player,
-                    GameLayer::DroppedItem,
-                ],
-            ),
-            Friction::new(0.8),
-            Visibility::default(),
-            AwaitingNeighbors,
-            DespawnOnExit(GameState::Game),
-        ))
-        .id();
-    index_entry.insert(entity);
+    let lit_edits = !voxels.native_edits.is_empty();
+    let origin = position * CHUNK_SIZE;
+    let mut entity = commands.spawn((
+        VoxelChunk { position },
+        voxels,
+        Transform::from_xyz(origin.x as f32, 0.0, origin.y as f32),
+        CollisionLayers::new(
+            GameLayer::World,
+            [
+                GameLayer::Default,
+                GameLayer::Player,
+                GameLayer::DroppedItem,
+            ],
+        ),
+        Friction::new(0.8),
+        Visibility::default(),
+        AwaitingNeighbors,
+        DespawnOnExit(GameState::Game),
+    ));
+    if lit_edits {
+        entity.insert(LitEdits);
+    }
+    index_entry.insert(entity.id());
+    // Queued after the spawn: `set_voxel` then finds the chunk and applies them as
+    // ordinary edits, neighbors and lighting included.
+    for edit in edits.remove(&position).into_iter().flatten() {
+        commands.trigger(edit);
+    }
 }
 
 /// Starts the first mesh of rendered chunks once their eight neighbors are loaded
@@ -344,8 +358,7 @@ pub(crate) fn refresh_neighbors_of_spawned(
                 continue;
             };
             if sections.missing_neighbors & (1 << neighbor_slot(-offset)) != 0 {
-                let all = voxels.all_sections();
-                voxels.mark_sections(all);
+                voxels.mark_sections(ALL_SECTIONS);
             }
         }
     }

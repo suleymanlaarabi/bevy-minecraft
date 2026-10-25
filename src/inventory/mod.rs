@@ -63,7 +63,13 @@ impl Plugin for InventoryPlugin {
                 OnExit(InventoryState::Open),
                 (ui::return_cursor_stack, ui::lock_cursor, ui::show_game_hud).chain(),
             )
-            .add_systems(Update, toggle_inventory.run_if(in_state(GameState::Game)))
+            .add_systems(
+                Update,
+                toggle_inventory
+                    .run_if(in_state(GameState::Game))
+                    // Nothing to open while the world is still loading.
+                    .run_if(any_with_component::<Player>),
+            )
             .add_systems(
                 Update,
                 (handle_number_keys, handle_hotbar_scroll, ui::refresh_slots)

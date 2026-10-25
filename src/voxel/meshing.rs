@@ -1,4 +1,9 @@
-use super::{ChunkVoxels, SUN_POSITION, VoxelKind, data::SECTION_HEIGHT};
+use super::{
+    ChunkVoxels, SUN_POSITION, VoxelKind,
+    data::{
+        CHUNK_HEIGHT, CHUNK_SIZE, FULL_SKY, Layer, SECTION_COUNT, SECTION_HEIGHT, SECTION_VOLUME,
+    },
+};
 use bevy::{
     asset::RenderAssetUsages,
     mesh::{Indices, MeshVertexAttribute, VertexFormat},
@@ -6,7 +11,7 @@ use bevy::{
     render::render_resource::PrimitiveTopology,
     shape::Aabb3d,
 };
-use std::sync::Arc;
+use std::cell::RefCell;
 
 /// Packed terrain and water vertex, decoded by `voxel_vertex.wesl`:
 /// - word 0: x, y, z (5 bits each, section-local 0..=16), face direction (3 bits,
@@ -58,7 +63,7 @@ struct Sample {
 
 const ABOVE_WORLD: Sample = Sample {
     kind: VoxelKind::Air,
-    light: 0xf0,
+    light: FULL_SKY,
     occludes: false,
 };
 const BELOW_WORLD: Sample = Sample {
@@ -67,10 +72,21 @@ const BELOW_WORLD: Sample = Sample {
     occludes: true,
 };
 
+impl Sample {
+    #[inline]
+    fn new(kind: VoxelKind, light: u8) -> Self {
+        Self {
+            kind,
+            light,
+            occludes: kind.is_opaque(),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Column {
-    cells: Arc<[VoxelKind]>,
-    light: Arc<[u8]>,
+    cells: Layer<VoxelKind>,
+    light: Layer<u8>,
 }
 
 /// A chunk and its eight neighbors, captured in O(1) for a mesh task.
@@ -79,9 +95,25 @@ struct Column {
 /// edge light, so world borders are neither dark nor artificially lit.
 #[derive(Clone)]
 pub(crate) struct ChunkNeighborhood {
-    size: i32,
-    height: i32,
     columns: [Option<Column>; 9],
+}
+
+/// Column index of a cell whose y is inside the world; x and z wrap into the column.
+#[inline]
+fn column_index(x: i32, y: i32, z: i32) -> usize {
+    ((x & 15) | (z & 15) << 4 | y << 8) as usize
+}
+
+/// 3x3 slot along one horizontal axis: 0 before the chunk, 1 inside, 2 after.
+#[inline]
+fn slot(value: i32) -> usize {
+    if value < 0 {
+        0
+    } else if value >= CHUNK_SIZE {
+        2
+    } else {
+        1
+    }
 }
 
 impl ChunkNeighborhood {
@@ -98,15 +130,9 @@ impl ChunkNeighborhood {
             if offset == IVec2::ZERO {
                 return Some(column(center));
             }
-            neighbor(offset)
-                .filter(|voxels| voxels.size == center.size && voxels.height == center.height)
-                .map(column)
+            neighbor(offset).map(column)
         });
-        Self {
-            size: center.size,
-            height: center.height,
-            columns,
-        }
+        Self { columns }
     }
 
     /// Bits of the 3x3 slots without a loaded neighbor.
@@ -118,100 +144,96 @@ impl ChunkNeighborhood {
             .fold(0, |mask, (slot, _)| mask | (1 << slot))
     }
 
-    fn index(&self, x: i32, y: i32, z: i32) -> usize {
-        (x + self.size * (z + self.size * y)) as usize
+    fn center(&self) -> &Column {
+        self.columns[4].as_ref().expect("center column")
     }
 
     fn sample(&self, local: IVec3) -> Sample {
-        if local.y >= self.height {
+        if local.y >= CHUNK_HEIGHT {
             return ABOVE_WORLD;
         }
         if local.y < 0 {
             return BELOW_WORLD;
         }
-        let slot = |value: i32| {
-            if value < 0 {
-                0
-            } else if value >= self.size {
-                2
-            } else {
-                1
-            }
-        };
         if let Some(column) = &self.columns[slot(local.x) + 3 * slot(local.z)] {
-            let index = self.index(
-                local.x.rem_euclid(self.size),
-                local.y,
-                local.z.rem_euclid(self.size),
-            );
-            let kind = column.cells[index];
-            return Sample {
-                kind,
-                light: column.light[index],
-                occludes: kind.is_opaque(),
-            };
+            let index = column_index(local.x, local.y, local.z);
+            return Sample::new(column.cells.get(index), column.light.get(index));
         }
-        let center = self.columns[4].as_ref().expect("center column");
-        let index = self.index(
-            local.x.clamp(0, self.size - 1),
+        let center = self.center();
+        let index = column_index(
+            local.x.clamp(0, CHUNK_SIZE - 1),
             local.y,
-            local.z.clamp(0, self.size - 1),
+            local.z.clamp(0, CHUNK_SIZE - 1),
         );
         Sample {
             kind: VoxelKind::Air,
-            light: center.light[index],
-            occludes: center.cells[index].is_opaque(),
+            light: center.light.get(index),
+            occludes: center.cells.get(index).is_opaque(),
         }
     }
 
+    /// Whether a section holds opaque blocks and water; uniform sections answer at once.
     fn section_contents(&self, section: usize) -> (bool, bool) {
-        let center = self.columns[4].as_ref().expect("center column");
-        let area = (self.size * self.size) as usize;
-        let start = section * SECTION_HEIGHT as usize * area;
-        let end = (start + SECTION_HEIGHT as usize * area).min(center.cells.len());
-        center.cells[start..end]
-            .iter()
-            .fold((false, false), |(opaque, water), kind| {
-                (
-                    opaque || kind.is_opaque(),
-                    water || *kind == VoxelKind::Water,
-                )
-            })
+        let cells = self.center().cells.section(section);
+        (
+            cells.any(VoxelKind::is_opaque),
+            cells.any(|kind| kind == VoxelKind::Water),
+        )
     }
 }
 
+/// Cells of a padded section row: one border cell on each side.
+const PADDED_SIZE: i32 = CHUNK_SIZE + 2;
+
 /// One section plus a one-cell border, copied once so meshing indexes a flat array.
+#[derive(Default)]
 struct Padded {
     dimensions: [i32; 3],
     samples: Vec<Sample>,
 }
 
 impl Padded {
-    fn section(neighborhood: &ChunkNeighborhood, section: usize) -> Self {
+    /// Refills the buffer with a section. Rows are copied 16 cells at a time from the
+    /// column that owns them; only the two border cells of a row are sampled one by one.
+    fn fill_section(&mut self, neighborhood: &ChunkNeighborhood, section: usize) {
         let base = section as i32 * SECTION_HEIGHT;
-        let height = SECTION_HEIGHT.min(neighborhood.height - base);
-        let size = neighborhood.size;
-        let mut samples = Vec::with_capacity(((size + 2) * (size + 2) * (height + 2)) as usize);
-        for y in -1..=height {
-            for z in -1..=size {
-                for x in -1..=size {
-                    samples.push(neighborhood.sample(IVec3::new(x, base + y, z)));
+        self.dimensions = [CHUNK_SIZE, SECTION_HEIGHT, CHUNK_SIZE];
+        self.samples.clear();
+        self.samples
+            .reserve((PADDED_SIZE * PADDED_SIZE * (SECTION_HEIGHT + 2)) as usize);
+        let mut kinds = [VoxelKind::Air; CHUNK_SIZE as usize];
+        let mut light = [0; CHUNK_SIZE as usize];
+        for y in base - 1..=base + SECTION_HEIGHT {
+            for z in -1..=CHUNK_SIZE {
+                self.samples.push(neighborhood.sample(IVec3::new(-1, y, z)));
+                let column = (0..CHUNK_HEIGHT)
+                    .contains(&y)
+                    .then(|| neighborhood.columns[1 + 3 * slot(z)].as_ref())
+                    .flatten();
+                if let Some(column) = column {
+                    let section = (y / SECTION_HEIGHT) as usize;
+                    let start = column_index(0, y, z) % SECTION_VOLUME;
+                    column.cells.section(section).copy_cells(start, &mut kinds);
+                    column.light.section(section).copy_cells(start, &mut light);
+                    self.samples.extend(
+                        kinds
+                            .iter()
+                            .zip(&light)
+                            .map(|(&kind, &light)| Sample::new(kind, light)),
+                    );
+                } else {
+                    self.samples
+                        .extend((0..CHUNK_SIZE).map(|x| neighborhood.sample(IVec3::new(x, y, z))));
                 }
+                self.samples
+                    .push(neighborhood.sample(IVec3::new(CHUNK_SIZE, y, z)));
             }
-        }
-        Self {
-            dimensions: [size, height, size],
-            samples,
         }
     }
 
     fn single(kind: VoxelKind) -> Self {
         let mut samples = vec![ABOVE_WORLD; 27];
-        samples[13] = Sample {
-            kind,
-            light: 0xf0,
-            occludes: kind.is_opaque(),
-        };
+        samples[13] = Sample::new(kind, FULL_SKY);
         Self {
             dimensions: [1, 1, 1],
             samples,
@@ -223,6 +245,20 @@ impl Padded {
         let depth = self.dimensions[2] + 2;
         self.samples[((local.x + 1) + width * ((local.z + 1) + depth * (local.y + 1))) as usize]
     }
+}
+
+/// Buffers reused by every section a thread meshes, instead of allocating per section.
+#[derive(Default)]
+struct Scratch {
+    padded: Padded,
+    faces: Vec<Option<LitFace>>,
+    shadow: Vec<Option<bool>>,
+    water: Vec<Option<(LitFace, bool)>>,
+    depths: Vec<u8>,
+}
+
+thread_local! {
+    static SCRATCH: RefCell<Scratch> = RefCell::default();
 }
 
 fn face_light(padded: &Padded, outside: [i32; 3], axis: usize) -> [u16; 4] {
@@ -344,47 +380,64 @@ pub(crate) fn build_sections(
     neighborhood: &ChunkNeighborhood,
     sections: u32,
 ) -> Vec<SectionMeshes> {
-    let count = (neighborhood.height + SECTION_HEIGHT - 1) / SECTION_HEIGHT;
-    (0..count as usize)
-        .filter(|section| sections & (1 << section) != 0)
-        .map(|index| {
-            let (opaque, water) = neighborhood.section_contents(index);
-            if !opaque && !water {
-                return SectionMeshes {
+    SCRATCH.with_borrow_mut(|scratch| {
+        let Scratch {
+            padded,
+            faces,
+            shadow,
+            water: water_faces,
+            depths,
+        } = scratch;
+        (0..SECTION_COUNT)
+            .filter(|section| sections & (1 << section) != 0)
+            .map(|index| {
+                let (opaque, water) = neighborhood.section_contents(index);
+                if !opaque && !water {
+                    return SectionMeshes {
+                        index,
+                        terrain: None,
+                        water: None,
+                        shadow: None,
+                    };
+                }
+                padded.fill_section(neighborhood, index);
+                let casts_shadow = padded.samples.iter().any(|sample| sample.light >> 4 != 0);
+                SectionMeshes {
                     index,
-                    terrain: None,
-                    water: None,
-                    shadow: None,
-                };
-            }
-            let padded = Padded::section(neighborhood, index);
-            let casts_shadow = padded.samples.iter().any(|sample| sample.light >> 4 != 0);
-            SectionMeshes {
-                index,
-                terrain: opaque
-                    .then(|| greedy_mesh(&padded, true))
-                    .filter(|geometry| !geometry.is_empty()),
-                shadow: (opaque && casts_shadow)
-                    .then(|| shadow_mesh(&padded))
-                    .filter(|geometry| !geometry.is_empty()),
-                water: water
-                    .then(|| water_mesh(&padded, neighborhood, index as i32 * SECTION_HEIGHT))
-                    .flatten(),
-            }
-        })
-        .collect()
+                    terrain: opaque
+                        .then(|| greedy_mesh(padded, true, faces))
+                        .filter(|geometry| !geometry.is_empty()),
+                    shadow: (opaque && casts_shadow)
+                        .then(|| shadow_mesh(padded, shadow))
+                        .filter(|geometry| !geometry.is_empty()),
+                    water: water
+                        .then(|| {
+                            water_mesh(
+                                padded,
+                                neighborhood,
+                                index as i32 * SECTION_HEIGHT,
+                                water_faces,
+                                depths,
+                            )
+                        })
+                        .flatten(),
+                }
+            })
+            .collect()
+    })
 }
 
 /// A unit block spanning 0..1 on every axis.
 pub(crate) fn build_block_item_mesh(kind: VoxelKind) -> Mesh {
-    greedy_mesh(&Padded::single(kind), false).into_mesh()
+    greedy_mesh(&Padded::single(kind), false, &mut Vec::new()).into_mesh()
 }
 
-fn greedy_mesh(padded: &Padded, lit: bool) -> TerrainGeometry {
+fn greedy_mesh(padded: &Padded, lit: bool, mask: &mut Vec<Option<LitFace>>) -> TerrainGeometry {
     let dimensions = padded.dimensions;
     let mut geometry = TerrainGeometry::default();
     let largest = dimensions[0].max(dimensions[1]).max(dimensions[2]);
-    let mut mask = vec![None; (largest * largest) as usize];
+    mask.clear();
+    mask.resize((largest * largest) as usize, None);
     for axis in 0..3 {
         let u = (axis + 1) % 3;
         let v = (axis + 2) % 3;
@@ -471,11 +524,12 @@ fn faces_sun(axis: usize, positive: bool) -> bool {
 
 /// Depth-only terrain: faces merge regardless of block, texture or light, and only
 /// those facing the sun are kept.
-fn shadow_mesh(padded: &Padded) -> TerrainGeometry {
+fn shadow_mesh(padded: &Padded, mask: &mut Vec<Option<bool>>) -> TerrainGeometry {
     let dimensions = padded.dimensions;
     let mut geometry = TerrainGeometry::default();
     let largest = dimensions[0].max(dimensions[1]).max(dimensions[2]);
-    let mut mask = vec![None; (largest * largest) as usize];
+    mask.clear();
+    mask.resize((largest * largest) as usize, None);
     for axis in 0..3 {
         let u = (axis + 1) % 3;
         let v = (axis + 2) % 3;
@@ -551,16 +605,18 @@ fn water_mesh(
     padded: &Padded,
     neighborhood: &ChunkNeighborhood,
     base: i32,
+    mask: &mut Vec<Option<(LitFace, bool)>>,
+    depths: &mut Vec<u8>,
 ) -> Option<TerrainGeometry> {
     let dimensions = padded.dimensions;
     let mut geometry = TerrainGeometry::default();
     let stride = dimensions[0] + 2;
-    let mut depths = Vec::new();
     for axis in 0..3 {
         let u = (axis + 1) % 3;
         let v = (axis + 2) % 3;
         let (width, height) = (dimensions[u] as usize, dimensions[v] as usize);
-        let mut mask = vec![None; width * height];
+        mask.clear();
+        mask.resize(width * height, None);
         for layer in -1..dimensions[axis] {
             // Column depths of this layer, computed once and only if it has a surface.
             depths.clear();
@@ -604,7 +660,7 @@ fn water_mesh(
                                     }),
                             );
                         }
-                        surface_depth(&depths, stride, water_cell.x, water_cell.z)
+                        surface_depth(depths, stride, water_cell.x, water_cell.z)
                     } else {
                         [WATER_DEPTH_MAX; 4]
                     };
@@ -621,7 +677,7 @@ fn water_mesh(
                     ));
                 }
             }
-            consume_mask(&mut mask, width, height, |i, j, w, h, (face, lowered)| {
+            consume_mask(mask, width, height, |i, j, w, h, (face, lowered)| {
                 let (corner, du, dv) = quad(axis, layer, i, j, w, h);
                 let Face(kind, positive, values) = face.face;
                 geometry.push_quad(corner, du, dv, axis, positive, kind, values);
@@ -704,38 +760,86 @@ mod tests {
         }
     }
 
+    /// An empty column with these blocks.
+    fn chunk(blocks: &[(IVec3, VoxelKind)]) -> ChunkVoxels {
+        let mut chunk = ChunkVoxels::filled(VoxelKind::Air);
+        for &(local, kind) in blocks {
+            assert!(chunk.set(local, kind));
+        }
+        chunk
+    }
+
     #[test]
     fn neighbors_never_emit_neighbor_owned_faces() {
-        let stone = ChunkVoxels::generated(1, 1, vec![VoxelKind::Stone]);
-        let empty = ChunkVoxels::generated(1, 1, vec![VoxelKind::Air]);
         for direction in [IVec2::NEG_X, IVec2::X, IVec2::NEG_Y, IVec2::Y] {
-            assert!(mesh(&empty, Some((direction, &stone))).terrain.is_none());
-            let solid = mesh(&stone, Some((direction, &stone))).terrain.unwrap();
+            let edge = |value: i32| match value {
+                -1 => 0,
+                1 => CHUNK_SIZE - 1,
+                _ => 5,
+            };
+            let cell = IVec3::new(edge(direction.x), 5, edge(direction.y));
+            let across = IVec3::new((cell.x + direction.x) & 15, 5, (cell.z + direction.y) & 15);
+            let neighbor = chunk(&[(across, VoxelKind::Stone)]);
+            let empty = chunk(&[]);
+            assert!(mesh(&empty, Some((direction, &neighbor))).terrain.is_none());
+            let center = chunk(&[(cell, VoxelKind::Stone)]);
+            let solid = mesh(&center, Some((direction, &neighbor))).terrain.unwrap();
             assert_eq!(solid.indices.len(), 5 * 6);
+            assert_eq!(mesh(&center, None).terrain.unwrap().indices.len(), 6 * 6);
         }
-        assert_eq!(mesh(&stone, None).terrain.unwrap().indices.len(), 6 * 6);
     }
 
     #[test]
     fn neighbor_light_reaches_border_face_corners() {
-        let mut center = ChunkVoxels::generated(1, 1, vec![VoxelKind::Stone]);
-        center = center.with_lighting(vec![0].into(), vec![0].into());
-        let lit = ChunkVoxels::generated(1, 1, vec![VoxelKind::Air])
-            .with_lighting(vec![0].into(), vec![0x37].into());
+        let center = ChunkVoxels::filled(VoxelKind::Stone).with_light(0);
+        let lit = ChunkVoxels::filled(VoxelKind::Air).with_light(0x37);
         let neighborhood =
             ChunkNeighborhood::new(&center, |offset| (offset == IVec2::NEG_X).then_some(&lit));
         let sample = neighborhood.sample(IVec3::new(-1, 0, 0));
         assert_eq!(sample.light, 0x37);
         assert!(!sample.occludes);
-        assert_eq!(neighborhood.sample(IVec3::Y).light, 0xf0);
+        assert_eq!(
+            neighborhood.sample(IVec3::new(0, CHUNK_HEIGHT, 0)).light,
+            FULL_SKY
+        );
         assert!(neighborhood.sample(IVec3::NEG_Y).occludes);
         // A missing neighbor repeats the chunk's own edge.
-        assert!(neighborhood.sample(IVec3::new(1, 0, 0)).occludes);
+        assert!(neighborhood.sample(IVec3::new(CHUNK_SIZE, 0, 0)).occludes);
+    }
+
+    #[test]
+    fn padded_rows_match_cell_by_cell_sampling() {
+        let center = chunk(&[
+            (IVec3::new(0, 15, 0), VoxelKind::Stone),
+            (IVec3::new(15, 16, 7), VoxelKind::Water),
+            (IVec3::new(3, 17, 15), VoxelKind::Dirt),
+        ]);
+        let neighbor = chunk(&[(IVec3::new(3, 16, 0), VoxelKind::Sand)]);
+        let neighborhood =
+            ChunkNeighborhood::new(&center, |offset| (offset == IVec2::Y).then_some(&neighbor));
+        let mut padded = Padded::default();
+        for section in [0, 1, SECTION_COUNT - 1] {
+            padded.fill_section(&neighborhood, section);
+            let base = section as i32 * SECTION_HEIGHT;
+            for y in -1..=SECTION_HEIGHT {
+                for z in -1..=CHUNK_SIZE {
+                    for x in -1..=CHUNK_SIZE {
+                        let expected = neighborhood.sample(IVec3::new(x, base + y, z));
+                        let actual = padded.get(IVec3::new(x, y, z));
+                        assert_eq!(
+                            (actual.kind, actual.light, actual.occludes),
+                            (expected.kind, expected.light, expected.occludes)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
     fn water_has_side_faces_and_no_faces_inside_solid_ceilings() {
-        let mut water = ChunkVoxels::generated(1, 2, vec![VoxelKind::Water, VoxelKind::Air]);
+        let cell = IVec3::new(5, 5, 5);
+        let mut water = chunk(&[(cell, VoxelKind::Water)]);
         let has_face = |geometry: &TerrainGeometry, direction: u32| {
             geometry
                 .vertices
@@ -752,22 +856,17 @@ mod tests {
                 .vertices
                 .iter()
                 .all(|vertex| (vertex[1] & WATER_LOWERED != 0)
-                    == (TerrainGeometry::position(*vertex).y == 1.0))
+                    == (TerrainGeometry::position(*vertex).y == 6.0))
         );
-        water.set(IVec3::Y, VoxelKind::Stone);
+        water.set(cell + IVec3::Y, VoxelKind::Stone);
         let geometry = mesh(&water, None).water.unwrap();
         assert_eq!(geometry.indices.len(), 5 * 6);
         assert!(!has_face(&geometry, 3));
-        water.set(IVec3::Y, VoxelKind::Water);
-        let geometry = mesh(&water, None).water.unwrap();
-        assert_eq!(geometry.indices.len(), 6 * 6);
     }
 
     #[test]
     fn sections_are_meshed_independently_and_empty_ones_are_skipped() {
-        let mut cells = vec![VoxelKind::Air; 48];
-        cells[40] = VoxelKind::Stone;
-        let chunk = ChunkVoxels::generated(1, 48, cells);
+        let chunk = chunk(&[(IVec3::new(5, 40, 5), VoxelKind::Stone)]);
         let neighborhood = ChunkNeighborhood::new(&chunk, |_| None);
         let sections = build_sections(&neighborhood, 0b111);
         assert_eq!(sections.len(), 3);
@@ -789,10 +888,10 @@ mod tests {
     fn shadow_meshes_merge_blocks_and_keep_only_sunward_faces() {
         // Two different blocks side by side: the lit mesh keeps them apart, the
         // shadow mesh merges them and drops the faces turned away from the sun.
-        let mut cells = vec![VoxelKind::Air; 2 * 2 * 16];
-        cells[0] = VoxelKind::Stone;
-        cells[1] = VoxelKind::Dirt;
-        let chunk = ChunkVoxels::generated(2, 16, cells);
+        let chunk = chunk(&[
+            (IVec3::new(5, 5, 5), VoxelKind::Stone),
+            (IVec3::new(6, 5, 5), VoxelKind::Dirt),
+        ]);
         let section = build_sections(&ChunkNeighborhood::new(&chunk, |_| None), 1).remove(0);
         let shadow = section.shadow.unwrap();
         let sunward = (0..3).filter(|&axis| faces_sun(axis, true)).count()

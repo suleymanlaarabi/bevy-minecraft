@@ -14,7 +14,8 @@ import bevy_pbr::render::{
 var blocks: texture_2d_array<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(1)
 var blocks_sampler: sampler;
-// Tint in RGB and texture layer in A, indexed by `face_index`.
+// Tint in RGB and texture layer in A, indexed by `face_index`. Read once per vertex:
+// a per-fragment lookup would put a dependent storage read before every texture sample.
 @group(constants::MATERIAL_BIND_GROUP) @binding(2)
 var<storage, read> faces: array<vec4<f32>>;
 
@@ -24,7 +25,8 @@ struct VoxelVaryings {
     @location(1) world_normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) light: vec2<f32>,
-    @location(4) @interpolate(flat) face: u32,
+    @location(4) @interpolate(flat) layer: u32,
+    @location(5) @interpolate(flat) tint: vec3<f32>,
 }
 
 @vertex
@@ -43,7 +45,10 @@ fn vertex(in: PackedVertex) -> VoxelVaryings {
     );
     out.uv = block_uv(vertex.position, vertex.direction >> 1u);
     out.light = vertex.light;
-    out.face = face_index(vertex);
+    // Constant over a quad, whose four vertices share kind and direction.
+    let face = faces[face_index(vertex)];
+    out.layer = u32(face.a + 0.5);
+    out.tint = face.rgb;
     return out;
 }
 
@@ -51,11 +56,7 @@ fn vertex(in: PackedVertex) -> VoxelVaryings {
 fn fragment(
     in: VoxelVaryings,
 ) -> FragmentOutput {
-    let face = faces[in.face];
-    let layer = u32(face.a + 0.5);
-    let tint = face.rgb;
-
-    var texture_color = textureSample(blocks, blocks_sampler, in.uv, layer);
+    var texture_color = textureSample(blocks, blocks_sampler, in.uv, in.layer);
     // Terrain is opaque: close leaf cutouts (any layer with alpha) with a dark tone.
     if texture_color.a < 1.0 {
         texture_color = vec4<f32>(
@@ -63,7 +64,7 @@ fn fragment(
             1.0,
         );
     }
-    let albedo = texture_color.rgb * tint;
+    let albedo = texture_color.rgb * in.tint;
     let normal = normalize(in.world_normal);
     let voxel_light = in.light;
     let sky = sky_visibility(voxel_light);

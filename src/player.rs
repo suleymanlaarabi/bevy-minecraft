@@ -9,6 +9,7 @@ use bevy::{
     input::mouse::AccumulatedMouseMotion,
     pbr::{DistanceFog, FogFalloff},
     prelude::*,
+    tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
 
 use crate::{
@@ -27,7 +28,11 @@ pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(GameState::Game), spawn_player)
+        app.add_systems(OnEnter(GameState::Game), start_spawn_search)
+            .add_systems(
+                Update,
+                finish_spawn_search.run_if(in_state(GameState::Game)),
+            )
             .add_systems(OnEnter(InventoryState::Open), clear_player_input)
             .add_systems(
                 RunFixedMainLoop,
@@ -121,21 +126,66 @@ impl Default for CameraSensitivity {
 #[derive(Component, Clone, Default)]
 pub(crate) struct Crosshair;
 
-fn spawn_player(
+/// The spawn point search generates terrain, so it runs off the main thread while a
+/// loading screen shows. The player, and everything that needs it, waits for it.
+#[derive(Component)]
+struct SpawnSearch(Task<Vec3>);
+
+#[derive(Component, Clone, Default)]
+struct LoadingScreen;
+
+fn start_spawn_search(
     mut commands: Commands,
     voxel_settings: Option<Res<VoxelSettings>>,
     generator: Option<Res<crate::voxel::generation::WorldGenerator>>,
 ) {
-    let spawn_pos = if let Some(settings) = voxel_settings {
+    let fallback = voxel_settings.map_or(Vec3::new(0.0, 30.0, 0.0), |settings| {
         let center = settings.chunk_center(IVec2::ZERO);
-        generator.as_ref().map_or(
-            Vec3::new(center.x, settings.base_height + 15.0, center.z),
-            |generator| generator.spawn_position(),
-        )
-    } else {
-        Vec3::new(0.0, 30.0, 0.0)
-    };
+        Vec3::new(center.x, settings.base_height + 15.0, center.z)
+    });
+    let generator = generator.map(|generator| generator.clone());
+    let task = AsyncComputeTaskPool::get()
+        .spawn(async move { generator.map_or(fallback, |generator| generator.spawn_position()) });
+    commands.spawn((SpawnSearch(task), DespawnOnExit(GameState::Game)));
 
+    // The player camera does not exist yet: the loading screen brings its own.
+    commands.spawn((Camera2d, LoadingScreen, DespawnOnExit(GameState::Game)));
+    commands.spawn_scene(bsn! {
+        Node {
+            width: percent(100),
+            height: percent(100),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+        }
+        BackgroundColor(Color::srgb_u8(15, 15, 18))
+        LoadingScreen
+        DespawnOnExit::<GameState>(GameState::Game)
+        Children [
+            Text("Generating world...")
+            TextFont { font_size: FontSize::Px(28.0) }
+            TextColor(Color::WHITE)
+        ]
+    });
+}
+
+fn finish_spawn_search(
+    mut commands: Commands,
+    mut searches: Query<(Entity, &mut SpawnSearch)>,
+    screens: Query<Entity, With<LoadingScreen>>,
+) {
+    for (entity, mut search) in &mut searches {
+        let Some(position) = check_ready(&mut search.0) else {
+            continue;
+        };
+        commands.entity(entity).despawn();
+        for screen in &screens {
+            commands.entity(screen).despawn();
+        }
+        spawn_player(&mut commands, position);
+    }
+}
+
+fn spawn_player(commands: &mut Commands, spawn_pos: Vec3) {
     commands.spawn_scene_list(bsn! {
         Player
         Transform::from_translation(spawn_pos)

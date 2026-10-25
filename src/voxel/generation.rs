@@ -1,4 +1,7 @@
-use super::{ChunkVoxels, VoxelKind, VoxelSettings};
+use super::{
+    ChunkVoxels, VoxelKind,
+    data::{CHUNK_HEIGHT, CHUNK_VOLUME},
+};
 use bevy::prelude::*;
 use pumpkin_worldgen::{BlockInfo, GeneratedChunk, World, block_info};
 use std::{
@@ -7,11 +10,11 @@ use std::{
 };
 
 pub(crate) const MIN_Y: i32 = -64;
-const HEIGHT: usize = 384;
+const HEIGHT: usize = CHUNK_HEIGHT as usize;
 struct ChunkSource {
     cells: Vec<VoxelKind>,
-    states: Arc<[u16]>,
-    light: Arc<[u8]>,
+    states: Box<[u16]>,
+    light: Box<[u8]>,
 }
 impl ChunkSource {
     fn new(generated: &GeneratedChunk) -> Self {
@@ -30,15 +33,13 @@ impl ChunkSource {
         }
     }
 
-    fn into_voxels(self, settings: &VoxelSettings) -> ChunkVoxels {
-        assert_eq!(settings.chunk_size, 16, "worldgen requires 16x16 chunks");
-        assert!((1..=384).contains(&settings.max_height));
-        let cells = (256 * settings.max_height) as usize;
-        let mut voxels = self.cells;
-        voxels.truncate(cells);
-        let light = self.light[..cells].into();
-        let states = self.states[..cells].into();
-        ChunkVoxels::generated(16, settings.max_height, voxels).with_lighting(states, light)
+    fn into_voxels(self) -> ChunkVoxels {
+        assert_eq!(
+            self.cells.len(),
+            CHUNK_VOLUME,
+            "worldgen columns are 16x16x384"
+        );
+        ChunkVoxels::generated(&self.cells, &self.states, &self.light)
     }
 }
 impl std::ops::Deref for ChunkSource {
@@ -171,13 +172,9 @@ impl WorldGenerator {
     }
 
     /// Converts a chunk Pumpkin already holds; `None` once it was unloaded.
-    pub(crate) fn loaded_chunk(
-        &self,
-        position: IVec2,
-        settings: &VoxelSettings,
-    ) -> Option<ChunkVoxels> {
+    pub(crate) fn loaded_chunk(&self, position: IVec2) -> Option<ChunkVoxels> {
         let generated = self.world().loaded_chunk(position.x, position.y)?;
-        Some(ChunkSource::new(&generated).into_voxels(settings))
+        Some(ChunkSource::new(&generated).into_voxels())
     }
 
     fn chunk(&self, position: IVec2) -> ChunkSource {
@@ -228,15 +225,6 @@ impl WorldGenerator {
         }
         Vec3::new(8.0, 200.0, 8.0)
     }
-}
-
-/// Blocks until the chunk exists; streaming uses [`WorldGenerator::loaded_chunk`] instead.
-pub(crate) fn generate_chunk(
-    position: IVec2,
-    settings: &VoxelSettings,
-    generator: &WorldGenerator,
-) -> ChunkVoxels {
-    generator.chunk(position).into_voxels(settings)
 }
 
 fn map_info(info: BlockInfo) -> VoxelKind {

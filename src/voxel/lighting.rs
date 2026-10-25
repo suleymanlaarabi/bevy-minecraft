@@ -2,18 +2,24 @@
 //!
 //! Streamed chunks keep the light Pumpkin computed during generation. Only the
 //! neighborhood of edited chunks is mirrored into the lighting context.
-use super::{ChunkVoxels, VoxelChunk, streaming::ChunkIndex};
+use super::{ChunkVoxels, VoxelChunk, data::Layer, streaming::ChunkIndex};
 use bevy::{
     platform::collections::{HashMap, HashSet},
     prelude::*,
     tasks::{Task, TaskPool, TaskPoolBuilder, futures::check_ready},
 };
 use pumpkin_worldgen::{Dimension, LightingChunk, LightingUpdate, LightingWorld};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 /// Chebyshev radius around an edited chunk mirrored into the lighting context: the
 /// relit 3x3 area plus the ring that seeds light across its border.
 const CONTEXT_RADIUS: i32 = 2;
+
+/// Chunks with native edits, the only ones whose neighborhood is mirrored into the
+/// lighting context. Edits are never forgotten, so the marker stays until despawn.
+#[derive(Component)]
+#[component(storage = "SparseSet")]
+pub(crate) struct LitEdits;
 
 type Version = (Entity, u64);
 struct Output {
@@ -26,7 +32,7 @@ pub(crate) struct LightingState {
     context: Option<LightingWorld>,
     task: Option<Task<Output>>,
     submitted: HashMap<IVec2, Version>,
-    ready: HashMap<IVec2, Arc<[u8]>>,
+    ready: HashMap<IVec2, Layer<u8>>,
 }
 
 fn pool() -> &'static TaskPool {
@@ -42,7 +48,8 @@ fn pool() -> &'static TaskPool {
 pub(crate) fn update_lighting(
     mut state: ResMut<LightingState>,
     index: Res<ChunkIndex>,
-    mut chunks: Query<(Entity, &VoxelChunk, &mut ChunkVoxels)>,
+    edited: Query<&VoxelChunk, With<LitEdits>>,
+    mut chunks: Query<(Entity, &mut ChunkVoxels)>,
     mut relevant: Local<HashSet<IVec2>>,
 ) {
     if let Some(task) = state.task.as_mut() {
@@ -52,16 +59,14 @@ pub(crate) fn update_lighting(
         state.task = None;
         state.context = Some(output.context);
         for update in output.updates {
-            state
-                .ready
-                .insert(IVec2::new(update.x, update.z), update.light.into());
+            state.ready.insert(
+                IVec2::new(update.x, update.z),
+                Layer::from_cells(&update.light),
+            );
         }
     }
     relevant.clear();
-    for (_, chunk, voxels) in &chunks {
-        if voxels.native_edits.is_empty() {
-            continue;
-        }
+    for chunk in &edited {
         for z in -CONTEXT_RADIUS..=CONTEXT_RADIUS {
             for x in -CONTEXT_RADIUS..=CONTEXT_RADIUS {
                 relevant.insert(chunk.position + IVec2::new(x, z));
@@ -83,7 +88,7 @@ pub(crate) fn update_lighting(
         let Some(&entity) = index.get(position) else {
             continue;
         };
-        let Ok((entity, _, voxels)) = chunks.get(entity) else {
+        let Ok((entity, voxels)) = chunks.get(entity) else {
             continue;
         };
         let Some(states) = &voxels.native_states else {
@@ -96,9 +101,9 @@ pub(crate) fn update_lighting(
         snapshots.push(LightingChunk {
             x: position.x,
             z: position.y,
-            states: states.clone(),
+            states: states.to_cells(),
             // Rendering estimates must never seed Pumpkin's authoritative light.
-            light: voxels.light.clone(),
+            light: voxels.light.to_cells(),
             edits: voxels.native_edits.iter().copied().collect(),
         });
         state.submitted.insert(*position, version);
@@ -119,7 +124,7 @@ pub(crate) fn update_lighting(
     let mut changed = Vec::new();
     for (position, light) in state.ready.drain() {
         if let Some(&entity) = index.get(&position)
-            && let Ok((_, _, mut voxels)) = chunks.get_mut(entity)
+            && let Ok((_, mut voxels)) = chunks.get_mut(entity)
         {
             let sections = voxels.bypass_change_detection().replace_light(light);
             if sections != 0 {
@@ -136,7 +141,7 @@ pub(crate) fn update_lighting(
                     continue;
                 }
                 if let Some(&entity) = index.get(&(position + IVec2::new(x, z)))
-                    && let Ok((_, _, mut voxels)) = chunks.get_mut(entity)
+                    && let Ok((_, mut voxels)) = chunks.get_mut(entity)
                 {
                     voxels.mark_sections(sections);
                 }

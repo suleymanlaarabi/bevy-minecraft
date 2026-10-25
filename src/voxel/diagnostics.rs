@@ -133,7 +133,9 @@ pub(crate) fn register(app: &mut App) {
             (configure_voxel_benchmark, run_voxel_benchmark)
                 .chain()
                 .after(record_voxel_frame)
-                .run_if(in_state(GameState::Game)),
+                .run_if(in_state(GameState::Game))
+                // The player spawns once its spawn point search finishes.
+                .run_if(any_with_component::<PlayerCamera>),
         )
         .add_systems(
             FixedUpdate,

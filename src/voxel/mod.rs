@@ -13,8 +13,8 @@ use bevy::{
     pbr::{DistanceFog, FogFalloff},
     prelude::*,
 };
-pub(crate) use data::{ChunkVoxels, VoxelChunk};
-pub use data::{SetVoxel, VoxelKind, VoxelViewer};
+pub(crate) use data::{CHUNK_SIZE, ChunkVoxels, VoxelChunk, split_world_position};
+pub use data::{SetVoxel, VoxelKind, VoxelViewer, chunk_at};
 use generation::WorldGenerator;
 pub use material::TexturePackId;
 use material::WaterMaterial;
@@ -32,13 +32,12 @@ use rebuild::{
     poll_chunk_colliders, prepare_assets, request_chunk_colliders, set_voxel, start_changed_builds,
 };
 use streaming::{
-    ChunkIndex, PendingChunks, StoredChunks, StreamOffsets, StreamState, poll_chunk_generations,
-    refresh_neighbors_of_spawned, release_ready_chunks, stream_chunks,
+    ChunkIndex, PendingChunks, PendingEdits, StoredChunks, StreamOffsets, StreamState,
+    poll_chunk_generations, refresh_neighbors_of_spawned, release_ready_chunks, stream_chunks,
 };
 
 #[derive(SystemParam)]
 pub struct VoxelWorld<'w, 's> {
-    settings: Res<'w, VoxelSettings>,
     index: Res<'w, ChunkIndex>,
     chunks: Query<'w, 's, &'static ChunkVoxels>,
     colliders: Query<'w, 's, (), With<avian3d::prelude::Collider>>,
@@ -48,13 +47,13 @@ impl VoxelWorld<'_, '_> {
     /// Collision is installed after asynchronous terrain/mesh generation.
     pub fn collision_ready(&self, position: Vec3) -> bool {
         self.index
-            .get(&self.settings.chunk_at(position))
+            .get(&chunk_at(position))
             .is_some_and(|entity| self.colliders.contains(*entity))
     }
 
     /// Returns the voxel at an integer world position, or `None` when it is unavailable.
     pub fn get(&self, world_position: IVec3) -> Option<VoxelKind> {
-        let (chunk_position, local_position) = self.settings.split_world_position(world_position);
+        let (chunk_position, local_position) = split_world_position(world_position);
         self.index
             .get(&chunk_position)
             .and_then(|entity| self.chunks.get(*entity).ok())
@@ -112,6 +111,7 @@ impl Plugin for VoxelPlugin {
         .init_resource::<ChunkIndex>()
         .init_resource::<StoredChunks>()
         .init_resource::<PendingChunks>()
+        .init_resource::<PendingEdits>()
         .init_resource::<StreamState>()
         .init_resource::<lighting::LightingState>()
         .add_observer(apply_view_distance)
@@ -123,7 +123,9 @@ impl Plugin for VoxelPlugin {
         .add_systems(
             Update,
             material::generate_block_mipmaps.run_if(
-                on_message::<AssetEvent<Image>>.or_else(on_message::<AssetEvent<VoxelMaterial>>),
+                on_message::<AssetEvent<Image>>
+                    .or_else(on_message::<AssetEvent<VoxelMaterial>>)
+                    .or_else(resource_exists::<material::MipmapJob>),
             ),
         )
         .add_systems(
@@ -233,6 +235,7 @@ fn cleanup_voxel_world(
     commands.queue(|world: &mut World| {
         world.resource_mut::<ChunkIndex>().clear();
         world.resource_mut::<PendingChunks>().clear();
+        world.resource_mut::<PendingEdits>().clear();
         world.resource_mut::<StoredChunks>().clear();
         // Drop the context on its own worker: Pumpkin shutdown must not stall ECS.
         if let Some(state) = world.remove_resource::<lighting::LightingState>() {
@@ -249,9 +252,7 @@ fn cleanup_voxel_world(
 
 #[derive(Resource, Clone, Debug)]
 pub struct VoxelSettings {
-    pub chunk_size: i32,
     pub base_height: f32,
-    pub max_height: i32,
     pub seed: u32,
     pub spawn_budget_per_frame: usize,
     pub despawn_budget_per_frame: usize,
@@ -260,10 +261,8 @@ pub struct VoxelSettings {
 impl Default for VoxelSettings {
     fn default() -> Self {
         Self {
-            chunk_size: 16,
             base_height: 127.0,
-            max_height: 384,
-            seed: 42,
+            seed: 22,
             spawn_budget_per_frame: 8,
             // Counted in section meshes: despawning a chunk frees all of them.
             despawn_budget_per_frame: 96,
@@ -273,30 +272,9 @@ impl Default for VoxelSettings {
 
 impl VoxelSettings {
     pub fn chunk_center(&self, chunk: IVec2) -> Vec3 {
-        let origin = (chunk * self.chunk_size).as_vec2();
-        let half = self.chunk_size as f32 * 0.5;
+        let origin = (chunk * CHUNK_SIZE).as_vec2();
+        let half = CHUNK_SIZE as f32 * 0.5;
         Vec3::new(origin.x + half, self.base_height, origin.y + half)
-    }
-
-    pub fn chunk_at(&self, world: Vec3) -> IVec2 {
-        IVec2::new(
-            (world.x.floor() as i32).div_euclid(self.chunk_size),
-            (world.z.floor() as i32).div_euclid(self.chunk_size),
-        )
-    }
-
-    pub fn split_world_position(&self, world: IVec3) -> (IVec2, IVec3) {
-        (
-            IVec2::new(
-                world.x.div_euclid(self.chunk_size),
-                world.z.div_euclid(self.chunk_size),
-            ),
-            IVec3::new(
-                world.x.rem_euclid(self.chunk_size),
-                world.y,
-                world.z.rem_euclid(self.chunk_size),
-            ),
-        )
     }
 }
 
@@ -309,7 +287,6 @@ mod tests {
     #[test]
     fn collision_readiness_waits_for_the_loaded_chunk_collider() {
         let mut world = World::new();
-        world.insert_resource(VoxelSettings::default());
         world.init_resource::<ChunkIndex>();
         let chunk = world.spawn_empty().id();
         world

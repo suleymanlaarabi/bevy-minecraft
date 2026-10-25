@@ -1,7 +1,7 @@
 use bevy::{
     asset::RenderAssetUsages,
     prelude::*,
-    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
+    render::render_resource::{Extent3d, TextureDataOrder, TextureDimension, TextureFormat},
     tasks::{ComputeTaskPool, ParallelSliceMut},
 };
 
@@ -133,6 +133,8 @@ struct BlockTexture<'a> {
     data: &'a [u8],
     width: usize,
     height: usize,
+    /// Bytes from one layer to the next: layer-major data interleaves each layer's mips.
+    layer_stride: usize,
     /// sRGB bytes decoded to linear.
     decode: [f32; 256],
 }
@@ -142,7 +144,7 @@ impl BlockTexture<'_> {
     fn sample(&self, layer: u32, uv: Vec2) -> Vec3 {
         let x = ((uv.x * self.width as f32) as usize).min(self.width - 1);
         let y = ((uv.y * self.height as f32) as usize).min(self.height - 1);
-        let offset = ((layer as usize * self.height + y) * self.width + x) * 4;
+        let offset = layer as usize * self.layer_stride + (y * self.width + x) * 4;
         let Some(&[r, g, b, a]) = self.data.get(offset..offset + 4) else {
             return Vec3::ZERO;
         };
@@ -165,10 +167,19 @@ fn render_icons(blocks: &Image, texture_pack: &TexturePack) -> Option<Vec<u8>> {
         return None;
     }
     let size = blocks.texture_descriptor.size;
+    let (width, height) = (size.width as usize, size.height as usize);
+    // Mip-major data stores every layer's base level first.
+    let layer_stride = match blocks.data_order {
+        TextureDataOrder::LayerMajor => (0..blocks.texture_descriptor.mip_level_count)
+            .map(|level| (width >> level).max(1) * (height >> level).max(1) * 4)
+            .sum(),
+        TextureDataOrder::MipMajor => width * height * 4,
+    };
     let texture = BlockTexture {
         data: blocks.data.as_deref()?,
-        width: size.width as usize,
-        height: size.height as usize,
+        width,
+        height,
+        layer_stride,
         decode: std::array::from_fn(|byte| {
             let value = byte as f32 / 255.0;
             if format.is_srgb() {

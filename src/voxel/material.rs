@@ -16,6 +16,7 @@ use bevy::{
         storage::ShaderBuffer,
     },
     shader::ShaderRef,
+    tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -358,22 +359,12 @@ pub(crate) fn block_texture(asset_server: &AssetServer, path: &str, layers: u32)
 /// which is linear in `(rgb * alpha, alpha)`, so each level is exactly the average of
 /// the shaded texels it covers and leaf cutouts keep their brightness at a distance.
 fn block_mipmaps(image: &Image) -> Option<(Vec<u8>, u32)> {
+    let levels = mipmap_levels(image)?;
     let descriptor = &image.texture_descriptor;
-    let srgb = match descriptor.format {
-        TextureFormat::Rgba8UnormSrgb => true,
-        TextureFormat::Rgba8Unorm => false,
-        _ => return None,
-    };
+    let srgb = descriptor.format == TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (descriptor.size.width, descriptor.size.height);
-    if descriptor.mip_level_count != 1 || !width.is_power_of_two() || !height.is_power_of_two() {
-        return None;
-    }
-    let levels = width.min(height).ilog2() + 1;
     let data = image.data.as_ref()?;
     let layer_bytes = (width * height * 4) as usize;
-    if levels == 1 || data.len() != layer_bytes * descriptor.size.depth_or_array_layers as usize {
-        return None;
-    }
 
     let decode: [f32; 256] = std::array::from_fn(|value| {
         let value = value as f32 / 255.0;
@@ -439,25 +430,77 @@ fn block_mipmaps(image: &Image) -> Option<(Vec<u8>, u32)> {
     Some((mipmapped, levels))
 }
 
+/// Mip levels [`block_mipmaps`] would build, or `None` when the image already has
+/// them or is unsupported. Cheap: only the descriptor and the data size are read.
+fn mipmap_levels(image: &Image) -> Option<u32> {
+    let descriptor = &image.texture_descriptor;
+    if !matches!(
+        descriptor.format,
+        TextureFormat::Rgba8UnormSrgb | TextureFormat::Rgba8Unorm
+    ) {
+        return None;
+    }
+    let (width, height) = (descriptor.size.width, descriptor.size.height);
+    if descriptor.mip_level_count != 1 || !width.is_power_of_two() || !height.is_power_of_two() {
+        return None;
+    }
+    let levels = width.min(height).ilog2() + 1;
+    let layer_bytes = (width * height * 4) as usize;
+    let expected = layer_bytes * descriptor.size.depth_or_array_layers as usize;
+    (levels > 1 && image.data.as_ref()?.len() == expected).then_some(levels)
+}
+
+/// Mip chain being computed off the main thread for one block texture.
+#[derive(Resource)]
+pub(crate) struct MipmapJob {
+    image: AssetId<Image>,
+    task: Task<Option<(Vec<u8>, u32)>>,
+}
+
 /// Gives the terrain's block texture its mip chain once it loads, including after a
-/// texture pack switch. Runs only on image or material asset events.
+/// texture pack switch. Runs on image or material asset events, and while a job runs.
 pub(crate) fn generate_block_mipmaps(
+    mut commands: Commands,
     assets: Option<Res<super::rebuild::VoxelAssets>>,
     materials: Res<Assets<VoxelMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    job: Option<ResMut<MipmapJob>>,
 ) {
-    let Some(material) = assets.and_then(|assets| materials.get(&assets.terrain)) else {
+    let Some(source) = assets
+        .and_then(|assets| materials.get(&assets.terrain))
+        .map(|material| material.blocks.id())
+    else {
         return;
     };
-    // Checked before `get_mut`, which would re-upload the image and wake this system.
-    let Some((data, levels)) = images.get(&material.blocks).and_then(block_mipmaps) else {
-        return;
-    };
-    if let Some(mut image) = images.get_mut(&material.blocks) {
-        image.data = Some(data);
-        image.data_order = TextureDataOrder::LayerMajor;
-        image.texture_descriptor.mip_level_count = levels;
+    if let Some(mut job) = job {
+        let Some(mipmapped) = check_ready(&mut job.task) else {
+            return;
+        };
+        commands.remove_resource::<MipmapJob>();
+        // A pack switch during the job leaves the result unused: the new texture is
+        // picked up below. Checked before `get_mut`, which re-uploads the image.
+        if job.image == source
+            && let Some((data, levels)) = mipmapped
+            && images.get(source).and_then(mipmap_levels) == Some(levels)
+            && let Some(mut image) = images.get_mut(source)
+        {
+            image.data = Some(data);
+            image.data_order = TextureDataOrder::LayerMajor;
+            image.texture_descriptor.mip_level_count = levels;
+            return;
+        }
     }
+    let Some(image) = images
+        .get(source)
+        .filter(|image| mipmap_levels(image).is_some())
+    else {
+        return;
+    };
+    let image = image.clone();
+    commands.insert_resource(MipmapJob {
+        image: source,
+        task: AsyncComputeTaskPool::get().spawn(async move { block_mipmaps(&image) }),
+    });
 }
 
 impl Material for VoxelMaterial {

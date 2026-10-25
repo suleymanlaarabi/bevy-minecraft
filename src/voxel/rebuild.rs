@@ -1,9 +1,13 @@
 use super::{
-    ChunkVoxels, SHADOW_LAYER, SetVoxel, VoxelChunk, VoxelKind, VoxelSettings, VoxelViewer,
-    generation::WorldGenerator,
+    ChunkVoxels, SHADOW_LAYER, SetVoxel, VoxelChunk, VoxelKind, VoxelViewer,
+    data::{
+        CHUNK_HEIGHT, CHUNK_SIZE, FULL_SKY, SECTION_COUNT, SECTION_HEIGHT, chunk_at,
+        split_world_position,
+    },
+    lighting::LitEdits,
     material::{TexturePack, VoxelMaterial, WaterMaterial, block_texture},
     meshing::{ChunkNeighborhood, build_sections},
-    streaming::{AwaitingNeighbors, ChunkIndex, StoredChunks},
+    streaming::{AwaitingNeighbors, ChunkIndex, PendingEdits, StoredChunks},
 };
 use avian3d::prelude::*;
 use bevy::{
@@ -195,13 +199,12 @@ pub(crate) fn neighbor_slot(offset: IVec2) -> usize {
 pub(crate) fn set_voxel(
     event: On<SetVoxel>,
     mut commands: Commands,
-    settings: Res<VoxelSettings>,
-    generator: Res<WorldGenerator>,
     index: Res<ChunkIndex>,
     mut stored: ResMut<StoredChunks>,
+    mut pending: ResMut<PendingEdits>,
     mut chunks: Query<&mut ChunkVoxels>,
 ) {
-    let (chunk, local) = settings.split_world_position(event.world_position);
+    let (chunk, local) = split_world_position(event.world_position);
     // Read neighbors before borrowing the edited chunk mutably, using the same query.
     // Only removal exposes a formerly opaque cell with stale (usually zero) light.
     let estimate = if event.kind == VoxelKind::Air
@@ -210,7 +213,6 @@ pub(crate) fn set_voxel(
         && voxels.native_states.is_some()
         && voxels.get(local).is_some_and(VoxelKind::is_opaque)
     {
-        let height = voxels.height;
         let (mut sky, mut block) = (0u8, 0u8);
         for offset in [
             IVec3::X,
@@ -221,23 +223,26 @@ pub(crate) fn set_voxel(
             IVec3::NEG_Z,
         ] {
             let position = event.world_position + offset;
-            let light = if position.y >= height {
-                0xf0
+            let light = if position.y >= CHUNK_HEIGHT {
+                FULL_SKY
             } else {
-                let (neighbor_chunk, neighbor_local) = settings.split_world_position(position);
+                let (neighbor_chunk, neighbor_local) = split_world_position(position);
                 let Some(entity) = index.get(&neighbor_chunk) else {
                     continue;
                 };
                 let Ok(neighbor) = chunks.get(*entity) else {
                     continue;
                 };
-                let Some(cell) = neighbor.index(neighbor_local) else {
-                    continue;
-                };
-                if neighbor.get(neighbor_local).is_none_or(VoxelKind::is_opaque) {
+                if neighbor
+                    .get(neighbor_local)
+                    .is_none_or(VoxelKind::is_opaque)
+                {
                     continue;
                 }
-                neighbor.render_light()[cell]
+                let Some(light) = neighbor.render_light_at(neighbor_local) else {
+                    continue;
+                };
+                light
             };
             let neighbor_sky = light >> 4;
             sky = sky.max(if offset == IVec3::Y && neighbor_sky == 15 {
@@ -258,39 +263,45 @@ pub(crate) fn set_voxel(
         let changed = voxels.bypass_change_detection().set(local, event.kind);
         if changed {
             if let Some(light) = estimate {
-                voxels.bypass_change_detection().estimate_light(local, light);
+                voxels
+                    .bypass_change_detection()
+                    .estimate_light(local, light);
             }
             voxels.set_changed();
-            commands.entity(*entity).try_insert(EditedChunk);
+            let mut entity = commands.entity(*entity);
+            entity.try_insert(EditedChunk);
+            if !voxels.native_edits.is_empty() {
+                entity.try_insert(LitEdits);
+            }
         }
         changed
+    } else if let Some(voxels) = stored.get_mut(&chunk) {
+        voxels.set(local, event.kind)
     } else {
-        stored
-            .entry(chunk)
-            .or_insert_with(|| super::generation::generate_chunk(chunk, &settings, &generator))
-            .set(local, event.kind)
+        // Applied by `spawn_chunk` once the chunk streams in.
+        pending.entry(chunk).or_default().push(*event);
+        return;
     };
     if !changed {
         return;
     }
 
     // Neighbors read this border directly; only their meshes need refreshing.
-    for offset in border_neighbors(local, settings.chunk_size) {
+    for offset in border_neighbors(local) {
         if let Some(entity) = index.get(&(chunk + offset))
             && let Ok(mut voxels) = chunks.get_mut(*entity)
         {
-            let sections = voxels.sections_around(local.y);
-            voxels.mark_sections(sections);
+            voxels.mark_sections(ChunkVoxels::sections_around(local.y));
             commands.entity(*entity).try_insert(EditedChunk);
         }
     }
 }
 
 /// Neighbor chunks whose meshes sample this cell (faces or corner light).
-fn border_neighbors(local: IVec3, size: i32) -> impl Iterator<Item = IVec2> {
+fn border_neighbors(local: IVec3) -> impl Iterator<Item = IVec2> {
     let side = |value: i32| match value {
         0 => [-1, 0],
-        value if value == size - 1 => [1, 0],
+        value if value == CHUNK_SIZE - 1 => [1, 0],
         _ => [0, 0],
     };
     let (xs, zs) = (side(local.x), side(local.z));
@@ -321,7 +332,6 @@ pub(crate) fn cleanup_removed_chunk(
 
 pub(crate) fn start_changed_builds(
     mut commands: Commands,
-    settings: Res<VoxelSettings>,
     index: Res<ChunkIndex>,
     viewer: Option<Single<&Transform, With<VoxelViewer>>>,
     builds: Query<(), With<ChunkBuild>>,
@@ -333,7 +343,7 @@ pub(crate) fn start_changed_builds(
         return;
     }
     let available = max_pending_builds().saturating_sub(builds.iter().count());
-    let center = viewer.map_or(IVec2::ZERO, |viewer| settings.chunk_at(viewer.translation));
+    let center = viewer.map_or(IVec2::ZERO, |viewer| chunk_at(viewer.translation));
     let pool = AsyncComputeTaskPool::get();
     let neighborhood = |position: IVec2, voxels: &ChunkVoxels| {
         ChunkNeighborhood::new(voxels, |offset| {
@@ -467,14 +477,13 @@ pub(crate) fn poll_builds(
             Some(sections) => sections.into_inner(),
             None => created.insert(ChunkSections::default()),
         };
-        let count = voxels.section_count();
-        entities.terrain.resize(count, None);
-        entities.water.resize(count, None);
-        entities.shadow.resize(count, None);
+        entities.terrain.resize(SECTION_COUNT, None);
+        entities.water.resize(SECTION_COUNT, None);
+        entities.shadow.resize(SECTION_COUNT, None);
         entities.missing_neighbors = output.missing_neighbors;
         if let Some(assets) = assets.as_deref() {
             for section in output.sections {
-                let y = (section.index as i32 * super::data::SECTION_HEIGHT) as f32;
+                let y = (section.index as i32 * SECTION_HEIGHT) as f32;
                 let terrain = section.terrain.map(|mesh| meshes.add(mesh));
                 let water = section.water.map(|mesh| meshes.add(mesh));
                 let shadow = section.shadow.map(|mesh| meshes.add(mesh));
@@ -571,7 +580,6 @@ const COLLIDER_KEEP_RADIUS: i32 = 4;
 /// Collision only exists around moving bodies (player, dropped items...).
 pub(crate) fn request_chunk_colliders(
     mut commands: Commands,
-    settings: Res<VoxelSettings>,
     index: Res<ChunkIndex>,
     bodies: Query<(&GlobalTransform, &RigidBody)>,
     chunks: Query<(&ChunkVoxels, Has<Collider>, Has<ColliderBuild>)>,
@@ -587,7 +595,7 @@ pub(crate) fn request_chunk_colliders(
         bodies
             .iter()
             .filter(|(_, body)| !body.is_static())
-            .map(|(transform, _)| settings.chunk_at(transform.translation())),
+            .map(|(transform, _)| chunk_at(transform.translation())),
     );
     current.sort_unstable_by_key(|position| (position.x, position.y));
     current.dedup();
@@ -630,7 +638,7 @@ pub(crate) fn request_chunk_colliders(
         commands.entity(entity).try_insert(ColliderBuild {
             content_revision: voxels.content_revision,
             task: pool.spawn(async move {
-                let solids = snapshot.solid_positions();
+                let solids = snapshot.collider_voxels();
                 (!solids.is_empty()).then(|| Collider::voxels(Vec3::ONE, &solids))
             }),
         });
@@ -642,7 +650,6 @@ const COLLIDERS_PER_FRAME: usize = 1;
 
 pub(crate) fn poll_chunk_colliders(
     mut commands: Commands,
-    settings: Res<VoxelSettings>,
     viewer: Option<Single<&GlobalTransform, With<VoxelViewer>>>,
     mut chunks: Query<(
         Entity,
@@ -652,7 +659,7 @@ pub(crate) fn poll_chunk_colliders(
         Has<Collider>,
     )>,
 ) {
-    let viewer_chunk = viewer.map(|viewer| settings.chunk_at(viewer.translation()));
+    let viewer_chunk = viewer.map(|viewer| chunk_at(viewer.translation()));
     let mut applied = 0;
     for (entity, chunk, mut voxels, mut build, has_collider) in &mut chunks {
         // Edited colliders and the viewer's own chunk never wait: something may stand on them.
@@ -689,19 +696,18 @@ mod tests {
 
     #[test]
     fn border_edits_refresh_cardinal_and_diagonal_neighbors() {
-        let corner: Vec<_> = border_neighbors(IVec3::new(0, 5, 15), 16).collect();
+        let corner: Vec<_> = border_neighbors(IVec3::new(0, 5, 15)).collect();
         assert_eq!(corner.len(), 3);
         assert!(corner.contains(&IVec2::new(-1, 0)));
         assert!(corner.contains(&IVec2::new(0, 1)));
         assert!(corner.contains(&IVec2::new(-1, 1)));
-        assert_eq!(border_neighbors(IVec3::new(4, 5, 7), 16).count(), 0);
+        assert_eq!(border_neighbors(IVec3::new(4, 5, 7)).count(), 0);
     }
 
     #[test]
     fn builds_clear_dirty_sections_only_for_the_current_revision() {
         let mut app = App::new();
         app.add_plugins(TaskPoolPlugin::default())
-            .insert_resource(VoxelSettings::default())
             .init_resource::<ChunkIndex>()
             .init_resource::<Assets<Mesh>>();
         let world = app.world_mut();
@@ -710,7 +716,7 @@ mod tests {
                 VoxelChunk {
                     position: IVec2::ZERO,
                 },
-                ChunkVoxels::generated(1, 32, vec![VoxelKind::Stone; 32]),
+                ChunkVoxels::filled(VoxelKind::Stone),
                 NeedsChunkBuild,
             ))
             .id();
