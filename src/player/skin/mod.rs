@@ -17,7 +17,7 @@ mod rig;
 mod view_model;
 use animation::{animate_rigs, animate_world};
 use appearance::{finish_import, import_skin, sync_labels};
-pub(crate) use appearance::{IMPORT_HINT, reset_skin, toggle_layers, toggle_model};
+pub(crate) use appearance::{reset_skin, toggle_layers, toggle_model};
 use assets::{load_skin, setup};
 use rig::{spawn_preview, spawn_world_rig, sync_parts};
 pub(crate) use view_model::ArmSwing;

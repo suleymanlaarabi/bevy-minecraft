@@ -51,7 +51,10 @@ pub(super) fn animate_rigs(
     let head = Vec2::new(delta.x.atan() * 0.65, delta.y.atan() * 0.55);
     for (rig, mut transform) in &mut rigs {
         if rig.preview {
-            transform.rotation = Quat::from_rotation_y(-0.22 + head.x * 0.2);
+            transform.set_if_neq(Transform {
+                rotation: Quat::from_rotation_y(-0.22 + head.x * 0.2),
+                ..*transform
+            });
         }
     }
     for (part, mut transform) in &mut parts {
@@ -67,7 +70,8 @@ pub(super) fn animate_rigs(
     }
 }
 
-// Rig roots and mesh parts are genuinely disjoint entity sets.
+// Rig roots and mesh parts are genuinely disjoint entity sets; parts read their rig
+// through `SkinPart::rig`, so the pass is linear in parts.
 pub(super) fn animate_world(
     time: Res<Time>,
     settings: Res<SkinSettings>,
@@ -75,26 +79,29 @@ pub(super) fn animate_world(
     camera: Single<&PlayerCamera>,
     player: Single<(&CharacterMotion, &CharacterState, &CharacterBody), With<Player>>,
     mut rigs: Query<
-        (Entity, &mut SkinRig, &mut Transform, &mut Visibility),
+        (&mut SkinRig, &mut Transform, &mut Visibility),
         (Without<SkinPart>, Without<FirstPersonArm>),
     >,
     mut parts: Query<(&SkinPart, &mut Transform), (Without<SkinRig>, Without<FirstPersonArm>)>,
 ) {
     let (motion, character, body) = *player;
-    for (entity, mut rig, mut transform, mut visibility) in &mut rigs {
+    let hidden = *view == PlayerView::FirstPerson;
+    let speed = motion.velocity.xz().length() as f32;
+    for (mut rig, mut transform, mut visibility) in &mut rigs {
         if rig.preview {
             continue;
         }
-        visibility.set_if_neq(if *view == PlayerView::FirstPerson {
+        visibility.set_if_neq(if hidden {
             Visibility::Hidden
         } else {
             Visibility::Inherited
         });
-        if *view == PlayerView::FirstPerson {
+        if hidden {
             continue;
         }
-        rig.phase = (rig.phase + time.delta_secs() * motion.velocity.xz().length() as f32 * 70.)
-            .rem_euclid(TAU);
+        if speed > 0. {
+            rig.phase = (rig.phase + time.delta_secs() * speed * 70.).rem_euclid(TAU);
+        }
         let mut pose = Transform::from_xyz(0., -body.origin_height, 0.)
             .with_rotation(Quat::from_rotation_y(PI));
         if character.pose == Pose::Swimming {
@@ -102,16 +109,26 @@ pub(super) fn animate_world(
             pose.translation += Vec3::new(0., 0.3, 0.9);
         }
         transform.set_if_neq(pose);
-        for (part, mut part_pose) in &mut parts {
-            if part.rig == entity {
-                part_pose.set_if_neq(part_transform(
-                    part.part,
-                    settings.model == SkinModel::Slim,
-                    rig.phase.sin() * (motion.velocity.xz().length() as f32 * 3.).min(0.7),
-                    Vec2::new(0., -camera.pitch),
-                    character.pose == Pose::Crouching,
-                ));
-            }
+    }
+    if hidden {
+        return;
+    }
+    let slim = settings.model == SkinModel::Slim;
+    let crouching = character.pose == Pose::Crouching;
+    let head = Vec2::new(0., -camera.pitch);
+    let amplitude = (speed * 3.).min(0.7);
+    for (part, mut part_pose) in &mut parts {
+        let Ok((rig, ..)) = rigs.get(part.rig) else {
+            continue;
+        };
+        if !rig.preview {
+            part_pose.set_if_neq(part_transform(
+                part.part,
+                slim,
+                rig.phase.sin() * amplitude,
+                head,
+                crouching,
+            ));
         }
     }
 }

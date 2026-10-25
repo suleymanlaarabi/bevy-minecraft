@@ -102,21 +102,22 @@ pub(crate) fn refresh_slots(
     }
 
     for (mut text, count, placeholder) in &mut counts {
-        let value = if let Some(view) = count {
-            match inventory.slot(view.index) {
+        if let Some(view) = count {
+            let value = match inventory.slot(view.index) {
                 Some(stack) if stack.count() > 1 => stack.count().to_string(),
                 _ => String::new(),
-            }
+            };
+            text.set_if_neq(Text(value));
         } else if let Some(view) = placeholder {
-            if inventory.slot(view.index).is_none() {
-                empty_slot_label(view.index).into()
-            } else {
-                String::new()
+            let label = match inventory.slot(view.index) {
+                None => empty_slot_label(view.index),
+                Some(_) => "",
+            };
+            // Compare first: the static label needs no allocation when unchanged.
+            if text.0 != label {
+                text.0 = label.into();
             }
-        } else {
-            continue;
-        };
-        text.set_if_neq(Text(value));
+        }
     }
 
     for (view, mut border) in &mut slots {

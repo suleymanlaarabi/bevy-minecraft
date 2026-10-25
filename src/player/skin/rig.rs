@@ -188,6 +188,7 @@ pub(super) fn sync_parts(
     settings: Res<SkinSettings>,
     assets: Res<SkinAssets>,
     inventory: Query<Ref<PlayerInventory>, With<Player>>,
+    new_parts: Query<(), Added<SkinPart>>,
     mut parts: Query<(
         &SkinPart,
         &mut Mesh3d,
@@ -196,12 +197,34 @@ pub(super) fn sync_parts(
     )>,
 ) {
     let inventory = inventory.single().ok();
-    let inventory_changed = inventory
-        .as_ref()
-        .is_some_and(|inventory| inventory.is_changed());
+    let changed = settings.is_changed()
+        || assets.is_changed()
+        || inventory
+            .as_ref()
+            .is_some_and(|inventory| inventory.is_changed());
+    if !changed && new_parts.is_empty() {
+        return;
+    }
+    // Leggings (slot 2) use their own texture layer; the other pieces share `humanoid`.
+    let armor: [Option<&Handle<StandardMaterial>>; 4] = std::array::from_fn(|slot| {
+        let stack = inventory.as_ref()?.slot(ARMOR_START + slot)?;
+        let name = stack
+            .item()
+            .component::<pumpkin_data::data_component_impl::EquippableImpl>()?
+            .asset_id
+            .as_ref()?;
+        let layer = if slot == 2 {
+            "humanoid_leggings"
+        } else {
+            "humanoid"
+        };
+        assets.armor.get(&format!(
+            "{layer}/{}",
+            name.strip_prefix("minecraft:").unwrap_or(name)
+        ))
+    });
     for (part, mut mesh, mut material, mut visibility) in &mut parts {
-        if !settings.is_changed() && !assets.is_changed() && !inventory_changed && !mesh.is_added()
-        {
+        if !changed && !mesh.is_added() {
             continue;
         }
         if part.armor {
@@ -219,31 +242,7 @@ pub(super) fn sync_parts(
                     _ => None,
                 }
             };
-            let equipment = slot.and_then(|slot| inventory.as_ref()?.slot(ARMOR_START + slot));
-            let key = equipment.and_then(|stack| {
-                let name = stack
-                    .item()
-                    .registry()
-                    .components
-                    .iter()
-                    .find_map(|(_, component)| {
-                        component
-                            .as_any()
-                            .downcast_ref::<pumpkin_data::data_component_impl::EquippableImpl>()
-                    })?
-                    .asset_id
-                    .as_ref()?;
-                Some(format!(
-                    "{}/{}",
-                    if part.layer == 1 {
-                        "humanoid_leggings"
-                    } else {
-                        "humanoid"
-                    },
-                    name.strip_prefix("minecraft:").unwrap_or(name)
-                ))
-            });
-            if let Some(handle) = key.as_ref().and_then(|key| assets.armor.get(key)) {
+            if let Some(handle) = slot.and_then(|slot| armor[slot]) {
                 if material.0 != *handle {
                     material.0 = handle.clone();
                 }

@@ -60,10 +60,7 @@ pub(super) fn player_input(
 /// Crouching and swimming lower the camera smoothly, as the eyes ease between poses.
 pub(super) fn follow_eye_height(
     player: Single<(&CharacterMotion, &Transform), (With<Player>, Without<PlayerCamera>)>,
-    mut camera: Single<
-        (&mut FollowOffset, &mut Transform, &PlayerCamera),
-        Without<Player>,
-    >,
+    mut camera: Single<(&mut FollowOffset, &mut Transform, &PlayerCamera), Without<Player>>,
     view: Res<super::skin::PlayerView>,
     world: crate::voxel::VoxelWorld,
 ) {

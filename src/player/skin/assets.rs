@@ -1,10 +1,6 @@
 //! Cached meshes, materials, and normalized skin textures.
 use super::*;
-use bevy::{
-    asset::LoadState,
-    image::{ImageLoaderSettings, ImageSampler},
-    render::render_resource::TextureFormat,
-};
+use bevy::{asset::LoadState, render::render_resource::TextureFormat};
 
 pub(super) fn setup(
     mut assets: ResMut<SkinAssets>,
@@ -138,7 +134,7 @@ pub(super) fn load_skin(
                 }
             }
             if !assets.fallback {
-                assets.status = IMPORT_HINT.into();
+                assets.status = super::appearance::IMPORT_HINT.into();
             }
         }
         Err(error) => {
@@ -152,7 +148,7 @@ pub(super) fn load_skin(
 fn skin_error(assets: &mut SkinAssets, server: &AssetServer, error: &str) {
     assets.status = error.into();
     if assets.texture == Handle::default() && !assets.fallback && assets.requested != "skin.png" {
-        assets.source = crate::load_nearest(server, "skin.png".into());
+        assets.source = crate::load_nearest(server, "skin.png");
         assets.fallback = true;
         assets.status.push_str(" Using default skin.");
     } else {

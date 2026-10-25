@@ -226,7 +226,7 @@ fn inventory_overlay_scene(preview: Handle<Image>) -> impl Scene {
                         Pickable::IGNORE
                     ]
                     --
-                    Text(crate::player::skin::IMPORT_HINT)
+                    Text("Drop a skin PNG to import")
                     crate::player::skin::SkinStatusLabel
                     TextFont { font_size: FontSize::Px(11.0) }
                     TextColor(Color::srgb(0.65,0.65,0.68))
