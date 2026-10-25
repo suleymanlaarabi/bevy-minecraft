@@ -5478,7 +5478,6 @@ dependencies = [
 [[package]]
 name = "pumpkin-util"
 version = "0.2.1+26.3-26.51"
-source = "git+https://github.com/Pumpkin-MC/Pumpkin.git?rev=8ca5cb443272e0ac4f59b4c2ac059bdc72c2a22b#8ca5cb443272e0ac4f59b4c2ac059bdc72c2a22b"
 dependencies = [
  "bytes",
  "colored",

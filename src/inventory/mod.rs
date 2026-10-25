@@ -1,3 +1,4 @@
+mod icons;
 mod model;
 mod ui;
 
@@ -38,6 +39,15 @@ impl Plugin for InventoryPlugin {
     fn build(&self, app: &mut App) {
         app.add_sub_state::<InventoryState>()
             .init_resource::<InventoryCursor>()
+            .init_resource::<icons::BlockIcons>()
+            .add_systems(Startup, icons::setup_block_icons)
+            .add_systems(
+                Update,
+                icons::render_block_icons.run_if(
+                    resource_exists::<crate::voxel::VoxelAssets>
+                        .and_then(resource_exists::<crate::voxel::TexturePack>),
+                ),
+            )
             .add_systems(OnExit(GameState::Game), reset_inventory_cursor)
             .add_systems(OnEnter(GameState::Game), ui::spawn_hotbar_hud)
             .add_systems(

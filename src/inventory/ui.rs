@@ -9,13 +9,14 @@ use crate::{
     game::GameState,
     inventory::{
         DragMode, DragState, HOTBAR_SIZE, INVENTORY_SIZE, InventoryCursor, InventoryState,
-        ItemKind, PlayerInventory,
+        ItemKind, PlayerInventory, icons::BlockIcons,
     },
     player::{Crosshair, Player},
 };
 
 const SLOT_SIZE: f32 = 48.0;
 const SLOT_GAP: f32 = 4.0;
+const ICON_SIZE: f32 = 32.0;
 
 const SLOT_BG: Color = Color::srgba(0.08, 0.08, 0.09, 0.94);
 const SLOT_BORDER: Color = Color::srgba(0.35, 0.35, 0.38, 1.0);
@@ -75,9 +76,9 @@ fn slot(index: usize, interactive: bool) -> impl Scene {
         @picking
         @interactions
         Children [
-            Node { width: px(30), height: px(30) }
+            Node { width: px(ICON_SIZE), height: px(ICON_SIZE) }
             SlotIcon { index }
-            BackgroundColor(Color::NONE)
+            ImageNode
             Visibility::Hidden
             Pickable::IGNORE
             --
@@ -206,7 +207,7 @@ fn inventory_overlay_scene() -> impl Scene {
             }
             CursorStackView
             Visibility::Hidden
-            BackgroundColor(Color::NONE)
+            ImageNode
             Pickable::IGNORE
             GlobalZIndex(200)
             Children [
@@ -301,33 +302,38 @@ pub(crate) fn return_cursor_stack(
     }
 }
 
-fn item_color(item: ItemKind) -> Color {
-    match item {
-        ItemKind::Block(kind) => {
-            let [r, g, b, a] = kind.color();
-            Color::srgba(r, g, b, a)
-        }
+/// Points `node` at the icon of `item`, leaving it untouched when already shown.
+fn show_icon(node: &mut Mut<ImageNode>, icons: &BlockIcons, item: ItemKind) {
+    let atlas = icons.atlas(item);
+    let shown = node.image == *icons.image()
+        && node
+            .texture_atlas
+            .as_ref()
+            .is_some_and(|current| current.index == atlas.index);
+    if !shown {
+        node.image = icons.image().clone();
+        node.texture_atlas = Some(atlas);
     }
 }
 
 pub(crate) fn refresh_slots(
     inventory: Single<Ref<PlayerInventory>, With<Player>>,
     new_views: Query<(), Added<InventorySlotView>>,
-    mut icons: Query<(&SlotIcon, &mut BackgroundColor, &mut Visibility)>,
+    block_icons: Res<BlockIcons>,
+    mut icons: Query<(&SlotIcon, &mut ImageNode, &mut Visibility)>,
     mut counts: Query<(&SlotCount, &mut Text)>,
     mut slots: Query<(&InventorySlotView, &mut BorderColor)>,
 ) {
     if !inventory.is_changed() && new_views.is_empty() {
         return;
     }
-    for (view, mut color, mut visibility) in &mut icons {
+    for (view, mut node, mut visibility) in &mut icons {
         match inventory.slot(view.index) {
             Some(stack) => {
-                color.set_if_neq(BackgroundColor(item_color(stack.item())));
+                show_icon(&mut node, &block_icons, stack.item());
                 visibility.set_if_neq(Visibility::Inherited);
             }
             None => {
-                color.set_if_neq(BackgroundColor(Color::NONE));
                 visibility.set_if_neq(Visibility::Hidden);
             }
         }
@@ -542,10 +548,11 @@ fn slot_drag_end(
 pub(crate) fn follow_cursor_stack(
     window: Single<&Window, With<PrimaryWindow>>,
     cursor: Res<InventoryCursor>,
-    view: Single<(&mut Node, &mut BackgroundColor, &mut Visibility), With<CursorStackView>>,
+    block_icons: Res<BlockIcons>,
+    view: Single<(&mut Node, &mut ImageNode, &mut Visibility), With<CursorStackView>>,
     mut count: Single<&mut Text, With<CursorStackCount>>,
 ) {
-    let (mut node, mut color, mut visibility) = view.into_inner();
+    let (mut node, mut image, mut visibility) = view.into_inner();
 
     let Some(stack) = cursor.stack else {
         visibility.set_if_neq(Visibility::Hidden);
@@ -567,7 +574,7 @@ pub(crate) fn follow_cursor_stack(
         node.left = left;
         node.top = top;
     }
-    color.set_if_neq(BackgroundColor(item_color(stack.item())));
+    show_icon(&mut image, &block_icons, stack.item());
     let text = if stack.count() > 1 {
         stack.count().to_string()
     } else {
@@ -667,7 +674,8 @@ mod tests {
     #[test]
     fn slots_initialize_when_opened_and_remain_unchanged_at_rest() {
         let mut app = App::new();
-        app.add_systems(Update, refresh_slots);
+        app.init_resource::<BlockIcons>()
+            .add_systems(Update, refresh_slots);
         app.world_mut().spawn(Player);
         let view = app
             .world_mut()
@@ -680,7 +688,7 @@ mod tests {
             .world_mut()
             .spawn((
                 SlotIcon { index: 0 },
-                BackgroundColor(Color::NONE),
+                ImageNode::default(),
                 Visibility::Hidden,
             ))
             .id();
@@ -699,7 +707,7 @@ mod tests {
         let icon_tick = app
             .world()
             .entity(icon)
-            .get_change_ticks::<BackgroundColor>()
+            .get_change_ticks::<ImageNode>()
             .unwrap()
             .changed;
         let border_tick = app
@@ -720,7 +728,7 @@ mod tests {
         assert_eq!(
             app.world()
                 .entity(icon)
-                .get_change_ticks::<BackgroundColor>()
+                .get_change_ticks::<ImageNode>()
                 .unwrap()
                 .changed,
             icon_tick
