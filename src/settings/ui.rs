@@ -11,7 +11,7 @@ use bevy::{
     settings::SaveSettingsDeferred,
     ui::Checked,
     ui_widgets::{
-        Activate, RadioGroup, SliderPrecision, SliderStep, SliderValue, ValueChange,
+        Activate, RadioGroup, ScrollArea, SliderPrecision, SliderStep, SliderValue, ValueChange,
         checkbox_self_update, radio_self_update, slider_self_update,
     },
 };
@@ -24,38 +24,10 @@ use super::{AntiAliasingMode, DisplayMode, GraphicsSettings, ShadowQuality};
 use super::SAVE_DELAY;
 
 #[derive(Component, Clone, Copy, Debug, Default)]
-struct SettingsPage;
-
-trait GraphicsChoice: Component + Clone + Copy + Default + PartialEq + Unpin {
-    fn set(self, settings: &mut GraphicsSettings);
-}
-
-impl GraphicsChoice for AntiAliasingMode {
-    fn set(self, settings: &mut GraphicsSettings) {
-        settings.anti_aliasing = self;
-    }
-}
-
-impl GraphicsChoice for ShadowQuality {
-    fn set(self, settings: &mut GraphicsSettings) {
-        settings.shadow_quality = self;
-    }
-}
-
-impl GraphicsChoice for TexturePackId {
-    fn set(self, settings: &mut GraphicsSettings) {
-        settings.texture_pack = self;
-    }
-}
-
-impl GraphicsChoice for DisplayMode {
-    fn set(self, settings: &mut GraphicsSettings) {
-        settings.display_mode = self;
-    }
-}
+struct SettingsPanel;
 
 pub(super) fn spawn_settings_page(mut commands: Commands, settings: Res<GraphicsSettings>) {
-    commands.spawn_scene(settings_page(settings.normalized()));
+    commands.spawn_scene(settings_page(*settings));
 }
 
 fn settings_page(settings: GraphicsSettings) -> impl Scene {
@@ -67,55 +39,88 @@ fn settings_page(settings: GraphicsSettings) -> impl Scene {
             justify_content: JustifyContent::Center,
             padding: px(24),
         }
-        SettingsPage
         ThemeBackgroundColor(tokens::WINDOW_BG)
         GlobalZIndex(200)
         DespawnOnExit::<GameState>(GameState::Settings)
         Children [
-            @pane()
             Node {
                 width: percent(100),
                 max_width: px(780),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(8),
             }
             Children [
-                @pane_header()
-                Children [Text("Graphics Settings") ThemedText]
+                @settings_panel(settings)
                 --
-                @pane_body()
-                Node { row_gap: px(8) }
-                InheritableThemeTextColor(tokens::TEXT_MAIN)
+                @back_button()
+            ]
+        ]
+    }
+}
+
+/// Shared graphics controls, including persistence and reset, for menus and in-game tools.
+pub(crate) fn settings_panel(settings: GraphicsSettings) -> impl Scene {
+    let settings = settings.normalized();
+    bsn! {
+        @pane()
+        SettingsPanel
+        Node { width: percent(100), max_height: vh(75) }
+        Children [
+            @pane_header()
+            Children [Text("Graphics Settings") ThemedText]
+            --
+            @pane_body()
+            Node { min_height: px(0), overflow: Overflow::scroll_y() }
+            ScrollArea
+            InheritableThemeTextColor(tokens::TEXT_MAIN)
+            Children [
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(8),
+                    flex_shrink: 0.0,
+                }
                 Children [
-                    @setting_row("Anti-Aliasing", anti_aliasing_control(settings.anti_aliasing))
+                    @setting_row("Anti-Aliasing", choice_control(settings.anti_aliasing, [
+                        ("Off", AntiAliasingMode::Off),
+                        ("FXAA", AntiAliasingMode::Fxaa),
+                        ("MSAA 2x", AntiAliasingMode::Msaa2x),
+                        ("MSAA 4x", AntiAliasingMode::Msaa4x),
+                        ("MSAA 8x", AntiAliasingMode::Msaa8x),
+                    ], |settings, value| settings.anti_aliasing = value))
                     --
-                    @setting_row("VSync", vsync_control(settings.vsync))
+                    @setting_row("VSync", toggle_control(settings.vsync, |settings, value| settings.vsync = value))
                     --
-                    @setting_row("Occlusion Culling", occlusion_culling_control(settings.occlusion_culling))
+                    @setting_row("Occlusion Culling", toggle_control(settings.occlusion_culling, |settings, value| settings.occlusion_culling = value))
                     --
-                    @setting_row("Shadow Quality", shadow_quality_control(settings.shadow_quality))
+                    @setting_row("Shadow Quality", choice_control(settings.shadow_quality, [
+                        ("Off", ShadowQuality::Off),
+                        ("Low", ShadowQuality::Low),
+                        ("Medium", ShadowQuality::Medium),
+                        ("High", ShadowQuality::High),
+                    ], |settings, value| settings.shadow_quality = value))
                     --
-                    @setting_row("Bloom", bloom_control(settings.bloom))
+                    @setting_row("Bloom", toggle_control(settings.bloom, |settings, value| settings.bloom = value))
                     --
-                    @setting_row("Clouds", clouds_control(settings.clouds))
+                    @setting_row("Clouds", toggle_control(settings.clouds, |settings, value| settings.clouds = value))
                     --
-                    @setting_row("Texture Pack", texture_pack_control(settings.texture_pack))
+                    @setting_row("Texture Pack", choice_control(settings.texture_pack, [
+                        ("Minecraft", TexturePackId::Vanilla),
+                        ("Faithful 32x", TexturePackId::Faithful),
+                        ("Replete", TexturePackId::Replete),
+                        ("Meadow", TexturePackId::Meadow),
+                        ("Twilight", TexturePackId::Twilight),
+                    ], |settings, value| settings.texture_pack = value))
                     --
                     @setting_row("Field of View", fov_control(settings.field_of_view))
                     --
                     @setting_row("View Distance", view_distance_control(settings.view_distance))
                     --
-                    @setting_row("Display Mode", display_mode_control(settings.display_mode))
+                    @setting_row("Display Mode", choice_control(settings.display_mode, [
+                        ("Windowed", DisplayMode::Windowed),
+                        ("Borderless", DisplayMode::BorderlessFullscreen),
+                    ], |settings, value| settings.display_mode = value))
                     --
-                    Node {
-                        width: percent(100),
-                        justify_content: JustifyContent::SpaceBetween,
-                        column_gap: px(8),
-                        margin: UiRect::top(px(4)),
-                    }
-                    Children [
-                        @reset_button()
-                        --
-                        @back_button()
-                    ]
+                    @reset_button()
                 ]
             ]
         ]
@@ -148,7 +153,15 @@ fn setting_row(label: &'static str, control: impl Scene) -> impl Scene {
     }
 }
 
-fn radio_group() -> impl Scene {
+fn choice_control<T: Component + Copy + Default + PartialEq + Unpin, const N: usize>(
+    selected: T,
+    choices: [(&'static str, T); N],
+    set: fn(&mut GraphicsSettings, T),
+) -> impl Scene {
+    let choices = choices
+        .into_iter()
+        .map(|(label, value)| radio_choice(label, value, selected))
+        .collect::<Vec<_>>();
     bsn! {
         Node {
             flex_wrap: FlexWrap::Wrap,
@@ -159,28 +172,22 @@ fn radio_group() -> impl Scene {
         }
         RadioGroup
         on(radio_self_update)
+        on(move |change: On<ValueChange<Entity>>, choices: Query<&T>, settings: Res<GraphicsSettings>, mut commands: Commands| {
+            if let Ok(value) = choices.get(change.value) {
+                let mut updated = *settings;
+                set(&mut updated, *value);
+                store_settings(*settings, updated, &mut commands);
+            }
+        })
+        Children [{choices}]
     }
 }
 
-fn anti_aliasing_control(selected: AntiAliasingMode) -> impl Scene {
-    bsn! {
-        @radio_group()
-        on(set_choice::<AntiAliasingMode>)
-        Children [
-            @radio_choice("Off", AntiAliasingMode::Off, selected)
-            --
-            @radio_choice("FXAA", AntiAliasingMode::Fxaa, selected)
-            --
-            @radio_choice("MSAA 2x", AntiAliasingMode::Msaa2x, selected)
-            --
-            @radio_choice("MSAA 4x", AntiAliasingMode::Msaa4x, selected)
-            --
-            @radio_choice("MSAA 8x", AntiAliasingMode::Msaa8x, selected)
-        ]
-    }
-}
-
-fn radio_choice<T: GraphicsChoice>(label: &'static str, value: T, selected: T) -> impl Scene {
+fn radio_choice<T: Component + Copy + Default + PartialEq + Unpin>(
+    label: &'static str,
+    value: T,
+    selected: T,
+) -> impl Scene {
     let checked = (value == selected).then_some(bsn! { Checked });
     bsn! {
         @FeathersRadio { @caption: bsn! { Text(label) ThemedText } }
@@ -189,89 +196,57 @@ fn radio_choice<T: GraphicsChoice>(label: &'static str, value: T, selected: T) -
     }
 }
 
-fn shadow_quality_control(selected: ShadowQuality) -> impl Scene {
-    bsn! {
-        @radio_group()
-        on(set_choice::<ShadowQuality>)
-        Children [
-            @radio_choice("Off", ShadowQuality::Off, selected)
-            --
-            @radio_choice("Low", ShadowQuality::Low, selected)
-            --
-            @radio_choice("Medium", ShadowQuality::Medium, selected)
-            --
-            @radio_choice("High", ShadowQuality::High, selected)
-        ]
-    }
-}
-
-fn texture_pack_control(selected: TexturePackId) -> impl Scene {
-    bsn! {
-        @radio_group()
-        on(set_choice::<TexturePackId>)
-        Children [
-            @radio_choice("Minecraft", TexturePackId::Vanilla, selected)
-            --
-            @radio_choice("Faithful 32x", TexturePackId::Faithful, selected)
-            --
-            @radio_choice("Replete", TexturePackId::Replete, selected)
-            --
-            @radio_choice("Meadow", TexturePackId::Meadow, selected)
-            --
-            @radio_choice("Twilight", TexturePackId::Twilight, selected)
-        ]
-    }
-}
-
-fn display_mode_control(selected: DisplayMode) -> impl Scene {
-    bsn! {
-        @radio_group()
-        on(set_choice::<DisplayMode>)
-        Children [
-            @radio_choice("Windowed", DisplayMode::Windowed, selected)
-            --
-            @radio_choice("Borderless", DisplayMode::BorderlessFullscreen, selected)
-        ]
-    }
-}
-
-fn vsync_control(enabled: bool) -> impl Scene {
+fn toggle_control(enabled: bool, set: fn(&mut GraphicsSettings, bool)) -> impl Scene {
     let checked = enabled.then_some(bsn! { Checked });
     bsn! {
         @FeathersToggleSwitch
         @checked
         on(checkbox_self_update)
-        on(set_vsync)
+        on(move |change: On<ValueChange<bool>>, settings: Res<GraphicsSettings>, mut commands: Commands| {
+            let mut updated = *settings;
+            set(&mut updated, change.value);
+            store_settings(*settings, updated, &mut commands);
+        })
     }
 }
 
 fn fov_control(value: f32) -> impl Scene {
+    graphics_slider(value, FOV_MIN..=FOV_MAX, |settings, value| {
+        settings.field_of_view = normalized_fov(value.round());
+    })
+}
+
+fn view_distance_control(value: u32) -> impl Scene {
+    graphics_slider(
+        value as f32,
+        VIEW_DISTANCE_MIN as f32..=VIEW_DISTANCE_MAX as f32,
+        |settings, value| {
+            settings.view_distance =
+                (value.round() as u32).clamp(VIEW_DISTANCE_MIN, VIEW_DISTANCE_MAX);
+        },
+    )
+}
+
+fn graphics_slider(
+    value: f32,
+    range: core::ops::RangeInclusive<f32>,
+    set: fn(&mut GraphicsSettings, f32),
+) -> impl Scene {
     bsn! {
         @FeathersSlider {
-            @min: FOV_MIN,
-            @max: FOV_MAX,
+            @min: {*range.start()},
+            @max: {*range.end()},
         }
-        Node { width: px(320) }
+        Node { width: px(320), max_width: percent(100) }
         SliderValue(value)
         SliderStep(1.0)
         SliderPrecision(0)
         on(slider_self_update)
-        on(set_field_of_view)
-    }
-}
-
-fn view_distance_control(value: u32) -> impl Scene {
-    bsn! {
-        @FeathersSlider {
-            @min: {VIEW_DISTANCE_MIN as f32},
-            @max: {VIEW_DISTANCE_MAX as f32},
-        }
-        Node { width: px(320) }
-        SliderValue({value as f32})
-        SliderStep(1.0)
-        SliderPrecision(0)
-        on(slider_self_update)
-        on(set_view_distance)
+        on(move |change: On<ValueChange<f32>>, settings: Res<GraphicsSettings>, mut commands: Commands| {
+            let mut updated = *settings;
+            set(&mut updated, change.value);
+            store_settings(*settings, updated, &mut commands);
+        })
     }
 }
 
@@ -294,122 +269,20 @@ fn back_button() -> impl Scene {
     }
 }
 
-fn set_choice<T: GraphicsChoice>(
-    change: On<ValueChange<Entity>>,
-    choices: Query<&T>,
-    settings: Res<GraphicsSettings>,
-    mut commands: Commands,
-) {
-    if let Ok(choice) = choices.get(change.value) {
-        let mut updated = *settings;
-        choice.set(&mut updated);
-        store_settings(*settings, updated, &mut commands);
-    }
-}
-
-fn occlusion_culling_control(enabled: bool) -> impl Scene {
-    let checked = enabled.then_some(bsn! { Checked });
-    bsn! {
-        @FeathersToggleSwitch
-        @checked
-        on(checkbox_self_update)
-        on(set_occlusion_culling)
-    }
-}
-
-fn set_occlusion_culling(
-    change: On<ValueChange<bool>>,
-    settings: Res<GraphicsSettings>,
-    mut commands: Commands,
-) {
-    let mut updated = *settings;
-    updated.occlusion_culling = change.value;
-    store_settings(*settings, updated, &mut commands);
-}
-
-fn bloom_control(enabled: bool) -> impl Scene {
-    let checked = enabled.then_some(bsn! { Checked });
-    bsn! {
-        @FeathersToggleSwitch
-        @checked
-        on(checkbox_self_update)
-        on(set_bloom)
-    }
-}
-
-fn set_bloom(
-    change: On<ValueChange<bool>>,
-    settings: Res<GraphicsSettings>,
-    mut commands: Commands,
-) {
-    let mut updated = *settings;
-    updated.bloom = change.value;
-    store_settings(*settings, updated, &mut commands);
-}
-
-fn clouds_control(enabled: bool) -> impl Scene {
-    let checked = enabled.then_some(bsn! { Checked });
-    bsn! {
-        @FeathersToggleSwitch
-        @checked
-        on(checkbox_self_update)
-        on(set_clouds)
-    }
-}
-
-fn set_clouds(
-    change: On<ValueChange<bool>>,
-    settings: Res<GraphicsSettings>,
-    mut commands: Commands,
-) {
-    let mut updated = *settings;
-    updated.clouds = change.value;
-    store_settings(*settings, updated, &mut commands);
-}
-
-fn set_vsync(
-    change: On<ValueChange<bool>>,
-    settings: Res<GraphicsSettings>,
-    mut commands: Commands,
-) {
-    let mut updated = *settings;
-    updated.vsync = change.value;
-    store_settings(*settings, updated, &mut commands);
-}
-
-fn set_field_of_view(
-    change: On<ValueChange<f32>>,
-    settings: Res<GraphicsSettings>,
-    mut commands: Commands,
-) {
-    let mut updated = *settings;
-    updated.field_of_view = normalized_fov(change.value.round());
-    store_settings(*settings, updated, &mut commands);
-}
-
-fn set_view_distance(
-    change: On<ValueChange<f32>>,
-    settings: Res<GraphicsSettings>,
-    mut commands: Commands,
-) {
-    let mut updated = *settings;
-    updated.view_distance =
-        (change.value.round() as u32).clamp(VIEW_DISTANCE_MIN, VIEW_DISTANCE_MAX);
-    store_settings(*settings, updated, &mut commands);
-}
-
 fn reset_settings(
     _activate: On<Activate>,
-    pages: Query<Entity, With<SettingsPage>>,
+    panels: Query<Entity, With<SettingsPanel>>,
     settings: Res<GraphicsSettings>,
     mut commands: Commands,
 ) {
     let defaults = GraphicsSettings::default();
     store_settings(*settings, defaults, &mut commands);
-    for page in &pages {
-        commands.entity(page).despawn();
+    for panel in &panels {
+        commands
+            .entity(panel)
+            .despawn_related::<Children>()
+            .apply_scene(settings_panel(defaults));
     }
-    commands.spawn_scene(settings_page(defaults));
 }
 
 fn store_settings(current: GraphicsSettings, updated: GraphicsSettings, commands: &mut Commands) {

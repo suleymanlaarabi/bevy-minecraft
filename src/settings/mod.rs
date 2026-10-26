@@ -8,6 +8,8 @@ use crate::{game::GameState, voxel::TexturePackId};
 use bevy::{input::common_conditions::input_just_pressed, prelude::*, settings::SettingsPlugin};
 use ui::spawn_settings_page;
 
+pub(crate) use ui::settings_panel;
+
 pub use model::{AntiAliasingMode, DisplayMode, GraphicsSettings, ShadowQuality};
 
 const SETTINGS_APP_NAME: &str = "org.hollow.game";

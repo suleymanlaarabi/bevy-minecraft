@@ -1,20 +1,22 @@
-//! Developer panel, toggled with P: flight and the time of day.
+//! Developer panel, toggled with P: world controls and shared graphics settings.
 //!
 //! While it is open the cursor is free and the player neither moves nor interacts,
 //! like with the inventory.
 
 use bevy::{
+    ecs::template::{EntityTemplate, OptionTemplate},
     feathers::{
         containers::{pane, pane_body, pane_header},
         controls::{FeathersSlider, FeathersToggleSwitch},
-        theme::{InheritableThemeTextColor, ThemedText},
+        focus::FocusIndicator,
+        theme::{InheritableThemeTextColor, ThemeBackgroundColor, ThemeToken, ThemedText},
         tokens,
     },
     prelude::*,
     ui::Checked,
     ui_widgets::{
-        SliderPrecision, SliderStep, SliderValue, ValueChange, checkbox_self_update,
-        slider_self_update,
+        SelectedTab, SliderPrecision, SliderStep, SliderValue, Tab, TabActivation, TabList,
+        ValueChange, checkbox_self_update, slider_self_update, tablist_self_update,
     },
 };
 
@@ -23,6 +25,7 @@ use crate::{
     game::GameState,
     inventory::{InventoryState, lock_cursor, unlock_cursor},
     player::{Player, clear_player_input},
+    settings::{GraphicsSettings, settings_panel},
     sky::TimeOfDay,
 };
 
@@ -47,6 +50,16 @@ struct TimeSlider;
 
 #[derive(Component, Clone, Copy, Debug, Default)]
 struct ClockText;
+
+#[derive(Component, Clone, Copy, Debug, Default)]
+struct DevPanel;
+
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PanelTab {
+    #[default]
+    World,
+    Settings,
+}
 
 pub struct DevToolsPlugin;
 
@@ -95,19 +108,23 @@ fn toggle_panel(
 fn spawn_panel(
     mut commands: Commands,
     time: Res<TimeOfDay>,
+    settings: Res<GraphicsSettings>,
     flying: Query<(), (With<Player>, With<Flying>)>,
 ) {
-    commands.spawn_scene(panel(!flying.is_empty(), *time));
+    commands.spawn_scene(panel(!flying.is_empty(), *time, *settings));
 }
 
-fn panel(flying: bool, time: TimeOfDay) -> impl Scene {
+fn panel(flying: bool, time: TimeOfDay, settings: GraphicsSettings) -> impl Scene {
     bsn! {
         Node {
             position_type: PositionType::Absolute,
             top: px(12),
             right: px(12),
             width: px(340),
+            max_width: percent(95),
+            max_height: vh(95),
         }
+        DevPanel
         GlobalZIndex(300)
         DespawnOnExit::<DevPanelState>(DevPanelState::Open)
         Children [
@@ -115,9 +132,23 @@ fn panel(flying: bool, time: TimeOfDay) -> impl Scene {
             Node { width: percent(100) }
             Children [
                 @pane_header()
-                Children [Text("Dev Tools") ThemedText]
+                Children [
+                    Text("Dev Tools") ThemedText
+                    --
+                    Node { column_gap: px(6) }
+                    TabList { activation: TabActivation::Automatic }
+                    @selected_tab(#world_tab)
+                    on(tablist_self_update)
+                    on(select_tab)
+                    Children [
+                        #world_tab @tab_header("World", PanelTab::World)
+                        --
+                        @tab_header("Settings", PanelTab::Settings)
+                    ]
+                ]
                 --
                 @pane_body()
+                PanelTab::World
                 Node { row_gap: px(8) }
                 InheritableThemeTextColor(tokens::TEXT_MAIN)
                 Children [
@@ -129,8 +160,70 @@ fn panel(flying: bool, time: TimeOfDay) -> impl Scene {
                     --
                     Text({clock(&time)}) ThemedText ClockText
                 ]
+                --
+                Node { display: Display::None }
+                PanelTab::Settings
+                Children [@settings_panel(settings)]
             ]
         ]
+    }
+}
+
+fn selected_tab(tab: EntityTemplate) -> impl Scene {
+    let tab = OptionTemplate::Some(tab);
+    bsn! { SelectedTab({tab}) }
+}
+
+fn tab_header(label: &'static str, tab: PanelTab) -> impl Scene {
+    bsn! {
+        Tab
+        tab
+        FocusIndicator
+        Node { padding: UiRect::axes(px(10), px(6)), align_items: AlignItems::Center }
+        ThemeBackgroundColor({tab_color(tab == PanelTab::World)})
+        Children [Text(label) ThemedText]
+    }
+}
+
+fn tab_color(selected: bool) -> ThemeToken {
+    if selected {
+        tokens::BUTTON_PRIMARY_BG
+    } else {
+        tokens::BUTTON_BG
+    }
+}
+
+fn select_tab(
+    change: On<ValueChange<Option<Entity>>>,
+    tabs: Query<(Entity, &PanelTab), With<Tab>>,
+    mut panels: Query<
+        (Option<&PanelTab>, &mut Node),
+        (Without<Tab>, Or<(With<DevPanel>, With<PanelTab>)>),
+    >,
+    mut commands: Commands,
+) {
+    let Some((_, selected)) = change.value.and_then(|entity| tabs.get(entity).ok()) else {
+        return;
+    };
+    for (entity, tab) in &tabs {
+        commands
+            .entity(entity)
+            .insert(ThemeBackgroundColor(tab_color(tab == selected)));
+    }
+    for (tab, mut node) in &mut panels {
+        if let Some(tab) = tab {
+            node.display = if tab == selected {
+                Display::Flex
+            } else {
+                Display::None
+            };
+        } else {
+            node.width = px(if *selected == PanelTab::World {
+                340.0
+            } else {
+                780.0
+            });
+        }
     }
 }
 
