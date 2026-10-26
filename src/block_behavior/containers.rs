@@ -233,9 +233,9 @@ impl PreparedColumn {
         let origin = IVec3::new(chunk.x * CHUNK_SIZE, 0, chunk.y * CHUNK_SIZE);
         for section in 0..SECTION_COUNT {
             if !voxels
-                .cells()
+                .states
                 .section(section)
-                .any(|kind| materialized(kind))
+                .any(|state| materialized(state.kind()))
             {
                 continue;
             }

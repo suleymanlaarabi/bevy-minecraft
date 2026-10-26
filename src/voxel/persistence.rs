@@ -1,29 +1,30 @@
 //! Compact section snapshots. Encoding and decoding happen on storage workers.
+#[cfg(test)]
+use super::VoxelKind;
 use super::{
-    ChunkVoxels, VoxelKind, VoxelState,
+    ChunkVoxels, VoxelState,
     coordinates::{CHUNK_VOLUME, SECTION_COUNT, SECTION_VOLUME},
-    storage::Section,
+    storage::{Layer, Section},
 };
+#[cfg(test)]
+use pumpkin_data::{Property as P, block_properties as bp};
 use std::{collections::BTreeSet, io, sync::Arc};
 
 impl ChunkVoxels {
     pub(crate) fn encode_saved(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(32 * 1024);
         bytes.extend_from_slice(b"HCHK\x01");
-        let states = self
-            .native_states
-            .as_ref()
-            .expect("persistent chunks have native states");
+        let states = &self.states;
         for s in 0..SECTION_COUNT {
             match states.section(s) {
                 Section::Uniform(value) => {
                     bytes.push(0);
-                    bytes.extend_from_slice(&value.to_le_bytes());
+                    bytes.extend_from_slice(&value.id().to_le_bytes());
                 }
                 Section::Dense(cells) => {
                     bytes.push(1);
                     for state in cells.iter() {
-                        bytes.extend_from_slice(&state.to_le_bytes());
+                        bytes.extend_from_slice(&state.id().to_le_bytes());
                     }
                 }
             }
@@ -65,17 +66,13 @@ impl ChunkVoxels {
             match take(&mut bytes, 1)?[0] {
                 0 => {
                     let state = u16::from_le_bytes(take(&mut bytes, 2)?.try_into().unwrap());
-                    if VoxelState::from_id(state).is_none() {
-                        return Err(invalid());
-                    }
+                    let state = VoxelState::from_id(state).ok_or_else(invalid)?;
                     states.extend(std::iter::repeat_n(state, SECTION_VOLUME));
                 }
                 1 => {
                     for state in take(&mut bytes, SECTION_VOLUME * 2)?.chunks_exact(2) {
                         let state = u16::from_le_bytes(state.try_into().unwrap());
-                        if VoxelState::from_id(state).is_none() {
-                            return Err(invalid());
-                        }
+                        let state = VoxelState::from_id(state).ok_or_else(invalid)?;
                         states.push(state);
                     }
                 }
@@ -104,11 +101,7 @@ impl ChunkVoxels {
         if !bytes.is_empty() {
             return Err(invalid());
         }
-        let kinds: Vec<_> = states
-            .iter()
-            .map(|&s| VoxelState::from_id(s).unwrap().kind())
-            .collect::<Vec<VoxelKind>>();
-        let mut chunk = Self::generated(&kinds, &states, &light);
+        let mut chunk = Self::from_layers(Layer::from_cells(&states), Layer::from_cells(&light));
         chunk.modified = !edits.is_empty();
         chunk.native_edits = Arc::new(edits);
         chunk.save_revision = 1;
@@ -129,7 +122,11 @@ mod tests {
         let state = VoxelKind::from_key("oak_stairs")
             .unwrap()
             .default_state()
-            .with(&[("facing", "west"), ("half", "top"), ("waterlogged", "true")]);
+            .with(&[
+                P::Facing(bp::Facing::West),
+                P::Half(bp::Half::Top),
+                P::Waterlogged(true),
+            ]);
         let cell = IVec3::new(15, 383, 0);
         chunk.set_state(cell, state);
         chunk.light = Layer::filled(0x7b);

@@ -1,6 +1,7 @@
 //! Voxel domain facade and the shared streaming/rebuild schedule.
 
 mod api;
+mod block_relations;
 mod blocks;
 mod chunk;
 mod collision;

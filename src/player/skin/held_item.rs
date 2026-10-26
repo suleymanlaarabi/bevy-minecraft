@@ -88,7 +88,25 @@ struct ItemVisual {
 #[derive(Asset, TypePath, Deserialize)]
 pub(super) struct HeldManifest {
     version: u32,
-    items: HashMap<String, ItemDefinition>,
+    #[serde(deserialize_with = "item_definitions")]
+    items: HashMap<u16, ItemDefinition>,
+}
+fn item_definitions<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<u16, ItemDefinition>, D::Error> {
+    let definitions = HashMap::<String, ItemDefinition>::deserialize(deserializer)?;
+    let mut items = HashMap::with_capacity(definitions.len());
+    for (name, definition) in definitions {
+        let item = pumpkin_data::item::Item::from_registry_key(&name).ok_or_else(|| {
+            serde::de::Error::custom(format!("Unknown held-item identity: {name}"))
+        })?;
+        if items.insert(item.id, definition).is_some() {
+            return Err(serde::de::Error::custom(format!(
+                "Duplicate held-item identity: {name}"
+            )));
+        }
+    }
+    Ok(items)
 }
 #[derive(Default, TypePath)]
 pub(super) struct HeldManifestLoader;
@@ -257,7 +275,7 @@ pub(super) fn build_visual(
             }
             let definition = manifests
                 .get(&assets.manifest)
-                .and_then(|manifest| manifest.items.get(item.name()));
+                .and_then(|manifest| manifest.items.get(&item.registry().id));
             let Some(visual) = assets.visual(
                 item,
                 definition,

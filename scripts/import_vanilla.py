@@ -33,9 +33,9 @@ def column(top, side, bottom=None, tint=None):
 
 # VoxelKind key -> (top, side, bottom, tint). Keys match `VoxelKind::key`.
 BLOCKS = {
-    'grass': ('grass_block_top', 'grass_block_side', 'dirt', None),
+    'grass_block': ('grass_block_top', 'grass_block_side', 'dirt', None),
     'dirt': cube('dirt'), 'stone': cube('stone'), 'sand': cube('sand'), 'snow': cube('snow'),
-    'wood': column('oak_log_top', 'oak_log'), 'leaves': cube('oak_leaves', FOLIAGE),
+    'oak_log': column('oak_log_top', 'oak_log'), 'oak_leaves': cube('oak_leaves', FOLIAGE),
     'deepslate': column('deepslate_top', 'deepslate'), 'gravel': cube('gravel'),
     **{ore: cube(ore) for kind in ['coal', 'iron', 'copper', 'gold', 'redstone', 'diamond', 'emerald', 'lapis'] for ore in [f'{kind}_ore', f'deepslate_{kind}_ore']},
     **{name: cube(name) for name in ['granite', 'diorite', 'andesite', 'tuff', 'calcite', 'bedrock', 'cobblestone', 'mossy_cobblestone', 'cobbled_deepslate', 'stone_bricks', 'mossy_stone_bricks', 'cracked_stone_bricks', 'obsidian', 'smooth_basalt', 'dripstone_block', 'amethyst_block', 'budding_amethyst', 'magma', 'coarse_dirt', 'rooted_dirt', 'mud', 'clay', 'moss_block', 'red_sand', 'terracotta', 'powder_snow', 'ice', 'packed_ice', 'blue_ice', 'bricks', 'prismarine', 'prismarine_bricks', 'dark_prismarine', 'sea_lantern', 'brown_mushroom_block', 'red_mushroom_block', 'mushroom_stem', 'cherry_leaves', 'pale_oak_leaves', 'azalea_leaves', 'flowering_azalea_leaves']},
@@ -116,9 +116,9 @@ def main():
         return '(1.0, 1.0, 1.0)' if color is None else '(' + ', '.join(f'{c / 255:.3f}' for c in color) + ')'
     entries = []
     for key, (top, side, bottom, color) in sorted(BLOCKS.items()):
-        top_tint = tint(GRASS if key == 'grass' else color)
+        top_tint = tint(GRASS if key == 'grass_block' else color)
         entries.append(f'        "{key}": (top: {layers[top]}, side: {layers[side]}, bottom: {layers[bottom]}, tint_top: {top_tint}, tint_side: {tint(color)}, tint_bottom: {tint(color)}),')
-    (DEST / 'pack.ron').write_text(f'(\n    name: "Minecraft {VERSION}",\n    layers: {layer_count},\n    texture: "blocks_array.png",\n    blocks: {{\n' + '\n'.join(entries) + '\n    },\n)\n')
+    (DEST / 'pack.ron').write_text(f'(\n    version: 2,\n    name: "Minecraft {VERSION}",\n    layers: {layer_count},\n    texture: "blocks_array.png",\n    blocks: {{\n' + '\n'.join(entries) + '\n    },\n)\n')
     (DEST / 'source.json').write_text(json.dumps({'minecraft': VERSION, 'client_sha1': sha1}, indent=2) + '\n')
 
 if __name__ == '__main__':

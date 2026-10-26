@@ -1,35 +1,10 @@
 use super::{ChunkVoxels, VoxelKind, coordinates::CHUNK_HEIGHT};
 use bevy::prelude::*;
-use pumpkin_worldgen::{BlockInfo, GeneratedChunk, World, block_info};
-use std::{
-    collections::HashSet,
-    sync::{Arc, OnceLock, mpsc},
-};
+use pumpkin_worldgen::{GeneratedChunk, World};
+use std::sync::{Arc, OnceLock, mpsc};
 
 pub(crate) const MIN_Y: i32 = -64;
 const HEIGHT: usize = CHUNK_HEIGHT as usize;
-struct ChunkSource {
-    cells: Vec<VoxelKind>,
-}
-impl ChunkSource {
-    fn new(generated: &GeneratedChunk) -> Self {
-        let kinds = kinds();
-        Self {
-            cells: generated
-                .block_states()
-                .iter()
-                .map(|&state| kinds[state as usize])
-                .collect(),
-        }
-    }
-}
-impl std::ops::Deref for ChunkSource {
-    type Target = Vec<VoxelKind>;
-    fn deref(&self) -> &Self::Target {
-        &self.cells
-    }
-}
-
 /// Vanilla chunks from `pumpkin-worldgen` (terrain, caves, ores, trees, structures).
 ///
 /// Streaming keeps Pumpkin's chunk system loaded around the viewer with one ticket,
@@ -86,29 +61,6 @@ fn run_view_thread(
 /// Same Y-major layout as `GeneratedChunk::block_states`.
 fn index(x: usize, y: usize, z: usize) -> usize {
     x + 16 * (z + 16 * y)
-}
-
-/// Block-state id -> game material, computed once for every vanilla state.
-fn kinds() -> &'static [VoxelKind] {
-    static KINDS: OnceLock<Box<[VoxelKind]>> = OnceLock::new();
-    KINDS.get_or_init(|| {
-        let mut approximated = HashSet::new();
-        (0..=u16::MAX)
-            .map(|id| {
-                let Some(info) = block_info(id) else {
-                    return VoxelKind::Air;
-                };
-                let kind = map_info(info);
-                if kind == VoxelKind::Stone
-                    && map_block(info.name).is_none()
-                    && approximated.insert(info.name)
-                {
-                    debug!("No voxel kind for {}: drawn as stone", info.name);
-                }
-                kind
-            })
-            .collect()
-    })
 }
 
 pub(crate) enum ChunkLoad {
@@ -267,7 +219,6 @@ impl WorldGenerator {
                         ChunkVoxels::from_native(
                             generated.block_states(),
                             generated.light().expect("full generation has light"),
-                            kinds(),
                         )
                     };
                     let mut containers =
@@ -302,12 +253,11 @@ impl WorldGenerator {
         }
     }
 
-    fn chunk(&self, position: IVec2) -> std::io::Result<ChunkSource> {
+    fn chunk(&self, position: IVec2) -> std::io::Result<GeneratedChunk> {
         let world = self.world();
-        let generated = world
+        world
             .loaded_chunk(position.x, position.y)
-            .map_or_else(|| world.try_generate_chunk(position.x, position.y), Ok)?;
-        Ok(ChunkSource::new(&generated))
+            .map_or_else(|| world.try_generate_chunk(position.x, position.y), Ok)
     }
 
     #[cfg(test)]
@@ -326,7 +276,6 @@ impl WorldGenerator {
     pub(crate) fn try_spawn_position(&self) -> std::io::Result<Vec3> {
         // Prefer dry ground near the origin, which can be ocean.
         // Candidates are probed on terrain-only chunks, far cheaper than full ones.
-        let kinds = kinds();
         let top = |cells: &dyn Fn(usize) -> VoxelKind| {
             (0..HEIGHT)
                 .rev()
@@ -342,7 +291,11 @@ impl WorldGenerator {
                         continue;
                     }
                     let terrain = self.world().generate_terrain(dx, dz);
-                    let terrain = |i: usize| kinds[terrain.block_states()[i] as usize];
+                    let terrain = |i: usize| {
+                        super::VoxelState::from_id(terrain.block_states()[i])
+                            .expect("Valid generated state")
+                            .kind()
+                    };
                     let Some(ground) = top(&terrain) else {
                         continue;
                     };
@@ -352,7 +305,12 @@ impl WorldGenerator {
                     }
                     // Trees only exist in the full chunk.
                     let cells = self.chunk(IVec2::new(dx, dz))?;
-                    let surface = top(&|i| cells[i]).unwrap_or(ground);
+                    let surface = top(&|i| {
+                        super::VoxelState::from_id(cells.block_states()[i])
+                            .expect("Valid generated state")
+                            .kind()
+                    })
+                    .unwrap_or(ground);
                     if surface + 2 >= HEIGHT {
                         continue;
                     }
@@ -366,18 +324,6 @@ impl WorldGenerator {
         }
         Ok(Vec3::new(8.0, 200.0, 8.0))
     }
-}
-
-fn map_info(info: BlockInfo) -> VoxelKind {
-    if info.is_air {
-        VoxelKind::Air
-    } else {
-        VoxelKind::from_key(info.name).unwrap_or(VoxelKind::Stone)
-    }
-}
-
-fn map_block(name: &str) -> Option<VoxelKind> {
-    VoxelKind::from_key(name)
 }
 
 #[cfg(test)]
@@ -407,12 +353,13 @@ mod tests {
             "short_grass",
             "pointed_dripstone",
         ] {
-            let native = map_block(name).expect("native block");
+            let native = VoxelKind::from_key(name).expect("native block");
             assert_eq!(native.name(), name);
         }
-        assert_eq!(map_block("minecraft:grass_block"), Some(VoxelKind::Grass));
-        let kinds = kinds();
-        assert!(kinds.contains(&VoxelKind::Leaves) && kinds.contains(&VoxelKind::Water));
+        assert_eq!(
+            VoxelKind::from_key("minecraft:grass_block"),
+            Some(VoxelKind::Grass)
+        );
     }
 
     #[test]
@@ -427,9 +374,24 @@ mod tests {
         let chunk = generator.chunk(position).unwrap();
         let x = (spawn.x as i32).rem_euclid(16) as usize;
         let z = (spawn.z as i32).rem_euclid(16) as usize;
-        assert_ne!(chunk[index(x, spawn.y as usize - 3, z)], VoxelKind::Air);
-        assert_eq!(chunk[index(x, spawn.y as usize - 2, z)], VoxelKind::Air);
-        assert!(chunk.iter().any(|&kind| {
+        assert_ne!(
+            super::super::VoxelState::from_id(
+                chunk.block_states()[index(x, spawn.y as usize - 3, z)]
+            )
+            .unwrap()
+            .kind(),
+            VoxelKind::Air
+        );
+        assert_eq!(
+            super::super::VoxelState::from_id(
+                chunk.block_states()[index(x, spawn.y as usize - 2, z)]
+            )
+            .unwrap()
+            .kind(),
+            VoxelKind::Air
+        );
+        assert!(chunk.block_states().iter().any(|&id| {
+            let kind = super::super::VoxelState::from_id(id).unwrap().kind();
             matches!(
                 kind,
                 VoxelKind::CoalOre

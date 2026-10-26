@@ -135,8 +135,7 @@ impl Sample {
 
 #[derive(Clone)]
 struct Column {
-    cells: Layer<VoxelKind>,
-    states: Option<Layer<u16>>,
+    states: Layer<VoxelState>,
     light: Layer<u8>,
 }
 
@@ -175,8 +174,7 @@ impl ChunkNeighborhood {
         neighbor: impl Fn(IVec2) -> Option<&'a ChunkVoxels>,
     ) -> Self {
         let column = |voxels: &ChunkVoxels| Column {
-            cells: voxels.cells().clone(),
-            states: voxels.native_states.clone(),
+            states: voxels.states.clone(),
             light: voxels.render_light().clone(),
         };
         let columns = std::array::from_fn(|slot| {
@@ -226,11 +224,7 @@ impl ChunkNeighborhood {
         }
         if let Some(column) = &self.columns[slot(local.x) + 3 * slot(local.z)] {
             let index = column_index(local.x, local.y, local.z);
-            let state = column
-                .states
-                .as_ref()
-                .and_then(|states| VoxelState::from_id(states.get(index)))
-                .unwrap_or_else(|| column.cells.get(index).default_state());
+            let state = column.states.get(index);
             return Sample::state(state, column.light.get(index));
         }
         let center = self.center();
@@ -241,7 +235,7 @@ impl ChunkNeighborhood {
         );
         Sample {
             light: center.light.get(index),
-            ..if center.cells.get(index).is_opaque() {
+            ..if center.states.get(index).kind().is_opaque() {
                 BELOW_WORLD
             } else {
                 ABOVE_WORLD
@@ -251,17 +245,10 @@ impl ChunkNeighborhood {
 
     /// Whether a section holds opaque blocks and water; uniform sections answer at once.
     fn section_contents(&self, section: usize) -> (bool, bool) {
-        let cells = self.center().cells.section(section);
+        let states = self.center().states.section(section);
         (
-            cells.any(|kind| !matches!(kind, VoxelKind::Air | VoxelKind::Water)),
-            self.center().states.as_ref().map_or_else(
-                || cells.any(|kind| kind == VoxelKind::Water),
-                |states| {
-                    states
-                        .section(section)
-                        .any(|id| VoxelState::from_id(id).is_some_and(VoxelState::has_water))
-                },
-            ),
+            states.any(|state| !matches!(state.kind(), VoxelKind::Air | VoxelKind::Water)),
+            states.any(VoxelState::has_water),
         )
     }
 }
@@ -308,9 +295,8 @@ impl Padded {
         self.samples.clear();
         self.samples
             .reserve((PADDED_SIZE * PADDED_SIZE * (SECTION_HEIGHT + 2)) as usize);
-        let mut kinds = [VoxelKind::Air; CHUNK_SIZE as usize];
         let mut light = [0; CHUNK_SIZE as usize];
-        let mut states = [0; CHUNK_SIZE as usize];
+        let mut states = [VoxelKind::Air.default_state(); CHUNK_SIZE as usize];
         let build_connectivity = neighborhood.cached_connectivity[section].is_none();
         let mut summary = SectionSummary::default();
         self.fluid_occluders = false;
@@ -325,21 +311,16 @@ impl Padded {
                     let section = (y / SECTION_HEIGHT) as usize;
                     let start = column_index(0, y, z) % SECTION_VOLUME;
                     column.light.section(section).copy_cells(start, &mut light);
-                    if let Some(native) = &column.states {
-                        native.section(section).copy_cells(start, &mut states);
-                    } else {
-                        column.cells.section(section).copy_cells(start, &mut kinds);
-                        for (id, kind) in states.iter_mut().zip(kinds) {
-                            *id = kind.default_state().id();
-                        }
-                    }
-                    self.samples
-                        .extend(states.iter().zip(&light).map(|(&id, &light)| {
-                            Sample::state(
-                                VoxelState::from_id(id).unwrap_or(VoxelKind::Air.default_state()),
-                                light,
-                            )
-                        }));
+                    column
+                        .states
+                        .section(section)
+                        .copy_cells(start, &mut states);
+                    self.samples.extend(
+                        states
+                            .iter()
+                            .zip(&light)
+                            .map(|(&id, &light)| Sample::state(id, light)),
+                    );
                 } else {
                     self.samples
                         .extend((0..CHUNK_SIZE).map(|x| neighborhood.sample(IVec3::new(x, y, z))));

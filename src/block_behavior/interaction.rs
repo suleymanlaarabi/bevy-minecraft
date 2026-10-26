@@ -1,6 +1,6 @@
 //! Targeted observers handle capabilities; voxel commits own consumption and drops.
 use super::{
-    catalog::{SIDE_NAMES, SIDES, state_behavior},
+    catalog::{SIDE_FACING, SIDES, state_behavior},
     containers::{
         BlockEntity, BlockLookup, BlockState, Chest, ContainerTopology, Door, Dormant, Gate,
         ManualOpen, ViewingContainer,
@@ -14,6 +14,7 @@ use crate::{
     },
 };
 use bevy::{ecs::system::SystemParam, prelude::*};
+use pumpkin_data::Property as P;
 
 #[derive(EntityEvent)]
 pub(crate) struct BlockUse {
@@ -115,7 +116,7 @@ pub(crate) fn open_manual(
     let info = state_behavior(state.0);
     let mut next = info.toggle.expect("Manual opening transition");
     if gate && !info.open && event.look.dot(SIDES[info.facing as usize].as_vec3()) < 0.0 {
-        next = next.with(&[("facing", SIDE_NAMES[(info.facing as usize + 2) % 4])]);
+        next = next.with(&[P::Facing(SIDE_FACING[(info.facing as usize + 2) % 4])]);
     }
     if collisions.intersects(block.position, next) {
         return;
@@ -133,7 +134,7 @@ pub(crate) fn open_manual(
         if other.kind() != state.0.kind() || state_behavior(other).upper == info.upper {
             return;
         }
-        let next = other.with(&[("open", if info.open { "false" } else { "true" })]);
+        let next = other.with(&[P::Open(if info.open { false } else { true })]);
         if collisions.intersects(position, next) {
             return;
         }

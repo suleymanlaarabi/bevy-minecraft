@@ -52,7 +52,7 @@ fn uniform_sections_store_no_cells_until_edited() {
     assert!(
         (2..SECTION_COUNT).all(|section| layer.section(section).uniform() == Some(VoxelKind::Air))
     );
-    assert_eq!(&*layer.to_cells(), &cells[..]);
+    assert_eq!(&*layer.to_cells(std::convert::identity), &cells[..]);
 
     // Copy-on-write: the edit leaves a snapshot and the other sections untouched.
     let mut edited = layer.clone();

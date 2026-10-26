@@ -1,71 +1,10 @@
 //! Immutable, registry-indexed capabilities. Nothing here is stored per terrain cell.
 use crate::voxel::{VoxelKind, VoxelState};
 use bevy::prelude::*;
+use pumpkin_data::{Property as P, PropertyKey as K, block_properties as bp};
 use std::sync::LazyLock;
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum Opening {
-    #[default]
-    None,
-    Door,
-    Trapdoor,
-    Gate,
-}
-
-#[derive(Clone, Copy, Default)]
-pub(crate) struct Profile {
-    pub opening: Opening,
-    pub manual: bool,
-    pub climbable: bool,
-    pub chest: bool,
-    pub support: SupportRule,
-}
-
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum SupportRule {
-    #[default]
-    None,
-    Door,
-    WallMounted,
-    Vine,
-}
-
-pub(crate) fn profile(kind: VoxelKind) -> &'static Profile {
-    static PROFILES: LazyLock<Box<[Profile]>> = LazyLock::new(|| {
-        VoxelKind::ALL
-            .iter()
-            .map(|kind| {
-                let name = kind.name();
-                let opening = if name.ends_with("_trapdoor") {
-                    Opening::Trapdoor
-                } else if name.ends_with("_door") {
-                    Opening::Door
-                } else if name.ends_with("_fence_gate") {
-                    Opening::Gate
-                } else {
-                    Opening::None
-                };
-                Profile {
-                    opening,
-                    manual: opening != Opening::None
-                        && !matches!(name, "iron_door" | "iron_trapdoor"),
-                    climbable: matches!(name, "ladder" | "vine"),
-                    chest: name == "chest",
-                    support: if opening == Opening::Door {
-                        SupportRule::Door
-                    } else {
-                        match name {
-                            "ladder" => SupportRule::WallMounted,
-                            "vine" => SupportRule::Vine,
-                            _ => SupportRule::None,
-                        }
-                    },
-                }
-            })
-            .collect()
-    });
-    &PROFILES[kind.index()]
-}
+pub(crate) use crate::voxel::rules::{Opening, SupportRule, profile};
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct StateBehavior {
@@ -79,11 +18,16 @@ pub(crate) struct StateBehavior {
 }
 
 pub(crate) const SIDES: [IVec3; 4] = [IVec3::NEG_Z, IVec3::X, IVec3::Z, IVec3::NEG_X];
-pub(crate) const SIDE_NAMES: [&str; 4] = ["north", "east", "south", "west"];
+pub(crate) const SIDE_FACING: [bp::Facing; 4] = [
+    bp::Facing::North,
+    bp::Facing::East,
+    bp::Facing::South,
+    bp::Facing::West,
+];
 
 pub(crate) fn state_behavior(state: VoxelState) -> &'static StateBehavior {
     static STATES: LazyLock<Box<[StateBehavior]>> = LazyLock::new(|| {
-        (0..=u16::MAX)
+        (0..pumpkin_data::BlockStateId::COUNT)
             .map(|raw| {
                 let Some(state) = VoxelState::from_id(raw) else {
                     return StateBehavior::default();
@@ -96,36 +40,31 @@ pub(crate) fn state_behavior(state: VoxelState) -> &'static StateBehavior {
                 {
                     return StateBehavior::default();
                 }
-                let properties = state.properties();
-                let property = |key| {
-                    properties
-                        .iter()
-                        .find(|property| property.key_str() == key)
-                        .map(|property| property.value_str())
-                };
-                let open = property("open") == Some("true");
+                let open = state.property(K::Open) == Some(P::Open(true));
                 let mut attachments = 0;
                 if profile.support == SupportRule::Vine {
-                    for (i, name) in SIDE_NAMES.iter().chain([&"up"]).enumerate() {
-                        if property(name) == Some("true") {
+                    for (i, side) in SIDE_FACING.into_iter().chain([bp::Facing::Up]).enumerate() {
+                        let property = crate::voxel::VoxelState::attachment(side, true);
+                        if state.property(property.key()) == Some(property) {
                             attachments |= 1 << i;
                         }
                     }
                 }
                 StateBehavior {
                     climbable: profile.climbable,
-                    upper: property("half") == Some("upper"),
-                    facing: SIDE_NAMES
+                    upper: state.property(K::Half)
+                        == Some(P::DoubleBlockHalf(bp::DoubleBlockHalf::Upper)),
+                    facing: SIDE_FACING
                         .iter()
-                        .position(|name| Some(*name) == property("facing"))
+                        .position(|&facing| facing == state.facing())
                         .unwrap_or(0) as u8,
                     attachments,
                     open,
                     toggle: (profile.opening != Opening::None)
-                        .then(|| state.with(&[("open", if open { "false" } else { "true" })])),
-                    chest_half: match property("type") {
-                        Some("left") => 1,
-                        Some("right") => 2,
+                        .then(|| state.with(&[P::Open(!open)])),
+                    chest_half: match state.property(K::Type) {
+                        Some(P::ChestType(bp::ChestType::Left)) => 1,
+                        Some(P::ChestType(bp::ChestType::Right)) => 2,
                         _ => 0,
                     },
                 }

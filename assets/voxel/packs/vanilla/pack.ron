@@ -1,4 +1,5 @@
 (
+    version: 2,
     name: "Minecraft 26.3",
     layers: 1882,
     texture: "blocks_array.png",
@@ -52,7 +53,7 @@
         "flowering_azalea_leaves": (top: 459, side: 459, bottom: 459, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
         "gold_ore": (top: 478, side: 478, bottom: 478, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
         "granite": (top: 480, side: 480, bottom: 480, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
-        "grass": (top: 484, side: 481, bottom: 379, tint_top: (0.569, 0.741, 0.349), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
+        "grass_block": (top: 484, side: 481, bottom: 379, tint_top: (0.569, 0.741, 0.349), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
         "gravel": (top: 485, side: 485, bottom: 485, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
         "hay_block": (top: 523, side: 522, bottom: 523, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
         "ice": (top: 535, side: 535, bottom: 535, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
@@ -62,7 +63,7 @@
         "jungle_planks": (top: 557, side: 557, bottom: 557, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
         "lapis_ore": (top: 567, side: 567, bottom: 567, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
         "lava": (top: 572, side: 572, bottom: 572, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
-        "leaves": (top: 707, side: 707, bottom: 707, tint_top: (0.467, 0.671, 0.184), tint_side: (0.467, 0.671, 0.184), tint_bottom: (0.467, 0.671, 0.184)),
+        "oak_leaves": (top: 707, side: 707, bottom: 707, tint_top: (0.467, 0.671, 0.184), tint_side: (0.467, 0.671, 0.184), tint_bottom: (0.467, 0.671, 0.184)),
         "light_gray_terracotta": (top: 609, side: 609, bottom: 609, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
         "magma_block": (top: 655, side: 655, bottom: 655, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
         "mangrove_leaves": (top: 659, side: 659, bottom: 659, tint_top: (0.467, 0.671, 0.184), tint_side: (0.467, 0.671, 0.184), tint_bottom: (0.467, 0.671, 0.184)),
@@ -105,7 +106,7 @@
         "terracotta": (top: 1174, side: 1174, bottom: 1174, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
         "tuff": (top: 1204, side: 1204, bottom: 1204, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
         "white_terracotta": (top: 1288, side: 1288, bottom: 1288, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
-        "wood": (top: 709, side: 708, bottom: 709, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
+        "oak_log": (top: 709, side: 708, bottom: 709, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
         "yellow_terracotta": (top: 1309, side: 1309, bottom: 1309, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
     },
 )

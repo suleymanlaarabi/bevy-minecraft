@@ -2,6 +2,7 @@
 //! mesh workers only index shared, immutable quad lists.
 use crate::voxel::{VoxelKind, VoxelState};
 use bevy::prelude::*;
+use pumpkin_data::{BlockId, Property, PropertyKey};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{
@@ -256,8 +257,9 @@ impl Appearances {
 }
 
 fn translucent_kind(kind: VoxelKind) -> bool {
-    let name = kind.name();
-    matches!(name, "ice" | "frosted_ice") || name.contains("glass")
+    matches!(kind.0, BlockId::ICE | BlockId::FROSTED_ICE)
+        || kind.tagged(pumpkin_data::tag::Block::C_GLASS_BLOCKS)
+        || kind.tagged(pumpkin_data::tag::Block::C_GLASS_PANES)
 }
 
 fn base_flags(state: VoxelState) -> u8 {
@@ -296,8 +298,11 @@ fn state_info(state: VoxelState) -> CellInfo {
     };
     let level = if family != 0 {
         state
-            .property("level")
-            .and_then(|v| v.parse::<u8>().ok())
+            .property(PropertyKey::Level)
+            .and_then(|value| match value {
+                Property::Level(level) => Some(level),
+                _ => None,
+            })
             .unwrap_or(0)
     } else {
         0
@@ -380,33 +385,149 @@ fn rotated(source: &[ModelQuad], x: f32, y: f32, uvlock: bool) -> Arc<[ModelQuad
         })
         .collect()
 }
-fn matches(condition: &Value, props: &[(&str, &str)]) -> bool {
-    let Some(object) = condition.as_object() else {
-        return false;
-    };
-    object.iter().all(|(key, value)| match key.as_str() {
-        "OR" => value
-            .as_array()
-            .is_some_and(|a| a.iter().any(|v| matches(v, props))),
-        "AND" => value
-            .as_array()
-            .is_some_and(|a| a.iter().all(|v| matches(v, props))),
-        key => value.as_str().is_some_and(|values| {
-            props
-                .iter()
-                .any(|&(k, v)| k == key && values.split('|').any(|choice| choice == v))
-        }),
-    })
+/// Text conditions are compiled once at the model import boundary.
+enum Condition {
+    All(Vec<Self>),
+    Any(Vec<Self>),
+    Property(Vec<Property>),
 }
-fn variant_matches(key: &str, props: &[(&str, &str)]) -> bool {
-    key.is_empty()
-        || key.split(',').all(|condition| {
-            condition.split_once('=').is_some_and(|(key, value)| {
-                props
-                    .iter()
-                    .any(|&(k, v)| k == key && value.split('|').any(|candidate| candidate == v))
+impl Condition {
+    fn property(key: &str, choices: &str) -> Self {
+        Self::Property(
+            choices
+                .split('|')
+                .map(|value| {
+                    Property::from_str_pair(key, value).expect("Invalid imported model property")
+                })
+                .collect(),
+        )
+    }
+    fn multipart(value: &Value) -> Self {
+        let object = value.as_object().expect("Invalid multipart condition");
+        Self::All(
+            object
+                .iter()
+                .map(|(key, value)| match key.as_str() {
+                    "OR" => Self::Any(
+                        value
+                            .as_array()
+                            .expect("Invalid OR condition")
+                            .iter()
+                            .map(Self::multipart)
+                            .collect(),
+                    ),
+                    "AND" => Self::All(
+                        value
+                            .as_array()
+                            .expect("Invalid AND condition")
+                            .iter()
+                            .map(Self::multipart)
+                            .collect(),
+                    ),
+                    key => Self::property(key, value.as_str().expect("Invalid property condition")),
+                })
+                .collect(),
+        )
+    }
+    fn variant(key: &str) -> Self {
+        Self::All(
+            key.split(',')
+                .filter(|key| !key.is_empty())
+                .map(|condition| {
+                    let (key, value) = condition.split_once('=').expect("Invalid model variant");
+                    Self::property(key, value)
+                })
+                .collect(),
+        )
+    }
+    fn matches(&self, state: VoxelState) -> bool {
+        match self {
+            Self::All(conditions) => conditions.iter().all(|condition| condition.matches(state)),
+            Self::Any(conditions) => conditions.iter().any(|condition| condition.matches(state)),
+            Self::Property(choices) => choices.iter().any(|&choice| {
+                state
+                    .property(choice.key())
+                    .is_some_and(|actual| actual.matches_property(choice))
+            }),
+        }
+    }
+}
+struct ModelApplication {
+    model: Option<usize>,
+    x: i32,
+    y: i32,
+    uvlock: bool,
+    weight: u32,
+}
+struct ModelPart {
+    condition: Condition,
+    applications: Vec<ModelApplication>,
+}
+struct BlockModel {
+    variants: Vec<ModelPart>,
+    multipart: Vec<ModelPart>,
+}
+impl BlockModel {
+    fn compile(value: Value, models: &HashMap<String, usize>) -> Self {
+        let applications = |value: &Value| {
+            value
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_else(|| std::slice::from_ref(value))
+                .iter()
+                .map(|value| ModelApplication {
+                    model: models
+                        .get(
+                            value
+                                .get("model")
+                                .and_then(Value::as_str)
+                                .expect("Missing model name"),
+                        )
+                        .copied(),
+                    x: value.get("x").and_then(Value::as_i64).unwrap_or(0) as i32,
+                    y: value.get("y").and_then(Value::as_i64).unwrap_or(0) as i32,
+                    uvlock: value
+                        .get("uvlock")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    weight: value
+                        .get("weight")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(1)
+                        .clamp(1, u32::MAX as u64) as u32,
+                })
+                .collect()
+        };
+        let variants = value
+            .get("variants")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .map(|(key, value)| ModelPart {
+                condition: Condition::variant(key),
+                applications: applications(value),
             })
-        })
+            .collect();
+        let multipart = value
+            .get("multipart")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|part| ModelPart {
+                condition: part
+                    .get("when")
+                    .map(Condition::multipart)
+                    .unwrap_or(Condition::All(Vec::new())),
+                applications: applications(
+                    part.get("apply").expect("Missing multipart application"),
+                ),
+            })
+            .collect();
+        Self {
+            variants,
+            multipart,
+        }
+    }
 }
 fn library() -> &'static Library {
     static LIBRARY: OnceLock<Library> = OnceLock::new();
@@ -420,13 +541,13 @@ fn library() -> &'static Library {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => panic!("Cannot read vanilla model cache: {error}"),
         };
-        let mut recipes = (0..=u16::MAX).map(|_| Recipe::default()).collect::<Vec<_>>();
-        let mut cells = vec![CellInfo::default(); 65536];
+        let mut recipes = (0..pumpkin_data::BlockStateId::COUNT).map(|_| Recipe::default()).collect::<Vec<_>>();
+        let mut cells = vec![CellInfo::default(); pumpkin_data::BlockStateId::COUNT as usize];
         let mut appearances = Appearances::default();
         let pack_keys = pack_keys();
         let Some(imported) = imported else {
             warn!("Vanilla models unavailable: using shape-based models; run scripts/import_vanilla.py");
-            for raw in 0..=u16::MAX {
+            for raw in 0..pumpkin_data::BlockStateId::COUNT {
                 let Some(state) = VoxelState::from_id(raw) else { continue; };
                 let mut info = state_info(state);
                 if state.is_opaque_cube() && pack_cube(&pack_keys, state.kind()) {
@@ -437,44 +558,49 @@ fn library() -> &'static Library {
             }
             return Library { chests: None, recipes: recipes.into(), cells: cells.into(), appearances: appearances.list, textures: Vec::new(), opaque_textures: Vec::new(), texture_layers: Vec::new(), special_layers: 0, animations: Vec::new(), animated_layers: Box::new([false; 2048]) };
         };
-        let mut rotations = HashMap::<(String, i32, i32, bool), Arc<[ModelQuad]>>::new();
+        let model_ids: HashMap<_, _> = imported.models.keys().enumerate().map(|(index, name)| (name.clone(), index)).collect();
+        let models: Vec<_> = {
+            let mut models = vec![Vec::new(); model_ids.len()];
+            for (name, quads) in imported.models { models[model_ids[&name]] = quads; }
+            models
+        };
+        let mut blocks: Vec<Option<BlockModel>> = (0..BlockId::COUNT).map(|_| None).collect();
+        for (name, value) in imported.blocks {
+            // Vanilla also ships blockstate files for these two entities.
+            if matches!(name.as_str(), "item_frame" | "glow_item_frame") { continue; }
+            let kind = VoxelKind::from_key(&name).unwrap_or_else(|| panic!("Unknown imported model block: {name}"));
+            let slot = &mut blocks[kind.index()];
+            assert!(slot.is_none(), "Duplicate imported block identity");
+            *slot = Some(BlockModel::compile(value, &model_ids));
+        }
+        let chest_models = ["single", "left", "right"].map(|half| {
+            ["body", "lid"].map(|part| model_ids[&format!("hollow:chest/{half}/{part}")])
+        });
+        drop(model_ids);
+        let mut rotations = HashMap::<(usize, i32, i32, bool), Arc<[ModelQuad]>>::new();
         let mut assemblies = HashMap::<Vec<usize>, Arc<[ModelQuad]>>::new();
         let mut missing = std::collections::HashSet::new();
-        for raw in 0..=u16::MAX {
+        for raw in 0..pumpkin_data::BlockStateId::COUNT {
             let Some(state) = VoxelState::from_id(raw) else { continue; };
             let kind = state.kind();
-            let Some(block) = imported.blocks.get(kind.name()) else {
-                missing.insert(kind.name());
+            let Some(block) = blocks[kind.index()].as_ref() else {
+                missing.insert(kind);
                 cells[raw as usize] = finish(state_info(state), state);
                 continue;
             };
-            let properties = state.properties();
-            let props = properties.iter().map(|p| (p.key_str(), p.value_str())).collect::<Vec<_>>();
-            let mut applications = Vec::new();
-            if let Some(variants) = block.get("variants").and_then(Value::as_object) {
-                if let Some((_, apply)) = variants.iter().find(|(key,_)| variant_matches(key, &props)) { applications.push(apply); }
-            }
-            if let Some(parts) = block.get("multipart").and_then(Value::as_array) {
-                for part in parts {
-                    if part.get("when").is_none_or(|when| matches(when, &props)) && let Some(apply) = part.get("apply") { applications.push(apply); }
-                }
-            }
+            let applications = block.variants.iter().find(|part| part.condition.matches(state))
+                .into_iter().chain(block.multipart.iter().filter(|part| part.condition.matches(state)));
             let recipe = &mut recipes[raw as usize];
             let mut selected_model = false;
             let mut missing_model = false;
-            for apply in applications {
+            for part in applications {
                 let mut group = Vec::new();
-                let values = if let Some(a) = apply.as_array() { a.as_slice() } else { std::slice::from_ref(apply) };
-                for variant in values {
-                    let Some(name) = variant.get("model").and_then(Value::as_str) else { continue; };
-                    let x = variant.get("x").and_then(Value::as_i64).unwrap_or(0) as i32;
-                    let y = variant.get("y").and_then(Value::as_i64).unwrap_or(0) as i32;
-                    let lock = variant.get("uvlock").and_then(Value::as_bool).unwrap_or(false);
-                    let Some(source) = imported.models.get(name) else { missing.insert(kind.name()); missing_model = true; continue; };
+                for application in &part.applications {
+                    let Some(model) = application.model else { missing.insert(kind); missing_model = true; continue; };
                     selected_model = true;
-                    let quads = rotations.entry((name.to_owned(),x,y,lock)).or_insert_with(|| rotated(source, x as f32, y as f32, lock)).clone();
+                    let quads = rotations.entry((model, application.x, application.y, application.uvlock)).or_insert_with(|| rotated(&models[model], application.x as f32, application.y as f32, application.uvlock)).clone();
                     if !quads.is_empty() {
-                        group.push(Weighted { quads, weight: variant.get("weight").and_then(Value::as_u64).unwrap_or(1).clamp(1, u32::MAX as u64) as u32 });
+                        group.push(Weighted { quads, weight: application.weight });
                     }
                 }
                 if !group.is_empty() {
@@ -483,7 +609,7 @@ fn library() -> &'static Library {
             }
             recipe.resolved = selected_model && !missing_model;
             if !recipe.resolved {
-                missing.insert(kind.name());
+                missing.insert(kind);
                 recipe.groups.clear();
             }
             // Default pack cubes keep the pack's per-block faces; any other state
@@ -537,8 +663,8 @@ fn library() -> &'static Library {
         let chests = ["single", "left", "right"].map(|half| {
             let i = match half { "left" => 1, "right" => 2, _ => 0 };
             ChestParts {
-                body: imported.models[&format!("hollow:chest/{half}/body")].clone().into(),
-                lid: imported.models[&format!("hollow:chest/{half}/lid")].clone().into(),
+                body: models[chest_models[i][0]].clone().into(),
+                lid: models[chest_models[i][1]].clone().into(),
                 pivot: Vec3::from_array(imported.chest_pivots[i]),
             }
         });
@@ -546,16 +672,18 @@ fn library() -> &'static Library {
     })
 }
 /// Block keys of the bundled vanilla manifest.
-fn pack_keys() -> std::collections::HashSet<String> {
+fn pack_keys() -> std::collections::HashSet<VoxelKind> {
     super::texture_pack::manifest_keys(super::texture_pack::TexturePackId::Vanilla)
 }
-fn pack_cube(keys: &std::collections::HashSet<String>, kind: VoxelKind) -> bool {
+fn pack_cube(keys: &std::collections::HashSet<VoxelKind>, kind: VoxelKind) -> bool {
     // These keys already have the exact top/side/bottom mapping in all packs.
     // Logs with an explicit axis use the model path, as do slabs and farmland.
-    !matches!(kind.name(), "dirt_path" | "farmland" | "snow")
-        && !kind.name().ends_with("_stairs")
-        && !kind.name().ends_with("_slab")
-        && keys.contains(kind.key())
+    !matches!(
+        kind.0,
+        BlockId::DIRT_PATH | BlockId::FARMLAND | BlockId::SNOW
+    ) && !kind.tagged(pumpkin_data::tag::Block::MINECRAFT_STAIRS)
+        && !kind.tagged(pumpkin_data::tag::Block::MINECRAFT_SLABS)
+        && keys.contains(&kind)
 }
 /// Mesher classification of a state.
 #[inline]
@@ -690,7 +818,7 @@ fn fallback_slot_after(textures: usize, kind: VoxelKind, axis: usize, positive: 
 fn fallback(state: VoxelState, world: IVec3, mut visit: impl FnMut(&ModelQuad)) {
     if state.native().is_air()
         || state.kind() == VoxelKind::Water
-        || state.kind().name() == "bubble_column"
+        || state.kind().0 == BlockId::BUBBLE_COLUMN
     {
         return;
     }
@@ -772,11 +900,15 @@ pub(crate) fn tint_index(kind: VoxelKind) -> u8 {
     static INDICES: std::sync::LazyLock<Box<[u8]>> = std::sync::LazyLock::new(|| {
         VoxelKind::ALL
             .iter()
-            .map(|kind| match kind.name() {
-                "spruce_leaves" => 2,
-                "birch_leaves" => 3,
-                name if name.ends_with("_leaves") || name == "vine" => 4,
-                "lily_pad" => 5,
+            .map(|kind| match kind.0 {
+                BlockId::SPRUCE_LEAVES => 2,
+                BlockId::BIRCH_LEAVES => 3,
+                id if kind.tagged(pumpkin_data::tag::Block::MINECRAFT_LEAVES)
+                    || id == BlockId::VINE =>
+                {
+                    4
+                }
+                BlockId::LILY_PAD => 5,
                 _ => 1,
             })
             .collect()

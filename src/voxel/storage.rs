@@ -76,10 +76,10 @@ impl<T: Copy + PartialEq> Section<T> {
         }
     }
 
-    fn extend_into(&self, out: &mut Vec<T>) {
+    fn extend_into<U: Copy>(&self, out: &mut Vec<U>, map: &impl Fn(T) -> U) {
         match self {
-            Self::Uniform(value) => out.extend(std::iter::repeat_n(*value, SECTION_VOLUME)),
-            Self::Dense(cells) => out.extend_from_slice(&cells[..]),
+            Self::Uniform(value) => out.extend(std::iter::repeat_n(map(*value), SECTION_VOLUME)),
+            Self::Dense(cells) => out.extend(cells.iter().map(|&value| map(value))),
         }
     }
 }
@@ -137,10 +137,10 @@ impl<T: Copy + PartialEq> Layer<T> {
     }
 
     /// The full column in Pumpkin's layout, for the lighting worker.
-    pub(crate) fn to_cells(&self) -> Arc<[T]> {
+    pub(crate) fn to_cells<U: Copy>(&self, map: impl Fn(T) -> U) -> Arc<[U]> {
         let mut cells = Vec::with_capacity(CHUNK_VOLUME);
         for section in self.0.iter() {
-            section.extend_into(&mut cells);
+            section.extend_into(&mut cells, &map);
         }
         cells.into()
     }

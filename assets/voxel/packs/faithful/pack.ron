@@ -1,4 +1,5 @@
 (
+    version: 2,
     name: "Faithful 32x",
     layers: 19,
     texture: "blocks_array.png",
@@ -13,12 +14,12 @@
         "diamond_ore": (top: 16, side: 16, bottom: 16, tint_top: (1.0,1.0,1.0), tint_side: (1.0,1.0,1.0), tint_bottom: (1.0,1.0,1.0)),
         "emerald_ore": (top: 17, side: 17, bottom: 17, tint_top: (1.0,1.0,1.0), tint_side: (1.0,1.0,1.0), tint_bottom: (1.0,1.0,1.0)),
         "lapis_ore": (top: 18, side: 18, bottom: 18, tint_top: (1.0,1.0,1.0), tint_side: (1.0,1.0,1.0), tint_bottom: (1.0,1.0,1.0)),
-        "grass": (top: 0, side: 1, bottom: 2, tint_top: (0.42, 0.72, 0.24), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
+        "grass_block": (top: 0, side: 1, bottom: 2, tint_top: (0.42, 0.72, 0.24), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
         "dirt": (top: 2, side: 2, bottom: 2, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
         "stone": (top: 3, side: 3, bottom: 3, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
         "sand": (top: 4, side: 4, bottom: 4, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
         "snow": (top: 5, side: 5, bottom: 5, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
-        "wood": (top: 7, side: 6, bottom: 7, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
-        "leaves": (top: 8, side: 8, bottom: 8, tint_top: (0.20, 0.64, 0.16), tint_side: (0.20, 0.64, 0.16), tint_bottom: (0.20, 0.64, 0.16)),
+        "oak_log": (top: 7, side: 6, bottom: 7, tint_top: (1.0, 1.0, 1.0), tint_side: (1.0, 1.0, 1.0), tint_bottom: (1.0, 1.0, 1.0)),
+        "oak_leaves": (top: 8, side: 8, bottom: 8, tint_top: (0.20, 0.64, 0.16), tint_side: (0.20, 0.64, 0.16), tint_bottom: (0.20, 0.64, 0.16)),
     },
 )

@@ -1,8 +1,11 @@
 //! Validated native states and shape metadata shared by rendering and gameplay.
 use super::VoxelKind;
 use bevy::prelude::*;
-use pumpkin_data::{BlockState, BlockStateId, Property, block_properties::COLLISION_SHAPES};
-use pumpkin_util::math::{boundingbox::BoundingBox, position::BlockPos};
+use pumpkin_data::{
+    BlockId, BlockState, BlockStateId, Property, PropertyKey, block_properties::COLLISION_SHAPES,
+    block_properties::Facing,
+};
+use pumpkin_util::math::boundingbox::BoundingBox;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
@@ -82,7 +85,11 @@ impl VoxelState {
         self.0.as_u16()
     }
     pub const fn kind(self) -> VoxelKind {
-        VoxelKind(self.0.to_block().id)
+        if self.native().is_air() {
+            VoxelKind::Air
+        } else {
+            VoxelKind(self.0.to_block_id())
+        }
     }
     pub(crate) const fn native(self) -> &'static BlockState {
         self.0.to_state()
@@ -91,71 +98,16 @@ impl VoxelState {
         self.native().is_full_cube() && self.native().opacity == 15
     }
     pub(crate) fn has_water(self) -> bool {
-        static WATER: std::sync::OnceLock<Box<[bool]>> = std::sync::OnceLock::new();
-        WATER.get_or_init(|| {
-            (0..=u16::MAX)
-                .map(|raw| {
-                    let Some(id) = BlockStateId::new(raw) else {
-                        return false;
-                    };
-                    let kind = VoxelKind(id.to_block().id);
-                    kind == VoxelKind::Water
-                        || id.is_waterlogged()
-                        || matches!(
-                            kind.name(),
-                            "bubble_column" | "seagrass" | "tall_seagrass" | "kelp" | "kelp_plant"
-                        )
-                })
-                .collect()
-        })[self.id() as usize]
+        self.flags() & 1 != 0
     }
     fn offset_limits(self) -> (f32, f32) {
-        static OFFSETS: std::sync::OnceLock<Box<[(f32, f32)]>> = std::sync::OnceLock::new();
-        OFFSETS.get_or_init(|| {
+        static OFFSETS: std::sync::LazyLock<Box<[(f32, f32)]>> = std::sync::LazyLock::new(|| {
             VoxelKind::ALL
                 .iter()
-                .map(|kind| {
-                    let state = kind.default_state();
-                    let Some(&shape) = state.native().outline_shapes.first() else {
-                        return (0.0, 0.0);
-                    };
-                    let base = BlockBox::from(COLLISION_SHAPES[shape as usize]).min;
-                    let samples = [(1, 0), (7, 3), (-18, -7)].map(|(x, z)| {
-                        let pos = BlockPos::new(x, 0, z);
-                        let shifted = state
-                            .native()
-                            .get_block_outline_shapes_at(&pos)
-                            .next()
-                            .map(BlockBox::from)
-                            .unwrap();
-                        let seed = pumpkin_util::random::hash_block_pos(x, 0, z) as u64;
-                        (seed, shifted.min - base)
-                    });
-                    let horizontal = [0.0f32, 0.125, 0.25]
-                        .into_iter()
-                        .find(|&limit| {
-                            samples.iter().all(|&(seed, delta)| {
-                                let x = (((seed & 15) as f32 / 15.0 - 0.5) * 0.5)
-                                    .clamp(-limit, limit)
-                                    + limit;
-                                let z = (((((seed >> 8) & 15) as f32 / 15.0) - 0.5) * 0.5)
-                                    .clamp(-limit, limit)
-                                    + limit;
-                                (x - delta.x).abs() < 1e-5 && (z - delta.z).abs() < 1e-5
-                            })
-                        })
-                        .unwrap_or(0.0);
-                    let vertical = samples
-                        .iter()
-                        .find_map(|&(seed, delta)| {
-                            let fraction = ((seed >> 4) & 15) as f32 / 15.0;
-                            (fraction > 0.0).then(|| (delta.y / fraction * 1000.0).round() / 1000.0)
-                        })
-                        .unwrap_or(0.0);
-                    (horizontal, vertical)
-                })
+                .map(|kind| kind.block().shape_offset_limits())
                 .collect()
-        })[self.kind().index()]
+        });
+        OFFSETS[self.kind().index()]
     }
     /// Translation of resource-pack models, which are unshifted block-local geometry.
     pub(crate) fn visual_offset(self, world: IVec3) -> Vec3 {
@@ -169,42 +121,37 @@ impl VoxelState {
         let y = (((seed >> 4) & 15) as f32 / 15.0 - 1.0) * vertical;
         Vec3::new(x, y, z)
     }
-    pub(crate) fn properties(self) -> Vec<Property> {
-        self.0
-            .to_block()
-            .properties(self.0)
-            .map_or_else(Vec::new, |props| props.to_props())
+    pub(crate) fn properties(self) -> impl ExactSizeIterator<Item = Property> + Clone {
+        self.0.properties()
     }
-    pub fn property(self, key: &str) -> Option<&'static str> {
-        self.properties()
-            .iter()
-            .find(|p| p.key_str() == key)
-            .map(|p| p.value_str())
+    pub fn property(self, key: PropertyKey) -> Option<Property> {
+        self.0.property(key)
     }
-    pub(crate) fn with(self, edits: &[(&str, &str)]) -> Self {
-        let mut props = self.properties();
-        let mut changed = false;
-        for &(key, value) in edits {
-            if let Some(prop) = props.iter_mut().find(|p| p.key_str() == key)
-                && let Some(next) = Property::from_str_pair(key, value)
-                && *prop != next
-            {
-                *prop = next;
-                changed = true;
-            }
-        }
-        // Property-free blocks have no native BlockProperties implementation.
-        // Generic capability probes and unsupported edits must remain no-ops
-        // instead of reaching Pumpkin's `from_properties` panic arm.
-        if !changed {
-            return self;
-        }
+    pub(crate) fn supports(self, property: Property) -> bool {
+        self.0.supports(property)
+    }
+    pub(crate) fn with(self, edits: &[Property]) -> Self {
         Self(
             self.0
-                .to_block()
-                .from_properties(&props)
-                .to_state_id(self.0.to_block()),
+                .with_properties(edits)
+                .expect("Valid gameplay block properties"),
         )
+    }
+    pub(crate) fn facing(self) -> Facing {
+        match self.property(PropertyKey::Facing) {
+            Some(Property::Facing(facing)) => facing,
+            _ => Facing::North,
+        }
+    }
+    pub(crate) fn attachment(direction: Facing, value: bool) -> Property {
+        match direction {
+            Facing::North => Property::North(value),
+            Facing::East => Property::East(value),
+            Facing::South => Property::South(value),
+            Facing::West => Property::West(value),
+            Facing::Up => Property::Up(value),
+            Facing::Down => Property::Down(value),
+        }
     }
     pub(crate) fn collision_boxes(self, world: IVec3) -> impl Iterator<Item = BlockBox> {
         let delta = self.shape_offset(world);
@@ -223,27 +170,38 @@ impl VoxelState {
     }
     /// Pumpkin's shapes were extracted at the origin, whose vanilla offset is
     /// `(-h, -v, -h)` (its position hash is zero): undo that, then apply this
-    /// position's offset. `offset_limits` relies on the same relation.
+    /// position's offset using the native registry limits.
     fn shape_offset(self, world: IVec3) -> Vec3 {
         let (horizontal, vertical) = self.offset_limits();
         self.visual_offset(world) + Vec3::new(horizontal, vertical, horizontal)
     }
-    pub(crate) fn full_collision(self) -> bool {
-        static FULL: std::sync::OnceLock<Box<[bool]>> = std::sync::OnceLock::new();
-        FULL.get_or_init(|| {
-            (0..=u16::MAX)
+    fn flags(self) -> u8 {
+        static FLAGS: std::sync::LazyLock<Box<[u8]>> = std::sync::LazyLock::new(|| {
+            (0..BlockStateId::COUNT)
                 .map(|id| {
-                    let Some(state) = Self::from_id(id) else {
-                        return false;
+                    let state = BlockStateId::new(id).expect("Native registry state");
+                    let water = matches!(
+                        state.to_block_id(),
+                        BlockId::WATER
+                            | BlockId::BUBBLE_COLUMN
+                            | BlockId::SEAGRASS
+                            | BlockId::TALL_SEAGRASS
+                            | BlockId::KELP
+                            | BlockId::KELP_PLANT
+                    ) || state.is_waterlogged();
+                    let shapes = state.to_state().collision_shapes;
+                    let full = shapes.len() == 1 && {
+                        let bounds = BlockBox::from(COLLISION_SHAPES[shapes[0] as usize]);
+                        bounds.min == Vec3::ZERO && bounds.max == Vec3::ONE
                     };
-                    let shapes = state.native().collision_shapes;
-                    shapes.len() == 1 && {
-                        let b = BlockBox::from(COLLISION_SHAPES[shapes[0] as usize]);
-                        b.min == Vec3::ZERO && b.max == Vec3::ONE
-                    }
+                    u8::from(water) | (u8::from(full) << 1)
                 })
                 .collect()
-        })[self.id() as usize]
+        });
+        FLAGS[self.id() as usize]
+    }
+    pub(crate) fn full_collision(self) -> bool {
+        self.flags() & 2 != 0
     }
     pub(crate) fn replaceable(self) -> bool {
         self.native().replaceable()
@@ -261,3 +219,5 @@ impl VoxelKind {
         VoxelState(self.block().default_state.id)
     }
 }
+
+const _: () = assert!(std::mem::size_of::<VoxelState>() == 2);

@@ -103,11 +103,12 @@ struct BlockTextureConfig {
     tint_bottom: (f32, f32, f32),
 }
 
-/// Textures keyed by `VoxelKind::key`; missing blocks use their fallback chain.
+/// Text keys exist only while deserializing the manifest.
 type BlockTextures = HashMap<String, BlockTextureConfig>;
 
 #[derive(Debug, Deserialize)]
 struct TexturePackManifest {
+    version: u32,
     name: String,
     texture: String,
     #[serde(default = "default_texture_layers")]
@@ -128,18 +129,18 @@ pub(crate) struct TexturePack {
 /// Blocks still recognizable when drawn with their fallback's texture, tinted by their color.
 const TINTED_FALLBACKS: [VoxelKind; 2] = [VoxelKind::Lava, VoxelKind::MagmaBlock];
 
-fn resolve(blocks: &BlockTextures, kind: VoxelKind) -> Option<BlockTextureConfig> {
+fn resolve(blocks: &[Option<BlockTextureConfig>], kind: VoxelKind) -> Option<BlockTextureConfig> {
     if matches!(kind, VoxelKind::Air | VoxelKind::Water) {
         return None;
     }
     let mut source = kind;
     let mut config = loop {
-        if let Some(config) = blocks.get(source.key()) {
+        if let Some(config) = blocks[source.index()].as_ref() {
             break *config;
         }
         let fallback = source.fallback();
         if fallback == source {
-            break blocks[VoxelKind::Stone.key()];
+            break blocks[VoxelKind::Stone.index()].expect("Stone fallback");
         }
         source = fallback;
     };
@@ -156,11 +157,37 @@ fn resolve(blocks: &BlockTextures, kind: VoxelKind) -> Option<BlockTextureConfig
     Some(config)
 }
 
-/// Block keys of a pack's manifest.
-pub(crate) fn manifest_keys(id: TexturePackId) -> std::collections::HashSet<String> {
-    ron::from_str::<TexturePackManifest>(id.manifest_source())
-        .map(|manifest| manifest.blocks.into_keys().collect())
-        .unwrap_or_default()
+impl TexturePackManifest {
+    fn resolved_blocks(&self) -> Result<Box<[Option<BlockTextureConfig>]>, String> {
+        if self.version != 2 {
+            return Err("Incompatible texture pack version; regenerate the pack".into());
+        }
+        let mut blocks = vec![None; pumpkin_data::BlockId::COUNT as usize];
+        for (name, &config) in &self.blocks {
+            let kind = VoxelKind::from_key(name)
+                .ok_or_else(|| format!("Unknown texture pack block: {name}"))?;
+            if blocks[kind.index()].replace(config).is_some() {
+                return Err(format!("Duplicate texture pack block: {name}"));
+            }
+        }
+        if blocks[VoxelKind::Stone.index()].is_none() {
+            return Err("Missing stone fallback texture".into());
+        }
+        Ok(blocks.into())
+    }
+}
+
+/// Native block identities present in a validated manifest.
+pub(crate) fn manifest_keys(id: TexturePackId) -> std::collections::HashSet<VoxelKind> {
+    let manifest: TexturePackManifest =
+        ron::from_str(id.manifest_source()).expect("Invalid texture pack manifest");
+    let blocks = manifest
+        .resolved_blocks()
+        .expect("Invalid texture pack identities");
+    VoxelKind::ALL
+        .into_iter()
+        .filter(|kind| blocks[kind.index()].is_some())
+        .collect()
 }
 
 impl TexturePack {
@@ -178,9 +205,7 @@ impl TexturePack {
     fn try_load(id: TexturePackId) -> Result<Self, String> {
         let manifest = ron::from_str::<TexturePackManifest>(id.manifest_source())
             .map_err(|error| error.to_string())?;
-        if !manifest.blocks.contains_key(VoxelKind::Stone.key()) {
-            return Err("no \"stone\" entry, the fallback of every block".into());
-        }
+        let blocks = manifest.resolved_blocks()?;
         let texture_path = format!("voxel/packs/{}/{}", id.directory(), manifest.texture);
         if !id.is_available() {
             return Err(format!("missing {texture_path}"));
@@ -192,7 +217,7 @@ impl TexturePack {
             layers: manifest.layers,
             blocks: VoxelKind::ALL
                 .iter()
-                .map(|&kind| resolve(&manifest.blocks, kind))
+                .map(|&kind| resolve(&blocks, kind))
                 .collect(),
         })
     }

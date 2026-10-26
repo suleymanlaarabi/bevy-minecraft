@@ -167,7 +167,6 @@ fn apply_voxel(
     let estimate = if edit.kind == VoxelKind::Air
         && let Some(entity) = index.get(&chunk)
         && let Ok(voxels) = chunks.get(*entity)
-        && voxels.native_states.is_some()
         && voxels.get(local).is_some_and(VoxelKind::is_opaque)
     {
         let (mut sky, mut block) = (0u8, 0u8);
@@ -432,9 +431,9 @@ fn collect_border_connections(
     let origin = IVec3::new(chunk.x * CHUNK_SIZE, 0, chunk.y * CHUNK_SIZE);
     for section in 0..super::coordinates::SECTION_COUNT {
         if !voxels
-            .cells()
+            .states
             .section(section)
-            .any(super::rules::has_connections)
+            .any(|state| super::rules::has_connections(state.kind()))
         {
             continue;
         }

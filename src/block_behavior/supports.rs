@@ -1,5 +1,5 @@
 //! Bounded entity work; dependency and persistence state stay on the owning entity.
-use super::catalog::{SIDE_NAMES, SIDES, SupportRule, profile, state_behavior};
+use super::catalog::{SIDE_FACING, SIDES, SupportRule, profile, state_behavior};
 use super::containers::{BlockEntity, Door, Dormant, Vine, WallSupport};
 use crate::voxel::{
     VoxelKind, VoxelWorld,
@@ -174,8 +174,12 @@ pub(crate) fn update(
                             });
                         if !attached && !inherited {
                             surviving &= !(1 << i);
-                            let name = if i == 4 { "up" } else { SIDE_NAMES[i] };
-                            next = next.with(&[(name, "false")]);
+                            let side = if i == 4 {
+                                pumpkin_data::block_properties::Facing::Up
+                            } else {
+                                SIDE_FACING[i]
+                            };
+                            next = next.with(&[crate::voxel::VoxelState::attachment(side, false)]);
                         }
                     }
                     if surviving == 0 {

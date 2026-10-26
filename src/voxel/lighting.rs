@@ -27,7 +27,10 @@ type Version = (Entity, u64);
 #[derive(Resource, Default)]
 pub(super) struct LightingVersion(u64);
 
-pub(super) fn edited_lighting(_event: On<Insert<LitEdits>>, mut version: ResMut<LightingVersion>) {
+pub(super) fn edited_lighting(
+    _event: On<super::edits::BlockChanged>,
+    mut version: ResMut<LightingVersion>,
+) {
     version.0 = version.0.wrapping_add(1);
 }
 
@@ -123,9 +126,7 @@ pub(crate) fn update_lighting(
         let Ok((entity, voxels)) = chunks.get(entity) else {
             continue;
         };
-        let Some(states) = &voxels.native_states else {
-            continue;
-        };
+        let states = &voxels.states;
         let version = (entity, voxels.content_revision);
         if state.submitted.get(position) == Some(&version) {
             continue;
@@ -139,6 +140,52 @@ pub(crate) fn update_lighting(
         ));
         state.submitted.insert(*position, version);
     }
+    // Keep only results near unsynchronized edits pending. Unrelated edits and
+    // streaming must not postpone light that is already valid for display.
+    let invalidated: HashSet<_> = snapshots
+        .iter()
+        .map(|(position, ..)| *position)
+        .chain(removed.iter().copied())
+        .flat_map(|position| {
+            (-CONTEXT_RADIUS..=CONTEXT_RADIUS).flat_map(move |z| {
+                (-CONTEXT_RADIUS..=CONTEXT_RADIUS).map(move |x| position + IVec2::new(x, z))
+            })
+        })
+        .collect();
+    let mut changed = Vec::new();
+    state.ready.retain(|position, light| {
+        if invalidated.contains(position) {
+            return true;
+        }
+        if let Some(&entity) = index.get(position)
+            && let Ok((_, mut voxels)) = chunks.get_mut(entity)
+        {
+            let sections = voxels
+                .bypass_change_detection()
+                .replace_light(light.clone());
+            if sections != 0 {
+                voxels.set_changed();
+                commands.trigger(crate::block_behavior::visuals::ChunkLightChanged(entity));
+                changed.push((*position, sections));
+            }
+        }
+        false
+    });
+    // Neighbors sample this light at their border face corners.
+    for (position, sections) in changed {
+        for z in -1..=1 {
+            for x in -1..=1 {
+                if (x, z) == (0, 0) {
+                    continue;
+                }
+                if let Some(&entity) = index.get(&(position + IVec2::new(x, z)))
+                    && let Ok((_, mut voxels)) = chunks.get_mut(entity)
+                {
+                    voxels.mark_sections(sections);
+                }
+            }
+        }
+    }
     if !snapshots.is_empty() || !removed.is_empty() {
         let context = state.context.take();
         let removed = removed.into_iter().map(|p| (p.x, p.y)).collect::<Vec<_>>();
@@ -149,8 +196,8 @@ pub(crate) fn update_lighting(
                 .map(|(position, states, light, edits)| LightingChunk {
                     x: position.x,
                     z: position.y,
-                    states: states.to_cells(),
-                    light: light.to_cells(),
+                    states: states.to_cells(super::VoxelState::id),
+                    light: light.to_cells(std::convert::identity),
                     edits: edits.iter().copied().collect(),
                 })
                 .collect::<Vec<_>>();
@@ -167,37 +214,6 @@ pub(crate) fn update_lighting(
             Output { context, updates }
         }));
         return;
-    }
-    // The worker now represents the current entities AND their current native
-    // revisions. Retain intermediate results until then, so stale completions
-    // cannot erase newer edits and dependent neighbor light cannot get lost.
-    let mut changed = Vec::new();
-    for (position, light) in state.ready.drain() {
-        if let Some(&entity) = index.get(&position)
-            && let Ok((_, mut voxels)) = chunks.get_mut(entity)
-        {
-            let sections = voxels.bypass_change_detection().replace_light(light);
-            if sections != 0 {
-                voxels.set_changed();
-                commands.trigger(crate::block_behavior::visuals::ChunkLightChanged(entity));
-                changed.push((position, sections));
-            }
-        }
-    }
-    // Neighbors sample this light at their border face corners.
-    for (position, sections) in changed {
-        for z in -1..=1 {
-            for x in -1..=1 {
-                if (x, z) == (0, 0) {
-                    continue;
-                }
-                if let Some(&entity) = index.get(&(position + IVec2::new(x, z)))
-                    && let Ok((_, mut voxels)) = chunks.get_mut(entity)
-                {
-                    voxels.mark_sections(sections);
-                }
-            }
-        }
     }
     state.synchronized_version = Some(version.0);
 }

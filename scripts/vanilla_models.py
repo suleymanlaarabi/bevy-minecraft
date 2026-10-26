@@ -109,7 +109,10 @@ def import_models(jar):
         models[name]=quads
     for path in sorted(names):
         if not path.startswith('assets/minecraft/blockstates/') or not path.endswith('.json'):continue
-        block=path.rsplit('/',1)[1][:-5]; data=json.loads(jar.read(path));states[block]=data
+        block=path.rsplit('/',1)[1][:-5]
+        # These blockstate files describe entities rather than native blocks.
+        if block in {'item_frame', 'glow_item_frame'}:continue
+        data=json.loads(jar.read(path));states[block]=data
         applies=list(data.get('variants',{}).values())+[p['apply'] for p in data.get('multipart',[])]
         for apply in applies:
             for variant in apply if isinstance(apply,list) else [apply]:bake(variant['model'])

@@ -22,8 +22,7 @@ const PARTIAL_SHAPE: u8 = 2;
 /// Neighbor borders are not copied here: mesh tasks read the neighbors' shared layers.
 #[derive(Component, Clone, Debug)]
 pub struct ChunkVoxels {
-    cells: Layer<VoxelKind>,
-    pub(crate) native_states: Option<Layer<u16>>,
+    pub(crate) states: Layer<VoxelState>,
     pub(crate) light: Layer<u8>,
     /// Rendering-only estimates while Pumpkin relights edits. Never seed the worker with these.
     render_light: Option<Layer<u8>>,
@@ -42,38 +41,25 @@ pub struct ChunkVoxels {
     pub(crate) saved_revision: u64,
 }
 impl ChunkVoxels {
-    /// A column of `kind` under open sky, without Minecraft block states.
+    /// A uniform column with validated native states.
     #[cfg(test)]
     pub(crate) fn filled(kind: VoxelKind) -> Self {
-        Self::from_layers(Layer::filled(kind), Layer::filled(FULL_SKY), None)
+        Self::from_layers(Layer::filled(kind.default_state()), Layer::filled(FULL_SKY))
     }
 
-    /// A generated column; the slices use Pumpkin's Y-major layout.
-    pub(crate) fn generated(cells: &[VoxelKind], states: &[u16], light: &[u8]) -> Self {
+    /// Validates imported IDs once before they enter shared chunk storage.
+    pub(crate) fn from_native(states: &[u16], light: &[u8]) -> Self {
         Self::from_layers(
-            Layer::from_cells(cells),
+            Layer::from_mapped(states, |id| {
+                VoxelState::from_id(id).expect("Valid generated block state")
+            }),
             Layer::from_cells(light),
-            Some(Layer::from_cells(states)),
         )
     }
 
-    /// Converts native generation data directly into shared section storage.
-    pub(crate) fn from_native(states: &[u16], light: &[u8], kinds: &[VoxelKind]) -> Self {
-        Self::from_layers(
-            Layer::from_mapped(states, |state| kinds[state as usize]),
-            Layer::from_cells(light),
-            Some(Layer::from_cells(states)),
-        )
-    }
-
-    fn from_layers(
-        cells: Layer<VoxelKind>,
-        light: Layer<u8>,
-        native_states: Option<Layer<u16>>,
-    ) -> Self {
+    pub(super) fn from_layers(states: Layer<VoxelState>, light: Layer<u8>) -> Self {
         Self {
-            cells,
-            native_states,
+            states,
             light,
             render_light: None,
             native_edits: default(),
@@ -156,11 +142,7 @@ impl ChunkVoxels {
     }
 
     pub fn get(&self, local: IVec3) -> Option<VoxelKind> {
-        cell_index(local).map(|index| self.cells.get(index))
-    }
-
-    pub(crate) fn cells(&self) -> &Layer<VoxelKind> {
-        &self.cells
+        self.state(local).map(VoxelState::kind)
     }
 
     /// Changes one cell. Out-of-bounds and identical values return `false`.
@@ -169,13 +151,7 @@ impl ChunkVoxels {
     }
 
     pub fn state(&self, local: IVec3) -> Option<VoxelState> {
-        let index = cell_index(local)?;
-        Some(
-            self.native_states
-                .as_ref()
-                .and_then(|states| VoxelState::from_id(states.get(index)))
-                .unwrap_or_else(|| self.cells.get(index).default_state()),
-        )
+        cell_index(local).map(|index| self.states.get(index))
     }
 
     pub fn set_state(&mut self, local: IVec3, state: VoxelState) -> bool {
@@ -186,18 +162,7 @@ impl ChunkVoxels {
         if old == state {
             return false;
         }
-        self.cells.set(index, state.kind());
-        if self.native_states.is_none() {
-            self.native_states = Some(Layer::from_cells(
-                &self
-                    .cells
-                    .to_cells()
-                    .iter()
-                    .map(|kind| kind.default_state().id())
-                    .collect::<Vec<_>>(),
-            ));
-        }
-        self.native_states.as_mut().unwrap().set(index, state.id());
+        self.states.set(index, state);
         Arc::make_mut(&mut self.native_edits).insert(index);
         self.content_revision = self.content_revision.wrapping_add(1);
         self.mark_sections(Self::sections_around(local.y));
@@ -225,53 +190,26 @@ impl ChunkVoxels {
         let mut classes = vec![0u8; CHUNK_VOLUME];
         let mut partial = Vec::new();
         for section in 0..SECTION_COUNT {
-            if !self.cells.section(section).any(VoxelKind::is_solid) {
+            let states = self.states.section(section);
+            if !states.any(|state| !state.native().collision_shapes.is_empty()) {
                 continue;
             }
             let start = section * SECTION_VOLUME;
             let out = &mut classes[start..][..SECTION_VOLUME];
-            let mut classify = |offset: usize, state: VoxelState| {
-                let value = class(state);
-                out[offset] = value;
-                if value == PARTIAL_SHAPE {
-                    partial.push((start + offset, state));
-                }
-            };
-            if let Some(native) = &self.native_states {
-                match native.section(section) {
-                    Section::Uniform(id) => {
-                        if let Some(state) = VoxelState::from_id(*id) {
-                            let value = class(state);
-                            out.fill(value);
-                            if value == PARTIAL_SHAPE {
-                                partial.extend(
-                                    (0..SECTION_VOLUME).map(|offset| (start + offset, state)),
-                                );
-                            }
-                        }
-                    }
-                    Section::Dense(states) => {
-                        for (offset, &id) in states.iter().enumerate() {
-                            if let Some(state) = VoxelState::from_id(id) {
-                                classify(offset, state);
-                            }
-                        }
+            match states {
+                Section::Uniform(state) => {
+                    let value = class(*state);
+                    out.fill(value);
+                    if value == PARTIAL_SHAPE {
+                        partial.extend((0..SECTION_VOLUME).map(|offset| (start + offset, *state)));
                     }
                 }
-            } else {
-                match self.cells.section(section) {
-                    Section::Uniform(kind) => {
-                        let state = kind.default_state();
+                Section::Dense(states) => {
+                    for (offset, &state) in states.iter().enumerate() {
                         let value = class(state);
-                        out.fill(value);
+                        out[offset] = value;
                         if value == PARTIAL_SHAPE {
-                            partial
-                                .extend((0..SECTION_VOLUME).map(|offset| (start + offset, state)));
-                        }
-                    }
-                    Section::Dense(kinds) => {
-                        for (offset, &kind) in kinds.iter().enumerate() {
-                            classify(offset, kind.default_state());
+                            partial.push((start + offset, state));
                         }
                     }
                 }

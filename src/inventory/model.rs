@@ -264,12 +264,23 @@ impl PlayerInventory {
             };
             self.slots[index] =
                 (stack.count > 1).then(|| ItemStack::new(stack.item, stack.count - 1));
-            let remainder = match stack.item.name() {
-                "milk_bucket" | "water_bucket" | "lava_bucket" => Some("bucket"),
-                "honey_bottle" | "dragon_breath" => Some("glass_bottle"),
+            use pumpkin_data::item::Item;
+            let remainder = match stack.item.registry().id {
+                id if [
+                    Item::MILK_BUCKET.id,
+                    Item::WATER_BUCKET.id,
+                    Item::LAVA_BUCKET.id,
+                ]
+                .contains(&id) =>
+                {
+                    Some(ItemKind::Item(Item::BUCKET.id))
+                }
+                id if [Item::HONEY_BOTTLE.id, Item::DRAGON_BREATH.id].contains(&id) => {
+                    Some(ItemKind::Item(Item::GLASS_BOTTLE.id))
+                }
                 _ => None,
             };
-            if let Some(item) = remainder.and_then(ItemKind::from_name) {
+            if let Some(item) = remainder {
                 let remainder = ItemStack::new(item, 1);
                 if self.slots[index].is_none() {
                     self.slots[index] = Some(remainder);
