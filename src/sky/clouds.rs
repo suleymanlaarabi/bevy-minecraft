@@ -16,10 +16,10 @@ use bevy::{
 };
 use std::sync::Arc;
 
-/// Vanilla's cloud layer: 12×12 block cells, 4 blocks thick, at Y 192.
+/// Cloud layer: 12×12 block cells, 4 blocks thick, at Y 384.
 const CELL: f32 = 12.0;
 const THICKNESS: f32 = 4.0;
-const ALTITUDE: f32 = 192.0;
+const ALTITUDE: f32 = 300.0;
 /// Blocks per second along +X.
 const DRIFT_SPEED: f64 = 0.6;
 /// The pattern repeats every `PATTERN` cells on both axes.
