@@ -12,6 +12,7 @@ pub(crate) mod model_mesh;
 pub(crate) mod models;
 mod sort;
 mod texture_pack;
+mod uploads;
 pub(crate) mod visibility;
 
 use bevy::prelude::*;
@@ -29,6 +30,7 @@ impl Plugin for VoxelRenderPlugin {
     fn build(&self, app: &mut App) {
         sort::register(app);
         visibility::register(app);
+        uploads::register(app);
         fog::register(app);
         app.add_systems(
             PostUpdate,

@@ -118,6 +118,15 @@ impl ChunkVoxels {
             .set(index, light);
     }
 
+    /// Updates block light without discarding a pending skylight estimate.
+    pub(crate) fn set_block_light(&mut self, index: usize, light: u8) {
+        self.light
+            .set(index, (self.light.get(index) & 0xf0) | light);
+        if let Some(render) = &mut self.render_light {
+            render.set(index, (render.get(index) & 0xf0) | light);
+        }
+    }
+
     /// Replaces authoritative light, clears estimates, and returns visually changed sections.
     pub(crate) fn replace_light(&mut self, light: Layer<u8>) -> u32 {
         let authoritative_changed = self.light.changed_sections(&light);

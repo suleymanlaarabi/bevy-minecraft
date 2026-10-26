@@ -267,7 +267,7 @@ fn apply_voxel(
 }
 
 /// Neighbor chunks whose meshes sample this cell (faces or corner light).
-fn border_neighbors(local: IVec3) -> impl Iterator<Item = IVec2> {
+pub(super) fn border_neighbors(local: IVec3) -> impl Iterator<Item = IVec2> {
     let side = |value: i32| match value {
         0 => -1,
         value if value == CHUNK_SIZE - 1 => 1,

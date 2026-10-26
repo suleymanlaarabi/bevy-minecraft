@@ -1,15 +1,17 @@
-//! Serialized Pumpkin light updates run off the ECS thread; voxel edits remain immediate.
+//! Block light propagates locally in the edit frame; Pumpkin reconciles streamed
+//! lighting and skylight off the ECS thread.
 //!
 //! Streamed chunks keep the light Pumpkin computed during generation. Only the
 //! neighborhood of edited chunks is mirrored into the lighting context.
 use super::{ChunkVoxels, VoxelChunk, storage::Layer, streaming::ChunkIndex};
 use bevy::{
+    ecs::system::SystemParam,
     platform::collections::{HashMap, HashSet},
     prelude::*,
     tasks::{Task, TaskPool, TaskPoolBuilder, futures::check_ready},
 };
 use pumpkin_worldgen::{Dimension, LightingChunk, LightingWorld};
-use std::sync::OnceLock;
+use std::{collections::VecDeque, sync::OnceLock};
 
 /// Chebyshev radius around an edited chunk mirrored into the lighting context: the
 /// relit 3x3 area plus the ring that seeds light across its border.
@@ -28,10 +30,146 @@ type Version = (Entity, u64);
 pub(super) struct LightingVersion(u64);
 
 pub(super) fn edited_lighting(
-    _event: On<super::edits::BlockChanged>,
+    event: On<super::edits::BlockChanged>,
     mut version: ResMut<LightingVersion>,
+    mut block_light: ResMut<BlockLightEdits>,
 ) {
     version.0 = version.0.wrapping_add(1);
+    let old = event.old.native();
+    let new = event.new.native();
+    if old.luminance != new.luminance || old.opacity != new.opacity {
+        block_light.0.insert(event.position);
+    }
+}
+
+#[derive(Resource, Default)]
+pub(crate) struct BlockLightEdits(HashSet<IVec3>);
+
+/// One mutable voxel query supplies sequential reads and writes during propagation.
+#[derive(SystemParam)]
+pub(crate) struct BlockLight<'w, 's> {
+    index: Res<'w, ChunkIndex>,
+    chunks: Query<'w, 's, &'static mut ChunkVoxels>,
+    changed: Local<'s, HashMap<IVec2, (u32, bool)>>,
+}
+
+impl BlockLight<'_, '_> {
+    fn sample(&self, position: IVec3) -> Option<(super::VoxelState, u8)> {
+        let (chunk, local) = super::split_world_position(position);
+        let voxels = self.chunks.get(*self.index.get(&chunk)?).ok()?;
+        Some((voxels.state(local)?, voxels.render_light_at(local)? & 15))
+    }
+
+    fn set(&mut self, position: IVec3, light: u8) {
+        let (chunk, local) = super::split_world_position(position);
+        let Some(index) = super::coordinates::cell_index(local) else {
+            return;
+        };
+        let Some(&entity) = self.index.get(&chunk) else {
+            return;
+        };
+        let Ok(mut voxels) = self.chunks.get_mut(entity) else {
+            return;
+        };
+        if voxels.render_light().get(index) & 15 != light {
+            voxels
+                .bypass_change_detection()
+                .set_block_light(index, light);
+            for offset in std::iter::once(IVec2::ZERO).chain(super::edits::border_neighbors(local))
+            {
+                let (sections, authoritative) = self.changed.entry(chunk + offset).or_default();
+                *sections |= ChunkVoxels::sections_around(local.y);
+                *authoritative |= offset == IVec2::ZERO;
+            }
+        }
+    }
+}
+
+/// Remove dependent light first, then refill from surviving sources. Increase
+/// entries store positions, so a later decrease cannot replay an obsolete level.
+pub(crate) fn update_block_light(
+    mut commands: Commands,
+    mut edits: ResMut<BlockLightEdits>,
+    mut light: BlockLight,
+    mut decrease: Local<VecDeque<(IVec3, u8)>>,
+    mut increase: Local<VecDeque<IVec3>>,
+) {
+    const SIDES: [IVec3; 6] = [
+        IVec3::X,
+        IVec3::NEG_X,
+        IVec3::Y,
+        IVec3::NEG_Y,
+        IVec3::Z,
+        IVec3::NEG_Z,
+    ];
+    if edits.0.is_empty() {
+        return;
+    }
+    for position in edits.0.drain() {
+        let Some((_, previous)) = light.sample(position) else {
+            continue;
+        };
+        light.set(position, 0);
+        decrease.push_back((position, previous));
+        increase.push_back(position);
+        increase.extend(SIDES.map(|side| position + side));
+    }
+    while let Some((position, previous)) = decrease.pop_front() {
+        for side in SIDES {
+            let neighbor = position + side;
+            let Some((state, value)) = light.sample(neighbor) else {
+                continue;
+            };
+            if value > 0 && value < previous {
+                light.set(neighbor, 0);
+                decrease.push_back((neighbor, value));
+                if state.native().luminance > 0 {
+                    increase.push_back(neighbor);
+                }
+            } else if value > 0 {
+                increase.push_back(neighbor);
+            }
+        }
+    }
+    while let Some(position) = increase.pop_front() {
+        let Some((state, value)) = light.sample(position) else {
+            continue;
+        };
+        let value = value.max(state.native().luminance);
+        light.set(position, value);
+        if value <= 1 {
+            continue;
+        }
+        for side in SIDES {
+            let neighbor = position + side;
+            let Some((state, previous)) = light.sample(neighbor) else {
+                continue;
+            };
+            let propagated = value.saturating_sub(state.native().opacity.max(1));
+            if propagated > previous {
+                light.set(neighbor, propagated);
+                increase.push_back(neighbor);
+            }
+        }
+    }
+    // Mark once per affected column, including mesh readers across its borders.
+    let changed = std::mem::take(&mut *light.changed);
+    for (position, (sections, authoritative)) in &changed {
+        if let Some(&entity) = light.index.get(position)
+            && let Ok(mut voxels) = light.chunks.get_mut(entity)
+        {
+            voxels.mark_sections(*sections);
+            commands
+                .entity(entity)
+                .try_insert(super::edits::EditedChunk);
+            if *authoritative {
+                voxels.save_revision += 1;
+                commands.trigger(crate::block_behavior::visuals::ChunkLightChanged(entity));
+            }
+        }
+    }
+    *light.changed = changed;
+    light.changed.clear();
 }
 
 pub(super) fn added_lighting(_event: On<Add<VoxelChunk>>, mut version: ResMut<LightingVersion>) {

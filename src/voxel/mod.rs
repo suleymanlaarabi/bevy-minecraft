@@ -90,6 +90,7 @@ impl Plugin for VoxelPlugin {
             .init_resource::<StreamState>()
             .init_resource::<lighting::LightingState>()
             .init_resource::<lighting::LightingVersion>()
+            .init_resource::<lighting::BlockLightEdits>()
             .add_observer(lighting::edited_lighting)
             .add_observer(lighting::added_lighting)
             .add_observer(lighting::removed_lighting)
@@ -115,6 +116,7 @@ impl Plugin for VoxelPlugin {
                     poll_chunk_generations,
                     refresh_neighbors_of_spawned,
                     release_ready_chunks,
+                    lighting::update_block_light,
                     lighting::update_lighting,
                     // Release completed/stale task slots before scheduling their
                     // replacements, avoiding an idle frame at every completion.

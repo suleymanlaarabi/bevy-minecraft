@@ -45,10 +45,21 @@ allocation.
 Lighting content/arrival/removal observers invalidate a synchronization version.
 Once that version is synchronized and no worker/results remain, the lighting
 system returns before collecting edited positions or scanning neighborhoods.
-Every content edit reinserts `LitEdits`, even on an already edited chunk. Worker
-completions still check all submitted content/entity versions before application.
+`BlockChanged` queues emission and opacity changes for local block-light propagation
+before mesh scheduling in the same frame. Decreases finish before increases, which
+read the current level rather than replaying stale queued light. Overlapping sources
+are reseeded, and only affected sections and their border readers are invalidated.
+Worker completions still check submitted content/entity versions before application.
+In `pumpkin-worldgen`, emission-only edits preserve skylight and rebuild only block
+light. Opacity or occlusion changes and streamed edits still reconcile skylight.
 Replacing authoritative light compares it with displayed light separately only
 when temporary rendering estimates actually exist.
+
+Player edits have reserved mesh task capacity when streaming fills its ordinary
+slots. A visible section retains its current mesh until the render world's
+`RenderAssets<RenderMesh>` confirms that its replacement is prepared. Translucent
+sorting data switches with its matching mesh, so uploading a replacement cannot
+temporarily leave a wall without geometry or sort indices for the wrong mesh.
 
 Chunk arrival observers feed neighbor refresh and readiness checks. Stable views
 only reconsider waiting chunks touched by arrivals; view changes reconsider the

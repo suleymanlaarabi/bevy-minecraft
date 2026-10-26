@@ -543,6 +543,7 @@ pub(super) fn cleanup_voxel_world(
                 .detach();
         }
         world.init_resource::<super::lighting::LightingState>();
+        *world.resource_mut::<super::lighting::BlockLightEdits>() = default();
         *world.resource_mut::<StreamState>() = StreamState::default();
         *world.resource_mut::<ChunkArrivals>() = ChunkArrivals::default();
         *world.resource_mut::<super::collision::ColliderRequests>() = default();

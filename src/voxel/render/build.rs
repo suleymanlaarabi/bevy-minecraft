@@ -163,7 +163,7 @@ pub(crate) fn start_changed_builds(
     index: Res<ChunkIndex>,
     viewer: Option<Single<&Transform, With<VoxelViewer>>>,
     camera: Option<Single<&GlobalTransform, With<crate::player::PlayerCamera>>>,
-    builds: Query<(), With<ChunkBuild>>,
+    builds: Query<Has<EditedChunk>, With<ChunkBuild>>,
     chunks: WaitingChunks,
     all: Query<&ChunkVoxels>,
     mut candidates: Local<Vec<((bool, DistanceKey), Entity)>>,
@@ -172,6 +172,11 @@ pub(crate) fn start_changed_builds(
         return;
     }
     let available = max_pending_builds().saturating_sub(builds.iter().count());
+    // Player edits can start even when streaming occupies the ordinary slots.
+    let edit_available = AsyncComputeTaskPool::get()
+        .thread_num()
+        .max(1)
+        .saturating_sub(builds.iter().filter(|edited| *edited).count());
     // Grid-cell order depends on the eye, not its orientation.
     let eye = camera
         .map(|camera| camera.translation())
@@ -190,7 +195,7 @@ pub(crate) fn start_changed_builds(
     for (entity, chunk, voxels, edited, _) in &chunks {
         if voxels.dirty_sections == 0 {
             commands.entity(entity).remove::<NeedsChunkBuild>();
-        } else if available > 0 {
+        } else if available > 0 || (edited && edit_available > 0) {
             let position = chunk.position;
             candidates.push((
                 (
@@ -201,6 +206,8 @@ pub(crate) fn start_changed_builds(
             ));
         }
     }
+    let priority = candidates.iter().filter(|(key, _)| !key.0).count();
+    let available = available.max(edit_available.min(priority));
     // Only the nearest `available` chunks start, so a partial selection is enough.
     if available < candidates.len() {
         candidates.select_nth_unstable(available);
@@ -500,7 +507,7 @@ pub(crate) fn poll_builds(
                     // A fresh state also drops any sort of the replaced mesh.
                     commands
                         .entity(entity)
-                        .insert((sort, super::sort::SortState::new(key)));
+                        .insert(super::uploads::PendingSort(Some((sort, key))));
                 }
                 update_section(
                     &mut commands,
@@ -577,13 +584,20 @@ fn update_section<B: Bundle>(
 ) {
     match (mesh, *slot) {
         (Some(mesh), Some(entity)) => {
-            commands.entity(entity).try_insert(Mesh3d(mesh));
+            commands
+                .entity(entity)
+                .try_insert(super::uploads::PendingMesh(mesh));
         }
         (Some(mesh), None) => {
             let transform = Transform::from_xyz(0.0, y, 0.0);
             *slot = Some(
                 commands
-                    .spawn((bundle(mesh), transform, ChildOf(chunk)))
+                    .spawn((
+                        bundle(mesh.clone()),
+                        transform,
+                        ChildOf(chunk),
+                        super::uploads::PendingMesh(mesh),
+                    ))
                     .id(),
             );
         }
