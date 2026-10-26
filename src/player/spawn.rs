@@ -158,6 +158,14 @@ fn spawn_player(
     let rotation = saved.map_or(Quat::IDENTITY, |p| Quat::from_array(p.rotation).normalize());
     let pitch = saved.map_or(0.0, |p| p.pitch);
     let inventory = saved.and_then(|p| p.inventory().ok()).unwrap_or_default();
+    let grid = crate::inventory::CraftingGrid {
+        slots: std::array::from_fn(|index| {
+            saved
+                .and_then(|player| player.crafting[index].as_ref())
+                .and_then(|stack| stack.restore().ok())
+        }),
+        ..default()
+    };
     let player_transform = Transform {
         translation: spawn_pos,
         rotation,
@@ -171,6 +179,7 @@ fn spawn_player(
     commands.spawn_scene_list(bsn! {
         Player
         inventory
+        grid
         crate::inventory::HotbarSelection({saved.map_or(0, |saved| saved.selected)})
         player_transform
         GlobalTransform::from_translation(spawn_pos)

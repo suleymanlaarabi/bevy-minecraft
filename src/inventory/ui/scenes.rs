@@ -11,7 +11,7 @@ use crate::{
     game::GameState,
     inventory::{
         ARMOR_START, CRAFT_RESULT, CRAFT_START, HOTBAR_SIZE, INVENTORY_SIZE, InventoryState,
-        OFFHAND_SLOT, SLOT_COUNT,
+        OFFHAND_SLOT,
     },
 };
 use bevy::{picking::prelude::Pickable, prelude::*};
@@ -57,6 +57,12 @@ fn slot(index: usize, interactive: bool) -> impl Scene {
             Pickable::IGNORE
             --
             @{ count_text(bsn! { SlotCount }, 3.0, 1.0) }
+            --
+            Node { position_type: PositionType::Absolute, left: px(4), bottom: px(3), height: px(3), width: px(0) }
+            super::SlotDurability
+            BackgroundColor(Color::srgb(0.25, 0.85, 0.25))
+            Visibility::Hidden
+            Pickable::IGNORE
         ]
     }
 }
@@ -192,27 +198,7 @@ fn inventory_overlay_scene(preview: Handle<Image>) -> impl Scene {
                 --
                 Node { flex_direction: FlexDirection::Column, flex_grow: 1.0, row_gap: px(10) }
                 Children [
-                    Text("Crafting")
-                    TextFont { font_size: FontSize::Px(15.0) }
-                    TextColor(Color::WHITE)
-                    Pickable::IGNORE
-                    --
-                    Node { align_items: AlignItems::Center, column_gap: px(8) }
-                    Children [
-                        Node {
-                            display: Display::Grid,
-                            grid_template_columns: RepeatedGridTrack::px::<Vec<RepeatedGridTrack>>(2_u16, SLOT_SIZE),
-                            column_gap: px(SLOT_GAP), row_gap: px(SLOT_GAP),
-                        }
-                        Children [ { slot_list(CRAFT_START..SLOT_COUNT, true) } ]
-                        --
-                        Text("→")
-                        TextFont { font_size: FontSize::Px(20.0) }
-                        TextColor(Color::srgb(0.65,0.65,0.68))
-                        Pickable::IGNORE
-                        --
-                        { slot_list(CRAFT_RESULT..CRAFT_RESULT+1, true) }
-                    ]
+                    @{ crafting_section(2) }
                     --
                     Node { align_items: AlignItems::Center, column_gap: px(10) }
                     Children [
@@ -229,16 +215,43 @@ fn inventory_overlay_scene(preview: Handle<Image>) -> impl Scene {
     )
 }
 
+fn crafting_section(side: u16) -> impl Scene {
+    bsn! {
+        Node { align_items: AlignItems::Center, column_gap: px(8) }
+        Children [
+            Node {
+                display: Display::Grid,
+                grid_template_columns: RepeatedGridTrack::px::<Vec<RepeatedGridTrack>>(side, SLOT_SIZE),
+                column_gap: px(SLOT_GAP), row_gap: px(SLOT_GAP),
+            }
+            Children [ { slot_list(CRAFT_START..CRAFT_START + usize::from(side * side), true) } ]
+            --
+            Text("→")
+            TextFont { font_size: FontSize::Px(20.0) }
+            TextColor(Color::srgb(0.65,0.65,0.68))
+            Pickable::IGNORE
+            --
+            { slot_list(CRAFT_RESULT..CRAFT_RESULT+1, true) }
+        ]
+    }
+}
+
 pub(crate) fn spawn_inventory_overlay(
     mut commands: Commands,
     assets: Res<crate::player::skin::SkinAssets>,
     partners: Query<&crate::block_behavior::containers::ChestPartners>,
+    workbenches: Query<(), With<crate::block_behavior::workbench::ViewingWorkbench>>,
     sessions: Query<
         &crate::block_behavior::containers::ViewingContainer,
         With<crate::player::Player>,
     >,
 ) {
-    if let Ok(session) = sessions.single() {
+    if !workbenches.is_empty() {
+        commands.spawn_scene(overlay_scene(
+            "Crafting Table",
+            bsn! { @{ crafting_section(3) } },
+        ));
+    } else if let Ok(session) = sessions.single() {
         let count = 27 * (1 + partners.get(session.0).map_or(0, |partners| partners.len()));
         commands.spawn_scene(container_overlay_scene(count));
     } else {

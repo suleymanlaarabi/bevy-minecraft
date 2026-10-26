@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub(super) const FORMAT_VERSION: u32 = 5;
+pub(super) const FORMAT_VERSION: u32 = 6;
 use hollow_worldgen::GENERATOR_VERSION;
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,8 +65,13 @@ impl WorldMetadata {
         }
     }
     pub(super) fn validate(&self) -> io::Result<()> {
-        if self.format != FORMAT_VERSION
-            || self.generator != GENERATOR_VERSION
+        if self.format != FORMAT_VERSION {
+            return Err(io::Error::other(format!(
+                "Incompatible save format {}: expected {FORMAT_VERSION}. Create a new world.",
+                self.format
+            )));
+        }
+        if self.generator != GENERATOR_VERSION
             || self.pumpkin_commit != hollow_worldgen::PUMPKIN_COMMIT
             || self.minecraft_version != hollow_worldgen::MINECRAFT_VERSION
             || self.dimension != "overworld"
@@ -95,6 +100,7 @@ pub(super) fn now() -> u64 {
 pub(crate) struct SavedStack {
     pub name: String,
     pub count: u8,
+    pub damage: u32,
 }
 impl SavedStack {
     /// Keep the block identity when its item registry entry has a different key.
@@ -106,6 +112,7 @@ impl SavedStack {
         Self {
             name: name.into(),
             count: stack.count(),
+            damage: stack.damage(),
         }
     }
     fn item(&self) -> io::Result<ItemKind> {
@@ -122,7 +129,9 @@ impl SavedStack {
         if self.count == 0 || self.count > item.max_stack_size() {
             return Err(io::Error::other("Invalid saved item stack."));
         }
-        Ok(ItemStack::new(item, self.count))
+        ItemStack::new(item, self.count)
+            .with_damage(self.damage)
+            .ok_or_else(|| io::Error::other("Invalid saved item durability."))
     }
 }
 
@@ -134,6 +143,7 @@ pub(crate) struct SavedPlayer {
     pub slots: Vec<Option<SavedStack>>,
     pub selected: usize,
     pub cursor: Option<SavedStack>,
+    pub crafting: [Option<SavedStack>; 9],
 }
 impl SavedPlayer {
     /// Makes the pose loadable: a save must never write a world `inventory` rejects.
@@ -206,6 +216,9 @@ impl SavedPlayer {
         }
         if let Some(cursor) = &self.cursor {
             let _ = cursor.restore()?;
+        }
+        for stack in self.crafting.iter().flatten() {
+            let _ = stack.restore()?;
         }
         let inventory = PlayerInventory::from_saved(slots);
         Ok(inventory)

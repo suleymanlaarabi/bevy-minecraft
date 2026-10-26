@@ -9,8 +9,8 @@ pub const BLOCK_STACK_SIZE: u8 = 64;
 pub const ARMOR_START: usize = INVENTORY_SIZE;
 pub const OFFHAND_SLOT: usize = ARMOR_START + 4;
 pub const CRAFT_START: usize = OFFHAND_SLOT + 1;
-pub const SLOT_COUNT: usize = CRAFT_START + 4;
-pub const CRAFT_RESULT: usize = SLOT_COUNT;
+pub const SLOT_COUNT: usize = CRAFT_START;
+pub const CRAFT_RESULT: usize = CRAFT_START + 9;
 /// Exclusive upper bound of item registry ids.
 pub(crate) const ITEM_ID_LIMIT: u16 = 4096;
 
@@ -55,35 +55,20 @@ impl ItemKind {
         component(self.registry())
     }
 
-    /// Cached per registry id: the component scan is too slow for insert/merge loops.
     pub fn max_stack_size(self) -> u8 {
-        use pumpkin_data::data_component_impl::MaxStackSizeImpl;
-        static SIZES: std::sync::OnceLock<Box<[u8]>> = std::sync::OnceLock::new();
-        let sizes = SIZES.get_or_init(|| {
-            (0..ITEM_ID_LIMIT)
-                .map(|id| {
-                    pumpkin_data::item::Item::from_id(id)
-                        .and_then(component::<MaxStackSizeImpl>)
-                        .map_or(BLOCK_STACK_SIZE, |size| size.size)
-                })
-                .collect()
-        });
-        sizes[self.registry().id as usize]
+        properties()[self.registry().id as usize].max_stack_size
+    }
+
+    pub fn max_damage(self) -> u32 {
+        properties()[self.registry().id as usize].max_damage
     }
 
     pub fn armor_slot(self) -> Option<usize> {
-        use pumpkin_data::data_component_impl::{EquipmentSlot, EquippableImpl};
-        let equipment = self.component::<EquippableImpl>()?;
-        Some(
-            ARMOR_START
-                + match equipment.slot {
-                    EquipmentSlot::Head(_) => 0,
-                    EquipmentSlot::Chest(_) => 1,
-                    EquipmentSlot::Legs(_) => 2,
-                    EquipmentSlot::Feet(_) => 3,
-                    _ => return None,
-                },
-        )
+        properties()[self.registry().id as usize].armor_slot
+    }
+
+    pub(crate) fn crafting_remainder(self) -> Option<ItemKind> {
+        properties()[self.registry().id as usize].remainder
     }
 
     pub fn is_valid(self) -> bool {
@@ -100,10 +85,67 @@ impl ItemKind {
     }
 }
 
+struct ItemProperties {
+    max_stack_size: u8,
+    max_damage: u32,
+    armor_slot: Option<usize>,
+    remainder: Option<ItemKind>,
+}
+
+fn properties() -> &'static [ItemProperties] {
+    use pumpkin_data::{data_component_impl::*, item::Item};
+    static PROPERTIES: std::sync::OnceLock<Box<[ItemProperties]>> = std::sync::OnceLock::new();
+    PROPERTIES.get_or_init(|| {
+        (0..ITEM_ID_LIMIT)
+            .map(|id| {
+                let item = Item::from_id(id);
+                let armor_slot = item
+                    .and_then(component::<EquippableImpl>)
+                    .and_then(|equipment| {
+                        Some(
+                            ARMOR_START
+                                + match equipment.slot {
+                                    EquipmentSlot::Head(_) => 0,
+                                    EquipmentSlot::Chest(_) => 1,
+                                    EquipmentSlot::Legs(_) => 2,
+                                    EquipmentSlot::Feet(_) => 3,
+                                    _ => return None,
+                                },
+                        )
+                    });
+                let remainder = if [
+                    Item::MILK_BUCKET.id,
+                    Item::WATER_BUCKET.id,
+                    Item::LAVA_BUCKET.id,
+                ]
+                .contains(&id)
+                {
+                    Some(ItemKind::Item(Item::BUCKET.id))
+                } else if [Item::HONEY_BOTTLE.id, Item::DRAGON_BREATH.id].contains(&id) {
+                    Some(ItemKind::Item(Item::GLASS_BOTTLE.id))
+                } else {
+                    None
+                };
+                ItemProperties {
+                    max_stack_size: item
+                        .and_then(component::<MaxStackSizeImpl>)
+                        .map_or(BLOCK_STACK_SIZE, |value| value.size),
+                    max_damage: item
+                        .and_then(component::<MaxDamageImpl>)
+                        .map_or(0, |value| value.max_damage as u32),
+                    armor_slot,
+                    remainder,
+                }
+            })
+            .collect()
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ItemStack {
     item: ItemKind,
     count: u8,
+    damage: u32,
 }
 
 impl ItemStack {
@@ -112,7 +154,11 @@ impl ItemStack {
         assert!(count > 0);
         assert!(count <= item.max_stack_size());
 
-        Self { item, count }
+        Self {
+            item,
+            count,
+            damage: 0,
+        }
     }
 
     pub const fn item(self) -> ItemKind {
@@ -121,6 +167,32 @@ impl ItemStack {
 
     pub const fn count(self) -> u8 {
         self.count
+    }
+
+    pub const fn damage(self) -> u32 {
+        self.damage
+    }
+
+    pub fn with_damage(mut self, damage: u32) -> Option<Self> {
+        let maximum = self.item.max_damage();
+        if (maximum == 0 && damage != 0) || (maximum != 0 && damage >= maximum) {
+            return None;
+        }
+        self.damage = damage;
+        Some(self)
+    }
+
+    pub fn with_count(mut self, count: u8) -> Option<Self> {
+        if count == 0 {
+            return None;
+        }
+        assert!(count <= self.max_stack_size());
+        self.count = count;
+        Some(self)
+    }
+
+    pub fn can_merge(self, other: Self) -> bool {
+        self.item == other.item && self.damage == other.damage
     }
 
     pub fn max_stack_size(self) -> u8 {
@@ -169,7 +241,7 @@ impl PlayerInventory {
     }
 
     pub fn slot(&self, index: usize) -> Option<ItemStack> {
-        self.slots.get(index).copied().flatten()
+        self.slots.as_slice().get(index).copied().flatten()
     }
 
     pub fn swap_slots(&mut self, a: usize, b: usize) {
@@ -190,9 +262,8 @@ impl PlayerInventory {
                 && let Some(target) = stack.item().armor_slot()
                 && self.slots[target].is_none()
             {
-                self.slots[index] =
-                    (stack.count > 1).then(|| ItemStack::new(stack.item, stack.count - 1));
-                self.slots[target] = Some(ItemStack::new(stack.item, 1));
+                self.slots[index] = stack.with_count(stack.count - 1);
+                self.slots[target] = stack.with_count(1);
                 return;
             }
         }
@@ -223,10 +294,6 @@ impl PlayerInventory {
         Self::accepts(index, stack) && stack.count <= Self::capacity(index, stack.item)
     }
 
-    pub(crate) fn craft_to_hotbar(&mut self, index: usize) {
-        self.craft_once(|next, output| merge_output(&mut next.slots[index], output));
-    }
-
     pub fn accepts(index: usize, stack: ItemStack) -> bool {
         if Self::is_armor_slot(index) {
             stack.item().armor_slot() == Some(index)
@@ -235,71 +302,24 @@ impl PlayerInventory {
         }
     }
 
-    pub(crate) fn take_crafting_inputs(&mut self) -> [Option<ItemStack>; 4] {
-        std::array::from_fn(|i| self.slots[CRAFT_START + i].take())
+    pub(crate) fn snapshot(&self) -> [Option<ItemStack>; SLOT_COUNT] {
+        *self.slots
     }
 
-    pub(crate) fn recipe(&self) -> Option<&'static super::crafting::Recipe> {
-        super::crafting::find(&self.slots[CRAFT_START..]).map(super::crafting::get)
-    }
-
-    /// Crafts once: `place` stores the output in a copy, committed only if the inputs and
-    /// their remainders were consumed too.
-    fn craft_once(&mut self, place: impl FnOnce(&mut Self, ItemStack) -> bool) -> bool {
-        let Some(output) = self.recipe().map(|recipe| recipe.output) else {
-            return false;
-        };
-        let mut next = self.clone();
-        if !place(&mut next, output) || !next.consume_recipe() {
-            return false;
+    pub(crate) fn replace_slots(&mut self, slots: [Option<ItemStack>; SLOT_COUNT]) {
+        if *self.slots != slots {
+            *self.slots = slots;
         }
-        *self = next;
-        true
     }
 
-    fn consume_recipe(&mut self) -> bool {
-        for index in CRAFT_START..SLOT_COUNT {
-            let Some(stack) = self.slots[index] else {
-                continue;
-            };
-            self.slots[index] =
-                (stack.count > 1).then(|| ItemStack::new(stack.item, stack.count - 1));
-            use pumpkin_data::item::Item;
-            let remainder = match stack.item.registry().id {
-                id if [
-                    Item::MILK_BUCKET.id,
-                    Item::WATER_BUCKET.id,
-                    Item::LAVA_BUCKET.id,
-                ]
-                .contains(&id) =>
-                {
-                    Some(ItemKind::Item(Item::BUCKET.id))
-                }
-                id if [Item::HONEY_BOTTLE.id, Item::DRAGON_BREATH.id].contains(&id) => {
-                    Some(ItemKind::Item(Item::GLASS_BOTTLE.id))
-                }
-                _ => None,
-            };
-            if let Some(item) = remainder {
-                let remainder = ItemStack::new(item, 1);
-                if self.slots[index].is_none() {
-                    self.slots[index] = Some(remainder);
-                } else if self.insert(remainder).is_some() {
-                    return false;
-                }
-            }
-        }
-        true
-    }
-
-    pub(crate) fn craft(&mut self, cursor: &mut Option<ItemStack>, quick: bool) {
-        if quick {
-            while self.craft_once(|next, output| next.insert(output).is_none()) {}
-        } else {
-            let mut held = *cursor;
-            if self.craft_once(|_, output| merge_output(&mut held, output)) {
-                *cursor = held;
-            }
+    pub(crate) fn damage_tool(&mut self, index: usize, amount: u32) {
+        if let Some(stack) = self.slot(index)
+            && stack.item().max_damage() > 0
+        {
+            self.slots.set(
+                index,
+                stack.with_damage(stack.damage().saturating_add(amount)),
+            );
         }
     }
 
@@ -310,22 +330,10 @@ impl PlayerInventory {
         if stack.count() < amount {
             return false;
         }
-        self.slots.set(
-            index,
-            (stack.count() > amount).then(|| ItemStack::new(stack.item(), stack.count() - amount)),
-        );
+        self.slots
+            .set(index, stack.with_count(stack.count() - amount));
         true
     }
-}
-
-/// Adds `output` onto `target` when it is empty or holds a compatible, non-full stack.
-fn merge_output(target: &mut Option<ItemStack>, output: ItemStack) -> bool {
-    let count = target.map_or(0, |stack| stack.count) + output.count;
-    if target.is_some_and(|stack| stack.item != output.item) || count > output.max_stack_size() {
-        return false;
-    }
-    *target = Some(ItemStack::new(output.item, count));
-    true
 }
 
 impl super::slots::Slots for PlayerInventory {
@@ -333,7 +341,7 @@ impl super::slots::Slots for PlayerInventory {
         SLOT_COUNT
     }
     fn get(&self, index: usize) -> Option<ItemStack> {
-        self.slots.get(index).copied().flatten()
+        self.slots.as_slice().get(index).copied().flatten()
     }
     fn set(&mut self, index: usize, stack: Option<ItemStack>) {
         if index < SLOT_COUNT {
@@ -357,20 +365,4 @@ impl HotbarSelection {
     pub fn stack(&self, inventory: &PlayerInventory) -> Option<ItemStack> {
         inventory.slot(self.0)
     }
-}
-#[derive(Component, Default, PartialEq, Eq)]
-pub(crate) struct CraftingResult(pub Option<ItemStack>);
-
-pub(crate) fn refresh_crafting(
-    mut inventories: Query<(Ref<PlayerInventory>, &mut CraftingResult)>,
-) {
-    inventories
-        .par_iter_mut()
-        .for_each(|(inventory, mut result)| {
-            if inventory.is_changed() {
-                result.set_if_neq(CraftingResult(
-                    inventory.recipe().map(|recipe| recipe.output),
-                ));
-            }
-        });
 }

@@ -33,7 +33,7 @@ impl<const N: usize> DerefMut for ItemSlots<N> {
 }
 impl<const N: usize> ItemSlots<N> {
     pub fn slot(&self, index: usize) -> Option<ItemStack> {
-        self.get(index).copied().flatten()
+        self.as_slice().get(index).copied().flatten()
     }
     pub fn set(&mut self, index: usize, stack: Option<ItemStack>) -> bool {
         if index >= N || self.slot(index) == stack {
@@ -61,9 +61,6 @@ pub(crate) trait Slots {
     fn collectible(&self, index: usize) -> bool {
         self.writable(index)
     }
-}
-fn stack(item: ItemKind, count: u8) -> Option<ItemStack> {
-    (count != 0).then(|| ItemStack::new(item, count))
 }
 pub(crate) fn swap(slots: &mut impl Slots, a: usize, b: usize) {
     if a == b || !slots.writable(a) || !slots.writable(b) {
@@ -96,8 +93,8 @@ pub(crate) fn click(
             } else {
                 current.count()
             };
-            *cursor = stack(current.item(), count);
-            slots.set(index, stack(current.item(), current.count() - count));
+            *cursor = current.with_count(count);
+            slots.set(index, current.with_count(current.count() - count));
         }
         return;
     };
@@ -108,10 +105,10 @@ pub(crate) fn click(
     match current {
         None => {
             let count = if right { 1 } else { held.count().min(capacity) };
-            slots.set(index, stack(held.item(), count));
-            *cursor = stack(held.item(), held.count() - count);
+            slots.set(index, held.with_count(count));
+            *cursor = held.with_count(held.count() - count);
         }
-        Some(current) if current.item() == held.item() => {
+        Some(current) if current.can_merge(held) => {
             let count =
                 capacity
                     .saturating_sub(current.count())
@@ -119,8 +116,8 @@ pub(crate) fn click(
             if count == 0 {
                 return;
             }
-            slots.set(index, stack(held.item(), current.count() + count));
-            *cursor = stack(held.item(), held.count() - count);
+            slots.set(index, held.with_count(current.count() + count));
+            *cursor = held.with_count(held.count() - count);
         }
         Some(current) if !right && held.count() <= capacity => {
             slots.set(index, Some(held));
@@ -143,15 +140,15 @@ pub(crate) fn collect(slots: &mut impl Slots, cursor: &mut Option<ItemStack>) {
         let Some(current) = slots.get(index) else {
             continue;
         };
-        if held.item() != current.item() {
+        if !held.can_merge(current) {
             continue;
         }
         let count = (held.max_stack_size() - held.count()).min(current.count());
         if count == 0 {
             continue;
         }
-        slots.set(index, stack(current.item(), current.count() - count));
-        held = ItemStack::new(held.item(), held.count() + count);
+        slots.set(index, current.with_count(current.count() - count));
+        held = held.with_count(held.count() + count).unwrap();
     }
     *cursor = Some(held);
 }
@@ -190,18 +187,18 @@ pub(crate) fn distribute(
             .min(remaining)
             .min(slots.capacity(index, held.item()).saturating_sub(previous));
         if moved != 0 {
-            slots.set(index, stack(held.item(), previous + moved));
+            slots.set(index, held.with_count(previous + moved));
             remaining -= moved;
         }
     }
-    *cursor = stack(held.item(), remaining);
+    *cursor = held.with_count(remaining);
 }
 fn slots_compatible(slots: &impl Slots, index: usize, held: ItemStack) -> bool {
     slots.writable(index)
         && slots.capacity(index, held.item()) > slots.get(index).map_or(0, ItemStack::count)
         && slots
             .get(index)
-            .is_none_or(|current| current.item() == held.item())
+            .is_none_or(|current| current.can_merge(held))
 }
 pub(crate) fn transfer(slots: &mut impl Slots, source: usize, targets: core::ops::Range<usize>) {
     if !slots.writable(source) {
@@ -228,9 +225,7 @@ pub(crate) fn insert(
                 continue;
             }
             let current = slots.get(target);
-            if current.is_none() != empty
-                || current.is_some_and(|stack| stack.item() != held.item())
-            {
+            if current.is_none() != empty || current.is_some_and(|stack| !stack.can_merge(held)) {
                 continue;
             }
             let previous = current.map_or(0, ItemStack::count);
@@ -238,7 +233,7 @@ pub(crate) fn insert(
             if moved == 0 {
                 continue;
             }
-            slots.set(target, stack(held.item(), previous + moved));
+            slots.set(target, held.with_count(previous + moved));
             left -= moved;
             if left == 0 {
                 break;
@@ -248,5 +243,21 @@ pub(crate) fn insert(
             break;
         }
     }
-    stack(held.item(), left)
+    held.with_count(left)
+}
+
+/// Fixed transaction buffers use the same insertion rules as ECS inventories.
+impl<const N: usize> Slots for [Option<ItemStack>; N] {
+    fn len(&self) -> usize {
+        N
+    }
+    fn get(&self, index: usize) -> Option<ItemStack> {
+        self.as_slice().get(index).copied().flatten()
+    }
+    fn set(&mut self, index: usize, stack: Option<ItemStack>) {
+        self[index] = stack;
+    }
+    fn capacity(&self, index: usize, item: ItemKind) -> u8 {
+        if index < N { item.max_stack_size() } else { 0 }
+    }
 }

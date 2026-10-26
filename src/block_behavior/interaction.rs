@@ -26,7 +26,19 @@ pub(crate) struct BlockUse {
 #[derive(SystemParam)]
 pub(crate) struct BlockTargets<'w, 's> {
     lookup: BlockLookup<'w, 's>,
-    usable: Query<'w, 's, (), (Or<(With<ManualOpen>, With<Chest>)>, Without<Dormant>)>,
+    usable: Query<
+        'w,
+        's,
+        (),
+        (
+            Or<(
+                With<ManualOpen>,
+                With<Chest>,
+                With<super::workbench::CraftingTable>,
+            )>,
+            Without<Dormant>,
+        ),
+    >,
 }
 impl BlockTargets<'_, '_> {
     pub fn target(&self, position: IVec3) -> Option<Entity> {
@@ -147,6 +159,7 @@ pub(crate) fn open_manual(
     commands.trigger(EditBatch {
         edits,
         consume: None,
-        drop: None,
+        harvest: None,
+        tool: None,
     });
 }

@@ -173,7 +173,10 @@ impl BlockLookup<'_, '_> {
 }
 pub(crate) fn materialized(kind: crate::voxel::VoxelKind) -> bool {
     let p = profile(kind);
-    p.manual || p.chest || p.support != SupportRule::None
+    p.manual
+        || p.chest
+        || kind.0 == pumpkin_data::BlockId::CRAFTING_TABLE
+        || p.support != SupportRule::None
 }
 fn classify(world: &mut World, entity: Entity, state: VoxelState) {
     let p = profile(state.kind());
@@ -183,7 +186,17 @@ fn classify(world: &mut World, entity: Entity, state: VoxelState) {
     let mut entity = world.entity_mut(entity);
     entity.insert(BlockState(state));
     if kind_changed {
-        entity.remove::<(ManualOpen, Door, Gate, WallSupport, Vine)>();
+        entity.remove::<(
+            ManualOpen,
+            Door,
+            Gate,
+            WallSupport,
+            Vine,
+            super::workbench::CraftingTable,
+        )>();
+        if state.kind().0 == pumpkin_data::BlockId::CRAFTING_TABLE {
+            entity.insert(super::workbench::CraftingTable);
+        }
         if p.manual {
             entity.insert(ManualOpen);
         }
@@ -390,9 +403,18 @@ pub(crate) fn changed(event: On<crate::voxel::edits::BlockChanged>, mut commands
             if profile(old.kind()).chest != profile(new.kind()).chest {
                 if let Some(inventory) = world.get::<ContainerInventory>(entity).cloned() {
                     use crate::dropped_item::DroppedItemCommandsExt;
-                    for stack in inventory.iter().flatten() {
+                    let mut drops = [None; CONTAINER_SIZE];
+                    for &stack in inventory.iter().flatten() {
+                        let remaining =
+                            crate::inventory::slots::insert(&mut drops, stack, 0..CONTAINER_SIZE);
+                        debug_assert!(
+                            remaining.is_none(),
+                            "Container drops fit their original slot count"
+                        );
+                    }
+                    for stack in drops.into_iter().flatten() {
                         world.commands().spawn_dropped_item(
-                            *stack,
+                            stack,
                             position.as_vec3() + Vec3::splat(0.5),
                             Vec3::Y * 1.2,
                         );

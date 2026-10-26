@@ -37,9 +37,10 @@ pub(super) struct BlockTargetState(Option<BlockTarget>);
 #[derive(Debug, Clone, Copy)]
 struct BreakProgress {
     position: IVec3,
-    kind: VoxelKind,
     state: VoxelState,
-    elapsed: f32,
+    slot: usize,
+    tool: Option<ItemStack>,
+    progress: f32,
 }
 
 #[derive(Component, Default)]
@@ -164,6 +165,15 @@ fn update_breaking(
     mut breaking: Single<&mut BreakingState, With<PlayerCamera>>,
     mut swing: Single<&mut super::skin::ArmSwing, With<PlayerCamera>>,
     voxel_world: VoxelWorld,
+    player: Single<
+        (
+            Entity,
+            &crate::inventory::PlayerInventory,
+            &crate::inventory::HotbarSelection,
+            &crate::character::CharacterState,
+        ),
+        With<Player>,
+    >,
 ) {
     if !mouse.pressed(MouseButton::Left) {
         breaking.0 = None;
@@ -177,28 +187,35 @@ fn update_breaking(
         breaking.0 = None;
         return;
     };
-    let kind = state.kind();
-    let Some(duration) = kind.break_duration() else {
+    let (actor, inventory, selection, player_state) = *player;
+    let tool = selection.stack(inventory);
+    let Some(outcome) = crate::inventory::mining::outcome(state, tool, player_state) else {
         breaking.0 = None;
         return;
     };
     swing.request_mining();
 
-    if breaking
-        .0
-        .as_ref()
-        .is_none_or(|progress| progress.position != target.destroy || progress.state != state)
-    {
+    if breaking.0.as_ref().is_none_or(|progress| {
+        progress.position != target.destroy
+            || progress.state != state
+            || progress.slot != selection.0
+            || progress.tool != tool
+    }) {
         breaking.0 = Some(BreakProgress {
             position: target.destroy,
-            kind,
             state,
-            elapsed: 0.0,
+            slot: selection.0,
+            tool,
+            progress: 0.0,
         });
     }
     let progress = breaking.0.as_mut().unwrap();
-    progress.elapsed += time.delta_secs();
-    if progress.elapsed < duration || voxel_world.state(target.destroy) != Some(state) {
+    progress.progress = if outcome.duration == 0.0 {
+        1.0
+    } else {
+        progress.progress + time.delta_secs() / outcome.duration
+    };
+    if progress.progress < 1.0 || voxel_world.state(target.destroy) != Some(state) {
         return;
     }
 
@@ -219,17 +236,20 @@ fn update_breaking(
             });
         }
     }
-    let drop = ItemKind::from_voxel(kind).map(|item| {
-        (
-            ItemStack::new(item, 1),
-            target.destroy.as_vec3() + Vec3::splat(0.5) + target.normal * 0.55,
-            target.normal * 0.35 + Vec3::Y * 1.2,
-        )
-    });
     commands.trigger(crate::voxel::edits::EditBatch {
         edits,
         consume: None,
-        drop,
+        harvest: Some(crate::block_behavior::loot::Harvest {
+            position: target.destroy,
+            state,
+            offset: target.normal * 0.55,
+            velocity: target.normal * 0.35 + Vec3::Y * 1.2,
+        }),
+        tool: Some(crate::voxel::edits::MiningAction {
+            actor,
+            slot: selection.0,
+            expected: tool,
+        }),
     });
     breaking.0 = None;
 }
@@ -309,7 +329,8 @@ fn handle_block_placement(
     commands.trigger(EditBatch {
         edits,
         consume: Some((actor, ItemKind::Block(kind))),
-        drop: None,
+        harvest: None,
+        tool: None,
     });
     swing.request();
 }
@@ -351,11 +372,7 @@ fn sync_breaking_overlay(
     if transform.translation != translation {
         transform.translation = translation;
     }
-    let duration = progress
-        .kind
-        .break_duration()
-        .expect("active breaking state is breakable");
-    let stage = ((progress.elapsed / duration.max(0.001) * 10.0).floor() as usize).min(9);
+    let stage = ((progress.progress * 10.0).floor() as usize).min(9);
     if material.0 != assets.materials[stage] {
         material.0 = assets.materials[stage].clone();
     }

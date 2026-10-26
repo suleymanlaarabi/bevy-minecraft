@@ -8,7 +8,14 @@ use crate::{
 use bevy::{picking::prelude::*, prelude::*};
 
 pub(crate) fn return_cursor_stack(
-    mut players: Query<(&mut PlayerInventory, &GlobalTransform), With<Player>>,
+    mut players: Query<
+        (
+            &mut PlayerInventory,
+            &mut crate::inventory::CraftingGrid,
+            &GlobalTransform,
+        ),
+        With<Player>,
+    >,
     mut cursor: ResMut<InventoryCursor>,
     mut actions: ResMut<crate::inventory::access::InventoryActions>,
     state: Res<State<GameState>>,
@@ -22,11 +29,12 @@ pub(crate) fn return_cursor_stack(
     cursor.hovered_slot = None;
     cursor.drag = None;
     let held = cursor.stack.take();
-    let Ok((mut inventory, transform)) = players.single_mut() else {
+    let Ok((mut inventory, mut grid, transform)) = players.single_mut() else {
         return;
     };
     PlayerInventory::edit(&mut inventory, |inventory| {
-        let inputs = inventory.take_crafting_inputs();
+        let inputs = std::mem::take(&mut grid.slots);
+        grid.side = 2;
         for stack in held.into_iter().chain(inputs.into_iter().flatten()) {
             if let Some(remaining) = inventory.insert(stack) {
                 commands.spawn_dropped_item(

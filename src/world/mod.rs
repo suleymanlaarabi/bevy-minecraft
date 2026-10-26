@@ -498,6 +498,7 @@ fn checkpoint(
         (
             &Transform,
             &PlayerInventory,
+            &crate::inventory::CraftingGrid,
             &crate::inventory::HotbarSelection,
         ),
         With<Player>,
@@ -538,7 +539,7 @@ fn checkpoint(
         return;
     }
     // Only gameplay changes the world; `settle_exit` leaves without saving otherwise.
-    let Ok((transform, inventory, selection)) = players.single() else {
+    let Ok((transform, inventory, grid, selection)) = players.single() else {
         return;
     };
     save.elapsed = 0.0;
@@ -552,6 +553,7 @@ fn checkpoint(
             .collect(),
         selected: selection.0,
         cursor: cursor.stack.map(SavedStack::capture),
+        crafting: grid.slots.map(|stack| stack.map(SavedStack::capture)),
     };
     let previous = session.last_checkpoint.as_ref().unwrap_or(&session.resume);
     player.sanitize(previous.player.as_ref().or(session.resume.player.as_ref()));

@@ -1,11 +1,12 @@
 pub(crate) mod access;
-mod crafting;
+pub(crate) mod crafting;
 pub(crate) mod icons;
 mod input;
+pub(crate) mod mining;
 mod model;
 pub(crate) mod slots;
 mod ui;
-pub(crate) use model::CraftingResult;
+pub(crate) use crafting::{CraftingGrid, CraftingResult};
 pub(crate) use ui::{lock_cursor, unlock_cursor};
 
 use bevy::prelude::*;
@@ -49,7 +50,14 @@ impl Plugin for InventoryPlugin {
             .init_resource::<InventoryCursor>()
             .init_resource::<access::InventoryActions>()
             .init_resource::<icons::BlockIcons>()
-            .add_systems(Startup, (icons::setup_block_icons, crafting::initialize))
+            .add_systems(
+                Startup,
+                (
+                    icons::setup_block_icons,
+                    crafting::initialize,
+                    mining::initialize,
+                ),
+            )
             .add_systems(
                 Update,
                 icons::render_block_icons.run_if(
@@ -97,7 +105,7 @@ impl Plugin for InventoryPlugin {
             )
             .add_systems(
                 PostUpdate,
-                model::refresh_crafting
+                crafting::refresh_crafting
                     .in_set(crate::block_behavior::GameplaySystems::Derived)
                     .run_if(crate::world::playing),
             )

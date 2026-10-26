@@ -75,7 +75,16 @@ pub(crate) struct CheckedEdit {
 pub(crate) struct EditBatch {
     pub edits: Vec<CheckedEdit>,
     pub consume: Option<(Entity, crate::inventory::ItemKind)>,
-    pub drop: Option<(crate::inventory::ItemStack, Vec3, Vec3)>,
+    pub harvest: Option<crate::block_behavior::loot::Harvest>,
+    pub tool: Option<MiningAction>,
+}
+
+/// The selected stack is checked again when deferred commands commit.
+#[derive(Clone, Copy)]
+pub(crate) struct MiningAction {
+    pub actor: Entity,
+    pub slot: usize,
+    pub expected: Option<crate::inventory::ItemStack>,
 }
 
 pub(crate) fn edit_batch(
@@ -88,7 +97,9 @@ pub(crate) fn edit_batch(
     mut inventories: Query<(
         &mut crate::inventory::PlayerInventory,
         &crate::inventory::HotbarSelection,
+        &crate::character::CharacterState,
     )>,
+    mut random: ResMut<crate::block_behavior::loot::LootRandom>,
 ) {
     if event.edits.iter().all(|edit| edit.state == edit.expected) {
         return;
@@ -108,8 +119,34 @@ pub(crate) fn edit_batch(
             return;
         }
     }
+    let mut mining = None;
+    if let Some(tool) = event.tool {
+        let Ok((inventory, selection, player)) = inventories.get(tool.actor) else {
+            return;
+        };
+        let Some(harvest) = event.harvest else {
+            return;
+        };
+        if selection.0 != tool.slot || selection.stack(inventory) != tool.expected {
+            return;
+        }
+        let Some(outcome) = crate::inventory::mining::outcome(harvest.state, tool.expected, player)
+        else {
+            return;
+        };
+        mining = Some(outcome);
+    }
+    if let Some(harvest) = event.harvest {
+        if !event.edits.iter().any(|edit| {
+            edit.position == harvest.position
+                && edit.expected == harvest.state
+                && edit.state.kind() != edit.expected.kind()
+        }) {
+            return;
+        }
+    }
     if let Some((actor, item)) = event.consume {
-        let Ok((mut inventory, selection)) = inventories.get_mut(actor) else {
+        let Ok((mut inventory, selection, _)) = inventories.get_mut(actor) else {
             return;
         };
         if selection.stack(&inventory).map(|stack| stack.item()) != Some(item) {
@@ -121,6 +158,14 @@ pub(crate) fn edit_batch(
         if !consumed {
             return;
         }
+    }
+    if let (Some(tool), Some(outcome)) = (event.tool, mining) {
+        let Ok((mut inventory, _, _)) = inventories.get_mut(tool.actor) else {
+            return;
+        };
+        crate::inventory::PlayerInventory::edit(&mut inventory, |inventory| {
+            inventory.damage_tool(tool.slot, outcome.damage)
+        });
     }
     // Neighbor rules see the complete batch, never an intermediate half-door.
     for edit in &event.edits {
@@ -143,9 +188,24 @@ pub(crate) fn edit_batch(
             &mut commands,
         );
     }
-    if let Some((stack, position, velocity)) = event.drop {
+    if let Some(harvest) = event.harvest
+        && mining.is_none_or(|outcome| outcome.can_harvest)
+    {
         use crate::dropped_item::DroppedItemCommandsExt;
-        commands.spawn_dropped_item(stack, position, velocity);
+        for stack in crate::block_behavior::loot::drops(
+            harvest.state,
+            mining.is_some_and(|outcome| outcome.shears),
+            &mut random,
+        )
+        .into_iter()
+        .flatten()
+        {
+            commands.spawn_dropped_item(
+                stack,
+                harvest.position.as_vec3() + Vec3::splat(0.5) + harvest.offset,
+                harvest.velocity,
+            );
+        }
     }
 }
 

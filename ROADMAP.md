@@ -41,11 +41,11 @@ Checked boxes below identify existing capabilities. Remaining-work boxes stay un
 | Area | Status | What remains |
 | --- | --- | --- |
 | Block/item registries and assets | Needs audit | Check actual family coverage, obtainability, models, item use, and behavior. |
-| Mining | Partial | Tool effectiveness, harvest requirements, durability, loot rules, and experience; current breaking uses block durations and generally drops the block item. |
-| Item stacks | Partial | Current game stacks track item identity and count; add per-stack state for damage, enchantments, names, potions, and stored contents. |
-| Crafting | Partial | Personal 2x2 recipes exist; workbench 3x3, processing stations, and recipe discovery remain. |
-| Equipment | Partial | Slots and visuals exist; armor protection, weapon effects, durability, and equipment abilities remain. |
-| Interactive blocks | Partial | Normal chests and manual openings are integrated; most stations, machines, and special storage remain. |
+| Mining | Partial | Tool-aware mining, durability, and simplified block loot exist; experience, enchantments, and a full family audit remain. |
+| Item stacks | Partial | Item identity, count, and damage are saved; enchantments, names, potions, and stored contents remain. |
+| Crafting | Partial | Personal 2x2 and workbench 3x3 recipes, tags, repeated crafting, and remainders exist; processing stations and recipe discovery remain. |
+| Equipment | Partial | Slots, visuals, and gathering-tool durability exist; armor protection, weapon effects, other durability costs, and equipment abilities remain. |
+| Interactive blocks | Partial | Normal chests, manual openings, and crafting tables are integrated; processing stations, machines, and special storage remain. |
 | Fluids | Partial | Rendering and character interaction exist; dynamic flow, buckets, and fluid-driven world updates remain. |
 | World generation | Needs audit | The generator contains many biome/feature/structure implementations; audit their game exposure, loot, entities, and progression. |
 | Dimensions | Partial | Generation types include Nether and End; game sessions and world metadata currently select and accept only the Overworld. |
@@ -94,12 +94,14 @@ Milestones group dependencies rather than require strictly serial development. S
 
 ## M2 - Gathering, crafting, and processing
 
-**Status: Partial.** Personal 2x2 crafting and basic block breaking already exist.
+**Status: Partial.** Tool-aware gathering, saved durability, simplified block loot, and personal/workbench crafting exist. Processing stations, recipe search, and the full resource-progression audit remain.
 
-- [ ] Add pickaxes, axes, shovels, hoes, and shears, with material tiers, suitable blocks, harvest requirements, and durability.
-- [ ] Derive mining results from tool, block, and player state, including incorrect tools, underwater work, instant-break blocks, and unbreakable blocks.
-- [ ] Replace generic self-drops with loot rules: stone/cobblestone, ores/raw materials/gems, leaves/saplings, gravel/flint, crops, multi-part blocks, and container contents.
-- [ ] Add the crafting table and 3x3 shaped/shapeless recipes, ingredient tags, repeated crafting, and remaining containers such as empty buckets.
+Implementation details and static review: [M2 gathering and crafting](docs/M2_GATHERING.md).
+
+- [x] Add pickaxes, axes, shovels, hoes, and shears, with material tiers, suitable blocks, harvest requirements, and durability.
+- [x] Derive mining results from tool, block, and player state, including incorrect tools, underwater work, instant-break blocks, and unbreakable blocks.
+- [x] Replace generic self-drops with loot rules: stone/cobblestone, ores/raw materials/gems, leaves/saplings, gravel/flint, crops, multi-part blocks, and container contents.
+- [x] Add the crafting table and 3x3 shaped/shapeless recipes, ingredient tags, repeated crafting, and remaining containers such as empty buckets.
 - [ ] Add furnaces, blast furnaces, smokers, fuel, burn/cook progress, valid input/output slots, experience, and lit block states.
 - [ ] Add campfire cooking and charcoal production, with sensible alternative routes for early fuel and food.
 - [ ] Add a searchable recipe interface showing ingredients, station requirements, available materials, and recipe output.
@@ -208,7 +210,7 @@ The status column describes the current game integration, not upstream data comp
 | Snow, ice, coral, moss, dripstone, and amethyst | Partial | Environmental rules, survival, growth, and resource renewal | M4, M5, M7 |
 | Normal chests and double chests | Implemented | Integrate richer stack data and automated transfer | M1, M9 |
 | Barrels, trapped chests, ender chests, shulker boxes, and bundles | Missing | Storage rules, portable contents, powered interactions, and persistence | M8, M9, M11 |
-| Crafting tables, furnaces, smokers, blast furnaces, and campfires | Missing | Workstation interactions, processing, fuel, and progress | M2 |
+| Crafting tables, furnaces, smokers, blast furnaces, and campfires | Partial | Crafting-table interaction and 3x3 crafting exist; cooking, fuel, and machine progress remain | M2 |
 | Anvils, grindstones, smithing tables, and stonecutters | Missing | Repair, upgrades, naming, recipes, and item modification | M8, M11 |
 | Looms, banners, pots, signs, books, and bookshelves | Needs audit | Editing/custom data, display, decoration recipes, and interactions | M7, M8 |
 | Maps, compasses, clocks, and cartography tables | Missing | Tracking, map data, exploration, and map modification | M8, M10 |
@@ -222,7 +224,7 @@ The status column describes the current game integration, not upstream data comp
 | Spawners, trial encounters, vaults, and event blocks | Missing | Activation, enemies, keys/rewards, cooldowns, and saved encounter state | M6, M10 |
 | Nether/End blocks, portals, gateways, and respawn anchors | Partial | Generator data exists; dimension gameplay, activation, and special rules remain | M7, M11 |
 | Beacons, conduits, and other area-effect blocks | Missing | Structure requirements, resource costs, effects, and activation | M11, M12 |
-| Tools, weapons, armor, shields, and advanced equipment | Partial | Item identities/slots/visuals exist; durability, effects, and gameplay remain | M2, M6, M11 |
+| Tools, weapons, armor, shields, and advanced equipment | Partial | Gathering-tool effectiveness and durability exist; combat, other equipment effects, and acquisition routes remain | M2, M6, M11 |
 | Food, potions, buckets, fishing rods, leads, and utility items | Partial | Identities exist; consumption, active use, state, and resulting effects remain | M3, M4, M5, M6, M11 |
 | Passive, aquatic, ambient, neutral, hostile, and tameable mobs | Missing | Spawn, AI, animation, interactions, loot, and persistence | M5, M6 |
 | Villagers, traders, golems, raiders, and bosses | Missing | Social/progression systems, encounters, and rewards | M11, M12 |

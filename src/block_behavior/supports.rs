@@ -201,20 +201,16 @@ pub(crate) fn update(
                 expected: state,
                 state: next,
             });
-            let drop = drop_item
-                .then(|| crate::inventory::ItemKind::from_voxel(state.kind()))
-                .flatten()
-                .map(|item| {
-                    (
-                        crate::inventory::ItemStack::new(item, 1),
-                        position.as_vec3() + Vec3::splat(0.5),
-                        Vec3::Y * 1.2,
-                    )
-                });
             check.edit = Some(EditBatch {
                 edits,
                 consume: None,
-                drop,
+                harvest: drop_item.then_some(super::loot::Harvest {
+                    position,
+                    state,
+                    offset: Vec3::ZERO,
+                    velocity: Vec3::Y * 1.2,
+                }),
+                tool: None,
             });
         });
     // Complete the entire batch before any commit can invalidate another candidate.

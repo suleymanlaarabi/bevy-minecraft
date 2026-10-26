@@ -43,6 +43,8 @@ pub(crate) fn apply_actions(
     mut players: Query<
         (
             &mut PlayerInventory,
+            &mut super::CraftingGrid,
+            Option<&crate::block_behavior::workbench::ViewingWorkbench>,
             &CharacterMotion,
             Option<&ViewingContainer>,
         ),
@@ -51,11 +53,22 @@ pub(crate) fn apply_actions(
     topology: ContainerTopology,
     mut containers: Query<&mut ContainerInventory>,
     mut cursor: ResMut<InventoryCursor>,
+    workbenches: crate::block_behavior::workbench::WorkbenchAccess,
 ) {
     for action in actions.drain(..) {
-        let Ok((mut inventory, motion, viewing)) = players.single_mut() else {
+        let Ok((mut inventory, mut grid, workbench, motion, viewing)) = players.single_mut() else {
             continue;
         };
+        if let Some(session) = workbench
+            && !workbenches.valid(session.0, motion.position.as_vec3())
+        {
+            continue;
+        }
+        if (workbench.is_some() && viewing.is_some())
+            || grid.side != if workbench.is_some() { 3 } else { 2 }
+        {
+            continue;
+        }
         let owners = if let Some(viewing) = viewing {
             let Some(owners) = topology.owners(viewing.0, motion.position.as_vec3()) else {
                 continue;
@@ -75,15 +88,22 @@ pub(crate) fn apply_actions(
         } else {
             [None, None]
         };
+        let before = *grid;
         PlayerInventory::edit(&mut inventory, |inventory| {
             let mut slots = ScreenSlots {
                 inventory,
+                grid: grid.bypass_change_detection(),
                 containers: owners,
             };
             match action {
                 InventoryAction::SwapHotbar(index, hotbar) => {
                     if index == CRAFT_RESULT && !slots.container_open() {
-                        slots.inventory.craft_to_hotbar(hotbar);
+                        super::crafting::craft(
+                            slots.inventory,
+                            slots.grid,
+                            &mut cursor.stack,
+                            super::crafting::CraftDestination::Hotbar(hotbar),
+                        );
                     } else {
                         super::slots::swap(&mut slots, index, hotbar);
                     }
@@ -99,7 +119,16 @@ pub(crate) fn apply_actions(
                     }
                     if index == CRAFT_RESULT {
                         if !slots.container_open() {
-                            slots.inventory.craft(&mut cursor.stack, shift);
+                            super::crafting::craft(
+                                slots.inventory,
+                                slots.grid,
+                                &mut cursor.stack,
+                                if shift {
+                                    super::crafting::CraftDestination::Inventory
+                                } else {
+                                    super::crafting::CraftDestination::Cursor
+                                },
+                            );
                         }
                     } else if shift && !right && cursor.stack.is_none() {
                         slots.quick_move(index);
@@ -167,12 +196,16 @@ pub(crate) fn apply_actions(
                 }
             }
         });
+        if *grid != before {
+            grid.set_changed();
+        }
     }
 }
 
 /// The only borrowed adapter crossing player and chest slot owners.
 struct ScreenSlots<'a, 'w> {
     inventory: &'a mut PlayerInventory,
+    grid: &'a mut super::CraftingGrid,
     containers: [Option<Mut<'w, ContainerInventory>>; 2],
 }
 impl ScreenSlots<'_, '_> {
@@ -187,6 +220,8 @@ impl ScreenSlots<'_, '_> {
                 0..INVENTORY_SIZE
             };
             super::slots::transfer(self, index, targets);
+        } else if (super::CRAFT_START..CRAFT_RESULT).contains(&index) {
+            super::slots::transfer(self, index, 0..INVENTORY_SIZE);
         } else {
             self.inventory.quick_move(index);
         }
@@ -197,12 +232,19 @@ impl Slots for ScreenSlots<'_, '_> {
         if self.container_open() {
             CONTAINER_START + self.containers.iter().flatten().count() * CONTAINER_SIZE
         } else {
-            SLOT_COUNT
+            super::CRAFT_START + self.grid.active_len()
         }
     }
     fn get(&self, index: usize) -> Option<ItemStack> {
-        if index <= CRAFT_RESULT {
+        if index < SLOT_COUNT {
             self.inventory.slot(index)
+        } else if index < CRAFT_RESULT {
+            self.grid
+                .slots
+                .as_slice()
+                .get(index - super::CRAFT_START)
+                .copied()
+                .flatten()
         } else {
             let offset = index.checked_sub(CONTAINER_START)?;
             self.containers
@@ -214,6 +256,9 @@ impl Slots for ScreenSlots<'_, '_> {
     fn set(&mut self, index: usize, stack: Option<ItemStack>) {
         if index < SLOT_COUNT {
             Slots::set(self.inventory, index, stack);
+        } else if (super::CRAFT_START..super::CRAFT_START + self.grid.active_len()).contains(&index)
+        {
+            self.grid.slots[index - super::CRAFT_START] = stack;
         } else if let Some(offset) = index.checked_sub(CONTAINER_START)
             && let Some(Some(inventory)) = self.containers.get_mut(offset / CONTAINER_SIZE)
             && inventory
@@ -227,7 +272,7 @@ impl Slots for ScreenSlots<'_, '_> {
         if self.container_open() {
             index < INVENTORY_SIZE || (CONTAINER_START..self.len()).contains(&index)
         } else {
-            index < SLOT_COUNT
+            index < super::CRAFT_START + self.grid.active_len()
         }
     }
     fn capacity(&self, index: usize, item: ItemKind) -> u8 {

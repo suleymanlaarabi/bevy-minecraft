@@ -346,9 +346,8 @@ fn run_voxel_benchmark(
                     for depth in 1..=4 {
                         let position =
                             transform.translation.floor().as_ivec3() + IVec3::new(3, -depth, 0);
-                        if let Some(kind) = voxel_world
-                            .get(position)
-                            .filter(|kind| kind.break_duration().is_some())
+                        if let Some(kind) =
+                            voxel_world.get(position).filter(|kind| kind.is_breakable())
                         {
                             benchmark.edited = Some((position, kind));
                             break;

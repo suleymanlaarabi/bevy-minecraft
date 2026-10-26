@@ -17,6 +17,7 @@ use bevy::{
     PlayerInventory,
     crate::inventory::HotbarSelection,
     crate::inventory::CraftingResult,
+    crate::inventory::CraftingGrid,
     super::safety::PlayerCheckpoint,
     GameCharacter,
     AutoJump,

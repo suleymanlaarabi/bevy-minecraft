@@ -29,9 +29,13 @@ pub(crate) struct HotbarHud;
 struct InventoryOverlay;
 
 #[derive(Component, Clone, Copy, Default)]
+#[require(SlotDisplay)]
 pub(crate) struct InventorySlotView {
     index: usize,
 }
+
+#[derive(Component, Default)]
+pub(crate) struct SlotDisplay(Option<Option<crate::inventory::ItemStack>>);
 
 #[derive(Component, Clone, Copy, Default)]
 pub(crate) struct SlotIcon;
@@ -41,6 +45,9 @@ pub(crate) struct SlotCount;
 
 #[derive(Component, Clone, Copy, Default)]
 pub(crate) struct EmptySlotLabel;
+
+#[derive(Component, Clone, Copy, Default)]
+pub(crate) struct SlotDurability;
 
 fn empty_slot_label(index: usize) -> &'static str {
     use crate::inventory::{ARMOR_START, OFFHAND_SLOT};
@@ -62,7 +69,9 @@ pub(crate) struct CursorStackCount;
 
 /// A view addresses its ECS owner directly; no mirror inventory is kept in UI.
 #[derive(Component, Clone, Copy)]
-pub(super) struct SlotOwner {
-    entity: Entity,
-    index: usize,
+pub(super) enum SlotOwner {
+    Inventory(Entity, usize),
+    Crafting(Entity, usize),
+    Result(Entity),
+    Container(Entity, usize),
 }

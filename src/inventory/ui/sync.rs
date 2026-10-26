@@ -90,11 +90,15 @@ pub(crate) fn bind_slots(
     let (player, viewing) = *player;
     for (entity, view) in &views {
         let index = view.index;
-        let owner = if index < crate::inventory::access::CONTAINER_START {
-            Some(super::SlotOwner {
-                entity: player,
-                index,
-            })
+        let owner = if index < crate::inventory::SLOT_COUNT {
+            Some(super::SlotOwner::Inventory(player, index))
+        } else if index < crate::inventory::CRAFT_RESULT {
+            Some(super::SlotOwner::Crafting(
+                player,
+                index - crate::inventory::CRAFT_START,
+            ))
+        } else if index == crate::inventory::CRAFT_RESULT {
+            Some(super::SlotOwner::Result(player))
         } else {
             viewing.and_then(|viewing| {
                 let offset = index - crate::inventory::access::CONTAINER_START;
@@ -103,10 +107,7 @@ pub(crate) fn bind_slots(
                 } else {
                     *partners.get(viewing.0).ok()?.first()?
                 };
-                Some(super::SlotOwner {
-                    entity,
-                    index: offset % 27,
-                })
+                Some(super::SlotOwner::Container(entity, offset % 27))
             })
         };
         if let Some(owner) = owner {
@@ -119,95 +120,116 @@ pub(crate) fn refresh_slots(
         (
             Entity,
             Ref<PlayerInventory>,
+            Ref<crate::inventory::CraftingGrid>,
             Ref<crate::inventory::HotbarSelection>,
             Ref<crate::inventory::CraftingResult>,
+            Option<&crate::block_behavior::containers::ViewingContainer>,
         ),
         With<Player>,
     >,
     containers: Query<Ref<crate::block_behavior::ContainerInventory>>,
-    new_views: Query<
-        (),
-        Or<(
-            Added<super::SlotOwner>,
-            Added<SlotIcon>,
-            Added<SlotCount>,
-            Added<EmptySlotLabel>,
-        )>,
-    >,
+    partners: Query<&crate::block_behavior::containers::ChestPartners>,
+    new_views: Query<(), Added<super::SlotOwner>>,
     block_icons: Res<BlockIcons>,
-    mut icons: Query<(&ChildOf, &mut ImageNode, &mut Visibility), With<SlotIcon>>,
-    mut counts: Query<
-        (&ChildOf, &mut Text, Has<SlotCount>),
-        Or<(With<SlotCount>, With<EmptySlotLabel>)>,
+    mut icons: Query<(&mut ImageNode, &mut Visibility), With<SlotIcon>>,
+    mut durability: Query<
+        (&mut Node, &mut Visibility),
+        (With<super::SlotDurability>, Without<SlotIcon>),
     >,
-    owners: Query<(&InventorySlotView, &super::SlotOwner)>,
-    mut slots: Query<(&InventorySlotView, &mut BorderColor)>,
+    mut counts: Query<(&mut Text, Has<SlotCount>), Or<(With<SlotCount>, With<EmptySlotLabel>)>>,
+    mut views: Query<(
+        &InventorySlotView,
+        &super::SlotOwner,
+        &Children,
+        &mut BorderColor,
+        &mut super::SlotDisplay,
+    )>,
 ) {
-    let (player, inventory, selection, result) = inventory.into_inner();
+    let (player, inventory, grid, selection, result, viewing) = inventory.into_inner();
+    let container_changed = |entity| {
+        containers
+            .get(entity)
+            .is_ok_and(|inventory| inventory.is_changed())
+    };
+    let visible_containers_changed = viewing.is_some_and(|viewing| {
+        container_changed(viewing.0)
+            || partners
+                .get(viewing.0)
+                .is_ok_and(|partners| partners.iter().any(|entity| container_changed(entity)))
+    });
     if !inventory.is_changed()
+        && !grid.is_changed()
         && !selection.is_changed()
         && !result.is_changed()
-        && !containers.iter().any(|inventory| inventory.is_changed())
+        && !visible_containers_changed
         && new_views.is_empty()
     {
         return;
     }
-    let slot = |owner: &super::SlotOwner| {
-        if owner.entity == player {
-            if owner.index == crate::inventory::CRAFT_RESULT {
-                result.0
+    for (view, owner, children, mut border, mut display) in &mut views {
+        border.set_if_neq(BorderColor::all(
+            if view.index < HOTBAR_SIZE && view.index == selection.0 {
+                SELECTED_BORDER
             } else {
-                inventory.slot(owner.index)
+                SLOT_BORDER
+            },
+        ));
+        let stack = match *owner {
+            super::SlotOwner::Inventory(entity, index) if entity == player => inventory.slot(index),
+            super::SlotOwner::Crafting(entity, index) if entity == player => {
+                grid.slots.get(index).copied().flatten()
             }
-        } else {
-            containers.get(owner.entity).ok()?.slot(owner.index)
-        }
-    };
-    for (parent, mut node, mut visibility) in &mut icons {
-        let Ok((_, owner)) = owners.get(parent.parent()) else {
-            continue;
+            super::SlotOwner::Result(entity) if entity == player => result.0,
+            super::SlotOwner::Container(entity, index) => containers
+                .get(entity)
+                .ok()
+                .and_then(|inventory| inventory.slot(index)),
+            _ => None,
         };
-        match slot(owner) {
-            Some(stack) => {
-                show_icon(&mut node, &block_icons, stack.item());
-                visibility.set_if_neq(Visibility::Inherited);
-            }
-            None => {
-                visibility.set_if_neq(Visibility::Hidden);
-            }
-        }
-    }
-
-    for (parent, mut text, count) in &mut counts {
-        let Ok((view, owner)) = owners.get(parent.parent()) else {
+        if display.0 == Some(stack) {
             continue;
-        };
-        if count {
-            let value = match slot(owner) {
-                Some(stack) if stack.count() > 1 => stack.count().to_string(),
-                _ => String::new(),
-            };
-            text.set_if_neq(Text(value));
-        } else {
-            let label = match slot(owner) {
-                None => empty_slot_label(view.index),
-                Some(_) => "",
-            };
-            // Compare first: the static label needs no allocation when unchanged.
-            if text.0 != label {
-                text.0 = label.into();
+        }
+        display.0 = Some(stack);
+        for &child in children {
+            if let Ok((mut node, mut visibility)) = icons.get_mut(child) {
+                if let Some(stack) = stack {
+                    show_icon(&mut node, &block_icons, stack.item());
+                    visibility.set_if_neq(Visibility::Inherited);
+                } else {
+                    visibility.set_if_neq(Visibility::Hidden);
+                }
+            }
+            if let Ok((mut text, count)) = counts.get_mut(child) {
+                if count {
+                    text.set_if_neq(Text(
+                        stack
+                            .filter(|stack| stack.count() > 1)
+                            .map_or_else(String::new, |stack| stack.count().to_string()),
+                    ));
+                } else {
+                    let label = if stack.is_some() {
+                        ""
+                    } else {
+                        empty_slot_label(view.index)
+                    };
+                    if text.0 != label {
+                        text.0 = label.into();
+                    }
+                }
+            }
+            if let Ok((mut node, mut visibility)) = durability.get_mut(child) {
+                if let Some(stack) = stack
+                    && stack.damage() > 0
+                    && stack.item().max_damage() > 0
+                {
+                    let fraction = 1.0 - stack.damage() as f32 / stack.item().max_damage() as f32;
+                    node.width = px((super::SLOT_SIZE - 8.0) * fraction);
+                    visibility.set_if_neq(Visibility::Inherited);
+                } else {
+                    visibility.set_if_neq(Visibility::Hidden);
+                }
             }
         }
-    }
-
-    for (view, mut border) in &mut slots {
-        let selected = view.index < HOTBAR_SIZE && view.index == selection.0;
-
-        border.set_if_neq(BorderColor::all(if selected {
-            SELECTED_BORDER
-        } else {
-            SLOT_BORDER
-        }));
     }
 }
 
