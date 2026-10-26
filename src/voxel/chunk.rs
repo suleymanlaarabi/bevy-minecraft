@@ -1,15 +1,10 @@
-#[cfg(test)]
-use super::coordinates::FULL_SKY;
-use super::{
-    VoxelState,
-    blocks::VoxelKind,
-    coordinates::{
-        ALL_SECTIONS, CHUNK_HEIGHT, CHUNK_VOLUME, SECTION_COUNT, SECTION_HEIGHT, SECTION_VOLUME,
-        cell_index, cell_position,
-    },
-    storage::{Layer, Section},
-};
+use super::{VoxelKind, VoxelState};
 use bevy::prelude::*;
+use hollow_worldgen::coordinates::{
+    ALL_SECTIONS, CHUNK_HEIGHT, CHUNK_VOLUME, SECTION_COUNT, SECTION_HEIGHT, SECTION_VOLUME,
+    cell_index, cell_position,
+};
+use hollow_worldgen::sections::{Layer, Section};
 use std::{collections::BTreeSet, sync::Arc};
 
 /// Collision classes of [`ChunkVoxels::collision_classes`].
@@ -24,10 +19,10 @@ const PARTIAL_SHAPE: u8 = 2;
 pub struct ChunkVoxels {
     pub(crate) states: Layer<VoxelState>,
     pub(crate) light: Layer<u8>,
-    /// Rendering-only estimates while Pumpkin relights edits. Never seed the worker with these.
+    /// Rendering-only estimates while shared snapshots are relit. Never seed the worker with these.
     render_light: Option<Layer<u8>>,
-    /// Cells edited since generation. Pumpkin replays them whenever a chunk enters its
-    /// lighting context, so they are kept for the chunk's whole life.
+    /// Cells edited since generation. Reconciliation rechecks them when a chunk enters
+    /// its snapshot neighborhood, so they are kept for the chunk's whole life.
     pub(crate) native_edits: Arc<BTreeSet<usize>>,
     pub(crate) content_revision: u64,
     /// One bit per render section whose mesh is outdated.
@@ -42,20 +37,6 @@ pub struct ChunkVoxels {
 }
 impl ChunkVoxels {
     /// A uniform column with validated native states.
-    #[cfg(test)]
-    pub(crate) fn filled(kind: VoxelKind) -> Self {
-        Self::from_layers(Layer::filled(kind.default_state()), Layer::filled(FULL_SKY))
-    }
-
-    /// Validates imported IDs once before they enter shared chunk storage.
-    pub(crate) fn from_native(states: &[u16], light: &[u8]) -> Self {
-        Self::from_layers(
-            Layer::from_mapped(states, |id| {
-                VoxelState::from_id(id).expect("Valid generated block state")
-            }),
-            Layer::from_cells(light),
-        )
-    }
 
     pub(super) fn from_layers(states: Layer<VoxelState>, light: Layer<u8>) -> Self {
         Self {
@@ -118,13 +99,10 @@ impl ChunkVoxels {
             .set(index, light);
     }
 
-    /// Updates block light without discarding a pending skylight estimate.
+    /// Updates displayed block light without discarding a pending skylight estimate.
     pub(crate) fn set_block_light(&mut self, index: usize, light: u8) {
-        self.light
-            .set(index, (self.light.get(index) & 0xf0) | light);
-        if let Some(render) = &mut self.render_light {
-            render.set(index, (render.get(index) & 0xf0) | light);
-        }
+        let render = self.render_light.get_or_insert_with(|| self.light.clone());
+        render.set(index, (render.get(index) & 0xf0) | light);
     }
 
     /// Replaces authoritative light, clears estimates, and returns visually changed sections.
@@ -230,10 +208,6 @@ impl ChunkVoxels {
     /// Solid cells another body can touch. Cells enclosed by six solid neighbors of
     /// this chunk are left out: only a one-cell shell of the terrain is kept. Border
     /// cells stay, since the neighboring chunks are unknown here.
-    #[cfg(test)]
-    pub(crate) fn collider_voxels(&self) -> Vec<IVec3> {
-        Self::shell(&self.collision_classes().0)
-    }
 
     fn shell(classes: &[u8]) -> Vec<IVec3> {
         classes
@@ -295,11 +269,6 @@ impl ChunkVoxels {
         (terrain, partial)
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_light(mut self, light: u8) -> Self {
-        self.light = Layer::filled(light);
-        self
-    }
 }
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VoxelChunk {

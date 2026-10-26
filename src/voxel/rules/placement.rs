@@ -84,9 +84,9 @@ pub(crate) fn profile(kind: VoxelKind) -> &'static Profile {
         VoxelKind::ALL
             .iter()
             .map(|&kind| {
-                let item = VoxelKind(crate::voxel::block_relations::canonical(kind.0));
+                let item = VoxelKind(hollow_worldgen::block_relations::canonical(kind.0));
                 let state = item.default_state();
-                let wall = crate::voxel::block_relations::wall(kind.0).map(VoxelKind);
+                let wall = hollow_worldgen::block_relations::wall(kind.0).map(VoxelKind);
                 let pair = if state.property(K::Half)
                     == Some(P::DoubleBlockHalf(bp::DoubleBlockHalf::Lower))
                 {

@@ -3,10 +3,7 @@ use super::{
     meshing::{Padded, TerrainGeometry},
     models::{self, ModelQuad},
 };
-use crate::voxel::{
-    VoxelKind,
-    coordinates::{CHUNK_SIZE, SECTION_HEIGHT},
-};
+use crate::voxel::VoxelKind;
 use bevy::{
     asset::RenderAssetUsages,
     mesh::{Indices, MeshVertexAttribute, VertexFormat},
@@ -14,6 +11,7 @@ use bevy::{
     render::render_resource::PrimitiveTopology,
     shape::Aabb3d,
 };
+use hollow_worldgen::coordinates::{CHUNK_SIZE, SECTION_HEIGHT};
 use std::sync::Arc;
 
 /// Packed model vertex, decoded by `model_vertex.wesl` (16 bytes instead of 48):

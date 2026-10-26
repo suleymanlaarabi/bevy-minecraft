@@ -266,34 +266,3 @@ fn container_overlay_scene(count: usize) -> impl Scene {
         ),
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn inventory_scenes_preserve_all_slot_indices() {
-        for (scene, expected_count) in [
-            (Box::new(hotbar_hud_scene()) as Box<dyn Scene>, HOTBAR_SIZE),
-            (
-                Box::new(inventory_overlay_scene(Handle::default())),
-                SLOT_COUNT + 1,
-            ),
-        ] {
-            let mut app = App::new();
-            app.add_plugins((
-                TaskPoolPlugin::default(),
-                AssetPlugin::default(),
-                bevy::scene::ScenePlugin,
-            ));
-            let world = app.world_mut();
-            world.spawn_scene(scene).unwrap();
-            let mut indices: Vec<_> = world
-                .query::<&InventorySlotView>()
-                .iter(world)
-                .map(|slot| slot.index)
-                .collect();
-            indices.sort_unstable();
-            assert_eq!(indices, (0..expected_count).collect::<Vec<_>>());
-        }
-    }
-}

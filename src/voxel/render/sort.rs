@@ -2,11 +2,7 @@
 //! the eye moves. Grid-cell ordering stays valid when the camera turns. Meshes
 //! retain immutable GPU vertices; re-sorts patch only their index allocation.
 use super::model_mesh::SortData;
-use crate::{
-    game::GameState,
-    player::PlayerCamera,
-    voxel::coordinates::{CHUNK_SIZE, SECTION_HEIGHT},
-};
+use crate::{game::GameState, player::PlayerCamera};
 use bevy::mesh::Indices;
 use bevy::platform::collections::HashMap;
 use bevy::{
@@ -22,8 +18,9 @@ use bevy::{
         sync_world::{MainEntity, MainEntityHashMap},
         view::ExtractedView,
     },
-    tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
+    tasks::{Task, futures::check_ready},
 };
+use hollow_worldgen::coordinates::{CHUNK_SIZE, SECTION_HEIGHT};
 use std::sync::Arc;
 
 /// Sections within this many blocks of the eye (per axis, outside the section's
@@ -173,6 +170,7 @@ fn prepare_section_sorting(
 }
 
 fn sort_translucent(
+    budget: Res<hollow_worldgen::tasks::VoxelTaskBudget>,
     camera: Option<Single<&GlobalTransform, With<PlayerCamera>>>,
     mut sections: Query<(
         Entity,
@@ -263,13 +261,17 @@ fn sort_translucent(
         let sort = sort.clone();
         let mesh = mesh.0.id();
         let previous = state.indices.clone();
-        state.task = Some(AsyncComputeTaskPool::get().spawn(async move {
-            let indices = sort.mesh_indices(local_eye);
-            // Comparing and dropping a large unchanged payload belongs on the
-            // worker too; the ECS thread only handles the shared result.
-            let indices = (previous.as_deref() != Some(&indices)).then(|| Arc::new(indices));
-            Output { indices, key, mesh }
-        }));
+        state.task = Some(budget.spawn(
+            hollow_worldgen::tasks::WorkClass::Streaming,
+            local_eye.length_squared() as u32,
+            async move {
+                let indices = sort.mesh_indices(local_eye);
+                // Comparing and dropping a large unchanged payload belongs on the
+                // worker too; the ECS thread only handles the shared result.
+                let indices = (previous.as_deref() != Some(&indices)).then(|| Arc::new(indices));
+                Output { indices, key, mesh }
+            },
+        ));
     }
 }
 

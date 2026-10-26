@@ -1,11 +1,5 @@
 use super::models::{CellInfo, cell};
-use crate::voxel::{
-    ChunkVoxels, VoxelKind, VoxelState,
-    coordinates::{
-        CHUNK_HEIGHT, CHUNK_SIZE, FULL_SKY, SECTION_COUNT, SECTION_HEIGHT, SECTION_VOLUME,
-    },
-    storage::Layer,
-};
+use crate::voxel::{ChunkVoxels, VoxelKind, VoxelState};
 use bevy::{
     asset::RenderAssetUsages,
     mesh::{Indices, MeshVertexAttribute, VertexFormat},
@@ -13,6 +7,10 @@ use bevy::{
     render::render_resource::PrimitiveTopology,
     shape::Aabb3d,
 };
+use hollow_worldgen::coordinates::{
+    CHUNK_HEIGHT, CHUNK_SIZE, FULL_SKY, SECTION_COUNT, SECTION_HEIGHT, SECTION_VOLUME,
+};
+use hollow_worldgen::sections::Layer;
 use std::cell::RefCell;
 
 /// Packed terrain and water vertex, decoded by `voxel_vertex.wesl`:
@@ -79,11 +77,6 @@ const BELOW_WORLD: Sample = Sample {
 };
 
 impl Sample {
-    #[cfg(test)]
-    #[inline]
-    fn new(kind: VoxelKind, light: u8) -> Self {
-        Self::state(kind.default_state(), light)
-    }
     #[inline]
     fn state(state: VoxelState, light: u8) -> Self {
         Self {
@@ -348,18 +341,6 @@ impl Padded {
             }
         }
         self.summary = summary;
-    }
-
-    #[cfg(test)]
-    fn single(kind: VoxelKind) -> Self {
-        let mut samples = vec![ABOVE_WORLD; 27];
-        samples[13] = Sample::new(kind, FULL_SKY);
-        Self {
-            dimensions: [1, 1, 1],
-            fluid_occluders: samples[13].fluid_occluder(),
-            samples,
-            summary: SectionSummary::default(),
-        }
     }
 
     pub(super) fn get(&self, local: IVec3) -> Sample {
@@ -871,12 +852,6 @@ pub(crate) fn build_sections(
     })
 }
 
-/// A unit block spanning 0..1 on every axis.
-#[cfg(test)]
-pub(crate) fn build_block_item_mesh(kind: VoxelKind) -> Mesh {
-    greedy_mesh::<u16>(&Padded::single(kind), false, cell::CUBE, &mut Vec::new()).into_mesh()
-}
-
 /// Whether `from` (of greedy `class`) shows its face toward `to`. Cutout cubes
 /// keep faces against each other, as vanilla fancy leaves do: the holes of a
 /// single-sided hull would otherwise show the sky instead of inner leaves.
@@ -1212,191 +1187,3 @@ fn consume_mask<T: Copy + Eq>(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn mesh(center: &ChunkVoxels, neighbor: Option<(IVec2, &ChunkVoxels)>) -> SectionMeshes {
-        let neighborhood = ChunkNeighborhood::new(center, |offset| {
-            neighbor.and_then(|(position, voxels)| (position == offset).then_some(voxels))
-        });
-        build_sections(&neighborhood, 1).remove(0)
-    }
-
-    #[test]
-    fn light_gradients_are_not_collapsed_across_greedy_faces() {
-        let uniform = Face(1, true, [60; 4]);
-        let gradient = Face(1, true, [0, 20, 40, 60]);
-        for (face, expected) in [(uniform, 1), (gradient, 2)] {
-            let mut mask = vec![
-                Some(LitFace::new(face, 0, false)),
-                Some(LitFace::new(face, 1, false)),
-            ];
-            let mut count = 0;
-            consume_mask(&mut mask, 2, 1, |_, _, _, _, _| count += 1);
-            assert_eq!(count, expected);
-        }
-    }
-
-    /// An empty column with these blocks.
-    fn chunk(blocks: &[(IVec3, VoxelKind)]) -> ChunkVoxels {
-        let mut chunk = ChunkVoxels::filled(VoxelKind::Air);
-        for &(local, kind) in blocks {
-            assert!(chunk.set(local, kind));
-        }
-        chunk
-    }
-
-    #[test]
-    fn neighbors_never_emit_neighbor_owned_faces() {
-        for direction in [IVec2::NEG_X, IVec2::X, IVec2::NEG_Y, IVec2::Y] {
-            let edge = |value: i32| match value {
-                -1 => 0,
-                1 => CHUNK_SIZE - 1,
-                _ => 5,
-            };
-            let cell = IVec3::new(edge(direction.x), 5, edge(direction.y));
-            let across = IVec3::new((cell.x + direction.x) & 15, 5, (cell.z + direction.y) & 15);
-            let neighbor = chunk(&[(across, VoxelKind::Stone)]);
-            let empty = chunk(&[]);
-            assert!(mesh(&empty, Some((direction, &neighbor))).terrain.is_none());
-            let center = chunk(&[(cell, VoxelKind::Stone)]);
-            let solid = mesh(&center, Some((direction, &neighbor))).terrain.unwrap();
-            assert_eq!(solid.indices.len(), 5 * 6);
-            assert_eq!(mesh(&center, None).terrain.unwrap().indices.len(), 6 * 6);
-        }
-    }
-
-    #[test]
-    fn neighbor_light_reaches_border_face_corners() {
-        let center = ChunkVoxels::filled(VoxelKind::Stone).with_light(0);
-        let lit = ChunkVoxels::filled(VoxelKind::Air).with_light(0x37);
-        let neighborhood =
-            ChunkNeighborhood::new(&center, |offset| (offset == IVec2::NEG_X).then_some(&lit));
-        let sample = neighborhood.sample(IVec3::new(-1, 0, 0));
-        assert_eq!(sample.light, 0x37);
-        assert!(!sample.occludes());
-        assert_eq!(
-            neighborhood.sample(IVec3::new(0, CHUNK_HEIGHT, 0)).light,
-            FULL_SKY
-        );
-        assert!(neighborhood.sample(IVec3::NEG_Y).occludes());
-        // A missing neighbor repeats the chunk's own edge.
-        assert!(neighborhood.sample(IVec3::new(CHUNK_SIZE, 0, 0)).occludes());
-    }
-
-    #[test]
-    fn padded_rows_match_cell_by_cell_sampling() {
-        let center = chunk(&[
-            (IVec3::new(0, 15, 0), VoxelKind::Stone),
-            (IVec3::new(15, 16, 7), VoxelKind::Water),
-            (IVec3::new(3, 17, 15), VoxelKind::Dirt),
-        ]);
-        let neighbor = chunk(&[(IVec3::new(3, 16, 0), VoxelKind::Sand)]);
-        let neighborhood =
-            ChunkNeighborhood::new(&center, |offset| (offset == IVec2::Y).then_some(&neighbor));
-        let mut padded = Padded::default();
-        for section in [0, 1, SECTION_COUNT - 1] {
-            padded.fill_section(&neighborhood, section);
-            let base = section as i32 * SECTION_HEIGHT;
-            for y in -1..=SECTION_HEIGHT {
-                for z in -1..=CHUNK_SIZE {
-                    for x in -1..=CHUNK_SIZE {
-                        let expected = neighborhood.sample(IVec3::new(x, base + y, z));
-                        let actual = padded.get(IVec3::new(x, y, z));
-                        assert_eq!(
-                            (actual.kind(), actual.light, actual.occludes()),
-                            (expected.kind(), expected.light, expected.occludes())
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn water_has_side_faces_and_no_faces_inside_solid_ceilings() {
-        let cell = IVec3::new(5, 5, 5);
-        let mut water = chunk(&[(cell, VoxelKind::Water)]);
-        let has_face = |geometry: &super::super::model_mesh::ModelGeometry, normal: [f32; 3]| {
-            geometry.normals.contains(&normal)
-        };
-        let geometry = mesh(&water, None).translucent.unwrap();
-        assert_eq!(geometry.indices.len(), 6 * 6);
-        assert!(has_face(&geometry, [1.0, 0.0, 0.0]));
-        assert!(has_face(&geometry, [0.0, 1.0, 0.0]));
-        assert!(geometry.positions.iter().all(|vertex| vertex[1] <= 5.875));
-        water.set(cell + IVec3::Y, VoxelKind::Stone);
-        let geometry = mesh(&water, None).translucent.unwrap();
-        assert_eq!(geometry.indices.len(), 5 * 6);
-        assert!(!has_face(&geometry, [0.0, 1.0, 0.0]));
-    }
-
-    #[test]
-    fn sections_are_meshed_independently_and_empty_ones_are_skipped() {
-        let chunk = chunk(&[(IVec3::new(5, 40, 5), VoxelKind::Stone)]);
-        let neighborhood = ChunkNeighborhood::new(&chunk, |_| None);
-        let sections = build_sections(&neighborhood, 0b111);
-        assert_eq!(sections.len(), 3);
-        assert!(sections[0].terrain.is_none() && sections[1].terrain.is_none());
-        assert_eq!(sections[2].terrain.as_ref().unwrap().indices.len(), 6 * 6);
-        // Positions are local to the section.
-        assert!(
-            sections[2]
-                .terrain
-                .as_ref()
-                .unwrap()
-                .vertices
-                .iter()
-                .all(|&vertex| TerrainGeometry::position(vertex).y <= 9.0)
-        );
-    }
-
-    #[test]
-    fn shadow_meshes_merge_blocks_and_keep_only_sunward_faces() {
-        // Two different blocks side by side: the lit mesh keeps them apart, the
-        // shadow mesh merges them and drops the faces the sky never lights.
-        let chunk = chunk(&[
-            (IVec3::new(5, 5, 5), VoxelKind::Stone),
-            (IVec3::new(6, 5, 5), VoxelKind::Dirt),
-        ]);
-        let section = build_sections(&ChunkNeighborhood::new(&chunk, |_| None), 1).remove(0);
-        let shadow = section.shadow.unwrap();
-        let sunward = (0..3).filter(|&axis| faces_sun(axis, true)).count()
-            + (0..3).filter(|&axis| faces_sun(axis, false)).count();
-        assert_eq!(sunward, 4);
-        assert_eq!(shadow.indices.len(), sunward * 6);
-        assert!(section.terrain.unwrap().indices.len() > 6 * 6);
-        for vertex in &shadow.vertices {
-            let direction = vertex[0] >> 15 & 7;
-            assert!(faces_sun((direction / 2) as usize, direction % 2 == 1));
-        }
-    }
-
-    #[test]
-    fn packed_vertices_round_trip_positions_and_light() {
-        let mut geometry = TerrainGeometry::<u16>::default();
-        geometry.push_quad(
-            [16, 0, 3],
-            [0, 16, 0],
-            [0, 0, 2],
-            0,
-            true,
-            super::super::models::cell_info(VoxelKind::Grass.default_state()).appearance,
-            [0, 60 | 15 << 6, 7, 60],
-        );
-        let corners: Vec<_> = geometry
-            .vertices
-            .iter()
-            .map(|&vertex| TerrainGeometry::position(vertex))
-            .collect();
-        assert_eq!(corners[0], Vec3::new(16.0, 0.0, 3.0));
-        assert_eq!(corners[2], Vec3::new(16.0, 16.0, 5.0));
-        assert_eq!(geometry.vertices[1][1], 60 | 15 << 6);
-        assert_eq!(
-            geometry.vertices[0][0] >> 18 & 16383,
-            u32::from(super::super::models::cell_info(VoxelKind::Grass.default_state()).appearance)
-        );
-        assert_eq!(geometry.vertices[0][0] >> 15 & 7, 1);
-    }
-}

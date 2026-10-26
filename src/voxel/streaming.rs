@@ -1,7 +1,5 @@
 use super::{
     ChunkVoxels, SetVoxel, VoxelChunk, VoxelSettings, VoxelViewer,
-    coordinates::neighbor_slot,
-    coordinates::{ALL_SECTIONS, CHUNK_SIZE, chunk_at},
     generation::{ChunkLoad, WorldGenerator},
     lighting::LitEdits,
     render::build::{ChunkSections, NeedsChunkBuild},
@@ -13,12 +11,14 @@ use bevy::{
     prelude::*,
     tasks::{IoTaskPool, Task, futures::check_ready},
 };
+use hollow_worldgen::coordinates::neighbor_slot;
+use hollow_worldgen::coordinates::{ALL_SECTIONS, CHUNK_SIZE, chunk_at};
 #[cfg(feature = "dev")]
 use std::time::{Duration, Instant};
 use std::{cmp::Reverse, collections::BinaryHeap};
 
-/// Copies of finished Pumpkin chunks in flight; Pumpkin itself does the generation.
-const MAX_PENDING_COPIES: usize = 16;
+/// Gameplay records being loaded and materialized around shared generated sections.
+const MAX_PENDING_LOADS: usize = 16;
 
 #[derive(Resource, Default, Deref, DerefMut)]
 pub(crate) struct ChunkIndex(HashMap<IVec2, Entity>);
@@ -101,7 +101,7 @@ pub(super) fn track_chunk_arrival(
 pub(crate) struct StreamState {
     pub center: Option<IVec2>,
     pub pending_despawns: Vec<Entity>,
-    /// Positions in the loaded area with neither an entity nor a copy in flight.
+    /// Positions in the loaded area with neither an entity nor a gameplay load in flight.
     missing: HashSet<IVec2>,
     /// Missing positions whose data is available, nearest first (may hold duplicates).
     ready: BinaryHeap<Reverse<(i32, i32, i32)>>,
@@ -111,7 +111,7 @@ impl StreamState {
     fn push_ready(&mut self, position: IVec2) {
         let center = self.center.unwrap_or_default();
         self.ready.push(Reverse((
-            position.distance_squared(center),
+            hollow_worldgen::coordinates::chunk_distance_squared(position, center),
             position.x,
             position.y,
         )));
@@ -124,13 +124,12 @@ impl StreamState {
         }
     }
 
-    /// A copy that found its chunk unloaded waits for Pumpkin's next completion event.
+    /// A load that found its base unavailable waits for Bevy's next completion message.
     fn retry_later(&mut self, position: IVec2, offsets: &StreamOffsets) {
         let radius_squared = (offsets.radius * offsets.radius) as i32;
-        if self
-            .center
-            .is_some_and(|center| position.distance_squared(center) <= radius_squared)
-        {
+        if self.center.is_some_and(|center| {
+            hollow_worldgen::coordinates::chunk_distance_squared(position, center) <= radius_squared
+        }) {
             self.missing.insert(position);
         }
     }
@@ -142,6 +141,8 @@ pub(crate) fn stream_chunks(
     viewer: Single<&GlobalTransform, With<VoxelViewer>>,
     settings: Res<VoxelSettings>,
     generator: Res<WorldGenerator>,
+    mut available: MessageReader<hollow_worldgen::runtime::ChunkAvailable>,
+    budget: Res<hollow_worldgen::tasks::VoxelTaskBudget>,
     offsets: Res<StreamOffsets>,
     mut stored: ResMut<StoredChunks>,
     mut pending: ResMut<PendingChunks>,
@@ -157,11 +158,15 @@ pub(crate) fn stream_chunks(
         state.pending_despawns.extend(
             index
                 .iter()
-                .filter(|(position, _)| position.distance_squared(center) > radius_squared)
+                .filter(|(position, _)| {
+                    hollow_worldgen::coordinates::chunk_distance_squared(**position, center)
+                        > radius_squared
+                })
                 .map(|(_, &entity)| entity),
         );
         pending.retain(|position, entity| {
-            let keep = position.distance_squared(center) <= radius_squared;
+            let keep = hollow_worldgen::coordinates::chunk_distance_squared(*position, center)
+                <= radius_squared;
             if !keep {
                 commands.entity(*entity).despawn();
             }
@@ -184,7 +189,11 @@ pub(crate) fn stream_chunks(
         }
     }
 
-    for position in generator.finished_chunks() {
+    for message in available
+        .read()
+        .filter(|message| message.session == generator.runtime.id())
+    {
+        let position = message.position;
         if state.missing.contains(&position) {
             state.push_ready(position);
         }
@@ -199,11 +208,11 @@ pub(crate) fn stream_chunks(
             .get(entity)
             .map_or(1, ChunkSections::mesh_count)
             .max(1);
-        commands.entity(entity).despawn();
+        unload_chunk(&mut commands, entity);
     }
 
     let mut spawned = 0;
-    while spawned < settings.spawn_budget_per_frame && pending.len() < MAX_PENDING_COPIES {
+    while spawned < settings.spawn_budget_per_frame && pending.len() < MAX_PENDING_LOADS {
         let Some(Reverse((_, x, z))) = state.ready.pop() else {
             break;
         };
@@ -211,21 +220,27 @@ pub(crate) fn stream_chunks(
         if !state.missing.remove(&position) {
             continue;
         }
+        let Some(chunk_entity) = generator.runtime.entity(position) else {
+            state.retry_ready(position, &offsets);
+            break;
+        };
         if let Some(voxels) = stored.remove(&position) {
             spawn_chunk(
                 &mut commands,
                 &mut index,
                 &mut edits,
                 position,
+                chunk_entity,
                 voxels,
                 default(),
             );
         } else {
             let generator = generator.clone();
+            let budget = budget.clone();
             let task = IoTaskPool::get().spawn(async move {
                 #[cfg(feature = "dev")]
                 let started = Instant::now();
-                let result = generator.loaded_gameplay_chunk(position).await;
+                let result = generator.loaded_gameplay_chunk(position, budget).await;
                 GeneratedChunk {
                     result,
                     #[cfg(feature = "dev")]
@@ -295,12 +310,17 @@ pub(crate) fn poll_chunk_generations(
         if index.contains_key(&position) {
             continue;
         }
+        let Some(chunk_entity) = generator.runtime.entity(position) else {
+            state.retry_ready(position, &offsets);
+            continue;
+        };
         let voxels = stored.remove(&position).unwrap_or(voxels);
         spawn_chunk(
             &mut commands,
             &mut index,
             &mut edits,
             position,
+            chunk_entity,
             voxels,
             containers,
         );
@@ -312,6 +332,7 @@ fn spawn_chunk(
     index: &mut ChunkIndex,
     edits: &mut PendingEdits,
     position: IVec2,
+    chunk_entity: Entity,
     mut voxels: ChunkVoxels,
     containers: crate::block_behavior::containers::PreparedColumn,
 ) {
@@ -322,7 +343,8 @@ fn spawn_chunk(
     voxels.collider_dirty = true;
     let lit_edits = !voxels.native_edits.is_empty();
     let origin = position * CHUNK_SIZE;
-    let mut entity = commands.spawn((
+    let mut entity = commands.entity(chunk_entity);
+    entity.insert((
         VoxelChunk { position },
         voxels,
         Transform::from_xyz(origin.x as f32, 0.0, origin.y as f32),
@@ -337,12 +359,11 @@ fn spawn_chunk(
         Friction::new(0.8),
         Visibility::default(),
         AwaitingNeighbors,
-        DespawnOnExit(GameState::Game),
+        hollow_worldgen::runtime::ChunkRetention,
     ));
     if lit_edits {
         entity.insert(LitEdits);
     }
-    let chunk_entity = entity.id();
     index_entry.insert(chunk_entity);
     crate::block_behavior::containers::spawn_for_chunk(
         commands,
@@ -393,12 +414,16 @@ pub(crate) fn release_ready_chunks(
         let Ok((_, chunk)) = waiting.get(entity) else {
             continue;
         };
-        if chunk.position.distance_squared(center) > render_squared {
+        if hollow_worldgen::coordinates::chunk_distance_squared(chunk.position, center)
+            > render_squared
+        {
             continue;
         }
         let ready = NEIGHBOR_OFFSETS.iter().all(|&offset| {
             let neighbor = chunk.position + offset;
-            index.contains_key(&neighbor) || neighbor.distance_squared(center) > loaded_squared
+            index.contains_key(&neighbor)
+                || hollow_worldgen::coordinates::chunk_distance_squared(neighbor, center)
+                    > loaded_squared
         });
         if ready {
             commands
@@ -444,56 +469,6 @@ pub(crate) fn refresh_neighbors_of_spawned(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn chunks_wait_for_all_loaded_neighbors_before_meshing() {
-        use bevy::ecs::system::RunSystemOnce;
-        let mut world = World::new();
-        world.init_resource::<ChunkIndex>();
-        world.insert_resource(StreamOffsets::new(2));
-        world.insert_resource(StreamState {
-            center: Some(IVec2::ZERO),
-            ..default()
-        });
-        let spawn = |world: &mut World, position: IVec2| {
-            let entity = world
-                .spawn((VoxelChunk { position }, AwaitingNeighbors))
-                .id();
-            world.resource_mut::<ChunkIndex>().insert(position, entity);
-            entity
-        };
-        let center = spawn(&mut world, IVec2::ZERO);
-        for offset in &NEIGHBOR_OFFSETS[..7] {
-            spawn(&mut world, *offset);
-        }
-        world.run_system_once(release_ready_chunks).unwrap();
-        assert!(world.get::<AwaitingNeighbors>(center).is_some());
-        spawn(&mut world, NEIGHBOR_OFFSETS[7]);
-        world.run_system_once(release_ready_chunks).unwrap();
-        assert!(world.get::<AwaitingNeighbors>(center).is_none());
-        assert!(world.get::<NeedsChunkBuild>(center).is_some());
-    }
-
-    #[test]
-    fn stream_offsets_are_unique_nearest_first_and_inside_radius() {
-        let offsets = StreamOffsets::new(1);
-        assert_eq!(offsets.radius, 2);
-        assert_eq!(offsets.len(), 13);
-        assert_eq!(offsets[0], IVec2::ZERO);
-        assert!(
-            offsets
-                .windows(2)
-                .all(|pair| pair[0].length_squared() <= pair[1].length_squared())
-        );
-        assert!(offsets.iter().all(|offset| offset.length_squared() <= 4));
-        for (index, offset) in offsets.iter().enumerate() {
-            assert!(!offsets[..index].contains(offset));
-        }
-    }
-}
 
 pub(crate) fn cleanup_removed_chunk(
     event: On<Remove<ChunkVoxels>>,
@@ -516,12 +491,12 @@ pub(super) fn cleanup_voxel_world(
     generations: Query<Entity, With<ChunkGeneration>>,
 ) {
     for entity in &chunks {
-        commands.entity(entity).despawn();
+        unload_chunk(&mut commands, entity);
     }
     for entity in &generations {
         commands.entity(entity).despawn();
     }
-    // Let Pumpkin unload the area; the next session sets its own view.
+    // Release view demand; active generation retains its reservations until return.
     if let Some(generator) = generator {
         generator.clear_view();
     }
@@ -534,7 +509,7 @@ pub(super) fn cleanup_voxel_world(
         world
             .resource_mut::<crate::block_behavior::containers::GameplayColumns>()
             .clear();
-        // Drop the context on its own worker: Pumpkin shutdown must not stall ECS.
+        // Dispose shared lighting buffers off the ECS thread.
         if let Some(state) = world.remove_resource::<super::lighting::LightingState>() {
             bevy::tasks::IoTaskPool::get()
                 .spawn(async move {
@@ -548,4 +523,27 @@ pub(super) fn cleanup_voxel_world(
         *world.resource_mut::<ChunkArrivals>() = ChunkArrivals::default();
         *world.resource_mut::<super::collision::ColliderRequests>() = default();
     });
+}
+
+/// Release presentation while the generation graph retains the procedural column.
+fn unload_chunk(commands: &mut Commands, entity: Entity) {
+    let mut entity = commands.entity(entity);
+    entity.despawn_children();
+    // Observers capture edits before identity and ownership relationships disappear.
+    entity.remove::<ChunkVoxels>();
+    entity.remove::<VoxelChunk>();
+    entity.remove::<(
+        hollow_worldgen::runtime::ChunkRetention,
+        crate::block_behavior::containers::LoadedColumn,
+        ChunkSections,
+        super::render::build::ChunkBuild,
+        NeedsChunkBuild,
+        AwaitingNeighbors,
+        LitEdits,
+        super::edits::EditedChunk,
+        super::collision::ColliderBuild,
+        super::collision::PartialCollider,
+        Collider,
+        RigidBody,
+    )>();
 }

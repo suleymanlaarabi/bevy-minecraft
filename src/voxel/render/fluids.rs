@@ -4,8 +4,8 @@ use super::{
     meshing::{Padded, Sample},
     models::{self, ModelQuad},
 };
-use crate::voxel::state::BlockBox;
 use bevy::prelude::*;
+use hollow_worldgen::state::BlockBox;
 use pumpkin_data::block_properties::COLLISION_SHAPES;
 
 const SIDES: [IVec3; 4] = [IVec3::X, IVec3::NEG_X, IVec3::Z, IVec3::NEG_Z];

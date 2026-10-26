@@ -3,12 +3,12 @@
 use super::{
     ChunkVoxels,
     collision::{COLLIDER_RADIUS, ColliderBuild},
-    coordinates::chunk_at,
     render::build::{ChunkBuild, ChunkSections, NeedsChunkBuild},
     streaming::{AwaitingNeighbors, ChunkIndex, StreamOffsets},
 };
 use avian3d::prelude::Collider;
 use bevy::{ecs::system::SystemParam, prelude::*};
+use hollow_worldgen::coordinates::chunk_at;
 
 #[derive(SystemParam)]
 pub(crate) struct VoxelLoading<'w, 's> {

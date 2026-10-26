@@ -2,6 +2,7 @@
 //! one buffer avoids duplicating atmosphere textures and bindings per material.
 
 use crate::voxel::VoxelViewer;
+use bevy::render::storage::{GpuShaderBuffer, ShaderBuffer};
 use bevy::{
     asset::RenderAssetUsages,
     core_pipeline::{
@@ -24,7 +25,6 @@ use bevy::{
         render_asset::RenderAssets,
         render_resource::{binding_types::*, *},
         renderer::{RenderContext, RenderDevice, ViewQuery},
-        storage::{GpuShaderBuffer, ShaderBuffer},
         texture::GpuImage,
         view::{ViewUniform, ViewUniformOffset, ViewUniforms},
     },

@@ -1,6 +1,6 @@
 """Bake native block relationships without runtime name construction.
 
-Run after updating the adjacent worldgen registry. This reads native metadata;
+Run after updating the integrated worldgen registry. This reads native metadata;
 Minecraft names remain an import-time concern.
 """
 from pathlib import Path
@@ -8,7 +8,7 @@ import re
 import struct
 
 ROOT = Path(__file__).resolve().parents[1]
-source = (ROOT.parent / "worldgen/crates/pumpkin-data/src/generated/block.rs").read_text()
+source = (ROOT / "crates/worldgen/crates/pumpkin-data/src/generated/block.rs").read_text()
 blocks = {}
 for match in re.finditer(r'pub const (\w+): Self = Block \{(.*?)\n    \};', source, re.S):
     body = match[2]
@@ -55,4 +55,4 @@ for name in blocks:
     for mapping in [canonical, walls, materials]:
         target = mapping[name]
         output.extend(struct.pack("<H", blocks[target][2] if target is not None else 0xFFFF))
-(ROOT / "src/voxel/block_relations.bin").write_bytes(output)
+(ROOT / "crates/worldgen/src/block_relations.bin").write_bytes(output)

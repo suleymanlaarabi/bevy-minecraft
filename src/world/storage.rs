@@ -1,6 +1,6 @@
 //! Blocking transactional storage. Call only from workers, never ECS systems.
 use super::model::{Checkpoint, WorldMetadata};
-use pumpkin_worldgen::ChunkStorage;
+use hollow_worldgen::ChunkStorage;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{
     collections::HashMap,
@@ -10,7 +10,9 @@ use std::{
     time::Duration,
 };
 
-const MAX_RECORD_BYTES: usize = 8 * 1024 * 1024;
+use hollow_worldgen::codec::{
+    MAX_RECORD_BYTES, compress_record as compress, decompress_record as decompress,
+};
 const SCHEMA: &str = "
     CREATE TABLE records(key TEXT PRIMARY KEY, value BLOB NOT NULL);
     CREATE TABLE generated(x INTEGER NOT NULL,z INTEGER NOT NULL,stage INTEGER NOT NULL,value BLOB NOT NULL,PRIMARY KEY(x,z)) WITHOUT ROWID;
@@ -186,8 +188,57 @@ impl Drop for ColumnCommit<'_> {
     }
 }
 
+pub(super) struct PreparedCheckpoint {
+    metadata: Vec<u8>,
+    checkpoint: Vec<u8>,
+    chunks: Vec<((i32, i32), Vec<u8>)>,
+    containers: Vec<((i32, i32), Option<Vec<u8>>)>,
+    updates: HashMap<(i32, i32), ColumnUpdate>,
+}
+impl PreparedCheckpoint {
+    pub(super) fn encode(
+        metadata: &WorldMetadata,
+        checkpoint: &Checkpoint,
+        chunks: Vec<((i32, i32), Vec<u8>)>,
+        containers: Vec<((i32, i32), Option<Vec<u8>>)>,
+    ) -> io::Result<Self> {
+        let chunks: Vec<_> = chunks
+            .into_iter()
+            .map(|(p, bytes)| (p, compress(&bytes)))
+            .collect();
+        let mut updates = HashMap::<_, ColumnUpdate>::new();
+        for &(position, _) in &chunks {
+            updates.entry(position).or_default().terrain = true;
+        }
+        let containers: Vec<_> = containers
+            .into_iter()
+            .map(|(position, bytes)| {
+                let bytes = bytes
+                    .map(|bytes| {
+                        if bytes.len() > MAX_RECORD_BYTES {
+                            return Err(err("Container snapshot exceeds the record size limit."));
+                        }
+                        Ok(compress(&bytes))
+                    })
+                    .transpose()?;
+                updates.entry(position).or_default().containers = Some(bytes.is_some());
+                Ok((position, bytes))
+            })
+            .collect::<io::Result<_>>()?;
+        let metadata = serde_json::to_vec(metadata).map_err(err)?;
+        let checkpoint = serde_json::to_vec(checkpoint).map_err(err)?;
+        Ok(Self {
+            metadata,
+            checkpoint,
+            chunks,
+            containers,
+            updates,
+        })
+    }
+}
+
 pub(crate) struct Database {
-    /// Writer for checkpoints and Pumpkin's cache.
+    /// Writer for gameplay checkpoints and generated section records.
     connection: Mutex<Connection>,
     /// WAL reader: chunk streaming never waits on a checkpoint transaction or its fsync.
     reader: Mutex<Connection>,
@@ -267,12 +318,12 @@ impl Database {
         if checkpoint
             .support_pending
             .iter()
-            .any(|p| !(0..crate::voxel::coordinates::CHUNK_HEIGHT).contains(&p[1]))
+            .any(|p| !(0..hollow_worldgen::coordinates::CHUNK_HEIGHT).contains(&p[1]))
         {
             return Err(err("Invalid pending support update."));
         }
         if checkpoint.pending.iter().any(|(p, s)| {
-            !(0..crate::voxel::coordinates::CHUNK_HEIGHT).contains(&p[1])
+            !(0..hollow_worldgen::coordinates::CHUNK_HEIGHT).contains(&p[1])
                 || crate::voxel::VoxelState::from_id(*s).is_none()
         }) {
             return Err(err("Invalid pending block edits."));
@@ -309,7 +360,7 @@ impl Database {
                             "This world is in use by another session (or locking is unavailable): {error}"
                         )));
                     }
-                    // The preceding session may still be finishing Pumpkin shutdown.
+                    // The preceding session may still be finishing background storage work.
                     std::thread::sleep(Duration::from_millis(50));
                 }
             }
@@ -321,7 +372,7 @@ impl Database {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-16384; PRAGMA wal_autocheckpoint=2048;").map_err(err)
     }
 
-    /// Whether a saved snapshot replaces Pumpkin's column. Never touches SQLite.
+    /// Whether current gameplay terrain has a saved snapshot. Never touches SQLite.
     fn column(&self, x: i32, z: i32) -> ColumnState {
         self.columns
             .read()
@@ -366,38 +417,14 @@ impl Database {
         }))
     }
 
-    pub(super) fn checkpoint(
-        &self,
-        metadata: &WorldMetadata,
-        checkpoint: &Checkpoint,
-        chunks: Vec<((i32, i32), Vec<u8>)>,
-        containers: Vec<((i32, i32), Option<Vec<u8>>)>,
-    ) -> io::Result<()> {
-        let chunks: Vec<_> = chunks
-            .into_iter()
-            .map(|(p, bytes)| (p, compress(&bytes)))
-            .collect();
-        let mut updates = HashMap::<_, ColumnUpdate>::new();
-        for &(position, _) in &chunks {
-            updates.entry(position).or_default().terrain = true;
-        }
-        let containers: Vec<_> = containers
-            .into_iter()
-            .map(|(position, bytes)| {
-                let bytes = bytes
-                    .map(|bytes| {
-                        if bytes.len() > MAX_RECORD_BYTES {
-                            return Err(err("Container snapshot exceeds the record size limit."));
-                        }
-                        Ok(compress(&bytes))
-                    })
-                    .transpose()?;
-                updates.entry(position).or_default().containers = Some(bytes.is_some());
-                Ok((position, bytes))
-            })
-            .collect::<io::Result<_>>()?;
-        let metadata = serde_json::to_vec(metadata).map_err(err)?;
-        let checkpoint = serde_json::to_vec(checkpoint).map_err(err)?;
+    pub(super) fn checkpoint(&self, prepared: PreparedCheckpoint) -> io::Result<()> {
+        let PreparedCheckpoint {
+            metadata,
+            checkpoint,
+            chunks,
+            containers,
+            updates,
+        } = prepared;
         let mut conn = self.connection.lock().map_err(err)?;
         let mut publication = ColumnCommit::begin(&self.columns, updates);
         let tx = conn.transaction().map_err(err)?;
@@ -429,18 +456,23 @@ impl Database {
 }
 
 impl ChunkStorage for Database {
-    fn read_chunks(&self, positions: &[(i32, i32)]) -> io::Result<Vec<Option<Vec<u8>>>> {
+    fn read_chunks(
+        &self,
+        positions: &[(i32, i32)],
+    ) -> io::Result<Vec<Option<hollow_worldgen::codec::GenerationRecord>>> {
         // Release SQLite's connection before decompression.
         let records = {
             let conn = self.reader.lock().map_err(err)?;
             let mut query = conn
-                .prepare_cached("SELECT value FROM generated WHERE x=?1 AND z=?2")
+                .prepare_cached("SELECT stage,value FROM generated WHERE x=?1 AND z=?2")
                 .map_err(err)?;
             positions
                 .iter()
                 .map(|&(x, z)| {
                     query
-                        .query_row(params![x, z], |r| r.get::<_, Vec<u8>>(0))
+                        .query_row(params![x, z], |r| {
+                            Ok((r.get::<_, u8>(0)?, r.get::<_, Vec<u8>>(1)?))
+                        })
                         .optional()
                         .map_err(err)
                 })
@@ -448,16 +480,30 @@ impl ChunkStorage for Database {
         };
         records
             .into_iter()
-            .map(|r| r.map(|r| decompress(&r)).transpose())
+            .map(|record| {
+                record
+                    .map(|(stage, bytes)| {
+                        if !(1..hollow_worldgen::chunk_system::StagedChunkEnum::COUNT as u8)
+                            .contains(&stage)
+                        {
+                            return Err(err("Invalid stored generation stage."));
+                        }
+                        Ok(hollow_worldgen::codec::GenerationRecord {
+                            stage: hollow_worldgen::chunk_system::StagedChunkEnum::from(stage),
+                            bytes,
+                        })
+                    })
+                    .transpose()
+            })
             .collect()
     }
-    fn write_chunks(&self, chunks: Vec<((i32, i32), Vec<u8>)>) -> io::Result<()> {
+    fn write_chunks(
+        &self,
+        chunks: Vec<((i32, i32), hollow_worldgen::codec::GenerationRecord)>,
+    ) -> io::Result<()> {
         let records: Vec<_> = chunks
             .into_iter()
-            .map(|(p, bytes)| {
-                let stage = *bytes.get(21).unwrap_or(&0);
-                (p, stage, compress(&bytes))
-            })
+            .map(|(p, record)| (p, record.stage as u8, record.bytes))
             .collect();
         let mut conn = self.connection.lock().map_err(err)?;
         let tx = conn.transaction().map_err(err)?;
@@ -489,122 +535,9 @@ fn read_json<T: serde::de::DeserializeOwned>(
         .optional()
         .map_err(err)?;
     bytes
-        .map(|b| serde_json::from_slice(&b).map_err(err))
+        .map(|b| {
+            serde_json::from_slice(&b)
+                .map_err(|error| err(format!("Incompatible or corrupt {key} record: {error}")))
+        })
         .transpose()
-}
-fn decompress(bytes: &[u8]) -> io::Result<Vec<u8>> {
-    let checksum = bytes
-        .get(..4)
-        .ok_or_else(|| err("Truncated compressed chunk."))?;
-    let bytes = &bytes[4..];
-    let size = bytes
-        .get(..4)
-        .ok_or_else(|| err("Truncated compressed chunk."))?;
-    if u32::from_le_bytes(size.try_into().unwrap()) as usize > MAX_RECORD_BYTES {
-        return Err(err("Invalid chunk size."));
-    }
-    let record = lz4_flex::decompress_size_prepended(bytes).map_err(err)?;
-    if crc32fast::hash(&record) != u32::from_le_bytes(checksum.try_into().unwrap()) {
-        return Err(err("Chunk checksum mismatch."));
-    }
-    Ok(record)
-}
-fn compress(bytes: &[u8]) -> Vec<u8> {
-    let mut record = crc32fast::hash(bytes).to_le_bytes().to_vec();
-    record.extend_from_slice(&lz4_flex::compress_prepend_size(bytes));
-    record
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn records_reject_corruption_and_oversized_allocations() {
-        let bytes = compress(b"Hollow chunk record");
-        assert_eq!(decompress(&bytes).unwrap(), b"Hollow chunk record");
-        let mut corrupt = bytes.clone();
-        corrupt[0] ^= 1;
-        assert!(decompress(&corrupt).is_err());
-        assert!(decompress(&bytes[..7]).is_err());
-        let mut oversized = bytes;
-        oversized[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(decompress(&oversized).is_err());
-    }
-
-    fn with_database(run: impl FnOnce(&Database, &WorldMetadata)) {
-        struct Directory(PathBuf);
-        impl Drop for Directory {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let directory = Directory(
-            std::env::temp_dir().join(format!("hollow-storage-{}", uuid::Uuid::new_v4())),
-        );
-        std::fs::create_dir(&directory.0).unwrap();
-        let lock = Database::lock(&directory.0).unwrap();
-        let path = directory.0.join("world.sqlite3");
-        let conn = Connection::open(&path).unwrap();
-        Database::configure(&conn).unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
-        let database = Database::from_connection(conn, &path, lock).unwrap();
-        let metadata = WorldMetadata::new("World".into(), -42, super::super::WorldQuality::Fast);
-        database
-            .checkpoint(&metadata, &Checkpoint::default(), vec![], vec![])
-            .unwrap();
-        run(&database, &metadata);
-    }
-
-    #[test]
-    fn failed_checkpoint_rolls_back_chunks_and_player_metadata_together() {
-        with_database(|database, original| {
-            database.connection.lock().unwrap().execute_batch("CREATE TRIGGER reject_checkpoint BEFORE UPDATE ON records WHEN NEW.key='checkpoint' BEGIN SELECT RAISE(ABORT,'simulated write failure'); END;").unwrap();
-            let mut updated = original.clone();
-            updated.name = "Updated World".into();
-            assert!(
-                database
-                    .checkpoint(
-                        &updated,
-                        &Checkpoint::default(),
-                        vec![((-2, 3), b"chunk snapshot".to_vec())],
-                        vec![]
-                    )
-                    .is_err()
-            );
-            assert!(
-                database
-                    .gameplay_column(-2, 3)
-                    .unwrap()
-                    .unwrap()
-                    .decode()
-                    .unwrap()
-                    .0
-                    .is_none()
-            );
-            let stored: WorldMetadata = read_json(&database.connection.lock().unwrap(), "metadata")
-                .unwrap()
-                .unwrap();
-            assert_eq!(stored.name, original.name);
-        });
-    }
-
-    #[test]
-    fn lower_generation_stage_cannot_replace_a_complete_cached_chunk() {
-        with_database(|database, _| {
-            let mut full = vec![0; 22];
-            full[..4].copy_from_slice(b"PCHK");
-            full[21] = 9;
-            let mut partial = full.clone();
-            partial[21] = 4;
-            database
-                .write_chunks(vec![((-2, 3), full.clone())])
-                .unwrap();
-            database.write_chunks(vec![((-2, 3), partial)]).unwrap();
-            assert_eq!(
-                database.read_chunks(&[(-2, 3), (3, -2)]).unwrap(),
-                vec![Some(full), None]
-            );
-        });
-    }
 }

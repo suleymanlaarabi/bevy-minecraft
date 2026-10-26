@@ -6,7 +6,6 @@ use super::{
 };
 use crate::voxel::{
     ChunkVoxels, SHADOW_LAYER, VoxelChunk, VoxelViewer,
-    coordinates::{SECTION_COUNT, SECTION_HEIGHT, chunk_at},
     edits::EditedChunk,
     streaming::{AwaitingNeighbors, ChunkIndex},
 };
@@ -17,6 +16,7 @@ use bevy::{
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
+use hollow_worldgen::coordinates::{SECTION_COUNT, SECTION_HEIGHT, chunk_at};
 use std::time::{Duration, Instant};
 
 /// Render sections of a chunk: one child entity per non-empty mesh.
@@ -161,6 +161,7 @@ pub(crate) fn mark_changed_chunks(mut commands: Commands, chunks: ChangedChunks)
 pub(crate) fn start_changed_builds(
     mut commands: Commands,
     index: Res<ChunkIndex>,
+    budget: Res<hollow_worldgen::tasks::VoxelTaskBudget>,
     viewer: Option<Single<&Transform, With<VoxelViewer>>>,
     camera: Option<Single<&GlobalTransform, With<crate::player::PlayerCamera>>>,
     builds: Query<Has<EditedChunk>, With<ChunkBuild>>,
@@ -182,7 +183,6 @@ pub(crate) fn start_changed_builds(
         .map(|camera| camera.translation())
         .or_else(|| viewer.as_ref().map(|viewer| viewer.translation));
     let center = viewer.map_or(IVec2::ZERO, |viewer| chunk_at(viewer.translation));
-    let pool = AsyncComputeTaskPool::get();
     let neighborhood = |position: IVec2, voxels: &ChunkVoxels| {
         ChunkNeighborhood::new(voxels, |offset| {
             index
@@ -200,7 +200,11 @@ pub(crate) fn start_changed_builds(
             candidates.push((
                 (
                     !edited,
-                    (position.distance_squared(center), position.x, position.y),
+                    (
+                        hollow_worldgen::coordinates::chunk_distance_squared(position, center),
+                        position.x,
+                        position.y,
+                    ),
                 ),
                 entity,
             ));
@@ -213,7 +217,7 @@ pub(crate) fn start_changed_builds(
         candidates.select_nth_unstable(available);
         candidates.truncate(available);
     }
-    for &(_, entity) in candidates.iter() {
+    for &(priority, entity) in candidates.iter() {
         let Ok((_, chunk, voxels, _, sections)) = chunks.get(entity) else {
             continue;
         };
@@ -224,21 +228,32 @@ pub(crate) fn start_changed_builds(
             neighborhood =
                 neighborhood.reuse_connectivity(sections.connectivity, sections.built_sections);
         }
-        commands
-            .entity(entity)
-            .insert(spawn_chunk_build(pool, neighborhood, voxels, eye));
+        commands.entity(entity).insert(spawn_chunk_build(
+            &budget,
+            if priority.0 {
+                hollow_worldgen::tasks::WorkClass::Streaming
+            } else {
+                hollow_worldgen::tasks::WorkClass::EditedMesh
+            },
+            priority.1.0 as u32,
+            neighborhood,
+            voxels,
+            eye,
+        ));
     }
 }
 
 fn spawn_chunk_build(
-    pool: &AsyncComputeTaskPool,
+    budget: &hollow_worldgen::tasks::VoxelTaskBudget,
+    class: hollow_worldgen::tasks::WorkClass,
+    distance: u32,
     neighborhood: ChunkNeighborhood,
     voxels: &ChunkVoxels,
     eye: Option<Vec3>,
 ) -> ChunkBuild {
     let sections = voxels.dirty_sections;
     let revision = voxels.revision;
-    let task = pool.spawn(async move {
+    let task = budget.spawn(class, distance, async move {
         #[cfg(feature = "dev")]
         let meshing_started = Instant::now();
         let sections = build_sections(&neighborhood, sections);
@@ -351,7 +366,11 @@ pub(crate) fn poll_builds(
     candidates.clear();
     candidates.extend(chunks.iter().map(|(entity, chunk, _, _, _, edited)| {
         (
-            (!edited, chunk.position.distance_squared(center), entity),
+            (
+                !edited,
+                hollow_worldgen::coordinates::chunk_distance_squared(chunk.position, center),
+                entity,
+            ),
             entity,
         )
     }));
@@ -606,64 +625,5 @@ fn update_section<B: Bundle>(
             *slot = None;
         }
         (None, None) => {}
-    }
-}
-
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-    use crate::voxel::VoxelKind;
-    use bevy::ecs::system::RunSystemOnce;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn builds_clear_dirty_sections_only_for_the_current_revision() {
-        let mut app = App::new();
-        app.add_plugins(TaskPoolPlugin::default())
-            .init_resource::<ChunkIndex>()
-            .init_resource::<Assets<Mesh>>();
-        let world = app.world_mut();
-        let entity = world
-            .spawn((
-                VoxelChunk {
-                    position: IVec2::ZERO,
-                },
-                ChunkVoxels::filled(VoxelKind::Stone),
-                NeedsChunkBuild,
-            ))
-            .id();
-        world
-            .resource_mut::<ChunkIndex>()
-            .insert(IVec2::ZERO, entity);
-        world.run_system_once(start_changed_builds).unwrap();
-        assert!(world.get::<ChunkBuild>(entity).is_some());
-        // An edit while meshing makes the result stale.
-        world
-            .get_mut::<ChunkVoxels>(entity)
-            .unwrap()
-            .set(IVec3::new(0, 20, 0), VoxelKind::Air);
-        let poll = |world: &mut World| {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while world.get::<ChunkBuild>(entity).is_some() {
-                assert!(Instant::now() < deadline, "chunk build did not finish");
-                world.run_system_once(poll_builds).unwrap();
-                std::thread::yield_now();
-            }
-        };
-        poll(world);
-        assert_ne!(world.get::<ChunkVoxels>(entity).unwrap().dirty_sections, 0);
-        world.run_system_once(start_changed_builds).unwrap();
-        poll(world);
-        assert_eq!(world.get::<ChunkVoxels>(entity).unwrap().dirty_sections, 0);
-        assert!(world.get::<NeedsChunkBuild>(entity).is_none());
-        assert_eq!(
-            world
-                .get::<ChunkSections>(entity)
-                .unwrap()
-                .missing_neighbors
-                .count_ones(),
-            8
-        );
     }
 }

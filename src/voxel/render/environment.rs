@@ -233,8 +233,8 @@ pub(in crate::voxel) fn follow_horizon_skirt(
     let radius = radius + 1.0;
     let rim_height = radius * 0.10510424;
     // Reach below the whole terrain column even from a high flying camera.
-    let depth =
-        (radius * 3.0).max(center.y + rim_height + super::super::coordinates::CHUNK_HEIGHT as f32);
+    let depth = (radius * 3.0)
+        .max(center.y + rim_height + hollow_worldgen::coordinates::CHUNK_HEIGHT as f32);
     skirt.set_if_neq(
         Transform::from_translation(center + Vec3::Y * rim_height)
             // The rim is six degrees above eye level; haze vanishes at three.

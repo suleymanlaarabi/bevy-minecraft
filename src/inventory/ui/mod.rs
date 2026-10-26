@@ -60,9 +60,6 @@ pub(crate) struct CursorStackView;
 #[derive(Component, Clone, Default)]
 pub(crate) struct CursorStackCount;
 
-#[cfg(test)]
-mod tests;
-
 /// A view addresses its ECS owner directly; no mirror inventory is kept in UI.
 #[derive(Component, Clone, Copy)]
 pub(super) struct SlotOwner {

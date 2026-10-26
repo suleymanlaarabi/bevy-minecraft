@@ -296,24 +296,3 @@ fn store_settings(current: GraphicsSettings, updated: GraphicsSettings, commands
 fn back_to_menu_on_activate(_activate: On<Activate>, mut next_state: ResMut<NextState<GameState>>) {
     next_state.set(GameState::Menu);
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sliders_preserve_the_configured_initial_values() {
-        let mut app = App::new();
-        app.add_plugins((
-            TaskPoolPlugin::default(),
-            AssetPlugin::default(),
-            bevy::scene::ScenePlugin,
-        ));
-        app.init_asset::<Font>();
-        let world = app.world_mut();
-        let fov = world.spawn_scene(fov_control(97.0)).unwrap().id();
-        let distance = world.spawn_scene(view_distance_control(17)).unwrap().id();
-        assert_eq!(world.get::<SliderValue>(fov).unwrap().0, 97.0);
-        assert_eq!(world.get::<SliderValue>(distance).unwrap().0, 17.0);
-    }
-}

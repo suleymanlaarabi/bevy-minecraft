@@ -30,6 +30,7 @@ pub(super) struct LoadingMessage;
 pub(super) fn start_spawn_search(
     mut commands: Commands,
     voxel_settings: Option<Res<VoxelSettings>>,
+    budget: Res<hollow_worldgen::tasks::VoxelTaskBudget>,
     generator: Option<Res<crate::voxel::generation::WorldGenerator>>,
     session: Option<Res<crate::world::WorldSession>>,
 ) {
@@ -44,11 +45,15 @@ pub(super) fn start_spawn_search(
             .as_ref()
             .map(|p| Vec3::from_array(p.position))
     });
+    let budget = budget.clone();
     let task = AsyncComputeTaskPool::get().spawn(async move {
-        saved_position.map_or_else(
-            || generator.map_or(Ok(fallback), |generator| generator.try_spawn_position()),
-            Ok,
-        )
+        if let Some(position) = saved_position {
+            Ok(position)
+        } else if let Some(generator) = generator {
+            generator.try_spawn_position(budget).await
+        } else {
+            Ok(fallback)
+        }
     });
     commands.spawn((SpawnSearch(task), DespawnOnExit(GameState::Game)));
     let message = if saved_position.is_some() {

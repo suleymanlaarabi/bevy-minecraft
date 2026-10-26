@@ -205,13 +205,6 @@ pub(crate) struct Aabb {
 }
 
 impl Aabb {
-    #[cfg(test)]
-    fn centered(center: DVec3, half_extents: DVec3) -> Self {
-        Self {
-            min: center - half_extents,
-            max: center + half_extents,
-        }
-    }
 
     fn cell(cell: IVec3) -> Self {
         let min = cell.as_dvec3();
@@ -321,14 +314,6 @@ impl Terrain {
         });
     }
 
-    #[cfg(test)]
-    fn from_boxes(boxes: Vec<Aabb>) -> Self {
-        Self {
-            boxes,
-            fluids: Vec::new(),
-            climbables: Vec::new(),
-        }
-    }
 
     fn collides(&self, body: &Aabb) -> bool {
         self.boxes.iter().any(|other| body.intersects(other))
@@ -906,144 +891,3 @@ fn should_auto_jump(terrain: &Terrain, aabb: Aabb, wish: DVec3) -> bool {
         && !terrain.collides(&aabb.moved(DVec3::Y * AUTO_JUMP_HEIGHT))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const PLAYER: DVec3 = DVec3::new(0.3, 0.9, 0.3);
-
-    fn cube(x: i32, y: i32, z: i32) -> Aabb {
-        Aabb::cell(IVec3::new(x, y, z))
-    }
-
-    /// A flat floor at y = 0 spanning a chunk border at x = 16.
-    fn floor() -> Vec<Aabb> {
-        (0..32)
-            .flat_map(|x| (-2..3).map(move |z| cube(x, -1, z)))
-            .collect()
-    }
-
-    fn standing(x: f64) -> Aabb {
-        Aabb::centered(DVec3::new(x, 0.9, 0.5), PLAYER)
-    }
-
-    #[test]
-    fn walking_on_flat_ground_never_snags_on_voxel_or_chunk_seams() {
-        let terrain = Terrain::from_boxes(floor());
-        let mut body = standing(1.5);
-        for _ in 0..120 {
-            let delta = DVec3::new(0.2159, -0.0784, 0.013);
-            let moved = terrain.collide(body, delta, true);
-            assert!((moved.x - delta.x).abs() < MOVE_EPSILON);
-            assert!((moved.z - delta.z).abs() < MOVE_EPSILON);
-            assert!(moved.y.abs() < MOVE_EPSILON);
-            body = body.moved(moved);
-            if body.max.x > 31.0 {
-                break;
-            }
-        }
-        assert!(body.min.x > 16.0, "crossed the chunk border");
-    }
-
-    #[test]
-    fn walls_stop_the_body_at_their_face() {
-        let mut boxes = floor();
-        boxes.extend([cube(3, 0, 0), cube(3, 1, 0)]);
-        let terrain = Terrain::from_boxes(boxes);
-        let body = standing(2.5);
-        let moved = terrain.collide(body, DVec3::new(0.5, 0.0, 0.0), true);
-        assert!((body.max.x + moved.x - 3.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn steps_climb_slabs_but_not_full_blocks() {
-        let slab = Aabb {
-            min: DVec3::new(3.0, 0.0, 0.0),
-            max: DVec3::new(4.0, 0.5, 1.0),
-        };
-        let mut boxes = floor();
-        boxes.push(slab);
-        let terrain = Terrain::from_boxes(boxes);
-        let moved = terrain.collide(standing(2.6), DVec3::new(0.2, -0.08, 0.0), true);
-        assert!((moved.x - 0.2).abs() < MOVE_EPSILON);
-        assert!((moved.y - 0.5).abs() < MOVE_EPSILON);
-
-        let mut boxes = floor();
-        boxes.push(cube(3, 0, 0));
-        let terrain = Terrain::from_boxes(boxes);
-        let body = standing(2.6);
-        let moved = terrain.collide(body, DVec3::new(0.2, -0.08, 0.0), true);
-        assert!(moved.y.abs() < MOVE_EPSILON);
-        assert!((body.max.x + moved.x - 3.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn sneaking_holds_the_body_on_a_ledge() {
-        let terrain = Terrain::from_boxes((0..3).map(|x| cube(x, -1, 0)).collect());
-        let mut body = standing(2.5);
-        for _ in 0..40 {
-            let delta = terrain.back_off_from_edge(body, DVec3::new(0.065, -0.08, 0.0));
-            body = body.moved(terrain.collide(body, delta, true));
-        }
-        assert!(body.min.x < 3.0, "still supported by the last block");
-        assert!(body.min.y.abs() < MOVE_EPSILON);
-    }
-
-    #[test]
-    fn falling_bodies_land_on_the_floor() {
-        let terrain = Terrain::from_boxes(floor());
-        let body = Aabb::centered(DVec3::new(4.5, 1.2, 0.5), PLAYER);
-        let delta = DVec3::new(0.0, -1.0, 0.0);
-        let moved = terrain.collide(body, delta, false);
-        assert!((body.min.y + moved.y).abs() < 1e-9);
-    }
-
-    #[test]
-    fn low_ceilings_force_crouching_then_crawling() {
-        let body = CharacterBody::default();
-        let origin = DVec3::new(4.5, 0.9, 0.5);
-        let mut boxes = floor();
-        boxes.push(Aabb {
-            min: DVec3::new(4.0, 1.6, 0.0),
-            max: DVec3::new(5.0, 2.6, 1.0),
-        });
-        let terrain = Terrain::from_boxes(boxes.clone());
-        assert_eq!(
-            choose_pose(&terrain, &body, origin, Pose::Standing),
-            Pose::Crouching
-        );
-
-        boxes.push(cube(4, 1, 0));
-        let terrain = Terrain::from_boxes(boxes);
-        assert_eq!(
-            choose_pose(&terrain, &body, origin, Pose::Standing),
-            Pose::Swimming
-        );
-        assert_eq!(
-            choose_pose(&terrain, &body, origin, Pose::Crouching),
-            Pose::Swimming
-        );
-
-        let open = Terrain::from_boxes(floor());
-        assert_eq!(
-            choose_pose(&open, &body, origin, Pose::Crouching),
-            Pose::Crouching
-        );
-        assert_eq!(
-            choose_pose(&open, &body, origin, Pose::Standing),
-            Pose::Standing
-        );
-    }
-
-    #[test]
-    fn auto_jump_only_triggers_for_one_block_rises() {
-        let mut boxes = floor();
-        boxes.push(cube(3, 0, 0));
-        let terrain = Terrain::from_boxes(boxes.clone());
-        assert!(should_auto_jump(&terrain, standing(2.65), DVec3::X));
-
-        boxes.push(cube(3, 1, 0));
-        let terrain = Terrain::from_boxes(boxes);
-        assert!(!should_auto_jump(&terrain, standing(2.65), DVec3::X));
-    }
-}

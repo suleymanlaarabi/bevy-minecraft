@@ -2,7 +2,8 @@ import json,re,sys
 from pathlib import Path
 
 def lines(path):
-    if path.name == 'tests.rs':
+    # Generator test modules are separate files gated by their parent modules.
+    if path.name in {'tests.rs', 'test.rs', 'test_deserializer.rs', 'parity_fingerprint_test.rs'} or 'proto_chunk_test' in path.parts:
         return 0
     source=path.read_text()
     # Test items in this project are trailing modules or standalone helpers.

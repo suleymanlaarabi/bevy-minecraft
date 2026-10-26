@@ -82,7 +82,7 @@ pub(crate) struct GameplayColumn {
     pub initialized: bool,
 }
 pub(crate) fn local_index(position: IVec3) -> u32 {
-    crate::voxel::coordinates::cell_index(crate::voxel::split_world_position(position).1)
+    hollow_worldgen::coordinates::cell_index(crate::voxel::split_world_position(position).1)
         .expect("Block entity position is inside the world") as u32
 }
 fn index_block(mut world: DeferredWorld, context: HookContext) {
@@ -211,7 +211,7 @@ fn classify(world: &mut World, entity: Entity, state: VoxelState) {
     }
 }
 pub(crate) fn top_clear(world: &VoxelWorld, position: IVec3) -> bool {
-    position.y + 1 >= crate::voxel::coordinates::CHUNK_HEIGHT
+    position.y + 1 >= hollow_worldgen::coordinates::CHUNK_HEIGHT
         || world.state(position + IVec3::Y).is_some_and(|state| {
             !state
                 .native()
@@ -228,7 +228,7 @@ type ContainerRecord = ([i32; 3], [Option<crate::world::SavedStack>; CONTAINER_S
 impl PreparedColumn {
     /// Runs only on a chunk-copy worker. Uniform sections are classified once.
     pub fn discover(voxels: &ChunkVoxels, chunk: IVec2) -> Self {
-        use crate::voxel::coordinates::{CHUNK_SIZE, SECTION_COUNT, SECTION_HEIGHT};
+        use hollow_worldgen::coordinates::{CHUNK_SIZE, SECTION_COUNT, SECTION_HEIGHT};
         let mut result = Self::default();
         let origin = IVec3::new(chunk.x * CHUNK_SIZE, 0, chunk.y * CHUNK_SIZE);
         for section in 0..SECTION_COUNT {
@@ -439,7 +439,7 @@ pub(crate) fn changed(event: On<crate::voxel::edits::BlockChanged>, mut commands
 }
 
 pub(crate) fn unload(
-    event: On<Despawn<crate::voxel::VoxelChunk>>,
+    event: On<Remove<crate::voxel::VoxelChunk>>,
     terrain: Query<&LoadedColumn>,
     blocks: Query<&BlockEntities>,
     columns: Query<&GameplayColumn>,

@@ -1,0 +1,32 @@
+# Copied from Pumpkin 8ca5cb443272e0ac4f59b4c2ac059bdc72c2a22b (GPL-3.0), modified locally.
+# Workspace inheritance is flattened; Pumpkin crates depend on each other by path.
+[package]
+name = "pumpkin-util"
+version = "0.2.1+26.3-26.51"
+edition = "2024"
+rust-version = "1.96"
+license = "GPL-3.0"
+
+[dependencies]
+pumpkin-nbt = { path = "../pumpkin-nbt", default-features = false }
+pumpkin-codecs = { path = "../pumpkin-codecs", default-features = false }
+serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1.0", default-features = false, features = ["std"] }
+bytes = { version = "1.12", default-features = false, features = ["serde", "std"] }
+
+num-derive = { version = "0.5", default-features = false }
+num-traits = { version = "0.2", default-features = false, features = ["std"] }
+
+colored = { version = "3.1", default-features = false }
+md-5 = { version = "0.10", default-features = false }
+quote = { version = "1.0", default-features = false, features = ["proc-macro"] , optional = true }
+syn = { version = "3.0", default-features = false, features = ["full", "parsing", "printing", "proc-macro", "clone-impls", "derive"] , optional = true }
+proc-macro2 = { version = "1.0", default-features = false, features = ["proc-macro"] , optional = true }
+
+uuid = { version = "1.29", default-features = false, features = ["serde", "v3", "v4", "std"] }
+dashmap = { version = "6.2", default-features = false }
+thiserror = { version = "2.0", default-features = false }
+
+[features]
+default = []
+codegen = ["dep:syn", "dep:quote", "dep:proc-macro2"]

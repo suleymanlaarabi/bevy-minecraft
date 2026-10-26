@@ -1,15 +1,13 @@
 //! Asynchronous terrain colliders around moving bodies.
 
-use super::{
-    ChunkVoxels, VoxelChunk, VoxelViewer, coordinates::chunk_at, edits::EditedChunk,
-    streaming::ChunkIndex,
-};
+use super::{ChunkVoxels, VoxelChunk, VoxelViewer, edits::EditedChunk, streaming::ChunkIndex};
 use avian3d::prelude::*;
 use bevy::{
     platform::collections::HashSet,
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
+use hollow_worldgen::coordinates::chunk_at;
 
 #[derive(Component)]
 pub(crate) struct ColliderBuild {
@@ -40,6 +38,7 @@ const COLLIDER_KEEP_RADIUS: i32 = 4;
 pub(crate) fn request_chunk_colliders(
     mut commands: Commands,
     index: Res<ChunkIndex>,
+    budget: Res<hollow_worldgen::tasks::VoxelTaskBudget>,
     bodies: Query<(&GlobalTransform, &RigidBody)>,
     viewers: Query<&GlobalTransform, With<VoxelViewer>>,
     chunks: Query<(&VoxelChunk, &ChunkVoxels, Has<Collider>, Has<ColliderBuild>)>,
@@ -138,7 +137,9 @@ pub(crate) fn request_chunk_colliders(
         if (has_collider || voxels.collider_built) && !voxels.collider_dirty {
             return false;
         }
-        let distance = viewer_center.map_or(0, |center| chunk.position.distance_squared(center));
+        let distance = viewer_center.map_or(0, |center| {
+            hollow_worldgen::coordinates::chunk_distance_squared(chunk.position, center)
+        });
         candidates.push((distance, entity));
         true
     });
@@ -146,7 +147,7 @@ pub(crate) fn request_chunk_colliders(
         candidates.select_nth_unstable(available);
     }
     candidates.truncate(available);
-    for &(_, entity) in candidates.iter() {
+    for &(distance, entity) in candidates.iter() {
         let Ok((chunk, voxels, _, _)) = chunks.get(entity) else {
             continue;
         };
@@ -154,7 +155,11 @@ pub(crate) fn request_chunk_colliders(
         let position = chunk.position;
         commands.entity(entity).try_insert(ColliderBuild {
             content_revision: voxels.content_revision,
-            task: pool.spawn(async move { snapshot.collider(position) }),
+            task: budget.spawn(
+                hollow_worldgen::tasks::WorkClass::PlayerCollision,
+                distance as u32,
+                async move { snapshot.collider(position) },
+            ),
         });
     }
 }

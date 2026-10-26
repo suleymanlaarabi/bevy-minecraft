@@ -1,0 +1,17 @@
+# Copied from Pumpkin 8ca5cb443272e0ac4f59b4c2ac059bdc72c2a22b (GPL-3.0), modified locally.
+# Workspace inheritance is flattened; Pumpkin crates depend on each other by path.
+[package]
+name = "pumpkin-nbt"
+version = "0.2.1+26.3-26.51"
+edition = "2024"
+rust-version = "1.96"
+license = "GPL-3.0"
+
+[dependencies]
+pumpkin-codecs = { path = "../pumpkin-codecs" }
+thiserror = { version = "2.0", default-features = false }
+bytes = { version = "1.12", default-features = false, features = ["serde", "std"] }
+uuid = { version = "1.29", default-features = false, features = ["serde", "v3", "v4", "std"] }
+cesu8 = { version = "1.1", default-features = false }
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+tracing = { version = "0.1.44", default-features = false, features = ["std", "attributes"] }

@@ -27,12 +27,19 @@ impl Plugin for HollowPlugin {
         let mut plugins = DefaultPlugins
             .set(TaskPoolPlugin {
                 task_pool_options: TaskPoolOptions {
-                    // Bound meshing and collider workers so background terrain work
-                    // leaves CPU time for rendering, ECS and Pumpkin generation.
+                    // All voxel CPU work shares this pool and its admission budget,
+                    // leaving CPU time for rendering and parallel ECS systems.
                     async_compute: bevy::app::TaskPoolThreadAssignmentPolicy {
                         min_threads: 1,
-                        max_threads: 4,
-                        percent: 0.25,
+                        max_threads: 10,
+                        percent: 0.50,
+                        on_thread_spawn: None,
+                        on_thread_destroy: None,
+                    },
+                    io: bevy::app::TaskPoolThreadAssignmentPolicy {
+                        min_threads: 1,
+                        max_threads: 2,
+                        percent: 0.1,
                         on_thread_spawn: None,
                         on_thread_destroy: None,
                     },

@@ -1,0 +1,35 @@
+[package]
+name = "hollow-worldgen"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+description = "Bevy-native voxel generation and shared section storage"
+readme = "README.md"
+keywords = ["minecraft", "worldgen", "vanilla", "pumpkin"]
+categories = ["game-development"]
+publish = false
+
+
+[dependencies]
+pumpkin-nbt = { path = "crates/pumpkin-nbt", default-features = false }
+pumpkin-util = { path = "crates/pumpkin-util", default-features = false }
+pumpkin-data = { path = "crates/pumpkin-data", default-features = false, features = ["default"] }
+
+thiserror = { version = "2.0", default-features = false }
+serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1.0", default-features = false, features = ["std"] }
+tracing = { version = "0.1.44", default-features = false, features = ["std", "attributes"] }
+sha2 = { version = "0.10", default-features = false }
+bitflags = { version = "2.13.2", default-features = false, features = ["std"] }
+dashmap = { version = "6.2", default-features = false }
+itertools = { version = "0.15.0", default-features = false, features = ["use_std"] }
+rustc-hash = { version = "2.1.3", default-features = false, features = ["std"] }
+
+async-channel = "2"
+lz4_flex = "0.13"
+crc32fast = "1"
+bevy_app = "0.20"
+bevy_ecs = "0.20"
+bevy_math = "0.20"
+bevy_tasks = "0.20"
+bevy_diagnostic = "0.20"

@@ -828,7 +828,7 @@ fn fallback(state: VoxelState, world: IVec3, mut visit: impl FnMut(&ModelQuad)) 
     for b in state
         .selection_boxes(world)
         .chain(
-            (kind == VoxelKind::Lava).then_some(crate::voxel::state::BlockBox {
+            (kind == VoxelKind::Lava).then_some(hollow_worldgen::state::BlockBox {
                 min: Vec3::ZERO,
                 max: Vec3::ONE,
             }),

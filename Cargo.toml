@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/worldgen", "crates/worldgen/crates/*"]
+resolver = "3"
+
 [package]
 name = "hollow"
 version = "0.1.0"
@@ -10,17 +14,15 @@ dev = ["bevy/bevy_dev_tools", "bevy/render_dev_tools", "avian3d/bevy_diagnostic"
 [dependencies]
 avian3d = { version = "0.8", default-features = false, features = ["3d", "parry-f32", "parallel"] }
 bevy = { version = "0.20", default-features = false, features = ["ui", "3d", "bevy_feathers", "bevy_settings"] }
-pumpkin-worldgen = { path = "../worldgen" }
-pumpkin-data = { path = "../worldgen/crates/pumpkin-data" }
-pumpkin-util = { path = "../worldgen/crates/pumpkin-util" }
+hollow-worldgen = { path = "crates/worldgen" }
+pumpkin-data = { path = "crates/worldgen/crates/pumpkin-data" }
+pumpkin-util = { path = "crates/worldgen/crates/pumpkin-util" }
 serde_json = "1.0"
 ron = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 rusqlite = { version = "0.38", features = ["bundled"] }
-lz4_flex = "0.13"
 directories = "6"
 uuid = { version = "1", features = ["v4"] }
-crc32fast = "1"
 bytemuck = "1"
 
 [profile.dev]
@@ -45,5 +47,33 @@ opt-level = 3
 opt-level = 3
 # Without these, wgpu enables Vulkan validation and Bevy validates every indirect draw.
 # Re-enable GPU validation when debugging shaders: `env WGPU_VALIDATION=1 cargo run`.
+debug-assertions = false
+overflow-checks = false
+
+# Workspace members do not inherit the dependency wildcard override. Preserve the
+# generator packages' existing optimized development settings after integration.
+
+[profile.dev.package.hollow-worldgen]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.pumpkin-data]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.pumpkin-util]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.pumpkin-nbt]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.pumpkin-codecs]
+opt-level = 3
 debug-assertions = false
 overflow-checks = false

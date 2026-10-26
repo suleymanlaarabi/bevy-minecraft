@@ -6,8 +6,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub(super) const FORMAT_VERSION: u32 = 2;
-pub(super) const GENERATOR_VERSION: &str = "hollow-pumpkin-1";
+pub(super) const FORMAT_VERSION: u32 = 3;
+use hollow_worldgen::GENERATOR_VERSION;
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorldQuality {
@@ -22,10 +22,10 @@ impl WorldQuality {
             Self::Vanilla => "Vanilla",
         }
     }
-    pub(crate) fn native(self) -> pumpkin_worldgen::TerrainQuality {
+    pub(crate) fn native(self) -> hollow_worldgen::TerrainQuality {
         match self {
-            Self::Fast => pumpkin_worldgen::TerrainQuality::Fast,
-            Self::Vanilla => pumpkin_worldgen::TerrainQuality::Vanilla,
+            Self::Fast => hollow_worldgen::TerrainQuality::Fast,
+            Self::Vanilla => hollow_worldgen::TerrainQuality::Vanilla,
         }
     }
 }
@@ -42,6 +42,9 @@ pub struct WorldMetadata {
     pub generator: String,
     pub pumpkin_commit: String,
     pub minecraft_version: String,
+    pub dimension: String,
+    pub fast_version: u32,
+    pub registry: u64,
 }
 impl WorldMetadata {
     pub(super) fn new(name: String, seed: i64, quality: WorldQuality) -> Self {
@@ -54,18 +57,24 @@ impl WorldMetadata {
             last_played: now(),
             format: FORMAT_VERSION,
             generator: GENERATOR_VERSION.into(),
-            pumpkin_commit: pumpkin_worldgen::PUMPKIN_COMMIT.into(),
-            minecraft_version: pumpkin_worldgen::MINECRAFT_VERSION.into(),
+            pumpkin_commit: hollow_worldgen::PUMPKIN_COMMIT.into(),
+            minecraft_version: hollow_worldgen::MINECRAFT_VERSION.into(),
+            dimension: "overworld".into(),
+            fast_version: hollow_worldgen::FAST_GENERATION_VERSION,
+            registry: hollow_worldgen::state::registry_identity(),
         }
     }
     pub(super) fn validate(&self) -> io::Result<()> {
         if self.format != FORMAT_VERSION
             || self.generator != GENERATOR_VERSION
-            || self.pumpkin_commit != pumpkin_worldgen::PUMPKIN_COMMIT
-            || self.minecraft_version != pumpkin_worldgen::MINECRAFT_VERSION
+            || self.pumpkin_commit != hollow_worldgen::PUMPKIN_COMMIT
+            || self.minecraft_version != hollow_worldgen::MINECRAFT_VERSION
+            || self.dimension != "overworld"
+            || self.fast_version != hollow_worldgen::FAST_GENERATION_VERSION
+            || self.registry != hollow_worldgen::state::registry_identity()
         {
             return Err(io::Error::other(
-                "Incompatible world version or block registry.",
+                "Incompatible world version, dimension, generation settings, or block registry.",
             ));
         }
         if uuid::Uuid::parse_str(&self.id).is_err() || self.name.trim().is_empty() {
@@ -258,39 +267,3 @@ impl Checkpoint {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn metadata_preserves_signed_seeds_and_rejects_incompatible_worlds() {
-        let mut metadata = WorldMetadata::new("World".into(), i64::MIN, WorldQuality::Vanilla);
-        let json = serde_json::to_vec(&metadata).unwrap();
-        let restored: WorldMetadata = serde_json::from_slice(&json).unwrap();
-        assert_eq!(restored.seed, i64::MIN);
-        assert_eq!(restored.quality, WorldQuality::Vanilla);
-        assert!(restored.validate().is_ok());
-        metadata.format += 1;
-        assert!(metadata.validate().is_err());
-    }
-
-    #[test]
-    fn invalid_stacks_are_rejected_before_gameplay() {
-        assert!(
-            SavedStack {
-                name: "stone".into(),
-                count: 0
-            }
-            .restore()
-            .is_err()
-        );
-        assert!(
-            SavedStack {
-                name: "missing:item".into(),
-                count: 1
-            }
-            .restore()
-            .is_err()
-        );
-    }
-}

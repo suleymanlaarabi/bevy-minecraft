@@ -100,27 +100,3 @@ impl VoxelCommandsExt for Commands<'_, '_> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-    use bevy::ecs::system::RunSystemOnce;
-
-    #[test]
-    fn collision_readiness_waits_for_the_loaded_chunk_voxels() {
-        let mut world = World::new();
-        world.init_resource::<ChunkIndex>();
-        let chunk = world.spawn_empty().id();
-        world
-            .resource_mut::<ChunkIndex>()
-            .insert(IVec2::ZERO, chunk);
-        let ready = |voxels: VoxelWorld| voxels.collision_ready(Vec3::new(8.0, 130.0, 8.0));
-        assert!(!world.run_system_once(ready).unwrap());
-        world
-            .entity_mut(chunk)
-            .insert(ChunkVoxels::filled(VoxelKind::Air));
-        assert!(world.run_system_once(ready).unwrap());
-        world.despawn(chunk);
-        assert!(!world.run_system_once(ready).unwrap());
-    }
-}

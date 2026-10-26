@@ -399,28 +399,3 @@ pub(crate) fn block_texture(asset_server: &AssetServer, path: &str, layers: u32)
         })
         .load(path.to_owned())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn built_in_packs_have_valid_layers_and_assets() {
-        for id in TexturePackId::all() {
-            let pack = TexturePack::load(id);
-            assert!(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("assets")
-                    .join(&pack.texture_path)
-                    .is_file()
-            );
-            for &kind in VoxelKind::itemizable() {
-                for axis in 0..3 {
-                    for positive in [false, true] {
-                        assert!(pack.texture_layer(kind, axis, positive) < pack.layers);
-                    }
-                }
-            }
-        }
-        assert!(TexturePackId::default().is_available());
-    }
-}

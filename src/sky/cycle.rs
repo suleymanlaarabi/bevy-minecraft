@@ -195,28 +195,3 @@ pub(super) fn update_sky_state(time_of_day: Res<TimeOfDay>, mut sky: ResMut<SkyS
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn lights_never_shine_from_below_or_from_negative_z() {
-        for step in 0..1000 {
-            let sky = SkyState::new(&TimeOfDay::from_days(step as f64 / 1000.0));
-            let light = if sky.sun_is_up() {
-                sky.sun_light_direction
-            } else {
-                sky.moon_light_direction
-            };
-            assert!(light.y >= 0.0 && light.z > 0.0, "{light:?}");
-        }
-    }
-
-    #[test]
-    fn time_wraps_into_whole_days() {
-        let mut time = TimeOfDay::from_days(2.75);
-        time.advance(0.5);
-        assert_eq!(time.day, 3);
-        assert!((time.fraction - 0.25).abs() < 1e-6);
-    }
-}

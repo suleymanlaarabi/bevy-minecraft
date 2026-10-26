@@ -5,7 +5,6 @@ use crate::{
     player::PlayerCamera,
     voxel::{
         ChunkVoxels, VoxelChunk,
-        coordinates::{CHUNK_HEIGHT, SECTION_COUNT, SECTION_HEIGHT},
         edits::EditedChunk,
         streaming::{ChunkIndex, StreamOffsets, StreamState},
     },
@@ -14,6 +13,7 @@ use bevy::{
     camera::visibility::{RenderLayers, VisibilitySystems},
     prelude::*,
 };
+use hollow_worldgen::coordinates::{CHUNK_HEIGHT, SECTION_COUNT, SECTION_HEIGHT};
 use std::collections::VecDeque;
 
 /// Hidden from the world camera, still available to directional shadow views.

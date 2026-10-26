@@ -2,12 +2,10 @@ use super::{
     material::{ModelBlend, ModelMaterial, VoxelCutoutMaterial, VoxelMaterial, WaterMaterial},
     texture_pack::{TexturePack, block_texture},
 };
+use bevy::render::storage::ShaderBuffer;
 use bevy::{
     prelude::*,
-    render::{
-        render_resource::{TextureDimension, TextureViewDimension},
-        storage::ShaderBuffer,
-    },
+    render::render_resource::{TextureDimension, TextureViewDimension},
 };
 
 /// A one-layer image is a valid texture array, but its default GPU view is D2.

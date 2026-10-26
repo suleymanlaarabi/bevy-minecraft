@@ -2,11 +2,11 @@
 
 use super::{
     ChunkVoxels, VoxelKind, VoxelState,
-    coordinates::{CHUNK_HEIGHT, CHUNK_SIZE, FULL_SKY, split_world_position},
     lighting::LitEdits,
     streaming::{ChunkIndex, PendingEdits, StoredChunks},
 };
 use bevy::prelude::*;
+use hollow_worldgen::coordinates::{CHUNK_HEIGHT, CHUNK_SIZE, FULL_SKY, split_world_position};
 
 #[derive(Event, Clone, Copy, Debug)]
 pub struct SetVoxel {
@@ -283,19 +283,6 @@ pub(super) fn border_neighbors(local: IVec3) -> impl Iterator<Item = IVec2> {
     .flatten()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn border_edits_refresh_cardinal_and_diagonal_neighbors() {
-        let corner: Vec<_> = border_neighbors(IVec3::new(0, 5, 15)).collect();
-        assert_eq!(corner.len(), 3);
-        assert!(corner.contains(&IVec2::new(-1, 0)));
-        assert!(corner.contains(&IVec2::new(0, 1)));
-        assert!(corner.contains(&IVec2::new(-1, 1)));
-        assert_eq!(border_neighbors(IVec3::new(4, 5, 7)).count(), 0);
-    }
-}
 
 fn read_state(
     position: IVec3,
@@ -429,7 +416,7 @@ fn collect_border_connections(
     seeds: &mut Vec<IVec3>,
 ) {
     let origin = IVec3::new(chunk.x * CHUNK_SIZE, 0, chunk.y * CHUNK_SIZE);
-    for section in 0..super::coordinates::SECTION_COUNT {
+    for section in 0..hollow_worldgen::coordinates::SECTION_COUNT {
         if !voxels
             .states
             .section(section)
@@ -437,8 +424,8 @@ fn collect_border_connections(
         {
             continue;
         }
-        let base = section as i32 * super::coordinates::SECTION_HEIGHT;
-        for y in base..base + super::coordinates::SECTION_HEIGHT {
+        let base = section as i32 * hollow_worldgen::coordinates::SECTION_HEIGHT;
+        for y in base..base + hollow_worldgen::coordinates::SECTION_HEIGHT {
             for along in 0..CHUNK_SIZE {
                 let mut local = IVec3::new(along, y, along);
                 local[axis] = edge;

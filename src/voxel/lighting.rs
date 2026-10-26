@@ -1,17 +1,15 @@
-//! Block light propagates locally in the edit frame; Pumpkin reconciles streamed
-//! lighting and skylight off the ECS thread.
-//!
-//! Streamed chunks keep the light Pumpkin computed during generation. Only the
-//! neighborhood of edited chunks is mirrored into the lighting context.
-use super::{ChunkVoxels, VoxelChunk, storage::Layer, streaming::ChunkIndex};
+//! Local edit-frame light estimates and authoritative snapshot reconciliation.
+//! Initial light comes from generation; only edited neighborhoods need relighting.
+use super::{ChunkVoxels, VoxelChunk, streaming::ChunkIndex};
 use bevy::{
     ecs::system::SystemParam,
     platform::collections::{HashMap, HashSet},
     prelude::*,
-    tasks::{Task, TaskPool, TaskPoolBuilder, futures::check_ready},
+    tasks::{Task, futures::check_ready},
 };
-use pumpkin_worldgen::{Dimension, LightingChunk, LightingWorld};
-use std::{collections::VecDeque, sync::OnceLock};
+use hollow_worldgen::reconcile::{LightingChunk, LightingSnapshots};
+use hollow_worldgen::sections::Layer;
+use std::collections::VecDeque;
 
 /// Chebyshev radius around an edited chunk mirrored into the lighting context: the
 /// relit 3x3 area plus the ring that seeds light across its border.
@@ -62,7 +60,7 @@ impl BlockLight<'_, '_> {
 
     fn set(&mut self, position: IVec3, light: u8) {
         let (chunk, local) = super::split_world_position(position);
-        let Some(index) = super::coordinates::cell_index(local) else {
+        let Some(index) = hollow_worldgen::coordinates::cell_index(local) else {
             return;
         };
         let Some(&entity) = self.index.get(&chunk) else {
@@ -77,9 +75,9 @@ impl BlockLight<'_, '_> {
                 .set_block_light(index, light);
             for offset in std::iter::once(IVec2::ZERO).chain(super::edits::border_neighbors(local))
             {
-                let (sections, authoritative) = self.changed.entry(chunk + offset).or_default();
+                let (sections, changed_column) = self.changed.entry(chunk + offset).or_default();
                 *sections |= ChunkVoxels::sections_around(local.y);
-                *authoritative |= offset == IVec2::ZERO;
+                *changed_column |= offset == IVec2::ZERO;
             }
         }
     }
@@ -154,7 +152,7 @@ pub(crate) fn update_block_light(
     }
     // Mark once per affected column, including mesh readers across its borders.
     let changed = std::mem::take(&mut *light.changed);
-    for (position, (sections, authoritative)) in &changed {
+    for (position, (sections, changed_column)) in &changed {
         if let Some(&entity) = light.index.get(position)
             && let Ok(mut voxels) = light.chunks.get_mut(entity)
         {
@@ -162,8 +160,7 @@ pub(crate) fn update_block_light(
             commands
                 .entity(entity)
                 .try_insert(super::edits::EditedChunk);
-            if *authoritative {
-                voxels.save_revision += 1;
+            if *changed_column {
                 commands.trigger(crate::block_behavior::visuals::ChunkLightChanged(entity));
             }
         }
@@ -184,33 +181,24 @@ pub(super) fn removed_lighting(
 }
 
 struct Output {
-    context: LightingWorld,
+    context: LightingSnapshots,
     updates: Vec<(IVec2, Layer<u8>)>,
 }
 
 #[derive(Resource, Default)]
 pub(crate) struct LightingState {
-    context: Option<LightingWorld>,
+    context: Option<LightingSnapshots>,
     task: Option<Task<Output>>,
     submitted: HashMap<IVec2, Version>,
     ready: HashMap<IVec2, Layer<u8>>,
     synchronized_version: Option<u64>,
 }
 
-fn pool() -> &'static TaskPool {
-    static POOL: OnceLock<TaskPool> = OnceLock::new();
-    POOL.get_or_init(|| {
-        TaskPoolBuilder::new()
-            .num_threads(1)
-            .thread_name("voxel-lighting".into())
-            .build()
-    })
-}
-
 pub(crate) fn update_lighting(
     mut commands: Commands,
     mut state: ResMut<LightingState>,
     version: Res<LightingVersion>,
+    budget: Res<hollow_worldgen::tasks::VoxelTaskBudget>,
     index: Res<ChunkIndex>,
     edited: Query<&VoxelChunk, With<LitEdits>>,
     mut chunks: Query<(Entity, &mut ChunkVoxels)>,
@@ -229,8 +217,26 @@ pub(crate) fn update_lighting(
             return;
         };
         state.task = None;
-        state.context = Some(output.context);
-        state.ready.extend(output.updates);
+        // Every input must still identify the same entity and block revision.
+        // Discard the context too: reusing its stale light would seed the retry.
+        if state
+            .submitted
+            .iter()
+            .any(|(position, &(entity, revision))| {
+                index.get(position) != Some(&entity)
+                    || chunks
+                        .get(entity)
+                        .map_or(true, |(_, voxels)| voxels.content_revision != revision)
+            })
+        {
+            state.submitted.clear();
+            state.context = None;
+            state.ready.clear();
+            state.synchronized_version = None;
+        } else {
+            state.context = Some(output.context);
+            state.ready.extend(output.updates);
+        }
     }
     current_positions.clear();
     current_positions.extend(edited.iter().map(|chunk| chunk.position));
@@ -327,30 +333,33 @@ pub(crate) fn update_lighting(
     if !snapshots.is_empty() || !removed.is_empty() {
         let context = state.context.take();
         let removed = removed.into_iter().map(|p| (p.x, p.y)).collect::<Vec<_>>();
-        state.task = Some(pool().spawn(async move {
-            let mut context = context.unwrap_or_else(|| LightingWorld::new(Dimension::Overworld));
-            let snapshots = snapshots
-                .into_iter()
-                .map(|(position, states, light, edits)| LightingChunk {
-                    x: position.x,
-                    z: position.y,
-                    states: states.to_cells(super::VoxelState::id),
-                    light: light.to_cells(std::convert::identity),
-                    edits: edits.iter().copied().collect(),
-                })
-                .collect::<Vec<_>>();
-            let updates = context
-                .update(snapshots, &removed)
-                .into_iter()
-                .map(|update| {
-                    (
-                        IVec2::new(update.x, update.z),
-                        Layer::from_cells(&update.light),
-                    )
-                })
-                .collect();
-            Output { context, updates }
-        }));
+        state.task =
+            Some(
+                budget.spawn(hollow_worldgen::tasks::WorkClass::Lighting, 0, async move {
+                    let mut context = context.unwrap_or_else(|| {
+                        LightingSnapshots::new(
+                            super::generation::MIN_Y,
+                            hollow_worldgen::coordinates::CHUNK_HEIGHT,
+                        )
+                    });
+                    let snapshots = snapshots
+                        .into_iter()
+                        .map(|(position, states, light, edits)| LightingChunk {
+                            x: position.x,
+                            z: position.y,
+                            states,
+                            light,
+                            edits,
+                        })
+                        .collect::<Vec<_>>();
+                    let updates = context
+                        .update(snapshots, &removed)
+                        .into_iter()
+                        .map(|update| (IVec2::new(update.x, update.z), update.light))
+                        .collect();
+                    Output { context, updates }
+                }),
+            );
         return;
     }
     state.synchronized_version = Some(version.0);

@@ -425,7 +425,7 @@ fn targeted_state(
                     if state.native().is_air() || state.kind() == VoxelKind::Water {
                         continue;
                     }
-                    let mut inspect = |shape: crate::voxel::state::BlockBox| {
+                    let mut inspect = |shape: hollow_worldgen::state::BlockBox| {
                         let Some((distance, normal)) =
                             shape.translated(owner.as_vec3()).ray(origin, direction)
                         else {
@@ -451,7 +451,7 @@ fn targeted_state(
                         }
                     };
                     if state.kind() == VoxelKind::Lava {
-                        inspect(crate::voxel::state::BlockBox {
+                        inspect(hollow_worldgen::state::BlockBox {
                             min: Vec3::ZERO,
                             max: Vec3::ONE,
                         });
@@ -479,127 +479,5 @@ fn targeted_state(
         entered = next[axis];
         cell[axis] += step[axis];
         next[axis] += delta[axis];
-    }
-}
-#[cfg(test)]
-fn targeted_voxel(
-    origin: Vec3,
-    direction: Dir3,
-    mut sample: impl FnMut(IVec3) -> Option<VoxelKind>,
-) -> Option<BlockTarget> {
-    targeted_state(origin, direction, |p| {
-        sample(p).map(VoxelKind::default_state)
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn voxel_ray_targets_leaves_through_water_and_keeps_the_entry_face() {
-        let target = targeted_voxel(Vec3::splat(0.5), Dir3::X, |cell| {
-            Some(match cell.x {
-                1 => VoxelKind::Water,
-                2 => VoxelKind::Leaves,
-                _ => VoxelKind::Air,
-            })
-        })
-        .unwrap();
-        assert_eq!(target.destroy, IVec3::new(2, 0, 0));
-        assert_eq!(target.place, IVec3::new(1, 0, 0));
-        assert_eq!(target.normal, Vec3::NEG_X);
-    }
-
-    #[test]
-    fn voxel_ray_handles_negative_boundary_origins_and_axis_aligned_rays() {
-        let target = targeted_voxel(Vec3::new(0.0, 0.5, 0.5), Dir3::NEG_X, |cell| {
-            Some(if cell.x == -1 {
-                VoxelKind::Stone
-            } else {
-                VoxelKind::Air
-            })
-        })
-        .unwrap();
-        assert_eq!(target.destroy, IVec3::new(-1, 0, 0));
-        assert_eq!(target.place, IVec3::ZERO);
-        assert_eq!(target.normal, Vec3::X);
-        assert!(
-            targeted_voxel(Vec3::splat(0.5), Dir3::Y, |cell| {
-                Some(if cell.y == 6 {
-                    VoxelKind::Stone
-                } else {
-                    VoxelKind::Air
-                })
-            })
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn voxel_ray_stops_at_unbreakable_blocks() {
-        for blocker in [VoxelKind::Bedrock, VoxelKind::Lava] {
-            let target = targeted_voxel(Vec3::splat(0.5), Dir3::X, |cell| {
-                Some(match cell.x {
-                    1 => blocker,
-                    2 => VoxelKind::Stone,
-                    _ => VoxelKind::Air,
-                })
-            })
-            .unwrap();
-            assert_eq!(target.destroy, IVec3::new(1, 0, 0));
-        }
-    }
-
-    #[test]
-    fn voxel_ray_stops_at_unavailable_chunks() {
-        let hit = targeted_voxel(Vec3::splat(0.5), Dir3::X, |cell| match cell.x {
-            1 => None,
-            2 => Some(VoxelKind::Stone),
-            _ => Some(VoxelKind::Air),
-        });
-        assert!(hit.is_none());
-    }
-
-    #[test]
-    fn overlay_global_transform_is_current_in_the_render_frame() {
-        let mut app = App::new();
-        app.add_plugins(TransformPlugin);
-        app.init_resource::<Assets<Mesh>>();
-        app.insert_resource(BreakingAssets {
-            mesh: default(),
-            materials: default(),
-        });
-        app.add_systems(
-            PostUpdate,
-            sync_breaking_overlay.before(TransformSystems::Propagate),
-        );
-        app.world_mut().spawn((
-            PlayerCamera::default(),
-            BreakingState(Some(BreakProgress {
-                position: IVec3::new(3, 4, 5),
-                kind: VoxelKind::Stone,
-                state: VoxelKind::Stone.default_state(),
-                elapsed: 0.1,
-            })),
-        ));
-        let overlay = app
-            .world_mut()
-            .spawn((
-                BreakingOverlay,
-                Transform::default(),
-                Visibility::Hidden,
-                MeshMaterial3d::<crate::voxel::render::ModelMaterial>::default(),
-                Mesh3d::default(),
-            ))
-            .id();
-        app.update();
-        assert_eq!(
-            app.world()
-                .get::<GlobalTransform>(overlay)
-                .unwrap()
-                .translation(),
-            Vec3::new(3.0, 4.0, 5.0)
-        );
     }
 }

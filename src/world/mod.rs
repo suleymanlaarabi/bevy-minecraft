@@ -300,6 +300,7 @@ fn poll_browser(
         Ok(opened) => {
             settings.seed = opened.session.metadata.seed;
             commands.insert_resource(opened.session);
+            commands.insert_resource(opened.generator.runtime.clone());
             commands.insert_resource(opened.generator);
             *save = SaveState::default();
             next.set(GameState::Game);
@@ -403,7 +404,9 @@ fn prepare_session(
     virtual_time.pause();
     // Preserve the existing developer autoplay path as an explicitly ephemeral session.
     if generator.is_none() {
-        commands.insert_resource(WorldGenerator::new(settings.seed));
+        let generator = WorldGenerator::new(settings.seed);
+        commands.insert_resource(generator.runtime.clone());
+        commands.insert_resource(generator);
     }
     if let Some(session) = session {
         for &(position, state) in &session.resume.pending {
@@ -418,11 +421,13 @@ fn prepare_session(
 }
 
 fn begin_saving(
+    generator: Res<WorldGenerator>,
     mut physics: ResMut<Time<Physics>>,
     mut virtual_time: ResMut<Time<Virtual>>,
     mut commands: Commands,
     mut cursors: Query<&mut CursorOptions>,
 ) {
+    generator.runtime.pause();
     physics.pause();
     virtual_time.pause();
     for mut cursor in &mut cursors {
@@ -432,6 +437,7 @@ fn begin_saving(
     ui::saving(&mut commands);
 }
 fn resume_physics(
+    generator: Res<WorldGenerator>,
     mut physics: ResMut<Time<Physics>>,
     mut virtual_time: ResMut<Time<Virtual>>,
     inventory: Res<State<InventoryState>>,
@@ -440,6 +446,7 @@ fn resume_physics(
     mut commands: Commands,
     overlays: Query<Entity, With<ui::SaveOverlay>>,
 ) {
+    generator.runtime.resume();
     physics.unpause();
     virtual_time.unpause();
     for mut cursor in &mut cursors {
@@ -492,7 +499,10 @@ fn checkpoint(
     phase: Res<State<WorldSessionPhase>>,
     time: Res<Time<Real>>,
     session: Option<Res<WorldSession>>,
-    generator: Res<WorldGenerator>,
+    generation: (
+        Res<WorldGenerator>,
+        Res<hollow_worldgen::tasks::VoxelTaskBudget>,
+    ),
     players: Query<
         (
             &Transform,
@@ -519,6 +529,7 @@ fn checkpoint(
     game_time: Res<Time>,
     time_of_day: Res<crate::sky::TimeOfDay>,
 ) {
+    let (generator, budget) = generation;
     let Some(session) = session else {
         return;
     };
@@ -604,26 +615,44 @@ fn checkpoint(
     metadata.last_played = model::now();
     let database = session.database.clone();
     let generator = generator.clone();
+    let budget = budget.clone();
     save.task = Some(IoTaskPool::get().spawn(async move {
         // Cache bases reach a durable transaction before their game checkpoint.
-        generator.flush()?;
-        let revisions = snapshots
-            .iter()
-            .map(|(p, v)| (*p, v.save_revision))
-            .collect();
-        let records = snapshots
-            .into_iter()
-            .map(|(p, v)| ((p.x, p.y), v.encode_saved()))
-            .collect();
-        let container_revisions = container_snapshots
-            .iter()
-            .map(|(p, data)| (*p, data.revision))
-            .collect();
-        let container_records = container_snapshots
-            .into_iter()
-            .map(|(p, data)| Ok(((p.x, p.y), data.encode()?)))
-            .collect::<io::Result<Vec<_>>>()?;
-        database.checkpoint(&metadata, &checkpoint, records, container_records)?;
+        generator.flush().await?;
+        let (prepared, revisions, container_revisions, checkpoint, metadata) = budget
+            .spawn(hollow_worldgen::tasks::WorkClass::Encoding, 0, async move {
+                let revisions = snapshots
+                    .iter()
+                    .map(|(p, v)| (*p, v.save_revision))
+                    .collect();
+                let records = snapshots
+                    .into_iter()
+                    .map(|(p, v)| ((p.x, p.y), v.encode_saved()))
+                    .collect();
+                let container_revisions = container_snapshots
+                    .iter()
+                    .map(|(p, data)| (*p, data.revision))
+                    .collect();
+                let container_records = container_snapshots
+                    .into_iter()
+                    .map(|(p, data)| Ok(((p.x, p.y), data.encode()?)))
+                    .collect::<io::Result<Vec<_>>>()?;
+                let prepared = storage::PreparedCheckpoint::encode(
+                    &metadata,
+                    &checkpoint,
+                    records,
+                    container_records,
+                )?;
+                Ok::<_, io::Error>((
+                    prepared,
+                    revisions,
+                    container_revisions,
+                    checkpoint,
+                    metadata,
+                ))
+            })
+            .await?;
+        database.checkpoint(prepared)?;
         Ok(SaveAck {
             revisions,
             container_revisions,
@@ -703,6 +732,8 @@ fn poll_save(
 fn end_session(mut commands: Commands, mut virtual_time: ResMut<Time<Virtual>>) {
     virtual_time.unpause();
     commands.queue(|world: &mut World| {
+        world.remove_resource::<hollow_worldgen::GenerationSession>();
+        world.remove_resource::<hollow_worldgen::GenerationSettings>();
         if let Some(generator) = world.remove_resource::<WorldGenerator>() {
             generator.cancel_requests();
             IoTaskPool::get()

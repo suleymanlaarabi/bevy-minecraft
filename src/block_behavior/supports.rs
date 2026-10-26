@@ -17,7 +17,7 @@ pub(crate) struct SupportCheck {
 }
 
 fn schedule(world: &mut World, position: IVec3, create: bool) {
-    if !(0..crate::voxel::coordinates::CHUNK_HEIGHT).contains(&position.y) {
+    if !(0..hollow_worldgen::coordinates::CHUNK_HEIGHT).contains(&position.y) {
         return;
     }
     let existing = super::containers::find_block(world, position);
@@ -102,7 +102,7 @@ pub(crate) fn update(
             let info = state_behavior(state);
             let mut unavailable = false;
             let mut sample = |p: IVec3| {
-                if !(0..crate::voxel::coordinates::CHUNK_HEIGHT).contains(&p.y) {
+                if !(0..hollow_worldgen::coordinates::CHUNK_HEIGHT).contains(&p.y) {
                     return Some(VoxelKind::Air.default_state());
                 }
                 let value = world.state(p);

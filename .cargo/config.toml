@@ -6,3 +6,21 @@ codegen-backend = "cranelift"
 
 [profile.dev.package."*"]
 codegen-backend = "llvm"
+
+# The dependency wildcard excludes workspace members. Preserve the generator's
+# optimized backend after integration, including its hot registry/property code.
+# Its noise kernels also require AVX2 intrinsics unsupported by Cranelift.
+[profile.dev.package.hollow-worldgen]
+codegen-backend = "llvm"
+
+[profile.dev.package.pumpkin-util]
+codegen-backend = "llvm"
+
+[profile.dev.package.pumpkin-data]
+codegen-backend = "llvm"
+
+[profile.dev.package.pumpkin-nbt]
+codegen-backend = "llvm"
+
+[profile.dev.package.pumpkin-codecs]
+codegen-backend = "llvm"

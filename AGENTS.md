@@ -1,4 +1,4 @@
-- Always write code and project content in **English**, including identifiers, comments, documentation, UI text, and error messages.
+- Always write code and project content in **English**, including identifiers, comments, UI text.
 - Never compile the project in **release** mode.
 - Verify changes using only `cargo check`. Do not run the project.
 - Do not validate performance optimizations with benchmarks or tests. Code inspection and reasoning are sufficient.

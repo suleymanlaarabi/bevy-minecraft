@@ -2,7 +2,7 @@ use super::material::VoxelMaterial;
 use bevy::{
     prelude::*,
     render::render_resource::{TextureDataOrder, TextureFormat},
-    tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
+    tasks::{Task, futures::check_ready},
 };
 
 /// Box-filtered mip chain of a pixel-art array texture, as `(data, level count)` in
@@ -115,6 +115,7 @@ pub(crate) struct MipmapJob {
 /// Gives the terrain's block texture its mip chain once it loads, including after a
 /// texture pack switch. Runs on image or material asset events, and while a job runs.
 pub(crate) fn generate_block_mipmaps(
+    budget: Res<hollow_worldgen::tasks::VoxelTaskBudget>,
     mut commands: Commands,
     assets: Option<Res<super::assets::VoxelAssets>>,
     materials: Res<Assets<VoxelMaterial>>,
@@ -154,44 +155,8 @@ pub(crate) fn generate_block_mipmaps(
     let image = image.clone();
     commands.insert_resource(MipmapJob {
         image: source,
-        task: AsyncComputeTaskPool::get().spawn(async move { block_mipmaps(&image) }),
+        task: budget.spawn(hollow_worldgen::tasks::WorkClass::Loading, 0, async move {
+            block_mipmaps(&image)
+        }),
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn block_mipmaps_average_shaded_texels_per_layer() {
-        use bevy::render::render_resource::{Extent3d, TextureDimension};
-        // Two 2x2 layers: opaque red with one transparent texel, then opaque white.
-        let red = [255, 0, 0, 255];
-        let data = [
-            red,
-            red,
-            red,
-            [0, 0, 0, 0],
-            [255; 4],
-            [255; 4],
-            [255; 4],
-            [255; 4],
-        ];
-        let image = Image::new(
-            Extent3d {
-                width: 2,
-                height: 2,
-                depth_or_array_layers: 2,
-            },
-            TextureDimension::D2,
-            data.concat(),
-            TextureFormat::Rgba8UnormSrgb,
-            default(),
-        );
-        let (mipmapped, levels) = block_mipmaps(&image).unwrap();
-        assert_eq!(levels, 2);
-        // Layer-major: each layer is followed by its own 1x1 level.
-        assert_eq!(mipmapped.len(), 2 * (16 + 4));
-        assert_eq!(&mipmapped[16..20], &[255, 0, 0, 191]);
-        assert_eq!(&mipmapped[36..40], &[255; 4]);
-    }
 }

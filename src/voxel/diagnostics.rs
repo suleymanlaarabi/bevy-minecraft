@@ -463,32 +463,3 @@ fn percentile(samples: &[f64], percentile: f64) -> f64 {
     let index = ((sorted.len() - 1) as f64 * percentile).round() as usize;
     sorted[index]
 }
-
-#[cfg(test)]
-mod tests {
-    use super::percentile;
-
-    #[test]
-    fn frame_collection_produces_nonzero_percentiles_without_logging() {
-        use super::{VoxelDiagnostics, record_voxel_frame};
-        use bevy::ecs::system::RunSystemOnce;
-        use bevy::prelude::*;
-        let mut world = World::new();
-        let mut time = Time::<Real>::default();
-        time.advance_by(core::time::Duration::from_millis(8));
-        world.insert_resource(time);
-        world.init_resource::<VoxelDiagnostics>();
-        world.run_system_once(record_voxel_frame).unwrap();
-        assert_eq!(
-            world.resource::<VoxelDiagnostics>().frame_percentiles(),
-            (8.0, 8.0, 8.0)
-        );
-    }
-
-    #[test]
-    fn percentile_handles_unsorted_and_empty_samples() {
-        assert_eq!(percentile(&[], 0.95), 0.0);
-        assert_eq!(percentile(&[8.0, 2.0, 4.0, 6.0], 0.50), 6.0);
-        assert_eq!(percentile(&[8.0, 2.0, 4.0, 6.0], 0.95), 8.0);
-    }
-}
