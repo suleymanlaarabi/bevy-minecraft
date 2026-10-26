@@ -120,6 +120,14 @@ from the registry. Doors, tall plants, and beds share pair placement/removal;
 chests share connection handling across their material variants. Selection and
 collision continue to use native shapes. Block drops use canonical item forms.
 
+The [block behavior architecture](docs/block-behaviors.md) and
+[extension cookbook](docs/block-behavior-cookbook.md) define the shared capability,
+ECS ownership and persistence contracts. Right-click manually opens doors, trapdoors
+and fence gates, or opens normal chests with 27/54 persistent slots and animated
+lids. Sneak with a block selected to place against interactive blocks. Ladders and
+vines support climbing, jumping upward and holding position while sneaking.
+World format 2 rejects older saves without migration.
+
 Compatible cubes keep greedy meshing and eight-byte vertices. Other models share
 sixteen-byte vertices and section-level opaque, cutout, or translucent batches.
 Static blocks do not create individual ECS entities. Deterministic multipart
@@ -145,12 +153,10 @@ obstacles.
 ## Current limitations
 
 - No vanilla ticks: plant growth, falling dripstone, fluids, leaves, damage, and
-  redstone are not simulated. Doors and gates display their state but do not
-  open interactively.
-- Specialized blocks use their default appearance: closed containers, blank
-  signs, plain banners, default pots and player heads, and resting model parts.
-  Per-block contents, text, patterns, owner skins, equipment, opening animations,
-  and active effects requiring block-entity data are not stored or simulated.
+  redstone are not simulated. Iron doors and trapdoors require future power logic.
+- Storage and opening animation currently cover normal chests. Other containers,
+  structure loot, signs, banner patterns, decorated pots, owner skins and other
+  active block-entity effects remain unimplemented. Generated chests start empty.
 - Exact model geometry requires the vanilla import. Without it, selection shapes
   provide a simplified fallback; incomplete packs reuse substitute textures.
 - Biome tint is fixed to plains. Per-section and per-face translucent sorting
@@ -200,7 +206,20 @@ the hotbar above the arm without sharing window buffers between 2D and 3D camera
 or relying on matching their antialiasing settings. The hand target resizes with
 the window and its camera is inactive outside the first-person inventory-closed view.
 
-The vanilla importer also extracts item sprites and humanoid armor textures to
+The selected main-hand stack replaces the bare arm with a cached block mesh or an
+item sprite extruded along its opaque silhouette. Imported Minecraft first-person
+display transforms set each item's position, rotation, and scale. Held objects use
+their own swing transform, and switching item kinds lowers the old visual before
+raising the new one. Empty slots show the skinned arm. The same cropped transparent
+pass renders both, with lighting that follows the day cycle. Poses refresh when
+returning from the inventory; failed item textures use a cached missing-item visual
+and report the error once. Blocks reuse their
+default-state geometry; specialized inventory-only block shapes, offhand rendering,
+dynamic item models, and special use poses such as maps, drawn bows, or blocking
+shields are outside this static main-hand renderer.
+
+The vanilla importer also extracts item sprites, first-person display transforms,
+and humanoid armor textures to
 `assets/player/vanilla/`. To import these separately from a local official client:
 
 ```bash

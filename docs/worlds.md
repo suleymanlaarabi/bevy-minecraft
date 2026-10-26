@@ -1,4 +1,4 @@
-# Hollow worlds — format 1
+# Hollow worlds — format 2
 
 `WorldPlugin` composes the catalog, asynchronous opening, sessions, and BSN/Feathers
 screens. Persistence uses explicit data models rather than serializing the ECS
@@ -18,10 +18,9 @@ collision budgets before spawning the player. Developer autoplay stays ephemeral
 
 Session entities remain attached to `GameState::Game` until the final commit
 succeeds. Closing the inventory returns its cursor stack and crafting inputs to storage,
-or creates drops if storage is full. Checkpoints write 45 slots: the original 36
-storage slots, four armor slots, offhand, and four crafting inputs. Loaders also
-accept the older 36-slot layout and initialize the extra slots as empty. The
-crafting result is derived from the inputs and is never saved as an item. Item
+or creates drops if storage is full. Checkpoints write 45 slots: 36
+storage slots, four armor slots, offhand, and four crafting inputs. Other layouts
+are rejected. The crafting result is derived from the inputs and is never saved as an item. Item
 stacks retain registry names and vanilla stack limits; armor slots are validated
 on load. The checkpoint is captured in `Last`, after
 deferred commands, while simulation is frozen. Any existing autosave finishes
@@ -41,13 +40,14 @@ Each UUID directory contains `world.sqlite3`, any SQLite WAL files, and a
 protected connection serializes batched access. File access, SQL, compression,
 and synchronization all happen outside ECS systems.
 
-The container has three tables:
+The database has four tables:
 
 | Table | Contents |
 | --- | --- |
 | `records` | Metadata and the latest checkpoint, encoded as JSON |
 | `generated` | Compact Pumpkin PUMP chunks, indexed by X/Z and generation stage |
 | `edited` | Complete snapshots of edited or relit chunks, indexed by X/Z |
+| `containers` | Sparse nonempty normal chest inventories, indexed by X/Z |
 
 Chunk blobs contain a CRC32 followed by size-prefixed LZ4 data. Decoding bounds
 the decompressed size, verifies the checksum, and rejects truncated snapshots.
@@ -65,7 +65,8 @@ edited chunks. Reads use a separate WAL connection and never wait on a checkpoin
 transaction.
 
 One checkpoint transaction stores changed chunk snapshots, the player, inventory,
-cursor stack, drops, and pending edits targeting absent chunks. Drops preserve
+cursor stack, drops, normal chest inventories, container removals, and pending
+edits targeting absent chunks, plus pending support cascades. Drops preserve
 velocity, remaining lifetime, and pickup delay. Time outside the game does not
 expire them. Pumpkin's generated bases are synchronized before committing the
 checkpoint.
@@ -77,12 +78,38 @@ unsaved. Unloaded dirty chunks stay in memory until their commit succeeds, then
 are released. Only one checkpoint task is in flight. Streaming copies and the
 Pumpkin write queue are bounded.
 
-## Compatibility and errors
+## Container lifecycle
+
+Each chest half owns 27 slots independently. The double-chest UI combines their
+addresses without merging their contents. Empty inventories allocate no slot
+arrays and need no persistent record. ECS data remains authoritative after unloading; dormant block entities retain their
+inventories, and immutable checkpoint snapshots share their arrays.
+
+I/O workers read compressed terrain and container blobs in one WAL transaction;
+compute workers decompress and decode them after the reader is released. One
+process-local presence/version index skips SQLite for columns without saved data.
+Only the changed columns enter an odd commit version, then publish a new stable
+even version on commit or rollback. Copies retry if their version changed or is
+unstable; unrelated columns remain valid. Metadata locks never span SQLite work.
+Publication precedes releasing retained snapshots through the save acknowledgement.
+
+Container dirty/saved revisions do not affect mesh or collision revisions. Dirty
+contents survive unloading and failed writes. Clean contents also remain available
+while their dirty terrain column is retained. Checkpoints encode complete sparse
+container records per changed column; an explicit absent record deletes the database
+row without depending on JSON formatting.
+Acknowledgements preserve changes newer than their captured revisions.
+Only strict current-registry stack sizes are accepted. No old item/layout conversion
+is performed. Entity identifiers, viewing relationships and lid progress are rebuilt after reopening
+the world. Ordinary terrain unloading retains gameplay owners.
+
+## Format rejection and errors
 
 The format, Hollow generator revision, Pumpkin commit, and Minecraft version are
 checked before gameplay starts. Incompatible registry or generator changes must
 increment `GENERATOR_VERSION`; incompatible container changes must increment
-`FORMAT_VERSION`. Version 1 performs no implicit migration.
+`FORMAT_VERSION`. Incompatible worlds are rejected. This beta retains no old
+format readers, backward compatibility, or migrations.
 
 A missing chunk permits generation. A read error forbids regeneration and stops
 that generator instance. Failed writes retain unacknowledged snapshots, including

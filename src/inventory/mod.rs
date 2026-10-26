@@ -1,8 +1,11 @@
+pub(crate) mod access;
 mod crafting;
 pub(crate) mod icons;
 mod input;
 mod model;
+pub(crate) mod slots;
 mod ui;
+pub(crate) use model::CraftingResult;
 pub(crate) use ui::{lock_cursor, unlock_cursor};
 
 use bevy::prelude::*;
@@ -12,8 +15,8 @@ use crate::{game::GameState, player::Player};
 
 pub use model::{
     ARMOR_START, BLOCK_STACK_SIZE, CRAFT_RESULT, CRAFT_START, DragMode, HOTBAR_SIZE,
-    INVENTORY_SIZE, ItemKind, ItemStack, MAIN_INVENTORY_SIZE, OFFHAND_SLOT, PlayerInventory,
-    SLOT_COUNT,
+    HotbarSelection, INVENTORY_SIZE, ItemKind, ItemStack, MAIN_INVENTORY_SIZE, OFFHAND_SLOT,
+    PlayerInventory, SLOT_COUNT,
 };
 
 #[derive(SubStates, Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
@@ -28,7 +31,7 @@ pub enum InventoryState {
 pub(crate) struct DragState {
     pub source_entity: Entity,
     pub mode: DragMode,
-    pub visited: [bool; SLOT_COUNT],
+    pub visited: [bool; access::MAX_VIEW_SLOTS],
 }
 
 #[derive(Resource, Default)]
@@ -44,6 +47,7 @@ impl Plugin for InventoryPlugin {
     fn build(&self, app: &mut App) {
         app.add_sub_state::<InventoryState>()
             .init_resource::<InventoryCursor>()
+            .init_resource::<access::InventoryActions>()
             .init_resource::<icons::BlockIcons>()
             .add_systems(Startup, (icons::setup_block_icons, crafting::initialize))
             .add_systems(
@@ -83,17 +87,36 @@ impl Plugin for InventoryPlugin {
             .add_systems(
                 Update,
                 (
-                    (handle_number_keys, handle_hotbar_scroll, handle_swap_offhand)
-                        .chain()
-                        .run_if(crate::devtools::panel_closed),
-                    ui::refresh_slots,
+                    handle_number_keys,
+                    handle_hotbar_scroll,
+                    handle_swap_offhand,
                 )
                     .chain()
+                    .run_if(crate::devtools::panel_closed)
                     .run_if(crate::world::playing),
             )
             .add_systems(
-                Update,
-                ui::follow_cursor_stack.run_if(in_state(InventoryState::Open)),
+                PostUpdate,
+                model::refresh_crafting
+                    .in_set(crate::block_behavior::GameplaySystems::Derived)
+                    .run_if(crate::world::playing),
+            )
+            .add_systems(
+                PostUpdate,
+                access::apply_actions
+                    .in_set(crate::block_behavior::GameplaySystems::Inventory)
+                    .run_if(crate::world::playing),
+            )
+            .add_systems(
+                PostUpdate,
+                (
+                    ui::bind_slots,
+                    ui::refresh_slots,
+                    ui::follow_cursor_stack.run_if(in_state(InventoryState::Open)),
+                )
+                    .chain()
+                    .in_set(crate::block_behavior::GameplaySystems::Presentation)
+                    .run_if(crate::world::playing),
             );
     }
 }
@@ -113,6 +136,10 @@ fn toggle_inventory(
     });
 }
 
-fn reset_inventory_cursor(mut cursor: ResMut<InventoryCursor>) {
+fn reset_inventory_cursor(
+    mut cursor: ResMut<InventoryCursor>,
+    mut actions: ResMut<access::InventoryActions>,
+) {
+    actions.clear();
     *cursor = InventoryCursor::default();
 }

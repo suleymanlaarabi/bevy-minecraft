@@ -24,6 +24,7 @@ def deduplicate_models(data):
     for block in data['blocks'].values():
         for apply in block.get('variants', {}).values():application(apply)
         for part in block.get('multipart', []):application(part['apply'])
+    output.update({name: quads for name, quads in data['models'].items() if name.startswith('hollow:chest/')})
     data['models'] = output
     data['invisible_models'] = sorted({remap[name] for name in data['invisible_models'] if name in remap})
 
@@ -150,7 +151,8 @@ def import_models(jar):
                 if name not in models or (not models[name] and name not in invisible):
                     raise ValueError(f'unresolved visible model {name} for {block}')
                 used.add(name)
+    used.update(name for name in models if name.startswith('hollow:chest/'))
     models = {name: models[name] for name in sorted(used)}
     textures = {q['texture'] for quads in models.values() for q in quads}
-    return {'version':2,'blocks':states,'models':models,
+    return {'version':3,'blocks':states,'models':models,'chest_pivots':bind.chest_pivots,
             'invisible_models':sorted(invisible & used)},textures

@@ -80,6 +80,7 @@ struct SaveState {
 }
 struct SaveAck {
     revisions: Vec<(IVec2, u64)>,
+    container_revisions: Vec<(IVec2, u64)>,
     checkpoint: Checkpoint,
     metadata: WorldMetadata,
     final_save: bool,
@@ -175,8 +176,10 @@ impl Plugin for WorldPlugin {
                 Last,
                 (
                     settle_exit,
+                    crate::block_behavior::containers::track_inventory_changes,
                     checkpoint,
                     poll_save,
+                    crate::block_behavior::containers::cleanup_dormant,
                     hold_save_error,
                     ui::refresh_save_status,
                 )
@@ -490,7 +493,14 @@ fn checkpoint(
     time: Res<Time<Real>>,
     session: Option<Res<WorldSession>>,
     generator: Res<WorldGenerator>,
-    players: Query<(&Transform, &PlayerInventory), With<Player>>,
+    players: Query<
+        (
+            &Transform,
+            &PlayerInventory,
+            &crate::inventory::HotbarSelection,
+        ),
+        With<Player>,
+    >,
     cameras: Query<&PlayerCamera>,
     cursor: Res<InventoryCursor>,
     drops: Query<(
@@ -501,6 +511,11 @@ fn checkpoint(
     chunks: Query<(&VoxelChunk, &ChunkVoxels)>,
     stored: Res<StoredChunks>,
     pending: Res<PendingEdits>,
+    containers: crate::block_behavior::containers::ContainerSnapshots,
+    supports: Query<
+        &crate::block_behavior::containers::BlockEntity,
+        With<crate::block_behavior::supports::SupportCheck>,
+    >,
     game_time: Res<Time>,
     time_of_day: Res<crate::sky::TimeOfDay>,
 ) {
@@ -522,7 +537,7 @@ fn checkpoint(
         return;
     }
     // Only gameplay changes the world; `settle_exit` leaves without saving otherwise.
-    let Ok((transform, inventory)) = players.single() else {
+    let Ok((transform, inventory, selection)) = players.single() else {
         return;
     };
     save.elapsed = 0.0;
@@ -534,11 +549,16 @@ fn checkpoint(
         slots: (0..crate::inventory::SLOT_COUNT)
             .map(|i| inventory.slot(i).map(SavedStack::capture))
             .collect(),
-        selected: inventory.selected_hotbar(),
+        selected: selection.0,
         cursor: cursor.stack.map(SavedStack::capture),
     };
     let previous = session.last_checkpoint.as_ref().unwrap_or(&session.resume);
     player.sanitize(previous.player.as_ref().or(session.resume.player.as_ref()));
+    let mut support_pending: Vec<_> = supports
+        .iter()
+        .map(|block| block.position.to_array())
+        .collect();
+    support_pending.sort_unstable();
     let checkpoint = Checkpoint {
         player: Some(player),
         drops: drops
@@ -556,6 +576,7 @@ fn checkpoint(
             })
             .collect(),
         time_of_day: Some(time_of_day.days()),
+        support_pending,
     };
     // Layers are copy-on-write: these clones only bump reference counts.
     let mut snapshots = HashMap::new();
@@ -568,7 +589,9 @@ fn checkpoint(
             snapshots.insert(position, voxels.clone());
         }
     }
+    let container_snapshots = containers.capture();
     if !forced
+        && container_snapshots.is_empty()
         && snapshots.is_empty()
         && session
             .last_checkpoint
@@ -592,9 +615,18 @@ fn checkpoint(
             .into_iter()
             .map(|(p, v)| ((p.x, p.y), v.encode_saved()))
             .collect();
-        database.checkpoint(&metadata, &checkpoint, records)?;
+        let container_revisions = container_snapshots
+            .iter()
+            .map(|(p, data)| (*p, data.revision))
+            .collect();
+        let container_records = container_snapshots
+            .into_iter()
+            .map(|(p, data)| Ok(((p.x, p.y), data.encode()?)))
+            .collect::<io::Result<Vec<_>>>()?;
+        database.checkpoint(&metadata, &checkpoint, records, container_records)?;
         Ok(SaveAck {
             revisions,
+            container_revisions,
             checkpoint,
             metadata,
             final_save,
@@ -607,6 +639,7 @@ fn poll_save(
     mut session: Option<ResMut<WorldSession>>,
     mut chunks: Query<(&VoxelChunk, &mut ChunkVoxels)>,
     mut stored: ResMut<StoredChunks>,
+    mut container_chunks: Query<&mut crate::block_behavior::containers::GameplayColumn>,
     phase: Res<State<WorldSessionPhase>>,
     mut next_phase: ResMut<NextState<WorldSessionPhase>>,
     mut next: ResMut<NextState<GameState>>,
@@ -640,6 +673,14 @@ fn poll_save(
                     .get(position)
                     .is_some_and(|&r| r == voxels.save_revision)
             });
+            let container_revisions: HashMap<_, _> = ack.container_revisions.into_iter().collect();
+            for mut data in &mut container_chunks {
+                if let Some(&revision) = container_revisions.get(&data.position) {
+                    if revision <= data.revision {
+                        data.bypass_change_detection().saved_revision = revision;
+                    }
+                }
+            }
             if let Some(session) = &mut session {
                 session.metadata = ack.metadata;
                 session.last_checkpoint = Some(ack.checkpoint);

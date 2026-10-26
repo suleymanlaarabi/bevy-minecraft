@@ -171,9 +171,11 @@ fn visible_face(
     let blockers = occlusion_shapes(sample)
         .iter()
         .map(|&id| BlockBox::from(COLLISION_SHAPES[id as usize]))
-        .chain(occlusion_shapes(neighbor).iter().map(|&id| {
-            BlockBox::from(COLLISION_SHAPES[id as usize]).translated(direction)
-        }));
+        .chain(
+            occlusion_shapes(neighbor)
+                .iter()
+                .map(|&id| BlockBox::from(COLLISION_SHAPES[id as usize]).translated(direction)),
+        );
     let positions = face.positions.map(Vec3::from_array);
     let min = positions
         .into_iter()
@@ -243,11 +245,7 @@ impl Polygon {
         let (mut inside, mut outside) = (Self::new(), Self::new());
         let distance = |p: Vec3| {
             let value = (p[axis] - plane) * sign;
-            if value.abs() < 1e-6 {
-                0.0
-            } else {
-                value
-            }
+            if value.abs() < 1e-6 { 0.0 } else { value }
         };
         let mut previous = self.vertices[self.len - 1];
         let mut previous_distance = distance(previous);
@@ -317,7 +315,11 @@ fn uncovered(
                 let (inside, outside) = polygon.split(axis, plane, sign);
                 for i in 1..outside.len.saturating_sub(1) {
                     uncovered(
-                        [outside.vertices[0], outside.vertices[i], outside.vertices[i + 1]],
+                        [
+                            outside.vertices[0],
+                            outside.vertices[i],
+                            outside.vertices[i + 1],
+                        ],
                         blockers.clone(),
                         emit,
                     );

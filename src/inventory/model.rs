@@ -136,10 +136,7 @@ pub enum DragMode {
 
 #[derive(Component, Clone, Debug, PartialEq, Eq)]
 pub struct PlayerInventory {
-    slots: [Option<ItemStack>; SLOT_COUNT],
-    selected_hotbar: usize,
-    /// Recipe matched by the crafting grid, refreshed whenever the grid changes.
-    recipe: Option<usize>,
+    slots: super::slots::ItemSlots<SLOT_COUNT>,
 }
 
 impl Default for PlayerInventory {
@@ -149,74 +146,38 @@ impl Default for PlayerInventory {
         slots[0] = Some(ItemStack::new(ItemKind::Block(VoxelKind::Dirt), 2));
 
         Self {
-            slots,
-            selected_hotbar: 0,
-            recipe: None,
+            slots: slots.into(),
         }
     }
 }
 
 impl PlayerInventory {
-    pub(crate) fn from_saved(
-        slots: [Option<ItemStack>; SLOT_COUNT],
-        selected_hotbar: usize,
-    ) -> Self {
-        let mut inventory = Self {
-            slots,
-            selected_hotbar,
-            recipe: None,
-        };
-        inventory.refresh_recipe();
-        inventory
+    pub(crate) fn from_saved(slots: [Option<ItemStack>; SLOT_COUNT]) -> Self {
+        Self {
+            slots: slots.into(),
+        }
     }
     /// Applies `edit` and flags the inventory as changed only when its contents differ,
     /// so no-op clicks and pickups do not refresh the slot views.
     pub fn edit<R>(inventory: &mut Mut<Self>, edit: impl FnOnce(&mut Self) -> R) -> R {
-        let before = Self::clone(inventory);
+        let before = *inventory.slots;
         let result = edit(inventory.bypass_change_detection());
-        if inventory.slots[CRAFT_START..SLOT_COUNT] != before.slots[CRAFT_START..SLOT_COUNT] {
-            inventory.bypass_change_detection().refresh_recipe();
-        }
-        if **inventory != before {
+        if *inventory.slots != before {
             inventory.set_changed();
         }
         result
     }
 
     pub fn slot(&self, index: usize) -> Option<ItemStack> {
-        if index == CRAFT_RESULT {
-            return self.recipe().map(|recipe| recipe.output);
-        }
         self.slots.get(index).copied().flatten()
     }
 
-    pub const fn selected_hotbar(&self) -> usize {
-        self.selected_hotbar
-    }
-
-    pub fn selected_stack(&self) -> Option<ItemStack> {
-        self.slots[self.selected_hotbar]
-    }
-
-    pub fn set_selected_hotbar(&mut self, index: usize) {
-        self.selected_hotbar = index.min(HOTBAR_SIZE - 1);
-    }
-
     pub fn swap_slots(&mut self, a: usize, b: usize) {
-        if a >= SLOT_COUNT
-            || b >= SLOT_COUNT
-            || a == b
-            || self.slots[a].is_some_and(|stack| !Self::fits(b, stack))
-            || self.slots[b].is_some_and(|stack| !Self::fits(a, stack))
-        {
-            return;
-        }
-
-        self.slots.swap(a, b);
+        super::slots::swap(self, a, b);
     }
 
     pub fn insert(&mut self, stack: ItemStack) -> Option<ItemStack> {
-        move_stack_into_range(&mut self.slots, stack, 0..INVENTORY_SIZE)
+        super::slots::insert(self, stack, 0..INVENTORY_SIZE)
     }
 
     pub fn quick_move(&mut self, index: usize) {
@@ -235,10 +196,6 @@ impl PlayerInventory {
                 return;
             }
         }
-        let Some(stack) = self.slots[index].take() else {
-            return;
-        };
-
         let range = if index >= INVENTORY_SIZE {
             0..INVENTORY_SIZE
         } else if index < HOTBAR_SIZE {
@@ -246,257 +203,11 @@ impl PlayerInventory {
         } else {
             0..HOTBAR_SIZE
         };
-
-        if let Some(leftover) = move_stack_into_range(&mut self.slots, stack, range) {
-            self.slots[index] = Some(leftover);
-        }
+        super::slots::transfer(self, index, range);
     }
 
-    pub fn left_click(&mut self, index: usize, cursor: &mut Option<ItemStack>) {
-        if index >= SLOT_COUNT {
-            return;
-        }
-
-        if cursor.is_some_and(|stack| !Self::accepts(index, stack)) {
-            return;
-        }
-        let held = cursor.take();
-        let slot = self.slots[index].take();
-
-        match (held, slot) {
-            (None, None) => {}
-            (None, Some(stack)) => {
-                *cursor = Some(stack);
-            }
-            (Some(stack), None) => {
-                let amount = stack.count.min(Self::capacity(index, stack.item));
-                self.slots[index] = Some(ItemStack::new(stack.item, amount));
-                *cursor = (stack.count > amount)
-                    .then(|| ItemStack::new(stack.item, stack.count - amount));
-            }
-            (Some(mut held), Some(mut slot)) => {
-                if held.item == slot.item {
-                    let capacity = Self::capacity(index, slot.item) - slot.count;
-                    let moved = capacity.min(held.count);
-
-                    slot.count += moved;
-                    held.count -= moved;
-
-                    self.slots[index] = Some(slot);
-
-                    if held.count > 0 {
-                        *cursor = Some(held);
-                    }
-                } else if held.count <= Self::capacity(index, held.item) {
-                    self.slots[index] = Some(held);
-                    *cursor = Some(slot);
-                } else {
-                    self.slots[index] = Some(slot);
-                    *cursor = Some(held);
-                }
-            }
-        }
-    }
-
-    pub fn right_click(&mut self, index: usize, cursor: &mut Option<ItemStack>) {
-        if index >= SLOT_COUNT {
-            return;
-        }
-
-        if cursor.is_some_and(|stack| !Self::accepts(index, stack)) {
-            return;
-        }
-        if cursor.is_none() {
-            let Some(stack) = self.slots[index].take() else {
-                return;
-            };
-
-            let taken = stack.count.div_ceil(2);
-            let remaining = stack.count / 2;
-
-            *cursor = Some(ItemStack::new(stack.item, taken));
-
-            if remaining > 0 {
-                self.slots[index] = Some(ItemStack::new(stack.item, remaining));
-            }
-
-            return;
-        }
-
-        let Some(mut held) = cursor.take() else {
-            return;
-        };
-
-        match self.slots[index].take() {
-            None => {
-                self.slots[index] = Some(ItemStack::new(held.item, 1));
-                held.count -= 1;
-
-                if held.count > 0 {
-                    *cursor = Some(held);
-                }
-            }
-            Some(mut slot)
-                if slot.item == held.item && slot.count < Self::capacity(index, slot.item) =>
-            {
-                slot.count += 1;
-                held.count -= 1;
-
-                self.slots[index] = Some(slot);
-
-                if held.count > 0 {
-                    *cursor = Some(held);
-                }
-            }
-            Some(slot) => {
-                self.slots[index] = Some(slot);
-                *cursor = Some(held);
-            }
-        }
-    }
-
-    pub fn collect_matching(&mut self, cursor: &mut Option<ItemStack>) {
-        let Some(mut held) = cursor.take() else {
-            return;
-        };
-
-        // Only storage slots: the crafting grid, armor and offhand stay untouched.
-        for slot in &mut self.slots[..INVENTORY_SIZE] {
-            if held.count == held.max_stack_size() {
-                break;
-            }
-
-            let Some(mut stack) = slot.take() else {
-                continue;
-            };
-
-            if stack.item != held.item {
-                *slot = Some(stack);
-                continue;
-            }
-
-            let capacity = held.max_stack_size() - held.count;
-            let moved = capacity.min(stack.count);
-
-            held.count += moved;
-            stack.count -= moved;
-
-            if stack.count > 0 {
-                *slot = Some(stack);
-            }
-        }
-
-        *cursor = Some(held);
-    }
-
-    pub fn distribute_drag(
-        &mut self,
-        cursor: &mut Option<ItemStack>,
-        visited: &[bool; SLOT_COUNT],
-        mode: DragMode,
-    ) {
-        let Some(mut held) = cursor.take() else {
-            return;
-        };
-
-        match mode {
-            DragMode::OneEach => {
-                for (index, visited) in visited.iter().copied().enumerate() {
-                    if !visited || held.count == 0 || !Self::accepts(index, held) {
-                        continue;
-                    }
-
-                    match self.slots[index].take() {
-                        None => {
-                            self.slots[index] = Some(ItemStack::new(held.item, 1));
-                            held.count -= 1;
-                        }
-                        Some(mut slot)
-                            if slot.item == held.item
-                                && slot.count < Self::capacity(index, slot.item) =>
-                        {
-                            slot.count += 1;
-                            held.count -= 1;
-                            self.slots[index] = Some(slot);
-                        }
-                        Some(slot) => {
-                            self.slots[index] = Some(slot);
-                        }
-                    }
-                }
-            }
-            DragMode::Even => {
-                let compatible = visited
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .filter(|(index, visited)| {
-                        if !visited || !Self::accepts(*index, held) {
-                            return false;
-                        }
-
-                        match self.slots[*index] {
-                            None => true,
-                            Some(slot) => {
-                                slot.item == held.item
-                                    && slot.count < Self::capacity(*index, slot.item)
-                            }
-                        }
-                    })
-                    .count();
-
-                if compatible == 0 {
-                    *cursor = Some(held);
-                    return;
-                }
-
-                let amount_per_slot = held.count / compatible as u8;
-
-                if amount_per_slot == 0 {
-                    *cursor = Some(held);
-                    return;
-                }
-
-                for (index, visited) in visited.iter().copied().enumerate() {
-                    if !visited || held.count == 0 || !Self::accepts(index, held) {
-                        continue;
-                    }
-
-                    match self.slots[index].take() {
-                        None => {
-                            let amount = amount_per_slot
-                                .min(held.count)
-                                .min(Self::capacity(index, held.item));
-
-                            self.slots[index] = Some(ItemStack::new(held.item, amount));
-
-                            held.count -= amount;
-                        }
-                        Some(mut slot) if slot.item == held.item => {
-                            let capacity = Self::capacity(index, slot.item) - slot.count;
-
-                            let amount = amount_per_slot.min(capacity).min(held.count);
-
-                            slot.count += amount;
-                            held.count -= amount;
-
-                            self.slots[index] = Some(slot);
-                        }
-                        Some(slot) => {
-                            self.slots[index] = Some(slot);
-                        }
-                    }
-                }
-            }
-        }
-
-        if held.count > 0 {
-            *cursor = Some(held);
-        }
-    }
-
-    const fn is_armor_slot(index: usize) -> bool {
-        index >= ARMOR_START && index < OFFHAND_SLOT
+    fn is_armor_slot(index: usize) -> bool {
+        (ARMOR_START..OFFHAND_SLOT).contains(&index)
     }
 
     pub fn capacity(index: usize, item: ItemKind) -> u8 {
@@ -525,17 +236,11 @@ impl PlayerInventory {
     }
 
     pub(crate) fn take_crafting_inputs(&mut self) -> [Option<ItemStack>; 4] {
-        let inputs = std::array::from_fn(|i| self.slots[CRAFT_START + i].take());
-        self.recipe = None;
-        inputs
+        std::array::from_fn(|i| self.slots[CRAFT_START + i].take())
     }
 
     pub(crate) fn recipe(&self) -> Option<&'static super::crafting::Recipe> {
-        self.recipe.map(super::crafting::get)
-    }
-
-    fn refresh_recipe(&mut self) {
-        self.recipe = super::crafting::find(&self.slots[CRAFT_START..SLOT_COUNT]);
+        super::crafting::find(&self.slots[CRAFT_START..]).map(super::crafting::get)
     }
 
     /// Crafts once: `place` stores the output in a copy, committed only if the inputs and
@@ -573,7 +278,6 @@ impl PlayerInventory {
                 }
             }
         }
-        self.refresh_recipe();
         true
     }
 
@@ -588,28 +292,17 @@ impl PlayerInventory {
         }
     }
 
-    pub fn consume_selected(&mut self, amount: u8) -> bool {
-        if amount == 0 {
-            return true;
-        }
-
-        let slot = &mut self.slots[self.selected_hotbar];
-
-        let Some(mut stack) = slot.take() else {
-            return false;
+    pub fn consume(&mut self, index: usize, amount: u8) -> bool {
+        let Some(stack) = self.slot(index) else {
+            return amount == 0;
         };
-
-        if stack.count < amount {
-            *slot = Some(stack);
+        if stack.count() < amount {
             return false;
         }
-
-        stack.count -= amount;
-
-        if stack.count > 0 {
-            *slot = Some(stack);
-        }
-
+        self.slots.set(
+            index,
+            (stack.count() > amount).then(|| ItemStack::new(stack.item(), stack.count() - amount)),
+        );
         true
     }
 }
@@ -624,41 +317,49 @@ fn merge_output(target: &mut Option<ItemStack>, output: ItemStack) -> bool {
     true
 }
 
-fn move_stack_into_range(
-    slots: &mut [Option<ItemStack>; SLOT_COUNT],
-    stack: ItemStack,
-    range: std::ops::Range<usize>,
-) -> Option<ItemStack> {
-    let mut remaining = stack;
-
-    for index in range.clone() {
-        let Some(existing) = slots[index].as_mut() else {
-            continue;
-        };
-
-        if existing.item != remaining.item {
-            continue;
-        }
-
-        let capacity = existing.max_stack_size() - existing.count;
-        let moved = capacity.min(remaining.count);
-
-        existing.count += moved;
-        remaining.count -= moved;
-
-        if remaining.count == 0 {
-            return None;
+impl super::slots::Slots for PlayerInventory {
+    fn len(&self) -> usize {
+        SLOT_COUNT
+    }
+    fn get(&self, index: usize) -> Option<ItemStack> {
+        self.slots.get(index).copied().flatten()
+    }
+    fn set(&mut self, index: usize, stack: Option<ItemStack>) {
+        if index < SLOT_COUNT {
+            self.slots[index] = stack;
         }
     }
-
-    for index in range {
-        if slots[index].is_some() {
-            continue;
+    fn capacity(&self, index: usize, item: ItemKind) -> u8 {
+        if index >= SLOT_COUNT || (Self::is_armor_slot(index) && item.armor_slot() != Some(index)) {
+            return 0;
         }
-
-        slots[index] = Some(remaining);
-        return None;
+        Self::capacity(index, item)
     }
+    fn collectible(&self, index: usize) -> bool {
+        index < INVENTORY_SIZE
+    }
+}
 
-    Some(remaining)
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HotbarSelection(pub usize);
+impl HotbarSelection {
+    pub fn stack(&self, inventory: &PlayerInventory) -> Option<ItemStack> {
+        inventory.slot(self.0)
+    }
+}
+#[derive(Component, Default, PartialEq, Eq)]
+pub(crate) struct CraftingResult(pub Option<ItemStack>);
+
+pub(crate) fn refresh_crafting(
+    mut inventories: Query<(Ref<PlayerInventory>, &mut CraftingResult)>,
+) {
+    inventories
+        .par_iter_mut()
+        .for_each(|(inventory, mut result)| {
+            if inventory.is_changed() {
+                result.set_if_neq(CraftingResult(
+                    inventory.recipe().map(|recipe| recipe.output),
+                ));
+            }
+        });
 }

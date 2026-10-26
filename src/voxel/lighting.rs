@@ -67,6 +67,7 @@ fn pool() -> &'static TaskPool {
 }
 
 pub(crate) fn update_lighting(
+    mut commands: Commands,
     mut state: ResMut<LightingState>,
     version: Res<LightingVersion>,
     index: Res<ChunkIndex>,
@@ -178,6 +179,7 @@ pub(crate) fn update_lighting(
             let sections = voxels.bypass_change_detection().replace_light(light);
             if sections != 0 {
                 voxels.set_changed();
+                commands.trigger(crate::block_behavior::visuals::ChunkLightChanged(entity));
                 changed.push((position, sections));
             }
         }

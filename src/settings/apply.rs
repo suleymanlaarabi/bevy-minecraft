@@ -65,11 +65,7 @@ fn apply_settings_to_new_target(
     }
 }
 
-fn apply_light_settings(
-    settings: &GraphicsSettings,
-    entity: Entity,
-    commands: &mut Commands,
-) {
+fn apply_light_settings(settings: &GraphicsSettings, entity: Entity, commands: &mut Commands) {
     // Shadow maps are the sky's: only the sun or the moon ever casts one (`crate::sky`).
     // Also culls shadow casters hidden from the sun in every cascade.
     let mut light = commands.entity(entity);

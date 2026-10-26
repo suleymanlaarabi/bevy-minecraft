@@ -9,7 +9,8 @@ use bevy::prelude::*;
 pub(crate) use interactions::return_cursor_stack;
 pub(crate) use scenes::{spawn_hotbar_hud, spawn_inventory_overlay};
 pub(crate) use sync::{
-    follow_cursor_stack, hide_game_hud, lock_cursor, refresh_slots, show_game_hud, unlock_cursor,
+    bind_slots, follow_cursor_stack, hide_game_hud, lock_cursor, refresh_slots, show_game_hud,
+    unlock_cursor,
 };
 
 const SLOT_SIZE: f32 = 48.0;
@@ -33,29 +34,22 @@ pub(crate) struct InventorySlotView {
 }
 
 #[derive(Component, Clone, Copy, Default)]
-pub(crate) struct SlotIcon {
-    index: usize,
-}
+pub(crate) struct SlotIcon;
 
 #[derive(Component, Clone, Copy, Default)]
-pub(crate) struct SlotCount {
-    index: usize,
-}
+pub(crate) struct SlotCount;
 
 #[derive(Component, Clone, Copy, Default)]
-pub(crate) struct EmptySlotLabel {
-    index: usize,
-}
+pub(crate) struct EmptySlotLabel;
 
 fn empty_slot_label(index: usize) -> &'static str {
-    use crate::inventory::{ARMOR_START, CRAFT_RESULT, OFFHAND_SLOT};
+    use crate::inventory::{ARMOR_START, OFFHAND_SLOT};
     match index {
         index if index == ARMOR_START => "Head",
         index if index == ARMOR_START + 1 => "Chest",
         index if index == ARMOR_START + 2 => "Legs",
         index if index == ARMOR_START + 3 => "Feet",
         OFFHAND_SLOT => "Hand",
-        CRAFT_RESULT => "Result",
         _ => "",
     }
 }
@@ -68,3 +62,10 @@ pub(crate) struct CursorStackCount;
 
 #[cfg(test)]
 mod tests;
+
+/// A view addresses its ECS owner directly; no mirror inventory is kept in UI.
+#[derive(Component, Clone, Copy)]
+pub(super) struct SlotOwner {
+    entity: Entity,
+    index: usize,
+}

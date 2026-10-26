@@ -10,13 +10,12 @@ use bevy::{
 };
 
 use crate::{
-    character::{Aabb, CharacterBody, CharacterMotion, CharacterState},
-    dropped_item::DroppedItemCommandsExt,
+    character::CharacterMotion,
     game::GameState,
     inventory::{InventoryState, ItemKind, ItemStack},
     player::{Player, PlayerCamera},
     spatial::FollowSystems,
-    voxel::{VoxelCommandsExt, VoxelKind, VoxelState, VoxelWorld},
+    voxel::{VoxelKind, VoxelState, VoxelWorld},
 };
 
 const BLOCK_REACH: f32 = 5.0;
@@ -56,7 +55,7 @@ struct BreakingAssets {
 }
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct PlayerInteraction;
+pub(crate) struct PlayerInteraction;
 
 pub(super) fn register(app: &mut App) {
     app.add_systems(
@@ -183,7 +182,7 @@ fn update_breaking(
         breaking.0 = None;
         return;
     };
-    swing.request();
+    swing.request_mining();
 
     if breaking
         .0
@@ -203,21 +202,35 @@ fn update_breaking(
         return;
     }
 
-    commands.set_voxel_state(target.destroy, state.removed());
-    if let Some(other) = crate::voxel::rules::paired_position(state, target.destroy)
-        && let Some(other_state) = voxel_world.state(other)
-        && crate::voxel::rules::paired_states(state, other_state)
-    {
-        commands.set_voxel_state(other, other_state.removed());
+    let mut edits = vec![crate::voxel::edits::CheckedEdit {
+        position: target.destroy,
+        expected: state,
+        state: state.removed(),
+    }];
+    if let Some(other) = crate::voxel::rules::paired_position(state, target.destroy) {
+        let Some(other_state) = voxel_world.state(other) else {
+            return;
+        };
+        if crate::voxel::rules::paired_states(state, other_state) {
+            edits.push(crate::voxel::edits::CheckedEdit {
+                position: other,
+                expected: other_state,
+                state: other_state.removed(),
+            });
+        }
     }
-    if let Some(item) = ItemKind::from_voxel(kind) {
-        let center = target.destroy.as_vec3() + Vec3::splat(0.5);
-        commands.spawn_dropped_item(
+    let drop = ItemKind::from_voxel(kind).map(|item| {
+        (
             ItemStack::new(item, 1),
-            center + target.normal * 0.55,
+            target.destroy.as_vec3() + Vec3::splat(0.5) + target.normal * 0.55,
             target.normal * 0.35 + Vec3::Y * 1.2,
-        );
-    }
+        )
+    });
+    commands.trigger(crate::voxel::edits::EditBatch {
+        edits,
+        consume: None,
+        drop,
+    });
     breaking.0 = None;
 }
 
@@ -226,20 +239,49 @@ fn handle_block_placement(
     mouse: Res<ButtonInput<MouseButton>>,
     target: Single<&BlockTargetState, With<PlayerCamera>>,
     voxel_world: VoxelWorld,
-    players: Query<(&CharacterMotion, &CharacterBody, &CharacterState), With<Player>>,
-    mut inventory: Single<&mut crate::inventory::PlayerInventory, With<Player>>,
+    player: Single<
+        (
+            Entity,
+            &crate::inventory::PlayerInventory,
+            &crate::inventory::HotbarSelection,
+            &crate::character::CharacterMovement,
+        ),
+        With<Player>,
+    >,
+    collisions: crate::block_behavior::interaction::BlockCollisions,
+    targets: crate::block_behavior::interaction::BlockTargets,
     mut swing: Single<&mut super::skin::ArmSwing, With<PlayerCamera>>,
 ) {
+    use crate::{
+        block_behavior::interaction::BlockUse,
+        voxel::edits::{CheckedEdit, EditBatch},
+    };
     let Some(target) = target.0 else {
         return;
     };
     if !mouse.just_pressed(MouseButton::Right) {
         return;
     }
-    let Some(ItemKind::Block(kind)) = inventory.selected_stack().map(|stack| stack.item()) else {
+    let (actor, inventory, selection, movement) = *player;
+    let Some(state) = voxel_world.state(target.destroy) else {
         return;
     };
-    let Some(edits) = crate::voxel::rules::placement(
+    let selected = selection.stack(inventory).map(|stack| stack.item());
+    let bypass = movement.sneak && matches!(selected, Some(ItemKind::Block(_)));
+    if !bypass && let Some(entity) = targets.target(target.destroy) {
+        commands.trigger(BlockUse {
+            entity,
+            actor,
+            state,
+            look: target.look,
+        });
+        swing.request();
+        return;
+    }
+    let Some(ItemKind::Block(kind)) = selected else {
+        return;
+    };
+    let Some(changes) = crate::voxel::rules::placement(
         &voxel_world,
         kind,
         target.destroy,
@@ -250,17 +292,26 @@ fn handle_block_placement(
     ) else {
         return;
     };
-    for &(position, state) in &edits {
-        if block_contains_player(&players, position, state) {
+    let mut edits = Vec::with_capacity(changes.len());
+    for (position, state) in changes {
+        if collisions.intersects(position, state) {
             return;
         }
+        let Some(expected) = voxel_world.state(position) else {
+            return;
+        };
+        edits.push(CheckedEdit {
+            position,
+            expected,
+            state,
+        });
     }
-    if inventory.consume_selected(1) {
-        swing.request();
-        for (position, state) in edits {
-            commands.set_voxel_state(position, state);
-        }
-    }
+    commands.trigger(EditBatch {
+        edits,
+        consume: Some((actor, ItemKind::Block(kind))),
+        drop: None,
+    });
+    swing.request();
 }
 
 fn sync_breaking_overlay(
@@ -320,23 +371,6 @@ fn cancel_breaking(
     for mut visibility in &mut overlays {
         *visibility = Visibility::Hidden;
     }
-}
-
-fn block_contains_player(
-    players: &Query<(&CharacterMotion, &CharacterBody, &CharacterState), With<Player>>,
-    position: IVec3,
-    state: VoxelState,
-) -> bool {
-    let origin = position.as_dvec3();
-    players.iter().any(|(motion, body, character)| {
-        let player = body.aabb(motion.position, character.pose);
-        state.collision_boxes(position).any(|shape| {
-            player.intersects(&Aabb {
-                min: origin + shape.min.as_dvec3(),
-                max: origin + shape.max.as_dvec3(),
-            })
-        })
-    })
 }
 
 fn draw_targeted_block(

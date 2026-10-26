@@ -292,6 +292,7 @@ impl Material for WaterMaterial {
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 #[bind_group_data(ModelMaterialKey)]
 pub(crate) struct ModelMaterial {
+    pub instance_light: bool,
     #[texture(0, dimension = "2d_array")]
     #[sampler(1)]
     pub blocks: Handle<Image>,
@@ -323,6 +324,7 @@ pub(crate) struct ModelMaterial {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ModelMaterialKey {
+    instance_light: bool,
     blend: ModelBlend,
     breaking: bool,
     filtered_fog: bool,
@@ -330,6 +332,7 @@ pub(crate) struct ModelMaterialKey {
 impl From<&ModelMaterial> for ModelMaterialKey {
     fn from(material: &ModelMaterial) -> Self {
         Self {
+            instance_light: material.instance_light,
             blend: material.blend,
             breaking: material.cracks.is_some(),
             filtered_fog: material.fog_sky.is_some(),
@@ -359,6 +362,7 @@ impl ModelMaterial {
     ) -> Self {
         let settings = water.settings;
         Self {
+            instance_light: false,
             blocks,
             faces,
             water: settings,
@@ -414,6 +418,12 @@ impl Material for ModelMaterial {
                 .0
                 .get_layout(&[super::model_mesh::ATTRIBUTE_MODEL.at_shader_location(0)])?,
         ];
+        if key.bind_group_data.instance_light {
+            descriptor
+                .vertex
+                .shader_defs
+                .push("MODEL_INSTANCE_LIGHT".into());
+        }
         let blend = key.bind_group_data.blend;
         descriptor.primitive.cull_mode = if blend == ModelBlend::Translucent {
             None

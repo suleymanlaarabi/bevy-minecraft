@@ -48,6 +48,10 @@ pub(crate) struct BlockIcons {
     task: Option<Task<IconOutput>>,
 }
 impl BlockIcons {
+    pub(crate) fn missing_image(&self) -> &Handle<Image> {
+        &self.missing
+    }
+
     pub(crate) fn item_image(&self, item: ItemKind) -> Option<&Handle<Image>> {
         match item {
             ItemKind::Item(id) => Some(if self.items.contains_key(&id) {
@@ -156,7 +160,8 @@ pub(crate) fn setup_block_icons(
         TextureDimension::D2,
         missing,
         TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD,
+        // Held-item extrusion also reads this small placeholder on the CPU.
+        RenderAssetUsages::default(),
     );
     fallback.sampler = bevy::image::ImageSampler::nearest();
     icons.missing = images.add(fallback);

@@ -431,7 +431,10 @@ pub(super) fn section(
                 if sample.fluid() >> 4 == 2 {
                     super::fluids::visit(padded, local, &mut emit);
                 } else {
-                    if sample.model() {
+                    if sample.model()
+                        && crate::block_behavior::catalog::profile(sample.state.kind()).chest
+                            == false
+                    {
                         models::visit_quads(sample.state, world, &mut emit);
                     }
                     if uneven_water {

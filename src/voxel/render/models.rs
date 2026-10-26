@@ -33,10 +33,10 @@ fn shade_up<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D
 #[derive(Deserialize)]
 struct Imported {
     version: u32,
+    chest_pivots: [[f32; 3]; 3],
     minecraft: String,
     textures: Vec<String>,
-    /// Textures without transparent texels; older imports lack it (all cutout).
-    #[serde(default)]
+    /// Textures without transparent texels.
     opaque_textures: Vec<bool>,
     models: HashMap<String, Vec<ModelQuad>>,
     blocks: HashMap<String, Value>,
@@ -67,7 +67,13 @@ struct Recipe {
     /// A resolved empty model is deliberately invisible, never a fallback cube.
     resolved: bool,
 }
+pub(crate) struct ChestParts {
+    pub body: Arc<[ModelQuad]>,
+    pub lid: Arc<[ModelQuad]>,
+    pub pivot: Vec3,
+}
 struct Library {
+    chests: Option<[ChestParts; 3]>,
     recipes: Box<[Recipe]>,
     textures: Vec<String>,
     opaque_textures: Vec<bool>,
@@ -212,7 +218,7 @@ fn cube_faces(quads: &[ModelQuad]) -> Option<[CubeFace; 6]> {
 }
 
 /// Legacy cubes keep the pack's own per-block top/side/bottom configuration.
-fn legacy_faces(kind: VoxelKind, textures: usize) -> [CubeFace; 6] {
+fn pack_faces(kind: VoxelKind, textures: usize) -> [CubeFace; 6] {
     std::array::from_fn(|direction| CubeFace {
         slot: fallback_slot_after(textures, kind, direction / 2, direction % 2 == 1),
         tinted: false,
@@ -405,24 +411,31 @@ fn variant_matches(key: &str, props: &[(&str, &str)]) -> bool {
 fn library() -> &'static Library {
     static LIBRARY: OnceLock<Library> = OnceLock::new();
     LIBRARY.get_or_init(|| {
-        let imported = std::fs::read(crate::asset_directory().join("voxel/packs/vanilla/models.json"))
-            .ok().and_then(|data| serde_json::from_slice::<Imported>(&data).ok()).filter(|data| data.version == 2 && data.minecraft == "26.3");
+        let imported = match std::fs::read(crate::asset_directory().join("voxel/packs/vanilla/models.json")) {
+            Ok(bytes) => {
+                let data: Imported = serde_json::from_slice(&bytes).expect("Invalid vanilla model cache; regenerate it with scripts/import_vanilla.py");
+                assert!(data.version == 3 && data.minecraft == "26.3", "Incompatible vanilla model cache; regenerate it with scripts/import_vanilla.py");
+                Some(data)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("Cannot read vanilla model cache: {error}"),
+        };
         let mut recipes = (0..=u16::MAX).map(|_| Recipe::default()).collect::<Vec<_>>();
         let mut cells = vec![CellInfo::default(); 65536];
         let mut appearances = Appearances::default();
-        let legacy = legacy_keys();
+        let pack_keys = pack_keys();
         let Some(imported) = imported else {
             warn!("Vanilla models unavailable: using shape-based models; run scripts/import_vanilla.py");
             for raw in 0..=u16::MAX {
                 let Some(state) = VoxelState::from_id(raw) else { continue; };
                 let mut info = state_info(state);
-                if state.is_opaque_cube() && legacy_cube(&legacy, state.kind()) {
-                    info.appearance = appearances.id(legacy_faces(state.kind(), 0), state.kind());
+                if state.is_opaque_cube() && pack_cube(&pack_keys, state.kind()) {
+                    info.appearance = appearances.id(pack_faces(state.kind(), 0), state.kind());
                     info.flags |= cell::CUBE;
                 }
                 cells[raw as usize] = finish(info, state);
             }
-            return Library { recipes: recipes.into(), cells: cells.into(), appearances: appearances.list, textures: Vec::new(), opaque_textures: Vec::new(), texture_layers: Vec::new(), special_layers: 0, animations: Vec::new(), animated_layers: Box::new([false; 2048]) };
+            return Library { chests: None, recipes: recipes.into(), cells: cells.into(), appearances: appearances.list, textures: Vec::new(), opaque_textures: Vec::new(), texture_layers: Vec::new(), special_layers: 0, animations: Vec::new(), animated_layers: Box::new([false; 2048]) };
         };
         let mut rotations = HashMap::<(String, i32, i32, bool), Arc<[ModelQuad]>>::new();
         let mut assemblies = HashMap::<Vec<usize>, Arc<[ModelQuad]>>::new();
@@ -473,7 +486,7 @@ fn library() -> &'static Library {
                 missing.insert(kind.name());
                 recipe.groups.clear();
             }
-            // Default legacy cubes keep the pack's per-block faces; any other state
+            // Default pack cubes keep the pack's per-block faces; any other state
             // whose single model is a plain cube shares a deduplicated appearance.
             let mut info = state_info(state);
             let model_faces = match recipe.groups.as_slice() {
@@ -483,10 +496,10 @@ fn library() -> &'static Library {
                 }
                 _ => None,
             };
-            if state == kind.default_state() && kind.is_opaque() && legacy_cube(&legacy, kind)
+            if state == kind.default_state() && kind.is_opaque() && pack_cube(&pack_keys, kind)
                 && !recipe.groups.is_empty()
             {
-                info.appearance = appearances.id(legacy_faces(kind, imported.textures.len()), kind);
+                info.appearance = appearances.id(pack_faces(kind, imported.textures.len()), kind);
                 info.flags |= cell::CUBE;
             } else if let Some(faces) = model_faces {
                 let class = if state.is_opaque_cube() {
@@ -521,14 +534,22 @@ fn library() -> &'static Library {
         if !missing.is_empty() { warn!("{} vanilla model families unavailable", missing.len()); }
         let mut animated_layers = Box::new([false; 2048]);
         for animation in &imported.animations { animated_layers[animation.layer as usize] = true; }
-        Library { recipes: recipes.into(), textures: imported.textures, opaque_textures: imported.opaque_textures, cells: cells.into(), appearances: appearances.list, texture_layers: imported.texture_layers, special_layers: imported.special_layers, animations: imported.animations, animated_layers }
+        let chests = ["single", "left", "right"].map(|half| {
+            let i = match half { "left" => 1, "right" => 2, _ => 0 };
+            ChestParts {
+                body: imported.models[&format!("hollow:chest/{half}/body")].clone().into(),
+                lid: imported.models[&format!("hollow:chest/{half}/lid")].clone().into(),
+                pivot: Vec3::from_array(imported.chest_pivots[i]),
+            }
+        });
+        Library { chests: Some(chests), recipes: recipes.into(), textures: imported.textures, opaque_textures: imported.opaque_textures, cells: cells.into(), appearances: appearances.list, texture_layers: imported.texture_layers, special_layers: imported.special_layers, animations: imported.animations, animated_layers }
     })
 }
 /// Block keys of the bundled vanilla manifest.
-fn legacy_keys() -> std::collections::HashSet<String> {
+fn pack_keys() -> std::collections::HashSet<String> {
     super::texture_pack::manifest_keys(super::texture_pack::TexturePackId::Vanilla)
 }
-fn legacy_cube(keys: &std::collections::HashSet<String>, kind: VoxelKind) -> bool {
+fn pack_cube(keys: &std::collections::HashSet<String>, kind: VoxelKind) -> bool {
     // These keys already have the exact top/side/bottom mapping in all packs.
     // Logs with an explicit axis use the model path, as do slabs and farmland.
     !matches!(kind.name(), "dirt_path" | "farmland" | "snow")
@@ -547,7 +568,7 @@ pub(crate) fn appearances() -> &'static [Appearance] {
 }
 
 /// Whether a model quad's texture is fully opaque, so it needs no alpha test.
-/// Unknown slots (fallback faces, older imports) stay alpha-tested.
+/// Unknown slots (shape-based texture faces) stay alpha-tested.
 #[inline]
 pub(crate) fn opaque_texture(slot: u32) -> bool {
     library()
@@ -765,4 +786,8 @@ pub(crate) fn tint_index(kind: VoxelKind) -> u8 {
 
 pub(crate) fn tint(kind: VoxelKind) -> [f32; 3] {
     TINTS[tint_index(kind) as usize]
+}
+
+pub(crate) fn chest_parts(half: usize) -> Option<&'static ChestParts> {
+    library().chests.as_ref().map(|parts| &parts[half])
 }

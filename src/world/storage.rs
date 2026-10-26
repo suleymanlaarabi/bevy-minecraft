@@ -3,7 +3,7 @@ use super::model::{Checkpoint, WorldMetadata};
 use pumpkin_worldgen::ChunkStorage;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError, RwLock},
@@ -14,6 +14,7 @@ const MAX_RECORD_BYTES: usize = 8 * 1024 * 1024;
 const SCHEMA: &str = "
     CREATE TABLE records(key TEXT PRIMARY KEY, value BLOB NOT NULL);
     CREATE TABLE generated(x INTEGER NOT NULL,z INTEGER NOT NULL,stage INTEGER NOT NULL,value BLOB NOT NULL,PRIMARY KEY(x,z)) WITHOUT ROWID;
+    CREATE TABLE containers(x INTEGER NOT NULL,z INTEGER NOT NULL,value BLOB NOT NULL,PRIMARY KEY(x,z)) WITHOUT ROWID;
     CREATE TABLE edited(x INTEGER NOT NULL,z INTEGER NOT NULL,value BLOB NOT NULL,PRIMARY KEY(x,z)) WITHOUT ROWID;
 ";
 
@@ -114,13 +115,84 @@ pub(super) fn delete_world(path: &Path) -> io::Result<()> {
 /// Prefix of world folders detached by [`delete_world`] and not yet removed.
 const DELETING_PREFIX: &str = ".deleting-";
 
+/// Presence and a process-local revision; odd revisions denote an in-flight commit.
+#[derive(Clone, Copy, Default)]
+struct ColumnState {
+    terrain: bool,
+    containers: bool,
+    revision: u64,
+}
+#[derive(Default)]
+struct ColumnUpdate {
+    terrain: bool,
+    containers: Option<bool>,
+}
+
+/// Compressed WAL data travels to a compute worker before it is decoded.
+#[derive(Default)]
+pub(crate) struct GameplayColumn {
+    pub revision: u64,
+    terrain: Option<Vec<u8>>,
+    containers: Option<Vec<u8>>,
+}
+impl GameplayColumn {
+    pub fn decode(self) -> io::Result<(Option<Vec<u8>>, Option<Vec<u8>>)> {
+        Ok((
+            self.terrain.map(|bytes| decompress(&bytes)).transpose()?,
+            self.containers
+                .map(|bytes| decompress(&bytes))
+                .transpose()?,
+        ))
+    }
+}
+
+/// Publishes a stable revision on success or rollback, without holding a lock over SQL.
+struct ColumnCommit<'a> {
+    columns: &'a RwLock<HashMap<(i32, i32), ColumnState>>,
+    updates: HashMap<(i32, i32), ColumnUpdate>,
+    committed: bool,
+}
+impl<'a> ColumnCommit<'a> {
+    fn begin(
+        columns: &'a RwLock<HashMap<(i32, i32), ColumnState>>,
+        updates: HashMap<(i32, i32), ColumnUpdate>,
+    ) -> Self {
+        {
+            let mut states = columns.write().unwrap_or_else(PoisonError::into_inner);
+            for &position in updates.keys() {
+                states.entry(position).or_default().revision += 1;
+            }
+        }
+        Self {
+            columns,
+            updates,
+            committed: false,
+        }
+    }
+}
+impl Drop for ColumnCommit<'_> {
+    fn drop(&mut self) {
+        let mut states = self.columns.write().unwrap_or_else(PoisonError::into_inner);
+        for (&position, update) in &self.updates {
+            let state = states.get_mut(&position).expect("Published column commit");
+            if self.committed {
+                state.terrain |= update.terrain;
+                if let Some(present) = update.containers {
+                    state.containers = present;
+                }
+            }
+            state.revision += 1;
+        }
+    }
+}
+
 pub(crate) struct Database {
     /// Writer for checkpoints and Pumpkin's cache.
     connection: Mutex<Connection>,
     /// WAL reader: chunk streaming never waits on a checkpoint transaction or its fsync.
     reader: Mutex<Connection>,
     /// Columns with a saved snapshot. Streaming skips SQLite for every other column.
-    edited: RwLock<HashSet<(i32, i32)>>,
+    columns: RwLock<HashMap<(i32, i32), ColumnState>>,
     _lock: std::fs::File,
 }
 impl Database {
@@ -128,17 +200,27 @@ impl Database {
         let reader =
             Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
         reader.busy_timeout(Duration::from_secs(5)).map_err(err)?;
-        let edited = conn
-            .prepare("SELECT x,z FROM edited")
-            .map_err(err)?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-            .map_err(err)?
-            .collect::<Result<_, _>>()
-            .map_err(err)?;
+        let mut columns = HashMap::<_, ColumnState>::new();
+        for (table, terrain) in [("edited", true), ("containers", false)] {
+            let mut query = conn
+                .prepare(&format!("SELECT x,z FROM {table}"))
+                .map_err(err)?;
+            let positions = query
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(err)?;
+            for position in positions {
+                let state = columns.entry(position.map_err(err)?).or_default();
+                if terrain {
+                    state.terrain = true;
+                } else {
+                    state.containers = true;
+                }
+            }
+        }
         Ok(Self {
+            columns: RwLock::new(columns),
             connection: Mutex::new(conn),
             reader: Mutex::new(reader),
-            edited: RwLock::new(edited),
             _lock: lock,
         })
     }
@@ -182,8 +264,16 @@ impl Database {
         for drop in &checkpoint.drops {
             drop.validate()?;
         }
+        if checkpoint
+            .support_pending
+            .iter()
+            .any(|p| !(0..crate::voxel::coordinates::CHUNK_HEIGHT).contains(&p[1]))
+        {
+            return Err(err("Invalid pending support update."));
+        }
         if checkpoint.pending.iter().any(|(p, s)| {
-            !(0..384).contains(&p[1]) || crate::voxel::VoxelState::from_id(*s).is_none()
+            !(0..crate::voxel::coordinates::CHUNK_HEIGHT).contains(&p[1])
+                || crate::voxel::VoxelState::from_id(*s).is_none()
         }) {
             return Err(err("Invalid pending block edits."));
         }
@@ -232,29 +322,48 @@ impl Database {
     }
 
     /// Whether a saved snapshot replaces Pumpkin's column. Never touches SQLite.
-    pub(crate) fn is_edited(&self, x: i32, z: i32) -> bool {
-        self.edited
+    fn column(&self, x: i32, z: i32) -> ColumnState {
+        self.columns
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .contains(&(x, z))
+            .get(&(x, z))
+            .copied()
+            .unwrap_or_default()
+    }
+    pub(crate) fn is_edited(&self, x: i32, z: i32) -> bool {
+        self.column(x, z).terrain
+    }
+    pub(crate) fn revision(&self, x: i32, z: i32) -> Option<u64> {
+        let revision = self.column(x, z).revision;
+        (revision % 2 == 0).then_some(revision)
     }
 
-    pub(crate) fn edited(&self, x: i32, z: i32) -> io::Result<Option<Vec<u8>>> {
-        if !self.is_edited(x, z) {
+    pub(crate) fn gameplay_column(&self, x: i32, z: i32) -> io::Result<Option<GameplayColumn>> {
+        let state = self.column(x, z);
+        if state.revision % 2 != 0 {
             return Ok(None);
         }
-        let value: Option<Vec<u8>> = self
-            .reader
-            .lock()
-            .map_err(err)?
-            .query_row(
-                "SELECT value FROM edited WHERE x=?1 AND z=?2",
-                params![x, z],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(err)?;
-        value.map(|v| decompress(&v)).transpose()
+        if !state.terrain && !state.containers {
+            return Ok(Some(GameplayColumn {
+                revision: state.revision,
+                ..Default::default()
+            }));
+        }
+        let mut reader = self.reader.lock().map_err(err)?;
+        let tx = reader.transaction().map_err(err)?;
+        let read = |sql: &str| -> io::Result<Option<Vec<u8>>> {
+            tx.query_row(sql, params![x, z], |row| row.get(0))
+                .optional()
+                .map_err(err)
+        };
+        let terrain = read("SELECT value FROM edited WHERE x=?1 AND z=?2")?;
+        let containers = read("SELECT value FROM containers WHERE x=?1 AND z=?2")?;
+        tx.commit().map_err(err)?;
+        Ok(Some(GameplayColumn {
+            revision: state.revision,
+            terrain,
+            containers,
+        }))
     }
 
     pub(super) fn checkpoint(
@@ -262,15 +371,35 @@ impl Database {
         metadata: &WorldMetadata,
         checkpoint: &Checkpoint,
         chunks: Vec<((i32, i32), Vec<u8>)>,
+        containers: Vec<((i32, i32), Option<Vec<u8>>)>,
     ) -> io::Result<()> {
         let chunks: Vec<_> = chunks
             .into_iter()
             .map(|(p, bytes)| (p, compress(&bytes)))
             .collect();
-        let positions: Vec<_> = chunks.iter().map(|&(p, _)| p).collect();
+        let mut updates = HashMap::<_, ColumnUpdate>::new();
+        for &(position, _) in &chunks {
+            updates.entry(position).or_default().terrain = true;
+        }
+        let containers: Vec<_> = containers
+            .into_iter()
+            .map(|(position, bytes)| {
+                let bytes = bytes
+                    .map(|bytes| {
+                        if bytes.len() > MAX_RECORD_BYTES {
+                            return Err(err("Container snapshot exceeds the record size limit."));
+                        }
+                        Ok(compress(&bytes))
+                    })
+                    .transpose()?;
+                updates.entry(position).or_default().containers = Some(bytes.is_some());
+                Ok((position, bytes))
+            })
+            .collect::<io::Result<_>>()?;
         let metadata = serde_json::to_vec(metadata).map_err(err)?;
         let checkpoint = serde_json::to_vec(checkpoint).map_err(err)?;
         let mut conn = self.connection.lock().map_err(err)?;
+        let mut publication = ColumnCommit::begin(&self.columns, updates);
         let tx = conn.transaction().map_err(err)?;
         {
             let mut insert = tx.prepare_cached("INSERT INTO edited VALUES(?1,?2,?3) ON CONFLICT(x,z) DO UPDATE SET value=excluded.value").map_err(err)?;
@@ -278,16 +407,23 @@ impl Database {
                 insert.execute(params![x, z, bytes]).map_err(err)?;
             }
         }
+        {
+            let mut insert = tx.prepare_cached("INSERT INTO containers VALUES(?1,?2,?3) ON CONFLICT(x,z) DO UPDATE SET value=excluded.value").map_err(err)?;
+            for ((x, z), bytes) in containers {
+                if let Some(bytes) = bytes {
+                    insert.execute(params![x, z, bytes]).map_err(err)?;
+                } else {
+                    tx.execute("DELETE FROM containers WHERE x=?1 AND z=?2", params![x, z])
+                        .map_err(err)?;
+                }
+            }
+        }
         for (key, bytes) in [("metadata", metadata), ("checkpoint", checkpoint)] {
             tx.execute("INSERT INTO records VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key,bytes]).map_err(err)?;
         }
         tx.commit().map_err(err)?;
-        drop(conn);
-        // Published before the save acknowledgement drops the in-memory copies.
-        self.edited
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend(positions);
+        // Drop publishes presence and stable versions before returning the acknowledgement.
+        publication.committed = true;
         Ok(())
     }
 }
@@ -415,7 +551,7 @@ mod tests {
         let database = Database::from_connection(conn, &path, lock).unwrap();
         let metadata = WorldMetadata::new("World".into(), -42, super::super::WorldQuality::Fast);
         database
-            .checkpoint(&metadata, &Checkpoint::default(), vec![])
+            .checkpoint(&metadata, &Checkpoint::default(), vec![], vec![])
             .unwrap();
         run(&database, &metadata);
     }
@@ -431,11 +567,21 @@ mod tests {
                     .checkpoint(
                         &updated,
                         &Checkpoint::default(),
-                        vec![((-2, 3), b"chunk snapshot".to_vec())]
+                        vec![((-2, 3), b"chunk snapshot".to_vec())],
+                        vec![]
                     )
                     .is_err()
             );
-            assert!(database.edited(-2, 3).unwrap().is_none());
+            assert!(
+                database
+                    .gameplay_column(-2, 3)
+                    .unwrap()
+                    .unwrap()
+                    .decode()
+                    .unwrap()
+                    .0
+                    .is_none()
+            );
             let stored: WorldMetadata = read_json(&database.connection.lock().unwrap(), "metadata")
                 .unwrap()
                 .unwrap();

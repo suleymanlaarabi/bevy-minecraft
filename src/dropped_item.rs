@@ -127,7 +127,7 @@ fn restore_dropped_item(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let drop = &event.0;
-    for stack in drop.stack.restore().into_iter().flatten() {
+    if let Ok(stack) = drop.stack.restore() {
         spawn_item(
             &mut commands,
             &mut assets,

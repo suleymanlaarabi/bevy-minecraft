@@ -1,4 +1,5 @@
 pub mod app;
+pub mod block_behavior;
 pub mod character;
 pub mod devtools;
 pub mod dropped_item;

@@ -165,3 +165,41 @@ window/UI scaling, arm swings, and graphics/texture-pack changes. Rust compilati
 does not validate runtime ECS scheduling, shader compilation, GPU behavior, visual
 equivalence or the 144 FPS target. No game, benchmark, test executable or release
 build is run as part of verification.
+
+## Block behaviors and memory
+
+Shared registry-indexed profiles classify capabilities once. A compile-time bound
+keeps the complete state-behavior table within 768 KiB, independent of view distance.
+Climbing reuses the controller's local terrain visit and scratch allocation; it
+never searches loaded blocks globally or decodes native property strings per tick.
+Interactive and support-dependent cells have sparse capability entities; ordinary
+terrain cells remain compact. Independent gameplay columns retain their ECS
+inventories while dormant. Coordinate indices contain only column/local-cell
+addresses and entity identifiers; native relationships supply traversal.
+
+Player and chest slot arrays share immutable snapshots. Empty default inventories
+allocate no slot array. Each double-chest half keeps its own 27 slots; pairing and
+UI never copy items. Actions borrow owners once and use statically dispatched slot
+operations. Change propagation to persistence runs once after writes. Drag scratch
+retains the fixed 100-index upper bound.
+
+Component add hooks deduplicate entity-only FIFO work. Support validation processes
+256 candidates, view preparation 64 candidates, and relighting 256 units per frame.
+Stale identifiers consume budgets. Dependency state and cursors remain on ECS
+components. Relighting retains a full rerun when invalidated during a partial pass.
+Support calculations, light samples and moving-lid animation use parallel queries;
+commits sharing cells or inventories remain ordered. Six chest meshes and one
+material remain shared. Stable lids do not animate or rebuild terrain.
+
+Held-item manifests use an asset loader. Selection, texture waiting, construction
+and equip transitions are separate; asset events wake texture work and refresh
+cached visuals. Missing textures retain the shared fallback symbol.
+
+I/O workers read compressed container records with terrain; compute workers perform
+decompression, decoding and block-entity discovery in relevant sections. The total
+in-flight copy limit remains sixteen across both stages. Persistence encoding and
+compression remain on workers after sharing snapshots. Independent container
+revisions prevent slot edits from invalidating terrain. Per-column storage versions
+reject copies racing a commit or rollback without invalidating unrelated columns.
+Short metadata locks never span SQL or fsync. These are implementation contracts established by
+inspection, not measured performance or memory results.

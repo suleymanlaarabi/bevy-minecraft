@@ -13,12 +13,14 @@ use std::collections::HashMap;
 mod animation;
 mod appearance;
 mod assets;
+mod held_item;
 mod rig;
 mod view_model;
 use animation::{animate_rigs, animate_world};
 use appearance::{finish_import, import_skin, sync_labels};
 pub(crate) use appearance::{reset_skin, toggle_layers, toggle_model};
 use assets::{load_skin, setup};
+use held_item::{FirstPersonRoot, HeldItem, HeldItemAssets, HeldItemPart};
 use rig::{spawn_preview, spawn_world_rig, sync_parts};
 pub(crate) use view_model::ArmSwing;
 use view_model::{
@@ -119,6 +121,8 @@ struct FirstPersonArm;
 struct ArmCamera;
 #[derive(Component)]
 struct ArmView;
+#[derive(Component)]
+struct HeldItemLight;
 #[derive(Component, Clone, Default)]
 pub(crate) struct SkinModelLabel;
 #[derive(Component, Clone, Default)]
@@ -134,13 +138,27 @@ const ARM_NIGHT_LEVEL: f32 = 0.25;
 fn dim_arm_with_daylight(
     sky: Res<crate::sky::SkyState>,
     assets: Res<SkinAssets>,
+    held_assets: Res<HeldItemAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut cameras: Query<&mut AmbientLight, With<ArmCamera>>,
+    mut lights: Query<&mut DirectionalLight, With<HeldItemLight>>,
 ) {
     if !sky.is_changed() {
         return;
     }
     let level = ARM_NIGHT_LEVEL + (1.0 - ARM_NIGHT_LEVEL) * (1.0 - sky.night);
     let color = Color::linear_rgb(level, level, level);
+    held_assets.dim(&mut materials, color);
+    for mut ambient in &mut cameras {
+        if ambient.brightness != 500. * level {
+            ambient.brightness = 500. * level;
+        }
+    }
+    for mut light in &mut lights {
+        if light.illuminance != 6000. * level {
+            light.illuminance = 6000. * level;
+        }
+    }
     for handle in [&assets.arm_base, &assets.arm_outer] {
         // `get_mut` re-uploads the material: only while the level changes.
         if materials
@@ -155,9 +173,12 @@ fn dim_arm_with_daylight(
 
 pub(super) fn register(app: &mut App) {
     app.init_resource::<PlayerView>()
+        .init_resource::<HeldItemAssets>()
+        .init_asset::<held_item::HeldManifest>()
+        .init_asset_loader::<held_item::HeldManifestLoader>()
         .init_resource::<SkinAssets>()
         .init_resource::<SkinImport>()
-        .add_systems(Startup, setup)
+        .add_systems(Startup, (setup, held_item::setup))
         .add_systems(
             Update,
             (import_skin, finish_import, load_skin, sync_parts).chain(),
@@ -175,7 +196,9 @@ pub(super) fn register(app: &mut App) {
         )
         .add_systems(
             Update,
-            (animate_rigs, sync_labels).run_if(in_state(InventoryState::Open)),
+            (animate_rigs, sync_labels)
+                .run_if(in_state(InventoryState::Open))
+                .run_if(any_with_component::<SkinPortrait>),
         )
         .add_systems(
             PostUpdate,
@@ -192,9 +215,16 @@ pub(super) fn register(app: &mut App) {
         )
         .add_systems(
             PostUpdate,
-            (advance_swing, animate_first_person)
+            (
+                advance_swing,
+                held_item::asset_events,
+                held_item::select,
+                held_item::advance_equipment,
+                held_item::build_visual,
+                animate_first_person,
+            )
                 .chain()
-                .after(crate::player::interaction::PlayerInteraction)
+                .after(crate::block_behavior::GameplaySystems::Derived)
                 .before(bevy::transform::TransformSystems::Propagate)
                 .run_if(crate::world::playing),
         );

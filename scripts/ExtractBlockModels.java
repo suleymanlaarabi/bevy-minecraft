@@ -52,6 +52,8 @@ class ExtractBlockModels {
                 quad.add("uv", uv);
                 quad.add("normal", JSON.toJsonTree(new float[]{normal.x, normal.y, normal.z}));
                 quad.addProperty("part", path);
+                Vector3f pivot = transform.transformPosition(new Vector3f());
+                quad.add("pivot", JSON.toJsonTree(new float[]{pivot.x, pivot.y, pivot.z}));
                 output.add(quad);
             }
         }

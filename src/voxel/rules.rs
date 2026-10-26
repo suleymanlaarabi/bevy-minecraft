@@ -404,7 +404,29 @@ pub(crate) fn placement(
         }
         state = state.with(&[("vertical_direction", vertical)]);
     }
+    if name == "ladder" {
+        if normal.y.abs() > 0.5 {
+            return None;
+        }
+        state = state.with(&[("facing", wall)]);
+        let support = world.state(position - normal.round().as_ivec3())?;
+        let side = match normal.round().as_ivec3() {
+            IVec3::X => BlockDirection::East,
+            IVec3::NEG_X => BlockDirection::West,
+            IVec3::Z => BlockDirection::South,
+            _ => BlockDirection::North,
+        };
+        if !support.native().is_side_solid(side) {
+            return None;
+        }
+    }
     if name == "vine" || name == "glow_lichen" {
+        if name == "vine" && normal.y > 0.5 {
+            return None;
+        }
+        if old.kind() == kind {
+            state = old;
+        }
         let attachment = if normal.y < -0.5 {
             "up"
         } else if normal.y > 0.5 {

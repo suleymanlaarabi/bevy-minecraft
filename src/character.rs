@@ -40,6 +40,8 @@ const LAVA_GRAVITY: f64 = GRAVITY / 4.0;
 const FLUID_SWIM_UP: f64 = 0.04;
 const FLUID_JUMP_THRESHOLD: f64 = 0.4;
 const SHORE_JUMP: f64 = 0.3;
+const CLIMB_SPEED: f64 = 0.15;
+const CLIMB_RISE: f64 = 0.2;
 const SOURCE_FLUID_HEIGHT: f64 = 8.0 / 9.0;
 const MIN_VELOCITY: f64 = 0.003;
 /// Vanilla creative flight: horizontal acceleration (doubled when sprinting),
@@ -258,12 +260,14 @@ struct FluidCell {
 pub(crate) struct Terrain {
     boxes: Vec<Aabb>,
     fluids: Vec<FluidCell>,
+    climbables: Vec<Aabb>,
 }
 
 impl Terrain {
     fn gather(&mut self, world: &VoxelWorld, region: Aabb) {
         self.boxes.clear();
         self.fluids.clear();
+        self.climbables.clear();
         // Fences and walls rise 0.5 above their cell: read one more cell below.
         let min = region.min.floor().as_ivec3() - IVec3::Y;
         let max = region.max.floor().as_ivec3();
@@ -276,10 +280,12 @@ impl Terrain {
                 above = None;
                 return;
             };
+            if crate::block_behavior::catalog::state_behavior(state).climbable {
+                self.climbables.push(Aabb::cell(cell));
+            }
             let fluid = fluid_of(state);
-            let covered = above.is_some_and(|(position, lava)| {
-                position == cell + IVec3::Y && fluid == Some(lava)
-            });
+            let covered = above
+                .is_some_and(|(position, lava)| position == cell + IVec3::Y && fluid == Some(lava));
             above = fluid.map(|lava| (cell, lava));
             if let Some(lava) = fluid {
                 let height = if covered { 1.0 } else { SOURCE_FLUID_HEIGHT };
@@ -307,6 +313,7 @@ impl Terrain {
         Self {
             boxes,
             fluids: Vec::new(),
+            climbables: Vec::new(),
         }
     }
 
@@ -315,9 +322,9 @@ impl Terrain {
     }
 
     fn has_fluid(&self, body: &Aabb) -> bool {
-        self.fluids.iter().any(|fluid| {
-            body.intersects(&fluid.cell) && body.min.y < fluid.top
-        })
+        self.fluids
+            .iter()
+            .any(|fluid| body.intersects(&fluid.cell) && body.min.y < fluid.top)
     }
 
     /// Deepest fluid surface above the feet, for water and lava.
@@ -504,9 +511,7 @@ fn character_physics(
                     .iter()
                     .filter(|obstacle| {
                         let penetration = obstacle.max.y - aabb.min.y;
-                        penetration > 0.0
-                            && penetration <= tolerance
-                            && aabb.intersects(obstacle)
+                        penetration > 0.0 && penetration <= tolerance && aabb.intersects(obstacle)
                     })
                     .map(|obstacle| obstacle.max.y)
                     .max_by(f64::total_cmp);
@@ -575,9 +580,8 @@ fn tick(
     let feet = aabb.min.y;
     let region = Aabb {
         min: aabb.min - reach - DVec3::Y * (STEP_HEIGHT + 0.1),
-        max: (aabb.max + reach).with_y(
-            feet + reach.y + Pose::Standing.height() as f64 + AUTO_JUMP_HEIGHT + 0.5,
-        ),
+        max: (aabb.max + reach)
+            .with_y(feet + reach.y + Pose::Standing.height() as f64 + AUTO_JUMP_HEIGHT + 0.5),
     };
     terrain.gather(world, region);
 
@@ -591,7 +595,11 @@ fn tick(
     );
     state.eyes_in_water = terrain.water_at(eyes);
 
-    velocity = DVec3::select(velocity.abs().cmplt(DVec3::splat(MIN_VELOCITY)), DVec3::ZERO, velocity);
+    velocity = DVec3::select(
+        velocity.abs().cmplt(DVec3::splat(MIN_VELOCITY)),
+        DVec3::ZERO,
+        velocity,
+    );
 
     let wish = Vec3::new(movement.direction.x, 0.0, movement.direction.z)
         .normalize_or_zero()
@@ -601,10 +609,8 @@ fn tick(
     // Vanilla `updateSwimming`: start with the eyes under water, keep swimming
     // while sprinting in water.
     let wants_sprint = movement.sprint && !sneaking && wish != DVec3::ZERO;
-    state.swimming = wants_sprint
-        && !flying
-        && state.in_water
-        && (state.swimming || state.eyes_in_water);
+    state.swimming =
+        wants_sprint && !flying && state.in_water && (state.swimming || state.eyes_in_water);
     let desired = if state.swimming {
         Pose::Swimming
     } else if sneaking {
@@ -624,13 +630,14 @@ fn tick(
     let (slipperiness, speed_factor, jump_factor) = ground_block(world, &aabb);
 
     if flying {
-        velocity.y += FLY_VERTICAL
-            * (movement.jump as i32 as f64 - movement.sneak as i32 as f64);
+        velocity.y += FLY_VERTICAL * (movement.jump as i32 as f64 - movement.sneak as i32 as f64);
     } else if movement.jump {
-        let depth = if state.in_water { water_depth } else { lava_depth };
-        if (state.in_water || state.in_lava)
-            && (!state.on_ground || depth > FLUID_JUMP_THRESHOLD)
-        {
+        let depth = if state.in_water {
+            water_depth
+        } else {
+            lava_depth
+        };
+        if (state.in_water || state.in_lava) && (!state.on_ground || depth > FLUID_JUMP_THRESHOLD) {
             velocity.y += FLUID_SWIM_UP;
         } else if state.on_ground {
             velocity.y = JUMP_VELOCITY * jump_factor;
@@ -655,12 +662,35 @@ fn tick(
         velocity.y -= FLUID_SWIM_UP;
     }
 
+    let climbing = if flying {
+        false
+    } else {
+        let feet = Aabb {
+            min: aabb.min + DVec3::splat(CONTACT_EPSILON),
+            max: aabb.max.with_y(aabb.min.y + 0.1) - DVec3::splat(CONTACT_EPSILON),
+        };
+        terrain.climbables.iter().any(|cell| feet.intersects(cell))
+    };
+    if climbing {
+        // Establish vertical intent before the fluid branch samples falling.
+        velocity.y = velocity.y.max(if sneaking { 0.0 } else { -CLIMB_SPEED });
+        if movement.jump {
+            velocity.y = CLIMB_RISE;
+        }
+    }
     let start_y = aabb.min.y;
     let falling = velocity.y <= 0.0;
     if flying {
         let speed = FLY_SPEED * if sprinting { 2.0 } else { 1.0 };
         velocity += input * speed;
-        move_body(terrain, &mut aabb, &mut velocity, state, false, speed_factor);
+        move_body(
+            terrain,
+            &mut aabb,
+            &mut velocity,
+            state,
+            false,
+            speed_factor,
+        );
         velocity.y *= FLY_VERTICAL_DRAG;
         velocity.x *= AIR_DRAG;
         velocity.z *= AIR_DRAG;
@@ -674,9 +704,21 @@ fn tick(
                 velocity.y += (look - velocity.y) * rate;
             }
         }
-        let drag = if sprinting { WATER_SPRINT_DRAG } else { WATER_DRAG };
+        let drag = if sprinting {
+            WATER_SPRINT_DRAG
+        } else {
+            WATER_DRAG
+        };
         velocity += input * FLUID_SPEED;
-        move_body(terrain, &mut aabb, &mut velocity, state, sneaking, speed_factor);
+        clamp_climbing(&mut velocity, climbing, sneaking);
+        move_body(
+            terrain,
+            &mut aabb,
+            &mut velocity,
+            state,
+            sneaking,
+            speed_factor,
+        );
         velocity *= DVec3::new(drag, WATER_DRAG, drag);
         if !sprinting {
             velocity.y = if falling
@@ -691,7 +733,15 @@ fn tick(
         climb_out_of_fluid(terrain, aabb, &mut velocity, state, start_y);
     } else if state.in_lava {
         velocity += input * FLUID_SPEED;
-        move_body(terrain, &mut aabb, &mut velocity, state, sneaking, speed_factor);
+        clamp_climbing(&mut velocity, climbing, sneaking);
+        move_body(
+            terrain,
+            &mut aabb,
+            &mut velocity,
+            state,
+            sneaking,
+            speed_factor,
+        );
         velocity *= if lava_depth <= FLUID_JUMP_THRESHOLD {
             DVec3::new(LAVA_DRAG, WATER_DRAG, LAVA_DRAG)
         } else {
@@ -709,22 +759,48 @@ fn tick(
         } else {
             (
                 AIR_DRAG,
-                if sprinting { AIR_SPRINT_SPEED } else { AIR_SPEED },
+                if sprinting {
+                    AIR_SPRINT_SPEED
+                } else {
+                    AIR_SPEED
+                },
             )
         };
         velocity += input * speed;
-        move_body(terrain, &mut aabb, &mut velocity, state, sneaking, speed_factor);
+        clamp_climbing(&mut velocity, climbing, sneaking);
+        move_body(
+            terrain,
+            &mut aabb,
+            &mut velocity,
+            state,
+            sneaking,
+            speed_factor,
+        );
         velocity.y = (velocity.y - GRAVITY) * VERTICAL_DRAG;
         velocity.x *= friction;
         velocity.z *= friction;
     }
 
+    if climbing && !sneaking && (state.horizontal_collision || movement.jump) {
+        velocity.y = CLIMB_RISE;
+    }
+    if climbing && sneaking {
+        velocity.y = velocity.y.max(0.0);
+    }
     motion.position = DVec3::new(
         (aabb.min.x + aabb.max.x) * 0.5,
         aabb.min.y + body.origin_height as f64,
         (aabb.min.z + aabb.max.z) * 0.5,
     );
     motion.velocity = velocity;
+}
+
+fn clamp_climbing(velocity: &mut DVec3, climbing: bool, sneaking: bool) {
+    if climbing {
+        velocity.x = velocity.x.clamp(-CLIMB_SPEED, CLIMB_SPEED);
+        velocity.z = velocity.z.clamp(-CLIMB_SPEED, CLIMB_SPEED);
+        velocity.y = velocity.y.max(if sneaking { 0.0 } else { -CLIMB_SPEED });
+    }
 }
 
 /// Vanilla `Entity.move` for one tick of velocity.
@@ -904,16 +980,31 @@ mod tests {
             max: DVec3::new(5.0, 2.6, 1.0),
         });
         let terrain = Terrain::from_boxes(boxes.clone());
-        assert_eq!(choose_pose(&terrain, &body, origin, Pose::Standing), Pose::Crouching);
+        assert_eq!(
+            choose_pose(&terrain, &body, origin, Pose::Standing),
+            Pose::Crouching
+        );
 
         boxes.push(cube(4, 1, 0));
         let terrain = Terrain::from_boxes(boxes);
-        assert_eq!(choose_pose(&terrain, &body, origin, Pose::Standing), Pose::Swimming);
-        assert_eq!(choose_pose(&terrain, &body, origin, Pose::Crouching), Pose::Swimming);
+        assert_eq!(
+            choose_pose(&terrain, &body, origin, Pose::Standing),
+            Pose::Swimming
+        );
+        assert_eq!(
+            choose_pose(&terrain, &body, origin, Pose::Crouching),
+            Pose::Swimming
+        );
 
         let open = Terrain::from_boxes(floor());
-        assert_eq!(choose_pose(&open, &body, origin, Pose::Crouching), Pose::Crouching);
-        assert_eq!(choose_pose(&open, &body, origin, Pose::Standing), Pose::Standing);
+        assert_eq!(
+            choose_pose(&open, &body, origin, Pose::Crouching),
+            Pose::Crouching
+        );
+        assert_eq!(
+            choose_pose(&open, &body, origin, Pose::Standing),
+            Pose::Standing
+        );
     }
 
     #[test]

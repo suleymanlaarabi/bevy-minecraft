@@ -188,7 +188,12 @@ fn speed_control(speed: f32) -> impl Scene {
 fn clock(time: &TimeOfDay) -> String {
     let minutes = (time.fraction * 24.0 * 60.0) as u32;
     let state = if time.speed == 0.0 { " (frozen)" } else { "" };
-    format!("Day {}, {:02}:{:02}{state}", time.day, minutes / 60, minutes % 60)
+    format!(
+        "Day {}, {:02}:{:02}{state}",
+        time.day,
+        minutes / 60,
+        minutes % 60
+    )
 }
 
 fn set_flying(

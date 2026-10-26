@@ -2,7 +2,7 @@ use super::InventorySlotView;
 use crate::{
     dropped_item::DroppedItemCommandsExt,
     game::GameState,
-    inventory::{CRAFT_RESULT, DragMode, DragState, InventoryCursor, PlayerInventory, SLOT_COUNT},
+    inventory::{DragMode, InventoryCursor, PlayerInventory},
     player::Player,
 };
 use bevy::{picking::prelude::*, prelude::*};
@@ -10,9 +10,11 @@ use bevy::{picking::prelude::*, prelude::*};
 pub(crate) fn return_cursor_stack(
     mut players: Query<(&mut PlayerInventory, &GlobalTransform), With<Player>>,
     mut cursor: ResMut<InventoryCursor>,
+    mut actions: ResMut<crate::inventory::access::InventoryActions>,
     state: Res<State<GameState>>,
     mut commands: Commands,
 ) {
+    actions.clear();
     // Leaving the session discards the cursor through `reset_inventory_cursor`.
     if *state.get() != GameState::Game {
         return;
@@ -63,179 +65,97 @@ pub(super) fn slot_out(
     }
 }
 
+fn click_action(
+    index: usize,
+    right: bool,
+    double: bool,
+    keyboard: &ButtonInput<KeyCode>,
+) -> crate::inventory::access::InventoryAction {
+    crate::inventory::access::InventoryAction::Click {
+        index,
+        right,
+        double,
+        shift: keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight),
+    }
+}
+pub(super) fn slot_press(
+    mut event: On<PointerPress>,
+    slots: Query<&InventorySlotView>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut actions: ResMut<crate::inventory::access::InventoryActions>,
+) {
+    if event.button != PointerButton::Secondary {
+        return;
+    }
+    event.propagate(false);
+    if let Ok(slot) = slots.get(event.entity) {
+        actions.push_back(click_action(slot.index, true, false, &keyboard));
+    }
+}
 pub(super) fn slot_click(
     mut event: On<PointerClick>,
     slots: Query<&InventorySlotView>,
     keyboard: Res<ButtonInput<KeyCode>>,
-    mut inventory: Single<&mut PlayerInventory, With<Player>>,
-    mut cursor: ResMut<InventoryCursor>,
+    mut actions: ResMut<crate::inventory::access::InventoryActions>,
 ) {
     event.propagate(false);
-
-    if cursor.drag.is_some() {
-        return;
-    }
-
-    let Ok(slot) = slots.get(event.entity) else {
-        return;
-    };
-
-    let index = slot.index;
-
-    let shift = keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
-    if index == CRAFT_RESULT {
-        if matches!(
-            event.button,
-            PointerButton::Primary | PointerButton::Secondary
-        ) {
-            PlayerInventory::edit(&mut inventory, |inventory| {
-                inventory.craft(&mut cursor.stack, shift)
-            });
-        }
-        return;
-    }
-    match event.button {
-        PointerButton::Primary => {
-            if shift && cursor.stack.is_none() {
-                PlayerInventory::edit(&mut inventory, |inventory| inventory.quick_move(index));
-                return;
-            }
-
-            if event.count >= 2 && cursor.stack.is_some() {
-                PlayerInventory::edit(&mut inventory, |inventory| {
-                    inventory.collect_matching(&mut cursor.stack)
-                });
-                return;
-            }
-
-            PlayerInventory::edit(&mut inventory, |inventory| {
-                inventory.left_click(index, &mut cursor.stack)
-            });
-        }
-        PointerButton::Secondary => {
-            PlayerInventory::edit(&mut inventory, |inventory| {
-                inventory.right_click(index, &mut cursor.stack)
-            });
-        }
-        PointerButton::Middle => {}
+    if event.button == PointerButton::Primary
+        && let Ok(slot) = slots.get(event.entity)
+    {
+        actions.push_back(click_action(slot.index, false, event.count >= 2, &keyboard));
     }
 }
-
 pub(super) fn slot_drag_start(
     mut event: On<PointerDragStart>,
     slots: Query<&InventorySlotView>,
-    mut inventory: Single<&mut PlayerInventory, With<Player>>,
-    mut cursor: ResMut<InventoryCursor>,
+    mut actions: ResMut<crate::inventory::access::InventoryActions>,
 ) {
     event.propagate(false);
-
-    let Ok(slot) = slots.get(event.entity) else {
-        return;
-    };
-
-    if slot.index == CRAFT_RESULT {
-        return;
-    }
-    let had_stack_before_drag = cursor.stack.is_some();
-
     let mode = match event.button {
         PointerButton::Primary => DragMode::Even,
         PointerButton::Secondary => DragMode::OneEach,
         PointerButton::Middle => return,
     };
-
-    if !had_stack_before_drag {
-        PlayerInventory::edit(&mut inventory, |inventory| {
-            if event.button == PointerButton::Primary {
-                inventory.left_click(slot.index, &mut cursor.stack);
-            } else {
-                inventory.right_click(slot.index, &mut cursor.stack);
-            }
+    if let Ok(slot) = slots.get(event.entity) {
+        actions.push_back(crate::inventory::access::InventoryAction::DragStart {
+            index: slot.index,
+            source: event.entity,
+            mode,
         });
     }
-
-    if cursor.stack.is_none() {
-        return;
-    }
-
-    let mut visited = [false; SLOT_COUNT];
-
-    if had_stack_before_drag {
-        visited[slot.index] = true;
-    }
-
-    cursor.drag = Some(DragState {
-        source_entity: event.entity,
-        mode,
-        visited,
-    });
 }
-
 pub(super) fn slot_drag_enter(
     mut event: On<PointerDragEnter>,
     slots: Query<&InventorySlotView>,
-    mut cursor: ResMut<InventoryCursor>,
+    mut actions: ResMut<crate::inventory::access::InventoryActions>,
 ) {
     event.propagate(false);
-
-    let Ok(slot) = slots.get(event.entity) else {
-        return;
-    };
-
-    let Some(drag) = cursor.drag.as_mut() else {
-        return;
-    };
-
-    if event.dragged != drag.source_entity {
-        return;
-    }
-
-    if slot.index < SLOT_COUNT {
-        drag.visited[slot.index] = true;
+    if let Ok(slot) = slots.get(event.entity) {
+        actions.push_back(crate::inventory::access::InventoryAction::DragVisit {
+            index: slot.index,
+            source: event.dragged,
+        });
     }
 }
-
 pub(super) fn slot_drag_over(
     mut event: On<PointerDragOver>,
     slots: Query<&InventorySlotView>,
-    mut cursor: ResMut<InventoryCursor>,
+    mut actions: ResMut<crate::inventory::access::InventoryActions>,
 ) {
     event.propagate(false);
-
-    let Ok(slot) = slots.get(event.entity) else {
-        return;
-    };
-
-    let Some(drag) = cursor.drag.as_mut() else {
-        return;
-    };
-
-    if event.dragged != drag.source_entity {
-        return;
-    }
-
-    if slot.index < SLOT_COUNT {
-        drag.visited[slot.index] = true;
+    if let Ok(slot) = slots.get(event.entity) {
+        actions.push_back(crate::inventory::access::InventoryAction::DragVisit {
+            index: slot.index,
+            source: event.dragged,
+        });
     }
 }
-
 pub(super) fn slot_drag_end(
     mut event: On<PointerDragEnd>,
-    mut inventory: Single<&mut PlayerInventory, With<Player>>,
-    mut cursor: ResMut<InventoryCursor>,
+    mut actions: ResMut<crate::inventory::access::InventoryActions>,
 ) {
     event.propagate(false);
-
-    let Some(drag) = cursor.drag.take() else {
-        return;
-    };
-
-    if drag.source_entity != event.entity {
-        cursor.drag = Some(drag);
-        return;
-    }
-
-    PlayerInventory::edit(&mut inventory, |inventory| {
-        inventory.distribute_drag(&mut cursor.stack, &drag.visited, drag.mode)
-    });
+    actions.push_back(crate::inventory::access::InventoryAction::DragEnd(
+        event.entity,
+    ));
 }

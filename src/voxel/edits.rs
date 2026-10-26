@@ -45,13 +45,126 @@ pub(crate) fn set_voxel(
     mut pending: ResMut<PendingEdits>,
     mut chunks: Query<&mut ChunkVoxels>,
 ) {
-    let (chunk, local) = split_world_position(event.world_position);
+    apply_voxel(
+        *event,
+        &mut commands,
+        &index,
+        &mut stored,
+        &mut pending,
+        &mut chunks,
+        true,
+    );
+}
+
+#[derive(Event, Clone, Copy)]
+pub(crate) struct BlockChanged {
+    pub position: IVec3,
+    pub old: VoxelState,
+    pub new: VoxelState,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct CheckedEdit {
+    pub position: IVec3,
+    pub expected: VoxelState,
+    pub state: VoxelState,
+}
+
+/// Gameplay edits are validated together before any state or item is changed.
+#[derive(Event)]
+pub(crate) struct EditBatch {
+    pub edits: Vec<CheckedEdit>,
+    pub consume: Option<(Entity, crate::inventory::ItemKind)>,
+    pub drop: Option<(crate::inventory::ItemStack, Vec3, Vec3)>,
+}
+
+pub(crate) fn edit_batch(
+    event: On<EditBatch>,
+    mut commands: Commands,
+    index: Res<ChunkIndex>,
+    mut stored: ResMut<StoredChunks>,
+    mut pending: ResMut<PendingEdits>,
+    mut chunks: Query<&mut ChunkVoxels>,
+    mut inventories: Query<(
+        &mut crate::inventory::PlayerInventory,
+        &crate::inventory::HotbarSelection,
+    )>,
+) {
+    if event.edits.iter().all(|edit| edit.state == edit.expected) {
+        return;
+    }
+    // This is the only ChunkVoxels query: read validation and writes are sequential.
+    for (i, edit) in event.edits.iter().enumerate() {
+        let (chunk, local) = split_world_position(edit.position);
+        if event.edits[..i]
+            .iter()
+            .any(|other| other.position == edit.position)
+            || index
+                .get(&chunk)
+                .and_then(|&entity| chunks.get(entity).ok())
+                .and_then(|voxels| voxels.state(local))
+                != Some(edit.expected)
+        {
+            return;
+        }
+    }
+    if let Some((actor, item)) = event.consume {
+        let Ok((mut inventory, selection)) = inventories.get_mut(actor) else {
+            return;
+        };
+        if selection.stack(&inventory).map(|stack| stack.item()) != Some(item) {
+            return;
+        }
+        let consumed = crate::inventory::PlayerInventory::edit(&mut inventory, |inventory| {
+            inventory.consume(selection.0, 1)
+        });
+        if !consumed {
+            return;
+        }
+    }
+    // Neighbor rules see the complete batch, never an intermediate half-door.
+    for edit in &event.edits {
+        apply_voxel(
+            SetVoxel::with_state(edit.position, edit.state),
+            &mut commands,
+            &index,
+            &mut stored,
+            &mut pending,
+            &mut chunks,
+            false,
+        );
+    }
+    for edit in &event.edits {
+        refresh_connections(
+            edit.position,
+            &index,
+            &mut stored,
+            &mut chunks,
+            &mut commands,
+        );
+    }
+    if let Some((stack, position, velocity)) = event.drop {
+        use crate::dropped_item::DroppedItemCommandsExt;
+        commands.spawn_dropped_item(stack, position, velocity);
+    }
+}
+
+fn apply_voxel(
+    edit: SetVoxel,
+    commands: &mut Commands,
+    index: &ChunkIndex,
+    stored: &mut StoredChunks,
+    pending: &mut PendingEdits,
+    chunks: &mut Query<&mut ChunkVoxels>,
+    refresh: bool,
+) {
+    let (chunk, local) = split_world_position(edit.world_position);
     if !(0..CHUNK_HEIGHT).contains(&local.y) {
         return;
     }
     // Read neighbors before borrowing the edited chunk mutably, using the same query.
     // Only removal exposes a formerly opaque cell with stale (usually zero) light.
-    let estimate = if event.kind == VoxelKind::Air
+    let estimate = if edit.kind == VoxelKind::Air
         && let Some(entity) = index.get(&chunk)
         && let Ok(voxels) = chunks.get(*entity)
         && voxels.native_states.is_some()
@@ -66,7 +179,7 @@ pub(crate) fn set_voxel(
             IVec3::Z,
             IVec3::NEG_Z,
         ] {
-            let position = event.world_position + offset;
+            let position = edit.world_position + offset;
             let light = if position.y >= CHUNK_HEIGHT {
                 FULL_SKY
             } else {
@@ -100,13 +213,14 @@ pub(crate) fn set_voxel(
     } else {
         None
     };
+    let old = read_state(edit.world_position, index, stored, chunks);
     let changed = if let Some(entity) = index.get(&chunk) {
         let Ok(mut voxels) = chunks.get_mut(*entity) else {
             return;
         };
         let changed = voxels
             .bypass_change_detection()
-            .set_state(local, event.state);
+            .set_state(local, edit.state);
         if changed {
             if let Some(light) = estimate {
                 voxels
@@ -122,22 +236,25 @@ pub(crate) fn set_voxel(
         }
         changed
     } else if let Some(voxels) = stored.get_mut(&chunk) {
-        voxels.set_state(local, event.state)
+        voxels.set_state(local, edit.state)
     } else {
         // Applied by `spawn_chunk` once the chunk streams in.
-        pending.entry(chunk).or_default().push(*event);
+        pending.entry(chunk).or_default().push(edit);
         return;
     };
     if !changed {
         return;
     }
-    refresh_connections(
-        event.world_position,
-        &index,
-        &mut stored,
-        &mut chunks,
-        &mut commands,
-    );
+    if let Some(old) = old {
+        commands.trigger(BlockChanged {
+            position: edit.world_position,
+            old,
+            new: edit.state,
+        });
+    }
+    if refresh {
+        refresh_connections(edit.world_position, index, stored, chunks, commands);
+    }
 
     // Neighbors read this border directly; only their meshes need refreshing.
     for offset in border_neighbors(local) {
@@ -235,6 +352,11 @@ fn refresh_connections(
         } else if let Some(voxels) = stored.get_mut(&chunk) {
             voxels.set_state(local, next);
         }
+        commands.trigger(BlockChanged {
+            position,
+            old: state,
+            new: next,
+        });
         for offset in border_neighbors(local) {
             if let Some(&entity) = index.get(&(chunk + offset))
                 && let Ok(mut voxels) = chunks.get_mut(entity)

@@ -1,6 +1,4 @@
-use crate::inventory::{
-    HOTBAR_SIZE, INVENTORY_SIZE, ItemKind, ItemStack, PlayerInventory, SLOT_COUNT,
-};
+use crate::inventory::{HOTBAR_SIZE, ItemKind, ItemStack, PlayerInventory, SLOT_COUNT};
 use crate::voxel::VoxelKind;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -8,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub(super) const FORMAT_VERSION: u32 = 1;
+pub(super) const FORMAT_VERSION: u32 = 2;
 pub(super) const GENERATOR_VERSION: &str = "hollow-pumpkin-1";
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,8 +88,7 @@ pub(crate) struct SavedStack {
     pub count: u8,
 }
 impl SavedStack {
-    /// Blocks keep their block key so items such as `redstone_wire` reload as the same
-    /// block, and saves written before non-block items existed stay readable.
+    /// Keep the block identity when its item registry entry has a different key.
     pub(crate) fn capture(stack: ItemStack) -> Self {
         let name = match stack.item() {
             ItemKind::Block(kind) => kind.name(),
@@ -110,22 +107,13 @@ impl SavedStack {
             .filter(|item| item.is_valid())
             .ok_or_else(|| io::Error::other("Unknown saved item."))
     }
-    /// Splits the saved count into valid stacks: older saves allowed 64 of every block,
-    /// above the real max stack size of signs, beds, cakes, etc.
-    pub(crate) fn restore(&self) -> io::Result<impl Iterator<Item = ItemStack>> {
+    /// Saved stacks must match the current registry's limits exactly.
+    pub(crate) fn restore(&self) -> io::Result<ItemStack> {
         let item = self.item()?;
-        if self.count == 0 {
+        if self.count == 0 || self.count > item.max_stack_size() {
             return Err(io::Error::other("Invalid saved item stack."));
         }
-        let max = item.max_stack_size();
-        let mut left = self.count;
-        Ok(std::iter::from_fn(move || {
-            (left > 0).then(|| {
-                let count = left.min(max);
-                left -= count;
-                ItemStack::new(item, count)
-            })
-        }))
+        Ok(ItemStack::new(item, self.count))
     }
 }
 
@@ -174,7 +162,7 @@ impl SavedPlayer {
     }
 
     pub(crate) fn inventory(&self) -> io::Result<PlayerInventory> {
-        if ![INVENTORY_SIZE, SLOT_COUNT].contains(&self.slots.len())
+        if self.slots.len() != SLOT_COUNT
             || self.selected >= HOTBAR_SIZE
             || !self
                 .position
@@ -195,12 +183,9 @@ impl SavedPlayer {
             return Err(io::Error::other("Invalid player position or orientation."));
         }
         let mut slots = [None; SLOT_COUNT];
-        let mut overflow = Vec::new();
         for (slot, saved) in slots.iter_mut().zip(&self.slots) {
             if let Some(saved) = saved {
-                let mut stacks = saved.restore()?;
-                *slot = stacks.next();
-                overflow.extend(stacks);
+                *slot = Some(saved.restore()?);
             }
         }
         if slots
@@ -211,13 +196,9 @@ impl SavedPlayer {
             return Err(io::Error::other("Invalid equipped item."));
         }
         if let Some(cursor) = &self.cursor {
-            overflow.extend(cursor.restore()?.skip(1));
+            let _ = cursor.restore()?;
         }
-        let mut inventory = PlayerInventory::from_saved(slots, self.selected);
-        // Excess from oversized legacy stacks goes to free slots; a full inventory loses it.
-        for stack in overflow {
-            inventory.insert(stack);
-        }
+        let inventory = PlayerInventory::from_saved(slots);
         Ok(inventory)
     }
 }
@@ -255,8 +236,9 @@ pub(crate) struct Checkpoint {
     pub drops: Vec<SavedDrop>,
     // Edits to unloaded chunks must survive even when no chunk has been materialized.
     pub pending: Vec<([i32; 3], u16)>,
-    /// Days since the world was created ([`crate::sky::TimeOfDay`]); absent in older saves.
-    #[serde(default)]
+    /// Bounded support cascades resume after saving or unloading.
+    pub support_pending: Vec<[i32; 3]>,
+    /// Days since the world was created ([`crate::sky::TimeOfDay`]).
     pub time_of_day: Option<f64>,
 }
 impl Checkpoint {
@@ -266,6 +248,7 @@ impl Checkpoint {
     pub(super) fn same_state(&self, other: &Self) -> bool {
         self.player == other.player
             && self.pending == other.pending
+            && self.support_pending == other.support_pending
             && self.drops.len() == other.drops.len()
             && self
                 .drops

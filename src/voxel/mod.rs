@@ -4,10 +4,10 @@ mod api;
 mod blocks;
 mod chunk;
 mod collision;
-mod coordinates;
+pub(crate) mod coordinates;
 #[cfg(feature = "dev")]
 mod diagnostics;
-mod edits;
+pub(crate) mod edits;
 pub(crate) mod generation;
 mod lighting;
 mod loading;
@@ -48,6 +48,9 @@ use streaming::{
 
 /// Render layer of depth-only terrain: drawn into the sun's shadow maps, never by cameras.
 pub(crate) const SHADOW_LAYER: usize = 1;
+
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct VoxelPipeline;
 
 pub struct VoxelPlugin {
     settings: VoxelSettings,
@@ -92,6 +95,7 @@ impl Plugin for VoxelPlugin {
             .add_observer(apply_view_distance)
             .add_observer(apply_texture_pack)
             .add_observer(set_voxel)
+            .add_observer(edits::edit_batch)
             .add_observer(edits::refresh_connection_border)
             .add_observer(cleanup_removed_chunk)
             .add_systems(PreStartup, prepare_assets)
@@ -120,6 +124,8 @@ impl Plugin for VoxelPlugin {
                     request_chunk_colliders,
                 )
                     .chain()
+                    .in_set(VoxelPipeline)
+                    .after(crate::player::PlayerInteraction)
                     .before(bevy::transform::TransformSystems::Propagate)
                     .run_if(crate::world::streaming),
             )

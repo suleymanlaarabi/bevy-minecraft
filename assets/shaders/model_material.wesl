@@ -51,6 +51,10 @@ fn vertex(in: ModelVertex) -> ModelVaryings {
     out.world_normal = mesh_functions::mesh_normal_local_to_world(model.normal, in.instance_index);
     out.uv = model.uv;
     out.light = model.light;
+@if(MODEL_INSTANCE_LIGHT) {
+    let light = mesh_functions::get_tag(in.instance_index);
+    out.light = vec2<f32>(f32((light >> 4u) & 15u), f32(light & 15u)) / 15.0;
+}
     let face = faces[model.slot];
     let frame = surface_frame(u32(face.a + 0.5));
     out.layer = frame.current;

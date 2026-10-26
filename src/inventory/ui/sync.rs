@@ -1,5 +1,5 @@
 use super::{
-    CursorStackCount, CursorStackView, EmptySlotLabel, HotbarHud, InventorySlotView,
+    CursorStackCount, CursorStackView, EmptySlotLabel, HotbarHud, ICON_SIZE, InventorySlotView,
     SELECTED_BORDER, SLOT_BORDER, SlotCount, SlotIcon, empty_slot_label,
 };
 use crate::{
@@ -75,22 +75,99 @@ fn show_icon(node: &mut Mut<ImageNode>, icons: &BlockIcons, item: ItemKind) {
     }
 }
 
+pub(crate) fn bind_slots(
+    mut commands: Commands,
+    player: Single<
+        (
+            Entity,
+            Option<&crate::block_behavior::containers::ViewingContainer>,
+        ),
+        With<Player>,
+    >,
+    partners: Query<&crate::block_behavior::containers::ChestPartners>,
+    views: Query<(Entity, &InventorySlotView), Added<InventorySlotView>>,
+) {
+    let (player, viewing) = *player;
+    for (entity, view) in &views {
+        let index = view.index;
+        let owner = if index < crate::inventory::access::CONTAINER_START {
+            Some(super::SlotOwner {
+                entity: player,
+                index,
+            })
+        } else {
+            viewing.and_then(|viewing| {
+                let offset = index - crate::inventory::access::CONTAINER_START;
+                let entity = if offset < 27 {
+                    viewing.0
+                } else {
+                    *partners.get(viewing.0).ok()?.first()?
+                };
+                Some(super::SlotOwner {
+                    entity,
+                    index: offset % 27,
+                })
+            })
+        };
+        if let Some(owner) = owner {
+            commands.entity(entity).insert(owner);
+        }
+    }
+}
 pub(crate) fn refresh_slots(
-    inventory: Single<Ref<PlayerInventory>, With<Player>>,
-    new_views: Query<(), Added<InventorySlotView>>,
+    inventory: Single<
+        (
+            Entity,
+            Ref<PlayerInventory>,
+            Ref<crate::inventory::HotbarSelection>,
+            Ref<crate::inventory::CraftingResult>,
+        ),
+        With<Player>,
+    >,
+    containers: Query<Ref<crate::block_behavior::ContainerInventory>>,
+    new_views: Query<
+        (),
+        Or<(
+            Added<super::SlotOwner>,
+            Added<SlotIcon>,
+            Added<SlotCount>,
+            Added<EmptySlotLabel>,
+        )>,
+    >,
     block_icons: Res<BlockIcons>,
-    mut icons: Query<(&SlotIcon, &mut ImageNode, &mut Visibility)>,
+    mut icons: Query<(&ChildOf, &mut ImageNode, &mut Visibility), With<SlotIcon>>,
     mut counts: Query<
-        (&mut Text, Option<&SlotCount>, Option<&EmptySlotLabel>),
+        (&ChildOf, &mut Text, Has<SlotCount>),
         Or<(With<SlotCount>, With<EmptySlotLabel>)>,
     >,
+    owners: Query<(&InventorySlotView, &super::SlotOwner)>,
     mut slots: Query<(&InventorySlotView, &mut BorderColor)>,
 ) {
-    if !inventory.is_changed() && new_views.is_empty() {
+    let (player, inventory, selection, result) = inventory.into_inner();
+    if !inventory.is_changed()
+        && !selection.is_changed()
+        && !result.is_changed()
+        && !containers.iter().any(|inventory| inventory.is_changed())
+        && new_views.is_empty()
+    {
         return;
     }
-    for (view, mut node, mut visibility) in &mut icons {
-        match inventory.slot(view.index) {
+    let slot = |owner: &super::SlotOwner| {
+        if owner.entity == player {
+            if owner.index == crate::inventory::CRAFT_RESULT {
+                result.0
+            } else {
+                inventory.slot(owner.index)
+            }
+        } else {
+            containers.get(owner.entity).ok()?.slot(owner.index)
+        }
+    };
+    for (parent, mut node, mut visibility) in &mut icons {
+        let Ok((_, owner)) = owners.get(parent.parent()) else {
+            continue;
+        };
+        match slot(owner) {
             Some(stack) => {
                 show_icon(&mut node, &block_icons, stack.item());
                 visibility.set_if_neq(Visibility::Inherited);
@@ -101,15 +178,18 @@ pub(crate) fn refresh_slots(
         }
     }
 
-    for (mut text, count, placeholder) in &mut counts {
-        if let Some(view) = count {
-            let value = match inventory.slot(view.index) {
+    for (parent, mut text, count) in &mut counts {
+        let Ok((view, owner)) = owners.get(parent.parent()) else {
+            continue;
+        };
+        if count {
+            let value = match slot(owner) {
                 Some(stack) if stack.count() > 1 => stack.count().to_string(),
                 _ => String::new(),
             };
             text.set_if_neq(Text(value));
-        } else if let Some(view) = placeholder {
-            let label = match inventory.slot(view.index) {
+        } else {
+            let label = match slot(owner) {
                 None => empty_slot_label(view.index),
                 Some(_) => "",
             };
@@ -121,7 +201,7 @@ pub(crate) fn refresh_slots(
     }
 
     for (view, mut border) in &mut slots {
-        let selected = view.index < HOTBAR_SIZE && view.index == inventory.selected_hotbar();
+        let selected = view.index < HOTBAR_SIZE && view.index == selection.0;
 
         border.set_if_neq(BorderColor::all(if selected {
             SELECTED_BORDER
@@ -133,6 +213,7 @@ pub(crate) fn refresh_slots(
 
 pub(crate) fn follow_cursor_stack(
     window: Single<&Window, With<PrimaryWindow>>,
+    ui_scale: Res<UiScale>,
     cursor: Res<InventoryCursor>,
     block_icons: Res<BlockIcons>,
     view: Single<(&mut Node, &mut ImageNode, &mut Visibility), With<CursorStackView>>,
@@ -154,8 +235,10 @@ pub(crate) fn follow_cursor_stack(
     };
 
     visibility.set_if_neq(Visibility::Inherited);
-    let left = px(position.x + 12.0);
-    let top = px(position.y + 12.0);
+    // Window coordinates already account for DPI; only the UI scale remains.
+    let position = position / ui_scale.0 - Vec2::splat(ICON_SIZE * 0.5);
+    let left = px(position.x);
+    let top = px(position.y);
     if node.left != left || node.top != top {
         node.left = left;
         node.top = top;

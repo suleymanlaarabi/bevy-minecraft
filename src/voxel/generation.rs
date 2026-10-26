@@ -111,6 +111,16 @@ fn kinds() -> &'static [VoxelKind] {
     })
 }
 
+pub(crate) enum ChunkLoad {
+    Ready {
+        voxels: ChunkVoxels,
+        containers: crate::block_behavior::containers::PreparedColumn,
+        revision: u64,
+    },
+    Retry,
+    Missing,
+}
+
 impl WorldGenerator {
     pub(crate) fn new(seed: i64) -> Self {
         let world = Arc::<OnceLock<World>>::default();
@@ -211,31 +221,85 @@ impl WorldGenerator {
             || self.world().is_loaded(position.x, position.y)
     }
 
-    /// Reads a saved snapshot, else converts a chunk Pumpkin already holds;
-    /// `None` once it was unloaded.
-    pub(crate) fn loaded_chunk(&self, position: IVec2) -> Option<ChunkVoxels> {
-        if let Some(storage) = &self.storage {
-            match storage
-                .edited(position.x, position.y)
-                .and_then(|bytes| bytes.map(|b| ChunkVoxels::decode_saved(&b)).transpose())
-            {
-                Ok(Some(chunk)) => return Some(chunk),
-                Ok(None) => {}
-                Err(error) => {
-                    self.errors
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .push(error.to_string());
-                    return None;
-                }
+    pub(crate) fn storage_revision(&self, position: IVec2) -> Option<u64> {
+        self.storage.as_ref().map_or(Some(0), |database| {
+            database.revision(position.x, position.y)
+        })
+    }
+
+    /// Called on an I/O worker; await compute-only decoding after the WAL read.
+    pub(crate) async fn loaded_gameplay_chunk(&self, position: IVec2) -> ChunkLoad {
+        use bevy::tasks::AsyncComputeTaskPool;
+        let result = async {
+            if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                return Ok(ChunkLoad::Missing);
+            }
+            let column = if let Some(storage) = &self.storage {
+                storage.gameplay_column(position.x, position.y)?
+            } else {
+                Some(crate::world::storage::GameplayColumn::default())
+            };
+            let Some(column) = column else {
+                return Ok(ChunkLoad::Retry);
+            };
+            if self.storage_revision(position) != Some(column.revision) {
+                return Ok(ChunkLoad::Retry);
+            }
+            let generator = self.clone();
+            AsyncComputeTaskPool::get()
+                .spawn(async move {
+                    if generator
+                        .cancelled
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        return Ok(ChunkLoad::Missing);
+                    }
+                    let revision = column.revision;
+                    let (edited, records) = column.decode()?;
+                    let voxels = if let Some(bytes) = edited {
+                        ChunkVoxels::decode_saved(&bytes)?
+                    } else {
+                        let Some(generated) =
+                            generator.world().loaded_chunk(position.x, position.y)
+                        else {
+                            return Ok(ChunkLoad::Missing);
+                        };
+                        ChunkVoxels::from_native(
+                            generated.block_states(),
+                            generated.light().expect("full generation has light"),
+                            kinds(),
+                        )
+                    };
+                    let mut containers =
+                        crate::block_behavior::containers::PreparedColumn::discover(
+                            &voxels, position,
+                        );
+                    if let Some(bytes) = records {
+                        containers.restore(&bytes)?;
+                        containers.revision = 1;
+                    }
+                    Ok::<_, std::io::Error>(ChunkLoad::Ready {
+                        voxels,
+                        containers,
+                        revision,
+                    })
+                })
+                .await
+        }
+        .await;
+        match result {
+            Ok(value) => value,
+            Err(error) => {
+                self.errors
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(format!(
+                        "Cannot load gameplay column ({}, {}): {error}",
+                        position.x, position.y
+                    ));
+                ChunkLoad::Missing
             }
         }
-        let generated = self.world().loaded_chunk(position.x, position.y)?;
-        Some(ChunkVoxels::from_native(
-            generated.block_states(),
-            generated.light().expect("full worldgen includes lighting"),
-            kinds(),
-        ))
     }
 
     fn chunk(&self, position: IVec2) -> std::io::Result<ChunkSource> {

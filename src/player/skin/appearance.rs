@@ -10,6 +10,7 @@ use bevy::{
 pub(super) fn import_skin(
     mut events: MessageReader<FileDragAndDrop>,
     state: Option<Res<State<InventoryState>>>,
+    sessions: Query<(), With<crate::block_behavior::containers::ViewingContainer>>,
     mut assets: ResMut<SkinAssets>,
     mut import: ResMut<SkinImport>,
 ) {
@@ -17,9 +18,10 @@ pub(super) fn import_skin(
         let FileDragAndDrop::DroppedFile { path_buf, .. } = event else {
             continue;
         };
-        if state
-            .as_ref()
-            .is_none_or(|state| *state.get() != InventoryState::Open)
+        if !sessions.is_empty()
+            || state
+                .as_ref()
+                .is_none_or(|state| *state.get() != InventoryState::Open)
         {
             continue;
         }

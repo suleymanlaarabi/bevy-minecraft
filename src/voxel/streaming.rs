@@ -2,7 +2,7 @@ use super::{
     ChunkVoxels, SetVoxel, VoxelChunk, VoxelSettings, VoxelViewer,
     coordinates::neighbor_slot,
     coordinates::{ALL_SECTIONS, CHUNK_SIZE, chunk_at},
-    generation::WorldGenerator,
+    generation::{ChunkLoad, WorldGenerator},
     lighting::LitEdits,
     render::build::{ChunkSections, NeedsChunkBuild},
 };
@@ -11,7 +11,7 @@ use avian3d::prelude::*;
 use bevy::{
     platform::collections::{HashMap, HashSet, hash_map::Entry},
     prelude::*,
-    tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
+    tasks::{IoTaskPool, Task, futures::check_ready},
 };
 #[cfg(feature = "dev")]
 use std::time::{Duration, Instant};
@@ -34,7 +34,7 @@ pub(crate) struct PendingEdits(HashMap<IVec2, Vec<SetVoxel>>);
 #[derive(Component)]
 pub(crate) struct ChunkGeneration {
     position: IVec2,
-    task: Task<Option<GeneratedChunk>>,
+    task: Task<GeneratedChunk>,
 }
 
 /// A spawned chunk that is not meshed until its four neighbors have filled its halo,
@@ -44,7 +44,7 @@ pub(crate) struct ChunkGeneration {
 pub(crate) struct AwaitingNeighbors;
 
 struct GeneratedChunk {
-    voxels: ChunkVoxels,
+    result: ChunkLoad,
     #[cfg(feature = "dev")]
     elapsed: Duration,
 }
@@ -115,6 +115,13 @@ impl StreamState {
             position.x,
             position.y,
         )));
+    }
+
+    fn retry_ready(&mut self, position: IVec2, offsets: &StreamOffsets) {
+        self.retry_later(position, offsets);
+        if self.missing.contains(&position) {
+            self.push_ready(position);
+        }
     }
 
     /// A copy that found its chunk unloaded waits for Pumpkin's next completion event.
@@ -205,19 +212,25 @@ pub(crate) fn stream_chunks(
             continue;
         }
         if let Some(voxels) = stored.remove(&position) {
-            spawn_chunk(&mut commands, &mut index, &mut edits, position, voxels);
+            spawn_chunk(
+                &mut commands,
+                &mut index,
+                &mut edits,
+                position,
+                voxels,
+                default(),
+            );
         } else {
             let generator = generator.clone();
-            // Decoding is CPU work; the snapshot read uses a WAL reader that never waits on saves.
-            let task = AsyncComputeTaskPool::get().spawn(async move {
+            let task = IoTaskPool::get().spawn(async move {
                 #[cfg(feature = "dev")]
                 let started = Instant::now();
-                let voxels = generator.loaded_chunk(position)?;
-                Some(GeneratedChunk {
-                    voxels,
+                let result = generator.loaded_gameplay_chunk(position).await;
+                GeneratedChunk {
+                    result,
                     #[cfg(feature = "dev")]
                     elapsed: started.elapsed(),
-                })
+                }
             });
             let entity = commands
                 .spawn((
@@ -234,6 +247,7 @@ pub(crate) fn stream_chunks(
 pub(crate) fn poll_chunk_generations(
     mut commands: Commands,
     settings: Res<VoxelSettings>,
+    generator: Res<WorldGenerator>,
     mut generations: Query<(Entity, &mut ChunkGeneration)>,
     mut stored: ResMut<StoredChunks>,
     mut pending: ResMut<PendingChunks>,
@@ -254,11 +268,26 @@ pub(crate) fn poll_chunk_generations(
         let position = generation.position;
         pending.remove(&position);
         commands.entity(task_entity).despawn();
-        let Some(generated) = generated else {
-            // Unloaded by Pumpkin before the copy: retry once it is back.
-            state.retry_later(position, &offsets);
-            continue;
+        completed += 1;
+        let (voxels, containers, revision) = match generated.result {
+            ChunkLoad::Ready {
+                voxels,
+                containers,
+                revision,
+            } => (voxels, containers, revision),
+            ChunkLoad::Retry => {
+                state.retry_ready(position, &offsets);
+                continue;
+            }
+            ChunkLoad::Missing => {
+                state.retry_later(position, &offsets);
+                continue;
+            }
         };
+        if generator.storage_revision(position) != Some(revision) {
+            state.retry_ready(position, &offsets);
+            continue;
+        }
         #[cfg(feature = "dev")]
         if let Some(diagnostics) = diagnostics.as_deref_mut() {
             diagnostics.record_generation(generated.elapsed);
@@ -266,9 +295,15 @@ pub(crate) fn poll_chunk_generations(
         if index.contains_key(&position) {
             continue;
         }
-        let voxels = stored.remove(&position).unwrap_or(generated.voxels);
-        spawn_chunk(&mut commands, &mut index, &mut edits, position, voxels);
-        completed += 1;
+        let voxels = stored.remove(&position).unwrap_or(voxels);
+        spawn_chunk(
+            &mut commands,
+            &mut index,
+            &mut edits,
+            position,
+            voxels,
+            containers,
+        );
     }
 }
 
@@ -278,6 +313,7 @@ fn spawn_chunk(
     edits: &mut PendingEdits,
     position: IVec2,
     mut voxels: ChunkVoxels,
+    containers: crate::block_behavior::containers::PreparedColumn,
 ) {
     let Entry::Vacant(index_entry) = index.entry(position) else {
         return;
@@ -306,7 +342,14 @@ fn spawn_chunk(
     if lit_edits {
         entity.insert(LitEdits);
     }
-    index_entry.insert(entity.id());
+    let chunk_entity = entity.id();
+    index_entry.insert(chunk_entity);
+    crate::block_behavior::containers::spawn_for_chunk(
+        commands,
+        chunk_entity,
+        position,
+        containers,
+    );
     // Queued after the spawn: `set_voxel` then finds the chunk and applies them as
     // ordinary edits, neighbors and lighting included.
     for edit in edits.remove(&position).into_iter().flatten() {
@@ -488,6 +531,9 @@ pub(super) fn cleanup_voxel_world(
         world.resource_mut::<PendingChunks>().clear();
         world.resource_mut::<PendingEdits>().clear();
         world.resource_mut::<StoredChunks>().clear();
+        world
+            .resource_mut::<crate::block_behavior::containers::GameplayColumns>()
+            .clear();
         // Drop the context on its own worker: Pumpkin shutdown must not stall ECS.
         if let Some(state) = world.remove_resource::<super::lighting::LightingState>() {
             bevy::tasks::IoTaskPool::get()

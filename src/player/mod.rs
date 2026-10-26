@@ -16,6 +16,7 @@ use spawn::{finish_spawn_loading, finish_spawn_search, start_spawn_search};
 
 pub(crate) use components::Crosshair;
 pub use components::{CameraSensitivity, Player, PlayerCamera};
+pub(crate) use interaction::PlayerInteraction;
 
 pub struct PlayerPlugin;
 

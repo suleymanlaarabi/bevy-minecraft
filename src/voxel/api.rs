@@ -64,6 +64,14 @@ impl VoxelWorld<'_, '_> {
             .and_then(|voxels| voxels.state(local))
     }
 
+    pub(crate) fn light(&self, position: IVec3) -> Option<u8> {
+        let (chunk, local) = split_world_position(position);
+        self.chunks
+            .get(*self.index.get(&chunk)?)
+            .ok()?
+            .render_light_at(local)
+    }
+
     pub fn is_liquid_at(&self, position: Vec3) -> bool {
         self.state(position.floor().as_ivec3())
             .is_some_and(|state| state.has_water() || state.kind() == VoxelKind::Lava)

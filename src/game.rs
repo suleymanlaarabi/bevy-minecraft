@@ -32,6 +32,7 @@ impl Plugin for GamePlugin {
             .add_plugins((
                 crate::world::WorldPlugin,
                 InventoryPlugin,
+                crate::block_behavior::BlockBehaviorPlugin,
                 PlayerPlugin,
                 GameMenuPlugin,
                 CharacterPlugin,

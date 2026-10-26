@@ -14,6 +14,7 @@ parallel workers, and event-driven view updates.
 | `menu` | Main menu BSN scenes and actions |
 | `world` | World catalog, creation, sessions, checkpoints, transactional storage and UI |
 | `player` | Player/camera components, asynchronous spawning, controls, interactions, recovery |
+| `block_behavior` | ECS capabilities and relationships, targeted actions, persistent dormant owners and articulated views |
 | `character` | Physics movement, sensors, stepping, water state and ground following |
 | `dropped_item` | Drop spawning, physics, collection, lifetime and persistent snapshots |
 | `spatial` | Collision layers and entity following relationships |
@@ -41,8 +42,12 @@ tools follow when `dev` is enabled. Theme setup and Escape registration remain
 in the application bootstrap. Automatic native window destruction is disabled;
 world lifecycle code owns graceful exit requests.
 
-`GamePlugin` initializes `GameState` and composes the world, inventory, player,
-menu, character, spatial, and dropped-item plugins. Top-level states are `Menu`,
+Block behaviors follow the [block behavior architecture](block-behaviors.md) and
+[extension cookbook](block-behavior-cookbook.md). Static terrain remains compact;
+only blocks requiring individual data or animation have entities.
+
+`GamePlugin` initializes `GameState` and composes the world, inventory, block
+behavior, player, menu, character, spatial, and dropped-item plugins. Top-level states are `Menu`,
 `Settings`, `WorldSelect`, `WorldCreate`, and `Game`.
 
 `WorldPlugin` owns `WorldSessionPhase`, a substate of `Game`: `Loading`, `Playing`,
@@ -114,7 +119,8 @@ initial loading session is discarded before gameplay.
 `PrepareSession` orders session setup before the player's spawn search.
 Player orientation and input stay chained in `RunFixedMainLoop`, in
 `RunFixedMainLoopSystems::BeforeFixedMainLoop`. Interactions run after camera
-following and before transform propagation. Character movement remains between
+following and before the voxel pipeline. Articulated block views follow that
+pipeline and precede transform propagation. Character movement remains between
 physics preparation and simulation; ground following runs before physics
 writeback. Drop collection follows transform propagation.
 
@@ -148,13 +154,16 @@ transitions; explicit static review remains required.
 
 Native states drive shapes, collisions, targeting, and indexed rendering recipes.
 Official specialized models are extracted headlessly at import time and assembled
-through shared transforms; the game has no Java dependency or per-block render
-systems. Equal geometry and deterministic multipart assemblies share immutable
-quad lists. Materials share animation timelines and texture banks; static
+through shared transforms; the game has no runtime Java dependency. Static terrain
+uses no per-block render systems; sparse animated block views follow the block
+behavior pipeline. Equal geometry and deterministic multipart assemblies share
+immutable quad lists. Materials share animation timelines and texture banks; static
 surfaces bypass animation reads and fluid family/amount fits in the existing
 four-byte state classification record.
 
-Vanilla ticking, block-entity contents and decoration data, gameplay-driven model
-animations, a pause menu, and networking remain separate work. Fast terrain stays the default for new
+Normal chest contents and articulated lids, manual doors/trapdoors/gates, and
+ladder/vine climbing are implemented through shared capabilities. General vanilla
+ticking, other block-entity contents and decoration data, a pause menu, and
+networking remain separate work. Fast terrain stays the default for new
 worlds; users may explicitly choose Vanilla at creation, and saves retain that
 choice permanently.

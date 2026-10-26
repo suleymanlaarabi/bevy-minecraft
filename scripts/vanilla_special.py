@@ -71,10 +71,13 @@ def transform(quads, scale=(1, 1, 1), translate=(0, 0, 0), rotations=()):
 
 def import_special_models(jar, models, states, textures):
     factories = extract_factories(jar)
-    def geometry(factory, texture, **transformation):
+    chest_pivots = []
+    def geometry(factory, texture, keep_parts=False, **transformation):
         quads = transform(factories[factory], **transformation)
         for q in quads:
-            q.pop('part', None)
+            if not keep_parts:
+                q.pop('part', None)
+                q.pop('pivot', None)
             q.update(texture='@' + texture, tinted=False, cull=[0, 0, 0],
                      translucent=False, shade='', effect=0, light_emission=0)
         textures.add('@' + texture)
@@ -117,6 +120,23 @@ def import_special_models(jar, models, states, textures):
             for key, quads in oriented(geometry('chest_' + half, texture)).items():
                 variants[key + (f',type={half}' if block != 'ender_chest' else '')] = quads
         bind(block, variants)
+
+    # Animated world chests share canonical local body/lid geometry. Closed
+    # assemblies remain available to icons and drops through the normal recipes.
+    for half in ['single', 'left', 'right']:
+        texture = 'entity/chest/normal' + ('_' + half if half != 'single' else '')
+        quads = geometry('chest_' + half, texture, keep_parts=True)
+        moving = [q for q in quads if q['part'].endswith(('/lid', '/lock'))]
+        pivot = next(q['pivot'] for q in moving if q['part'].endswith('/lid'))
+        chest_pivots.append(pivot)
+        for part, selected in [('body', [q for q in quads if q not in moving]), ('lid', moving)]:
+            for q in selected:
+                q.pop('part')
+                q.pop('pivot')
+                if part == 'lid':
+                    q['positions'] = [[round(p[i] - pivot[i], 7) for i in range(3)] for p in q['positions']]
+            models[f'hollow:chest/{half}/{part}'] = selected
+    bind.chest_pivots = chest_pivots
 
     # The same axis transforms serve every shulker color.
     for color in ['', *COLORS]:

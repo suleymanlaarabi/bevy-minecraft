@@ -16,6 +16,8 @@ use bevy::{
 #[derive(Component, Default, Debug, Clone)]
 #[require(
     PlayerInventory,
+    crate::inventory::HotbarSelection,
+    crate::inventory::CraftingResult,
     super::safety::PlayerCheckpoint,
     GameCharacter,
     AutoJump,

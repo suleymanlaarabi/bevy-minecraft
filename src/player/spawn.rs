@@ -132,7 +132,7 @@ pub(super) fn finish_spawn_loading(
         if let Some(session) = &session {
             if let Some(stack) = saved
                 .and_then(|p| p.cursor.as_ref())
-                .and_then(|s| s.restore().ok()?.next())
+                .and_then(|s| s.restore().ok())
             {
                 cursor.stack = Some(stack);
             }
@@ -166,6 +166,7 @@ fn spawn_player(
     commands.spawn_scene_list(bsn! {
         Player
         inventory
+        crate::inventory::HotbarSelection({saved.map_or(0, |saved| saved.selected)})
         player_transform
         GlobalTransform::from_translation(spawn_pos)
         FollowedBy [

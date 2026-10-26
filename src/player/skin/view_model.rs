@@ -4,12 +4,17 @@ use crate::player::PlayerCamera;
 use bevy::{camera::CameraProjection, render::render_resource::Extent3d, window::PrimaryWindow};
 use std::{f32::consts::PI, sync::OnceLock};
 
-const SWING_DURATION: f32 = 0.3;
+const SWING_TICK_DURATION: f32 = 1. / 20.;
+const SWING_DURATION_TICKS: u8 = 6;
 
 #[derive(Component, Default)]
 pub(crate) struct ArmSwing {
-    elapsed: Option<f32>,
+    ticks: Option<u8>,
+    tick_elapsed: f32,
+    previous_progress: f32,
+    current_progress: f32,
     requested: bool,
+    mining_requested: bool,
 }
 
 impl ArmSwing {
@@ -17,8 +22,50 @@ impl ArmSwing {
         self.requested = true;
     }
 
+    pub(crate) fn request_mining(&mut self) {
+        self.mining_requested = true;
+    }
+
     fn progress(&self) -> f32 {
-        self.elapsed.map_or(0., |elapsed| elapsed / SWING_DURATION)
+        // Minecraft interpolates a restarted swing through the end of the cycle,
+        // rather than interpolating backward from the previous pose to zero.
+        let end = if self.current_progress < self.previous_progress {
+            self.current_progress + 1.
+        } else {
+            self.current_progress
+        };
+        (self.previous_progress
+            + (end - self.previous_progress) * (self.tick_elapsed / SWING_TICK_DURATION))
+            .rem_euclid(1.)
+    }
+
+    fn tick(&mut self, requested: bool) {
+        // Match LivingEntity.SwingState: a six-tick swing can restart once its
+        // counter exceeds three ticks. Repeated mining therefore restarts at four.
+        if requested
+            && self
+                .ticks
+                .is_none_or(|ticks| ticks == 0 || ticks > SWING_DURATION_TICKS / 2)
+        {
+            if self.ticks.is_none() {
+                self.previous_progress = 0.;
+                self.current_progress = 0.;
+            }
+            self.ticks = Some(0);
+        }
+
+        self.previous_progress = self.current_progress;
+        if let Some(ticks) = self.ticks {
+            if ticks > SWING_DURATION_TICKS {
+                self.ticks = None;
+                self.current_progress = 0.;
+            } else {
+                self.current_progress = f32::from(ticks) / f32::from(SWING_DURATION_TICKS);
+                self.ticks = Some(ticks + 1);
+            }
+        } else {
+            self.current_progress = 0.;
+        }
     }
 }
 
@@ -38,21 +85,25 @@ pub(super) fn advance_swing(
         return;
     }
     let clicked = mouse.just_pressed(MouseButton::Left);
-    if swing.elapsed.is_none() && !swing.requested && !clicked {
+    if swing.ticks.is_none()
+        && swing.previous_progress == 0.
+        && swing.current_progress == 0.
+        && !swing.requested
+        && !swing.mining_requested
+        && !clicked
+    {
         return;
     }
-    if let Some(elapsed) = &mut swing.elapsed {
-        *elapsed += time.delta_secs();
-        if *elapsed >= SWING_DURATION {
-            swing.elapsed = None;
-        }
+    // Keep one-shot clicks until the next animation tick, but sample mining anew
+    // each frame so releasing the button or losing the target stops repetition.
+    swing.requested |= clicked;
+    let mining = std::mem::take(&mut swing.mining_requested);
+    swing.tick_elapsed += time.delta_secs();
+    while swing.tick_elapsed >= SWING_TICK_DURATION {
+        swing.tick_elapsed -= SWING_TICK_DURATION;
+        let requested = std::mem::take(&mut swing.requested) || mining;
+        swing.tick(requested);
     }
-    // A click swings even in air. Mining requests each frame, repeating complete
-    // cycles while the button is held without restarting the pose every frame.
-    if swing.elapsed.is_none() && (swing.requested || clicked) {
-        swing.elapsed = Some(0.);
-    }
-    swing.requested = false;
 }
 
 pub(super) fn first_person_pose(progress: f32, slim: bool) -> Transform {
@@ -95,10 +146,10 @@ pub(super) fn resize_arm_target(
     assets: Res<SkinAssets>,
     meshes: Res<Assets<Mesh>>,
     ui_scale: Res<UiScale>,
-    arms: Query<(Entity, &Transform), With<FirstPersonArm>>,
-    parts: Query<(&Mesh3d, &Transform, &ChildOf), With<SkinPart>>,
+    arms: Query<(Entity, &Transform, &Visibility), (With<FirstPersonRoot>, Without<ArmView>)>,
+    parts: Query<(&Mesh3d, &Transform, &ChildOf), Or<(With<SkinPart>, With<HeldItemPart>)>>,
     mut cameras: Query<(&mut Camera, &Projection), With<ArmCamera>>,
-    mut overlays: Query<(&mut Node, &mut Visibility), With<ArmView>>,
+    mut overlays: Query<(&mut Node, &mut Visibility), (With<ArmView>, Without<FirstPersonRoot>)>,
     mut images: ResMut<Assets<Image>>,
     mut allocation: Local<(UVec2, UVec2)>,
 ) {
@@ -118,7 +169,10 @@ pub(super) fn resize_arm_target(
             let mut perspective = perspective.clone();
             perspective.aspect_ratio = full_size.x as f32 / full_size.y as f32;
             let clip_from_view = perspective.get_clip_from_view();
-            for (root, arm) in &arms {
+            for (root, arm, visibility) in &arms {
+                if *visibility == Visibility::Hidden {
+                    continue;
+                }
                 for (mesh, part, parent) in &parts {
                     if parent.parent() != root {
                         continue;
@@ -218,28 +272,46 @@ pub(super) fn animate_first_person(
     view: Res<PlayerView>,
     settings: Res<SkinSettings>,
     swing: Single<Ref<ArmSwing>, With<PlayerCamera>>,
-    mut arms: Query<(&mut Transform, &mut Visibility), (With<FirstPersonArm>, Without<ArmView>)>,
-    mut overlays: Query<&mut Visibility, (With<ArmView>, Without<FirstPersonArm>)>,
+    held: Single<Ref<HeldItem>>,
+    mut arms: Query<
+        (&mut Transform, &mut Visibility, Option<&HeldItem>),
+        (With<FirstPersonRoot>, Without<ArmView>),
+    >,
+    mut overlays: Query<&mut Visibility, (With<ArmView>, Without<FirstPersonRoot>)>,
     mut cameras: Query<&mut Camera, With<ArmCamera>>,
 ) {
     // Mesh rig roots and UI image roots are genuinely disjoint entity sets.
     let visible = *state.get() == InventoryState::Closed && *view == PlayerView::FirstPerson;
-    for (mut transform, mut visibility) in &mut arms {
-        visibility.set_if_neq(if visible {
+    for (mut transform, mut visibility, item) in &mut arms {
+        let shown = visible
+            && if item.is_some() {
+                held.item.is_some()
+            } else {
+                held.item.is_none()
+            };
+        let became_visible = shown && *visibility == Visibility::Hidden;
+        visibility.set_if_neq(if shown {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         });
-        if visible
-            && (swing.is_changed()
+        if shown
+            && (became_visible
+                || swing.is_changed()
                 || settings.is_changed()
                 || view.is_changed()
+                || held.is_changed()
                 || transform.is_added())
         {
-            transform.set_if_neq(first_person_pose(
-                swing.progress(),
-                settings.model == SkinModel::Slim,
-            ));
+            let pose = if let Some(item) = item {
+                held_item::pose(swing.progress(), item.equipped, &item.display)
+            } else {
+                let mut pose =
+                    first_person_pose(swing.progress(), settings.model == SkinModel::Slim);
+                pose.translation.y -= 0.6 * (1. - held.equipped);
+                pose
+            };
+            transform.set_if_neq(pose);
         }
     }
     for mut visibility in &mut overlays {

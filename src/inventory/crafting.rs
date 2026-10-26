@@ -134,7 +134,7 @@ fn match_shapeless(ingredients: &[Vec<u16>], ids: &[Option<u16>; 4], used: u8) -
     })
 }
 
-/// Index of the recipe matching the 2x2 grid; `PlayerInventory` caches it per grid edit.
+/// Index of the recipe matching the 2x2 grid.
 pub(crate) fn find(slots: &[Option<ItemStack>]) -> Option<usize> {
     let ids: [Option<u16>; 4] = std::array::from_fn(|i| slots[i].map(|s| s.item().registry().id));
     let occupied = ids.iter().flatten().count();

@@ -71,7 +71,14 @@ fn spawn_rig(commands: &mut Commands, assets: &SkinAssets, preview: bool, parent
     }
 }
 
-pub(super) fn spawn_preview(mut commands: Commands, assets: Res<SkinAssets>) {
+pub(super) fn spawn_preview(
+    mut commands: Commands,
+    assets: Res<SkinAssets>,
+    sessions: Query<(), With<crate::block_behavior::containers::ViewingContainer>>,
+) {
+    if !sessions.is_empty() {
+        return;
+    }
     spawn_rig(&mut commands, &assets, true, None);
     commands.spawn((
         Camera3d::default(),
@@ -112,7 +119,9 @@ pub(super) fn spawn_world_rig(
     players: Query<Entity, Added<Player>>,
     cameras: Query<Entity, Added<PlayerCamera>>,
     settings: Res<SkinSettings>,
+    sky: Res<crate::sky::SkyState>,
 ) {
+    let level = ARM_NIGHT_LEVEL + (1. - ARM_NIGHT_LEVEL) * (1. - sky.night);
     for player in &players {
         spawn_rig(&mut commands, &assets, false, Some(player));
     }
@@ -134,12 +143,35 @@ pub(super) fn spawn_world_rig(
             }),
             RenderLayers::layer(ARM_LAYER),
             ArmCamera,
+            AmbientLight {
+                brightness: 500. * level,
+                ..default()
+            },
             Transform::default(),
+            ChildOf(camera),
+        ));
+        commands.spawn((
+            HeldItemLight,
+            DirectionalLight {
+                illuminance: 6000. * level,
+                shadow_maps_enabled: false,
+                ..default()
+            },
+            Transform::from_xyz(-3., 5., 4.).looking_at(Vec3::ZERO, Vec3::Y),
+            RenderLayers::layer(ARM_LAYER),
+            ChildOf(camera),
+        ));
+        commands.spawn((
+            FirstPersonRoot,
+            HeldItem::default(),
+            Transform::default(),
+            Visibility::Hidden,
             ChildOf(camera),
         ));
         let arm = commands
             .spawn((
                 FirstPersonArm,
+                FirstPersonRoot,
                 first_person_pose(0., settings.model == SkinModel::Slim),
                 Visibility::Hidden,
                 ChildOf(camera),

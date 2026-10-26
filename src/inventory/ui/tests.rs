@@ -16,6 +16,7 @@ fn ending_session_clears_cursor_without_spawning_orphaned_drops() {
     let mut world = World::new();
     world.insert_resource(State::new(GameState::Menu));
     world.init_resource::<InventoryCursor>();
+    world.init_resource::<crate::inventory::access::InventoryActions>();
     world.init_resource::<RecordedDrops>();
     world.add_observer(
         |event: On<SpawnDroppedItem>, mut drops: ResMut<RecordedDrops>| drops.0.push(event.stack),
@@ -38,6 +39,7 @@ fn closing_full_inventory_drops_remainder_without_losing_items() {
     let mut world = World::new();
     world.insert_resource(State::new(GameState::Game));
     world.init_resource::<InventoryCursor>();
+    world.init_resource::<crate::inventory::access::InventoryActions>();
     world.init_resource::<RecordedDrops>();
     world.add_observer(
         |event: On<SpawnDroppedItem>, mut drops: ResMut<RecordedDrops>| drops.0.push(event.stack),
@@ -52,7 +54,7 @@ fn closing_full_inventory_drops_remainder_without_losing_items() {
         );
     }
     let mut held = None;
-    inventory.left_click(0, &mut held);
+    crate::inventory::slots::click(&mut inventory, 0, &mut held, false);
     inventory.insert(ItemStack::new(ItemKind::Block(VoxelKind::Wood), 1));
     let player = world
         .spawn((
@@ -91,25 +93,30 @@ fn slots_initialize_when_opened_and_remain_unchanged_at_rest() {
     let mut app = App::new();
     app.init_resource::<BlockIcons>()
         .add_systems(Update, refresh_slots);
-    app.world_mut().spawn(Player);
+    let player = app.world_mut().spawn(Player).id();
     let view = app
         .world_mut()
         .spawn((
             InventorySlotView { index: 0 },
+            super::SlotOwner {
+                entity: player,
+                index: 0,
+            },
             BorderColor::all(Color::NONE),
         ))
         .id();
     let icon = app
         .world_mut()
         .spawn((
-            SlotIcon { index: 0 },
+            SlotIcon,
+            ChildOf(view),
             ImageNode::default(),
             Visibility::Hidden,
         ))
         .id();
     let count = app
         .world_mut()
-        .spawn((SlotCount { index: 0 }, Text::new("")))
+        .spawn((SlotCount, Text::new(""), ChildOf(view)))
         .id();
     app.update();
     assert_eq!(app.world().get::<Text>(count).unwrap().0, "2");
@@ -158,7 +165,7 @@ fn slots_initialize_when_opened_and_remain_unchanged_at_rest() {
     );
     let new_count = app
         .world_mut()
-        .spawn((SlotCount { index: 0 }, Text::new("")))
+        .spawn((SlotCount, Text::new(""), ChildOf(view)))
         .id();
     app.world_mut().spawn((
         InventorySlotView { index: 0 },
