@@ -4,12 +4,12 @@ use crate::{
     coordinates::SECTION_VOLUME,
     sections::{Layer, Section},
 };
-use std::{collections::BTreeSet, io, sync::Arc};
+use std::{io, sync::Arc};
 
 pub struct TerrainRecord {
     pub states: Layer<VoxelState>,
     pub light: Layer<u8>,
-    pub edits: Arc<BTreeSet<usize>>,
+    pub modified: bool,
 }
 
 fn invalid() -> io::Error {
@@ -74,21 +74,18 @@ fn decode_section<T: Cell>(bytes: &mut &[u8]) -> io::Result<Section<T>> {
 impl TerrainRecord {
     pub fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(32 * 1024);
-        bytes.extend_from_slice(b"HTRN\x01");
+        bytes.extend_from_slice(b"HTRN\x02");
         bytes.push(self.states.section_count() as u8);
         for section in 0..self.states.section_count() {
             encode_section(self.states.section(section), &mut bytes);
             encode_section(self.light.section(section), &mut bytes);
         }
-        bytes.extend_from_slice(&(self.edits.len() as u32).to_le_bytes());
-        for &index in self.edits.iter() {
-            bytes.extend_from_slice(&(index as u32).to_le_bytes());
-        }
+        bytes.push(u8::from(self.modified));
         bytes
     }
 
     pub fn decode(mut bytes: &[u8], section_count: usize) -> io::Result<Self> {
-        if take(&mut bytes, 5)? != b"HTRN\x01" || u8::decode(&mut bytes)? as usize != section_count
+        if take(&mut bytes, 5)? != b"HTRN\x02" || u8::decode(&mut bytes)? as usize != section_count
         {
             return Err(invalid());
         }
@@ -98,24 +95,18 @@ impl TerrainRecord {
             states.push(decode_section(&mut bytes)?);
             light.push(decode_section(&mut bytes)?);
         }
-        let count = u32::from_le_bytes(take(&mut bytes, 4)?.try_into().unwrap()) as usize;
-        if count > section_count * SECTION_VOLUME {
-            return Err(invalid());
-        }
-        let mut edits = BTreeSet::new();
-        for index in take(&mut bytes, count * 4)?.chunks_exact(4) {
-            let index = u32::from_le_bytes(index.try_into().unwrap()) as usize;
-            if index >= section_count * SECTION_VOLUME || !edits.insert(index) {
-                return Err(invalid());
-            }
-        }
+        let modified = match u8::decode(&mut bytes)? {
+            0 => false,
+            1 => true,
+            _ => return Err(invalid()),
+        };
         if !bytes.is_empty() {
             return Err(invalid());
         }
         Ok(Self {
             states: Layer::from_sections(states),
             light: Layer::from_sections(light),
-            edits: Arc::new(edits),
+            modified,
         })
     }
 }
@@ -126,10 +117,9 @@ pub struct GenerationRecord {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GenerationPayload {
-    biomes: Vec<u8>,
+struct WorkingPayload {
     heights: Vec<Vec<i16>>,
     surface_estimates: Vec<(u64, i32)>,
     block_count: usize,
@@ -139,8 +129,8 @@ pub struct GenerationPayload {
     structure_starts: Vec<String>,
     structure_references: Vec<String>,
 }
-impl GenerationPayload {
-    pub(crate) fn capture(chunk: &crate::ProtoChunk) -> Self {
+impl WorkingPayload {
+    fn capture(chunk: &crate::ProtoChunk) -> Self {
         fn nbt(compound: &pumpkin_nbt::NbtCompound) -> Vec<u8> {
             pumpkin_nbt::Nbt::new(String::new(), compound.clone())
                 .write()
@@ -159,7 +149,6 @@ impl GenerationPayload {
             .collect();
         structure_starts.sort_unstable();
         Self {
-            biomes: chunk.flat_biome_map.to_vec(),
             heights: vec![
                 chunk.flat_surface_height_map.to_vec(),
                 chunk.flat_ocean_floor_height_map.to_vec(),
@@ -200,49 +189,47 @@ struct GenerationHeader {
     position: [i32; 2],
     min_y: i32,
     height: i32,
-    metadata: GenerationPayload,
+    biomes: Vec<u8>,
+    metadata: GenerationMetadata,
+}
+
+/// Completed columns retain no resumable generation metadata.
+#[derive(serde::Serialize, serde::Deserialize)]
+enum GenerationMetadata {
+    Working(WorkingPayload),
+    Complete(crate::chunk::ChunkHeightmaps),
 }
 
 pub(crate) fn encode_generated(chunk: &crate::chunk_system::Chunk) -> io::Result<GenerationRecord> {
     use crate::chunk_system::{Chunk, StagedChunkEnum as Stage};
-    let (snapshot, metadata) = match chunk {
+    let (snapshot, biomes, metadata) = match chunk {
         Chunk::Proto(chunk) => (
             crate::ChunkSnapshot::from_proto(chunk, chunk.bottom_y() as i32, chunk.height() as i32),
-            GenerationPayload::capture(chunk),
+            chunk.flat_biome_map.to_vec(),
+            GenerationMetadata::Working(WorkingPayload::capture(chunk)),
         ),
-        Chunk::Complete(chunk) => {
-            let mut metadata = chunk.metadata.as_ref().clone();
-            let heightmaps = chunk.heightmap.lock().unwrap();
-            for x in 0..16 {
-                for z in 0..16 {
-                    for (kind, index) in [
-                        (crate::chunk::ChunkHeightmapType::WorldSurface, 0),
-                        (crate::chunk::ChunkHeightmapType::MotionBlocking, 4),
-                        (crate::chunk::ChunkHeightmapType::MotionBlockingNoLeaves, 5),
-                    ] {
-                        metadata.heights[index][(x * 16 + z) as usize] =
-                            heightmaps.get(kind, x, z, chunk.section.min_y) as i16;
-                    }
-                }
-            }
-            (chunk.snapshot(), metadata)
-        }
+        Chunk::Complete(chunk) => (
+            chunk.snapshot(),
+            chunk.section.biomes.to_vec(),
+            GenerationMetadata::Complete(chunk.heightmap.lock().unwrap().clone()),
+        ),
     };
     let header = GenerationHeader {
         position: [snapshot.chunk_x, snapshot.chunk_z],
         min_y: snapshot.min_y,
         height: snapshot.height,
+        biomes,
         metadata,
     };
     let header = serde_json::to_vec(&header).map_err(io::Error::other)?;
     let terrain = TerrainRecord {
         states: snapshot.states,
         light: snapshot.light,
-        edits: Arc::default(),
+        modified: false,
     }
     .encode();
     let mut bytes = Vec::with_capacity(9 + header.len() + terrain.len());
-    bytes.extend_from_slice(b"HGEN\x02");
+    bytes.extend_from_slice(b"HGEN\x03");
     bytes.extend_from_slice(&(header.len() as u32).to_le_bytes());
     bytes.extend_from_slice(&header);
     bytes.extend_from_slice(&terrain);
@@ -269,7 +256,7 @@ pub(crate) fn decode_generated(
     use std::sync::{Mutex, RwLock};
     let decoded = decompress_record(&record.bytes)?;
     let mut bytes = decoded.as_slice();
-    if take(&mut bytes, 5)? != b"HGEN\x02" {
+    if take(&mut bytes, 5)? != b"HGEN\x03" {
         return Err(invalid());
     }
     let header_len = u32::from_le_bytes(take(&mut bytes, 4)?.try_into().unwrap()) as usize;
@@ -280,20 +267,8 @@ pub(crate) fn decode_generated(
         || header.min_y != dim.min_y
         || header.height != dim.height
         || record.stage < Stage::Empty
-        || header.metadata.biomes.len() != dim.height as usize * 4
-        || header.metadata.heights.len() != 6
-        || header.metadata.heights.iter().any(|h| {
-            h.len() != 256
-                || h.iter().any(|&y| {
-                    y != i16::MIN
-                        && (y < (dim.min_y - 1) as i16 || y >= (dim.min_y + dim.height) as i16)
-                })
-        })
-        || (header.metadata.block_count != 0
-            && (header.metadata.block_count > dim.height as usize * 256
-                || header.metadata.block_count % SECTION_VOLUME != 0))
+        || header.biomes.len() != dim.height as usize * 4
         || header
-            .metadata
             .biomes
             .iter()
             .any(|&id| pumpkin_data::chunk::Biome::from_id(id).is_none())
@@ -301,10 +276,60 @@ pub(crate) fn decode_generated(
         return Err(invalid());
     }
     let terrain = TerrainRecord::decode(bytes, dim.height as usize / 16)?;
-    if !terrain.edits.is_empty() {
+    if terrain.modified {
         return Err(invalid());
     }
-    let metadata = header.metadata;
+    let metadata = match header.metadata {
+        GenerationMetadata::Complete(heightmaps) => {
+            if record.stage != Stage::Full
+                || [
+                    &heightmaps.world_surface,
+                    &heightmaps.motion_blocking,
+                    &heightmaps.motion_blocking_no_leaves,
+                ]
+                .into_iter()
+                .flatten()
+                .any(|heights| {
+                    heights.len() != ChunkHeightmaps::LONGS
+                        || heights.iter().any(|&word| {
+                            word < 0
+                                || (0..7)
+                                    .any(|i| ((word as u64 >> (i * 9)) & 511) > dim.height as u64)
+                        })
+                })
+            {
+                return Err(invalid());
+            }
+            return Ok(Chunk::Complete(Arc::new(ChunkData {
+                x: position.x,
+                z: position.y,
+                section: ChunkSections {
+                    count: dim.height as usize / 16,
+                    min_y: dim.min_y,
+                    states: RwLock::new(terrain.states),
+                    biomes: Arc::from(header.biomes),
+                },
+                heightmap: Mutex::new(heightmaps),
+                light: Mutex::new(terrain.light),
+            })));
+        }
+        GenerationMetadata::Working(metadata) => metadata,
+    };
+    if record.stage == Stage::Full
+        || metadata.heights.len() != 6
+        || metadata.heights.iter().any(|heights| {
+            heights.len() != 256
+                || heights.iter().any(|&y| {
+                    y != i16::MIN
+                        && (y < (dim.min_y - 1) as i16 || y >= (dim.min_y + dim.height) as i16)
+                })
+        })
+        || (metadata.block_count != 0
+            && (metadata.block_count > dim.height as usize * 256
+                || metadata.block_count % SECTION_VOLUME != 0))
+    {
+        return Err(invalid());
+    }
     for name in metadata
         .structure_starts
         .iter()
@@ -352,39 +377,6 @@ pub(crate) fn decode_generated(
             })
         })
         .collect::<io::Result<_>>()?;
-    if record.stage == Stage::Full {
-        let mut heightmaps = ChunkHeightmaps::default();
-        for x in 0..16 {
-            for z in 0..16 {
-                for (kind, index) in [
-                    (crate::chunk::ChunkHeightmapType::WorldSurface, 0),
-                    (crate::chunk::ChunkHeightmapType::MotionBlocking, 4),
-                    (crate::chunk::ChunkHeightmapType::MotionBlockingNoLeaves, 5),
-                ] {
-                    heightmaps.set(
-                        kind,
-                        x,
-                        z,
-                        metadata.heights[index][(x * 16 + z) as usize] as i32,
-                        dim.min_y,
-                    );
-                }
-            }
-        }
-        return Ok(Chunk::Complete(Arc::new(ChunkData {
-            x: position.x,
-            z: position.y,
-            section: ChunkSections {
-                count: dim.height as usize / 16,
-                min_y: dim.min_y,
-                states: RwLock::new(terrain.states),
-                biomes: Arc::from(metadata.biomes.clone()),
-            },
-            heightmap: Mutex::new(heightmaps),
-            light: Mutex::new(terrain.light),
-            metadata: Arc::new(metadata),
-        })));
-    }
     let mut chunk = crate::ProtoChunk::new(position.x, position.y, generator);
     if metadata.block_count != 0 {
         chunk.flat_block_map = (0..metadata.block_count)
@@ -395,7 +387,7 @@ pub(crate) fn decode_generated(
             })
             .collect();
     }
-    chunk.flat_biome_map = metadata.biomes.into_boxed_slice();
+    chunk.flat_biome_map = header.biomes.into_boxed_slice();
     let heights: Vec<[i16; 256]> = metadata
         .heights
         .into_iter()

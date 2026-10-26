@@ -280,7 +280,7 @@ pub(crate) fn update_lighting(
             *position,
             states.clone(),
             voxels.light.clone(),
-            voxels.native_edits.clone(),
+            voxels.modified,
         ));
         state.submitted.insert(*position, version);
     }
@@ -344,12 +344,12 @@ pub(crate) fn update_lighting(
                     });
                     let snapshots = snapshots
                         .into_iter()
-                        .map(|(position, states, light, edits)| LightingChunk {
+                        .map(|(position, states, light, modified)| LightingChunk {
                             x: position.x,
                             z: position.y,
                             states,
                             light,
-                            edits,
+                            modified,
                         })
                         .collect::<Vec<_>>();
                     let updates = context

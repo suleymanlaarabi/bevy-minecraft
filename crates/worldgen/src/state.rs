@@ -11,6 +11,8 @@ use pumpkin_util::math::boundingbox::BoundingBox;
 #[repr(transparent)]
 pub struct VoxelState(BlockStateId);
 
+const _: () = assert!(BlockStateId::COUNT <= 63_000, "At most 63000 block states");
+
 #[derive(Clone, Copy, Debug)]
 pub struct BlockBox {
     pub min: Vec3,

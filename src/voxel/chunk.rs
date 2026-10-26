@@ -2,7 +2,6 @@ use super::{VoxelKind, VoxelState};
 use bevy::prelude::*;
 use hollow_worldgen::coordinates::{ALL_SECTIONS, CHUNK_HEIGHT, SECTION_HEIGHT, cell_index};
 use hollow_worldgen::sections::Layer;
-use std::{collections::BTreeSet, sync::Arc};
 
 /// Chunk data, compressed by section. Cloning it is O(1); edits use copy-on-write
 /// while a build reads it.
@@ -14,13 +13,11 @@ pub struct ChunkVoxels {
     pub(crate) light: Layer<u8>,
     /// Rendering-only estimates while shared snapshots are relit. Never seed the worker with these.
     render_light: Option<Layer<u8>>,
-    /// Cells edited since generation. Reconciliation rechecks them when a chunk enters
-    /// its snapshot neighborhood, so they are kept for the chunk's whole life.
-    pub(crate) native_edits: Arc<BTreeSet<usize>>,
     pub(crate) content_revision: u64,
     /// One bit per render section whose mesh is outdated.
     pub(crate) dirty_sections: u32,
     pub(crate) revision: u64,
+    /// Remains set after saving: lighting must recognize edited chunks on arrival.
     pub(crate) modified: bool,
     /// Disk revisions are independent of mesh invalidations and lighting task versions.
     pub(crate) save_revision: u64,
@@ -34,7 +31,6 @@ impl ChunkVoxels {
             states,
             light,
             render_light: None,
-            native_edits: default(),
             content_revision: 0,
             dirty_sections: ALL_SECTIONS,
             revision: 0,
@@ -139,7 +135,6 @@ impl ChunkVoxels {
             return false;
         }
         self.states.set(index, state);
-        Arc::make_mut(&mut self.native_edits).insert(index);
         self.content_revision = self.content_revision.wrapping_add(1);
         self.mark_sections(Self::sections_around(local.y));
         self.modified = true;

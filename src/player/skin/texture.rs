@@ -33,7 +33,7 @@ pub(super) fn normalize(source: &Image) -> Result<Image, &'static str> {
         TextureDimension::D2,
         data,
         TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::default(),
+        RenderAssetUsages::RENDER_WORLD,
     );
     image.sampler = ImageSampler::nearest();
     Ok(image)

@@ -152,7 +152,6 @@ impl Chunk {
         };
         let snapshot = crate::ChunkSnapshot::from_proto(&proto, dimension.min_y, dimension.height);
         let heightmaps = Self::build_heightmaps(&proto, dimension.min_y);
-        let metadata = Arc::new(crate::codec::GenerationPayload::capture(&proto));
         Self::Complete(Arc::new(ChunkData {
             x: proto.x,
             z: proto.z,
@@ -164,7 +163,6 @@ impl Chunk {
             },
             heightmap: Mutex::new(heightmaps),
             light: Mutex::new(snapshot.light),
-            metadata,
         }))
     }
 }

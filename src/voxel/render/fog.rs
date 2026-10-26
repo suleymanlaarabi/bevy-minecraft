@@ -64,10 +64,9 @@ fn initialize_filtered_lut(
         return;
     }
     let mut texture = |size, dimension, repeat_sky| {
-        let mut image = Image::new_fill(
+        let mut image = Image::new_uninit(
             size,
             dimension,
-            &[0; 16],
             TextureFormat::Rgba32Float,
             RenderAssetUsages::RENDER_WORLD,
         );
@@ -100,13 +99,16 @@ fn initialize_filtered_lut(
         false,
     ));
     if let Some(mut buffer) = buffers.get_mut(&lut.0) {
-        buffer.data = ShaderBuffer::from(vec![[0.0_f32; 4]; 2]).data;
+        buffer.resize_buffer((2 * size_of::<[f32; 4]>()) as u64);
     }
 }
 
 impl FromWorld for FogLut {
     fn from_world(world: &mut World) -> Self {
-        let mut buffer = ShaderBuffer::from(vec![[0.0_f32; 4]; FOG_ENTRIES]);
+        let mut buffer = ShaderBuffer::with_size(
+            (FOG_ENTRIES * size_of::<[f32; 4]>()) as u64,
+            RenderAssetUsages::RENDER_WORLD,
+        );
         buffer.label = "voxel atmosphere snapshot".into();
         Self(
             world.resource_mut::<Assets<ShaderBuffer>>().add(buffer),

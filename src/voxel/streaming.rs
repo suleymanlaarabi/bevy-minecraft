@@ -337,7 +337,7 @@ fn spawn_chunk(
         return;
     };
     voxels.dirty_sections = ALL_SECTIONS;
-    let lit_edits = !voxels.native_edits.is_empty();
+    let lit_edits = voxels.modified;
     let origin = position * CHUNK_SIZE;
     let mut entity = commands.entity(chunk_entity);
     entity.insert((

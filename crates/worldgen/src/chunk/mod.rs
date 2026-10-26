@@ -1,5 +1,5 @@
 //! Shared generated column data; dense working buffers belong to ProtoChunk.
-use crate::{ChunkSnapshot, VoxelState, codec::GenerationPayload, sections::Layer};
+use crate::{ChunkSnapshot, VoxelState, sections::Layer};
 use format::LightContainer;
 use pumpkin_data::block_properties::blocks_movement;
 use pumpkin_data::{BlockState, BlockStateId, tag::Block::MINECRAFT_LEAVES};
@@ -14,7 +14,6 @@ pub struct ChunkData {
     pub section: ChunkSections,
     pub heightmap: Mutex<ChunkHeightmaps>,
     pub light: Mutex<Layer<u8>>,
-    pub metadata: Arc<GenerationPayload>,
 }
 pub struct ChunkSections {
     pub count: usize,
@@ -137,7 +136,8 @@ impl ChunkHeightmapType {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChunkHeightmaps {
     pub world_surface: Option<Box<[i64]>>,
     pub motion_blocking: Option<Box<[i64]>>,

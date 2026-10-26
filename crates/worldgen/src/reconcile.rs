@@ -8,10 +8,7 @@ use crate::{
 };
 use pumpkin_data::BlockStateId;
 use pumpkin_util::math::{position::BlockPos, vector2::Vector2};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone)]
 pub struct LightingChunk {
@@ -19,7 +16,7 @@ pub struct LightingChunk {
     pub z: i32,
     pub states: Layer<VoxelState>,
     pub light: Layer<u8>,
-    pub edits: Arc<BTreeSet<usize>>,
+    pub modified: bool,
 }
 pub struct LightingUpdate {
     pub x: i32,
@@ -116,9 +113,9 @@ impl LightingSnapshots {
                     }
                 }
                 old.states = snapshot.states;
-                old.edits = snapshot.edits;
+                old.modified = snapshot.modified;
             } else {
-                if !snapshot.edits.is_empty() {
+                if snapshot.modified {
                     rebuild.insert(position, true);
                 }
                 access.chunks.insert(position, snapshot);
@@ -129,11 +126,7 @@ impl LightingSnapshots {
             for dx in -1..=1 {
                 for dz in -1..=1 {
                     let p = (x + dx, z + dz);
-                    if access
-                        .chunks
-                        .get(&p)
-                        .is_some_and(|chunk| !chunk.edits.is_empty())
-                    {
+                    if access.chunks.get(&p).is_some_and(|chunk| chunk.modified) {
                         rebuild.insert(p, true);
                     }
                 }

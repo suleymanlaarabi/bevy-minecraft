@@ -1,5 +1,6 @@
 use crate::voxel::VoxelKind;
 use bevy::{
+    asset::RenderAssetUsages,
     image::{
         ImageAddressMode, ImageArrayLayout, ImageFilterMode, ImageLoaderSettings, ImageSampler,
         ImageSamplerDescriptor,
@@ -325,16 +326,17 @@ impl TexturePack {
         table
     }
     pub(crate) fn model_face_buffer(&self) -> ShaderBuffer {
-        ShaderBuffer::from(self.model_face_table())
+        ShaderBuffer::new(self.model_face_table(), RenderAssetUsages::RENDER_WORLD)
     }
 
     /// Both material families share one immutable animation descriptor buffer.
     pub(crate) fn animation_buffer(&self) -> ShaderBuffer {
-        ShaderBuffer::from(if self.vanilla_models() {
+        let table = if self.vanilla_models() {
             super::models::animation_table()
         } else {
             vec![[0_u32; 4]]
-        })
+        };
+        ShaderBuffer::new(table, RenderAssetUsages::RENDER_WORLD)
     }
 
     pub(crate) fn special_texture(&self, server: &AssetServer) -> Option<Handle<Image>> {
@@ -375,7 +377,7 @@ impl TexturePack {
     }
 
     pub(crate) fn cube_face_buffer(&self) -> ShaderBuffer {
-        ShaderBuffer::from(self.cube_face_table())
+        ShaderBuffer::new(self.cube_face_table(), RenderAssetUsages::RENDER_WORLD)
     }
 }
 

@@ -229,7 +229,7 @@ fn apply_voxel(
             voxels.set_changed();
             let mut entity = commands.entity(*entity);
             entity.try_insert(EditedChunk);
-            if !voxels.native_edits.is_empty() {
+            if voxels.modified {
                 entity.try_insert(LitEdits);
             }
         }
@@ -282,7 +282,6 @@ pub(super) fn border_neighbors(local: IVec3) -> impl Iterator<Item = IVec2> {
     .into_iter()
     .flatten()
 }
-
 
 fn read_state(
     position: IVec3,

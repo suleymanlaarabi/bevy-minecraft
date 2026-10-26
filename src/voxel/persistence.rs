@@ -8,18 +8,16 @@ impl ChunkVoxels {
         TerrainRecord {
             states: self.states.clone(),
             light: self.light.clone(),
-            edits: self.native_edits.clone(),
+            modified: self.modified,
         }
         .encode()
     }
     pub(crate) fn decode_saved(bytes: &[u8]) -> io::Result<Self> {
         let record = TerrainRecord::decode(bytes, SECTION_COUNT)?;
         let mut chunk = Self::from_layers(record.states, record.light);
-        chunk.modified = !record.edits.is_empty();
-        chunk.native_edits = record.edits;
+        chunk.modified = record.modified;
         chunk.save_revision = 1;
         chunk.saved_revision = 1;
         Ok(chunk)
     }
 }
-

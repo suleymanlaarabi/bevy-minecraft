@@ -339,7 +339,7 @@ fn sync_breaking_overlay(
     if *previous != Some(key) {
         let geometry =
             crate::voxel::render::model_mesh::state_geometry(progress.state, progress.position)
-                .into_dynamic_mesh();
+                .into_mesh();
         if let Some(mut target) = meshes.get_mut(&mesh.0) {
             *target = geometry;
         } else {

@@ -293,7 +293,7 @@ fn spawn_chunk_build(
                     let origin = (neighborhood.origin
                         + IVec3::Y * (section.index as i32 * SECTION_HEIGHT))
                         .as_vec3();
-                    let sort = geometry.sort_data();
+                    let sort = geometry.take_sort_data();
                     let key = eye.map(|eye| {
                         geometry.indices = sort.indices(eye - origin);
                         super::sort::sort_key(eye, eye - origin)

@@ -27,17 +27,25 @@ const POSITION_BIAS: f32 = 2.0;
 const POSITION_SCALE: f32 = 1024.0;
 const POSITION_MAX: u32 = (1 << 15) - 1;
 
-/// Unpacked geometry while meshing; [`ModelGeometry::into_mesh`] packs it.
-#[derive(Default)]
+/// GPU-ready geometry, with bounds and sort keys from the original positions.
 pub(crate) struct ModelGeometry {
-    pub positions: Vec<[f32; 3]>,
-    pub normals: Vec<[f32; 3]>,
-    pub uv: Vec<[f32; 2]>,
-    /// Face-table slot, corner light, tint palette index and water flags.
-    pub metadata: Vec<[u32; 4]>,
+    vertices: Vec<[u32; 4]>,
     pub indices: Vec<u32>,
-    /// Owning cell centers for translucent quads only, before any visual offsets.
-    sort_cells: Vec<Vec3>,
+    min: Vec3,
+    max: Vec3,
+    sort_quads: Vec<SortQuad>,
+}
+
+impl Default for ModelGeometry {
+    fn default() -> Self {
+        Self {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            min: Vec3::MAX,
+            max: Vec3::MIN,
+            sort_quads: Vec::new(),
+        }
+    }
 }
 
 /// Octahedral encoding mapped to 0..=254, so axis-aligned normals stay exact.
@@ -75,52 +83,51 @@ impl ModelGeometry {
     }
     #[cfg(feature = "dev")]
     pub fn counts(&self) -> (usize, usize) {
-        (self.positions.len(), self.indices.len() / 3)
+        (self.vertices.len(), self.indices.len() / 3)
     }
+    fn vertex(&mut self, position: Vec3, normal: [f32; 3], uv: [f32; 2], meta: [u32; 4]) {
+        self.min = self.min.min(position);
+        self.max = self.max.max(position);
+        self.vertices
+            .push(pack_vertex(position.to_array(), normal, uv, meta));
+    }
+
     pub fn quad(
         &mut self,
         q: &ModelQuad,
         offset: Vec3,
         light: [u16; 4],
         tint: u8,
-        slot: Option<u32>,
+        cell: Option<Vec3>,
     ) {
-        let first = self.positions.len() as u32;
-        let tint = u32::from(tint);
-        self.positions.extend(
-            q.positions
-                .map(|p| (Vec3::from_array(p) + offset).to_array()),
-        );
-        self.normals.extend(
-            [if q.shade_up {
-                [0.0, 1.0, 0.0]
-            } else {
-                q.normal
-            }; 4],
-        );
-        self.uv.extend(q.uv);
-        self.metadata.extend(light.map(|l| {
-            [
-                slot.unwrap_or(q.texture),
-                u32::from(l),
-                tint,
-                u32::from(q.effect) | if q.light_emission == 15 { 4 } else { 0 },
-            ]
-        }));
-        self.indices
-            .extend([first, first + 1, first + 2, first, first + 2, first + 3]);
-    }
-    /// A translucent quad and the cell it sorts with, kept in step by construction.
-    fn translucent_quad(
-        &mut self,
-        q: &ModelQuad,
-        offset: Vec3,
-        light: [u16; 4],
-        tint: u8,
-        cell: Vec3,
-    ) {
-        self.quad(q, offset, light, tint, None);
-        self.sort_cells.push(cell);
+        let first = self.vertices.len() as u32;
+        let positions = q.positions.map(|p| Vec3::from_array(p) + offset);
+        let normal = if q.shade_up {
+            [0.0, 1.0, 0.0]
+        } else {
+            q.normal
+        };
+        for ((position, uv), light) in positions.into_iter().zip(q.uv).zip(light) {
+            self.vertex(
+                position,
+                normal,
+                uv,
+                [
+                    q.texture,
+                    u32::from(light),
+                    u32::from(tint),
+                    u32::from(q.effect) | if q.light_emission == 15 { 4 } else { 0 },
+                ],
+            );
+        }
+        self.indices.extend(quad_indices(first / 4, false));
+        if let Some(cell) = cell {
+            self.sort_quads.push(SortQuad {
+                cell,
+                center: positions.into_iter().sum::<Vec3>() * 0.25,
+                reversed: false,
+            });
+        }
     }
     pub fn append_water(&mut self, water: TerrainGeometry) {
         for (quad, indices) in water
@@ -128,7 +135,7 @@ impl ModelGeometry {
             .chunks_exact(4)
             .zip(water.indices.chunks_exact(6))
         {
-            let first = self.positions.len() as u32;
+            let first = self.vertices.len() as u32;
             let (axis, positive) = super::meshing::face_direction(quad[0]);
             let mut normal = Vec3::ZERO;
             normal[axis] = if positive { 1.0 } else { -1.0 };
@@ -139,78 +146,59 @@ impl ModelGeometry {
                 .map(|&v| TerrainGeometry::position(v))
                 .sum::<Vec3>()
                 * 0.25;
-            self.sort_cells.push(center - normal * 0.5);
-            for &v in quad {
+            let positions = std::array::from_fn::<_, 4, _>(|i| {
+                let v = quad[i];
                 let mut position = TerrainGeometry::position(v);
                 if v[1] & (1 << 16) != 0 {
                     position.y -= 1.0 / 9.0;
                 }
-                self.positions.push(position.to_array());
-                self.normals.push(normal.to_array());
-                self.uv.push([0.0; 2]);
-                self.metadata.push([
-                    models::fluid_texture(1, false),
-                    v[1] & 4095,
-                    0,
-                    1 | (((v[1] >> 12) & 15) << 1),
-                ]);
-            }
+                self.vertex(
+                    position,
+                    normal.to_array(),
+                    [0.0; 2],
+                    [
+                        models::fluid_texture(1, false),
+                        v[1] & 4095,
+                        0,
+                        1 | (((v[1] >> 12) & 15) << 1),
+                    ],
+                );
+                position
+            });
+            let reversed = indices[1] > indices[2];
+            debug_assert_eq!(
+                indices,
+                &quad_indices(u32::from(indices[0]) / 4, reversed).map(|i| i as u16)
+            );
+            self.sort_quads.push(SortQuad {
+                cell: center - normal * 0.5,
+                center: positions.into_iter().sum::<Vec3>() * 0.25,
+                reversed,
+            });
             let base = u32::from(indices[0]);
             self.indices
                 .extend(indices.iter().map(|&i| first + u32::from(i) - base));
         }
     }
-    pub fn sort_data(&self) -> SortData {
-        // Translucent geometry only grows through `translucent_quad` and `append_water`.
-        assert_eq!(self.sort_cells.len() * 4, self.positions.len());
-        let quads = self
-            .positions
-            .chunks_exact(4)
-            .zip(self.indices.chunks_exact(6))
-            .zip(&self.sort_cells)
-            .enumerate()
-            .map(|(quad, ((p, indices), &cell))| {
-                let center = p.iter().map(|&v| Vec3::from_array(v)).sum::<Vec3>() * 0.25;
-                let reversed = indices[1] > indices[2];
-                debug_assert_eq!(indices, &quad_indices(quad as u32, reversed));
-                SortQuad {
-                    cell,
-                    center,
-                    reversed,
-                }
-            })
-            .collect::<Vec<_>>();
-        SortData(Arc::from(quads))
-    }
-    pub fn into_dynamic_mesh(self) -> Mesh {
-        let mut mesh = self.into_mesh();
-        mesh.asset_usage = RenderAssetUsages::default();
-        mesh
+    pub fn take_sort_data(&mut self) -> SortData {
+        // Translucent geometry records its original centers before vertex quantization.
+        assert_eq!(self.sort_quads.len() * 4, self.vertices.len());
+        SortData(Arc::from(std::mem::take(&mut self.sort_quads)))
     }
     pub fn into_mesh(self) -> Mesh {
-        let (min, max) = self
-            .positions
-            .iter()
-            .map(|&p| Vec3::from_array(p))
-            .fold((Vec3::MAX, Vec3::MIN), |(min, max), p| {
-                (min.min(p), max.max(p))
-            });
-        let vertices = self
-            .positions
-            .iter()
-            .zip(&self.normals)
-            .zip(&self.uv)
-            .zip(&self.metadata)
-            .map(|(((&position, &normal), &uv), &meta)| pack_vertex(position, normal, uv, meta))
-            .collect::<Vec<_>>();
+        let vertex_count = self.vertices.len();
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::RENDER_WORLD,
         )
-        .with_inserted_attribute(ATTRIBUTE_MODEL, vertices)
-        .with_inserted_indices(compact_indices(self.indices, self.positions.len()));
+        .with_inserted_attribute(ATTRIBUTE_MODEL, self.vertices)
+        .with_inserted_indices(compact_indices(self.indices, vertex_count));
         // Bevy derives bounds from `ATTRIBUTE_POSITION`, which packed meshes lack.
-        mesh.final_aabb = min.cmple(max).all().then(|| Aabb3d::from_min_max(min, max));
+        mesh.final_aabb = self
+            .min
+            .cmple(self.max)
+            .all()
+            .then(|| Aabb3d::from_min_max(self.min, self.max));
         mesh
     }
 }
@@ -375,7 +363,7 @@ pub(super) fn section(
                     });
                     if q.translucent {
                         let cell = local.as_vec3() + Vec3::splat(0.5);
-                        translucent.translucent_quad(q, translation, face, tint, cell);
+                        translucent.quad(q, translation, face, tint, Some(cell));
                         if q.effect & 1 != 0 {
                             let depths = if n.y > 0.0 {
                                 // Use the same column samples, rounding and corner order
@@ -413,11 +401,12 @@ pub(super) fn section(
                             } else {
                                 [15; 4]
                             };
-                            let start = translucent.metadata.len() - 4;
-                            for (metadata, depth) in
-                                translucent.metadata[start..].iter_mut().zip(depths)
+                            let start = translucent.vertices.len() - 4;
+                            for (vertex, depth) in
+                                translucent.vertices[start..].iter_mut().zip(depths)
                             {
-                                metadata[3] = 1 | (u32::from(depth) << 1);
+                                let flags = 1 | (u32::from(depth) << 1);
+                                vertex[3] = (vertex[3] & !(0x1f << 25)) | ((flags & 0x1f) << 25);
                             }
                         }
                     } else if models::opaque_texture(q.texture) {

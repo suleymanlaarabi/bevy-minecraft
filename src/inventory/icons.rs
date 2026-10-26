@@ -171,12 +171,12 @@ pub(crate) fn setup_block_icons(
         height: (ICON_SIZE * rows) as u32,
         depth_or_array_layers: 1,
     };
-    icons.image = images.add(Image::new_fill(
+    icons.image = images.add(Image::new_uninit(
         size,
         TextureDimension::D2,
-        &[0; 4],
         TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::default(),
+        // Bevy keeps the descriptor and handle; later renders replace the pixels.
+        RenderAssetUsages::RENDER_WORLD,
     ));
     icons.layout = layouts.add(TextureAtlasLayout::from_grid(
         UVec2::splat(ICON_SIZE as u32),
