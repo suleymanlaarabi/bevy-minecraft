@@ -36,6 +36,7 @@ impl Plugin for GamePlugin {
                 PlayerPlugin,
                 GameMenuPlugin,
                 CharacterPlugin,
+                crate::survival::SurvivalPlugin,
                 GameSpatialPlugin,
                 DroppedItemPlugin,
                 SkyPlugin,

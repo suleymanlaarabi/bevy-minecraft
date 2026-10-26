@@ -1,5 +1,4 @@
 (
-    version: 2,
     name: "Meadow",
     texture: "blocks_array.png",
     blocks: {

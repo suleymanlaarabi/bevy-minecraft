@@ -87,20 +87,19 @@ struct ItemVisual {
 
 #[derive(Asset, TypePath, Deserialize)]
 pub(super) struct HeldManifest {
-    version: u32,
     #[serde(deserialize_with = "item_definitions")]
-    items: HashMap<u16, ItemDefinition>,
+    items: Box<[Option<ItemDefinition>]>,
 }
 fn item_definitions<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
-) -> Result<HashMap<u16, ItemDefinition>, D::Error> {
+) -> Result<Box<[Option<ItemDefinition>]>, D::Error> {
     let definitions = HashMap::<String, ItemDefinition>::deserialize(deserializer)?;
-    let mut items = HashMap::with_capacity(definitions.len());
+    let mut items: Box<[_]> = (0..crate::inventory::ITEM_ID_LIMIT).map(|_| None).collect();
     for (name, definition) in definitions {
         let item = pumpkin_data::item::Item::from_registry_key(&name).ok_or_else(|| {
             serde::de::Error::custom(format!("Unknown held-item identity: {name}"))
         })?;
-        if items.insert(item.id, definition).is_some() {
+        if items[item.id as usize].replace(definition).is_some() {
             return Err(serde::de::Error::custom(format!(
                 "Duplicate held-item identity: {name}"
             )));
@@ -124,11 +123,6 @@ impl AssetLoader for HeldManifestLoader {
         reader.read_to_end(&mut bytes).await?;
         let manifest: HeldManifest =
             serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
-        if manifest.version != 1 {
-            return Err(std::io::Error::other(
-                "Unsupported held-item manifest; reimport player assets.",
-            ));
-        }
         Ok(manifest)
     }
     fn extensions(&self) -> &[&str] {
@@ -159,11 +153,21 @@ pub(super) fn setup(mut assets: ResMut<HeldItemAssets>, server: Res<AssetServer>
 }
 pub(super) fn select(
     mut commands: Commands,
-    inventory: Single<(&PlayerInventory, &crate::inventory::HotbarSelection), With<Player>>,
+    inventory: Single<
+        (
+            &PlayerInventory,
+            &crate::inventory::HotbarSelection,
+            &crate::survival::UsingItem,
+        ),
+        With<Player>,
+    >,
     mut held: Query<(Entity, &mut DesiredItem)>,
 ) {
-    let (inventory, selection) = *inventory;
-    let selected = selection.stack(inventory).map(|stack| stack.item());
+    let (inventory, selection, using) = *inventory;
+    let selected = using
+        .0
+        .map(|action| action.stack.item())
+        .or_else(|| selection.stack(inventory).map(|stack| stack.item()));
     for (entity, mut desired) in &mut held {
         if desired.item != selected {
             desired.item = selected;
@@ -261,7 +265,6 @@ pub(super) fn build_visual(
     mut materials: ResMut<Assets<StandardMaterial>>,
     voxel_assets: Res<VoxelAssets>,
     icons: Res<BlockIcons>,
-    sky: Res<crate::sky::SkyState>,
 ) {
     for (root, mut desired, mut held) in &mut held {
         commands.entity(root).remove::<BuildVisual>();
@@ -275,7 +278,7 @@ pub(super) fn build_visual(
             }
             let definition = manifests
                 .get(&assets.manifest)
-                .and_then(|manifest| manifest.items.get(&item.registry().id));
+                .and_then(|manifest| manifest.items[item.registry().id as usize].as_ref());
             let Some(visual) = assets.visual(
                 item,
                 definition,
@@ -285,7 +288,6 @@ pub(super) fn build_visual(
                 &mut materials,
                 &voxel_assets,
                 &icons,
-                &sky,
             ) else {
                 commands.entity(root).insert(WaitingForVisual);
                 continue;
@@ -344,7 +346,6 @@ impl HeldItemAssets {
         materials: &mut Assets<StandardMaterial>,
         voxel_assets: &VoxelAssets,
         icons: &BlockIcons,
-        sky: &crate::sky::SkyState,
     ) -> Option<ItemVisual> {
         if let Some(visual) = self.visuals.get(&item) {
             return Some(visual.clone());
@@ -426,12 +427,10 @@ impl HeldItemAssets {
                 };
                 mesh
             };
-            let level = ARM_NIGHT_LEVEL + (1. - ARM_NIGHT_LEVEL) * (1. - sky.night);
             ItemVisual {
                 mesh: meshes.add(mesh),
                 material: ItemMaterial::Sprite(materials.add(StandardMaterial {
                     base_color_texture: Some(source),
-                    base_color: Color::linear_rgb(level, level, level),
                     alpha_mode: AlphaMode::Mask(0.5),
                     unlit: true,
                     ..default()
@@ -449,19 +448,6 @@ impl HeldItemAssets {
         };
         self.visuals.insert(item, visual.clone());
         Some(visual)
-    }
-
-    pub(super) fn dim(&self, materials: &mut Assets<StandardMaterial>, color: Color) {
-        for visual in self.visuals.values() {
-            if let ItemMaterial::Sprite(handle) = &visual.material
-                && materials
-                    .get(handle)
-                    .is_some_and(|material| material.base_color != color)
-                && let Some(mut material) = materials.get_mut(handle)
-            {
-                material.base_color = color;
-            }
-        }
     }
 }
 

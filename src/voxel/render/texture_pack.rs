@@ -109,7 +109,6 @@ type BlockTextures = HashMap<String, BlockTextureConfig>;
 
 #[derive(Debug, Deserialize)]
 struct TexturePackManifest {
-    version: u32,
     name: String,
     texture: String,
     #[serde(default = "default_texture_layers")]
@@ -160,9 +159,6 @@ fn resolve(blocks: &[Option<BlockTextureConfig>], kind: VoxelKind) -> Option<Blo
 
 impl TexturePackManifest {
     fn resolved_blocks(&self) -> Result<Box<[Option<BlockTextureConfig>]>, String> {
-        if self.version != 2 {
-            return Err("Incompatible texture pack version; regenerate the pack".into());
-        }
         let mut blocks = vec![None; pumpkin_data::BlockId::COUNT as usize];
         for (name, &config) in &self.blocks {
             let kind = VoxelKind::from_key(name)

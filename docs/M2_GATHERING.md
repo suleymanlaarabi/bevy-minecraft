@@ -68,9 +68,9 @@ topology, session validation, inventory actions, derived crafting, and presentat
 Deferred edits and chest-content ejection finish before the Last checkpoint capture.
 Container snapshots retain their immutable copy-on-write ownership.
 
-Save format **6** requires stack damage and crafting-grid records. Earlier save
-formats are rejected with an explicit message; no migrations or compatibility
-paths are provided.
+Saved stacks contain damage and crafting-grid records directly. Saved data is
+disposable and deleted for each update; no format versions, compatibility checks,
+or migration paths are maintained.
 
 ## Performance and static ECS review
 

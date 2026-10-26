@@ -1,5 +1,4 @@
 (
-    version: 2,
     name: "Twilight",
     texture: "blocks_array.png",
     blocks: {

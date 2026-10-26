@@ -203,7 +203,6 @@ fn catalog() -> &'static Catalog {
 }
 pub(crate) fn initialize() {
     let _ = catalog();
-    let _ = ItemKind::Block(crate::voxel::VoxelKind::Dirt).max_stack_size();
 }
 fn accepts(catalog: &Catalog, ingredient: u16, id: Option<u16>) -> bool {
     match id {

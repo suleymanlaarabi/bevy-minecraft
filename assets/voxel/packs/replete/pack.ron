@@ -1,5 +1,4 @@
 (
-    version: 2,
     name: "Replete",
     texture: "blocks_array.png",
     blocks: {

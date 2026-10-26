@@ -38,7 +38,7 @@ pub(crate) struct BlockIcons {
     source: Option<AssetId<Image>>,
     special_source: Option<AssetId<Image>>,
     special_failed: bool,
-    items: std::collections::HashMap<u16, usize>,
+    items: Box<[Option<usize>]>,
     item_image: Handle<Image>,
     item_layout: Handle<TextureAtlasLayout>,
     item_grid: UVec2,
@@ -52,30 +52,31 @@ impl BlockIcons {
         &self.missing
     }
 
+    fn item_index(&self, item: ItemKind) -> Option<usize> {
+        let ItemKind::Item(id) = item else {
+            return None;
+        };
+        self.items.get(id as usize).copied().flatten()
+    }
+
     pub(crate) fn item_image(&self, item: ItemKind) -> Option<&Handle<Image>> {
         match item {
-            ItemKind::Item(id) => Some(if self.items.contains_key(&id) {
-                &self.item_image
-            } else {
-                &self.missing
-            }),
+            ItemKind::Item(_) => Some(
+                self.item_index(item)
+                    .map_or(&self.missing, |_| &self.item_image),
+            ),
             _ => None,
         }
     }
+
     pub(crate) fn item_atlas(&self, item: ItemKind) -> Option<TextureAtlas> {
-        let ItemKind::Item(id) = item else {
-            return None;
-        };
         Some(TextureAtlas {
             layout: self.item_layout.clone(),
-            index: *self.items.get(&id)?,
+            index: self.item_index(item)?,
         })
     }
     pub(crate) fn item_uv(&self, item: ItemKind) -> Option<(Vec2, Vec2)> {
-        let ItemKind::Item(id) = item else {
-            return None;
-        };
-        let index = *self.items.get(&id)? as u32;
+        let index = self.item_index(item)? as u32;
         let scale = Vec2::ONE / self.item_grid.as_vec2();
         Some((
             UVec2::new(index % self.item_grid.x, index / self.item_grid.x).as_vec2() * scale,
@@ -127,16 +128,12 @@ pub(crate) fn setup_block_icons(
             None,
             None,
         ));
-        icons.items = manifest
-            .items
-            .into_iter()
-            .filter_map(|(name, index)| {
-                Some((
-                    pumpkin_data::item::Item::from_registry_key(&name)?.id,
-                    index,
-                ))
-            })
-            .collect();
+        icons.items = vec![None; super::model::ITEM_ID_LIMIT as usize].into_boxed_slice();
+        for (name, index) in manifest.items {
+            if let Some(item) = pumpkin_data::item::Item::from_registry_key(&name) {
+                icons.items[item.id as usize] = Some(index);
+            }
+        }
     }
     // An explicit missing-item symbol also covers installations without imported sprites.
     let mut missing = vec![0; 16 * 16 * 4];

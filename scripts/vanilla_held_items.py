@@ -59,4 +59,4 @@ def import_held_items(jar, destination):
         target.parent.mkdir(parents=True, exist_ok=True)
         image.save(target)
     (destination / 'held_items.json').write_text(json.dumps(
-        {'version': 1, 'items': items}, separators=(',', ':')) + '\n')
+        {'items': items}, separators=(',', ':')) + '\n')

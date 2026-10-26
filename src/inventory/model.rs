@@ -14,7 +14,7 @@ pub const CRAFT_RESULT: usize = CRAFT_START + 9;
 /// Exclusive upper bound of item registry ids.
 pub(crate) const ITEM_ID_LIMIT: u16 = 4096;
 
-fn component<T: 'static>(item: &'static pumpkin_data::item::Item) -> Option<&'static T> {
+pub(super) fn component<T: 'static>(item: &'static pumpkin_data::item::Item) -> Option<&'static T> {
     item.components
         .iter()
         .find_map(|(_, component)| component.as_any().downcast_ref::<T>())
@@ -56,19 +56,19 @@ impl ItemKind {
     }
 
     pub fn max_stack_size(self) -> u8 {
-        properties()[self.registry().id as usize].max_stack_size
+        super::catalog::properties(self).max_stack_size
     }
 
     pub fn max_damage(self) -> u32 {
-        properties()[self.registry().id as usize].max_damage
+        super::catalog::properties(self).max_damage
     }
 
     pub fn armor_slot(self) -> Option<usize> {
-        properties()[self.registry().id as usize].armor_slot
+        super::catalog::properties(self).armor_slot
     }
 
     pub(crate) fn crafting_remainder(self) -> Option<ItemKind> {
-        properties()[self.registry().id as usize].remainder
+        super::catalog::properties(self).remainder
     }
 
     pub fn is_valid(self) -> bool {
@@ -85,60 +85,16 @@ impl ItemKind {
     }
 }
 
-struct ItemProperties {
-    max_stack_size: u8,
-    max_damage: u32,
-    armor_slot: Option<usize>,
-    remainder: Option<ItemKind>,
-}
-
-fn properties() -> &'static [ItemProperties] {
-    use pumpkin_data::{data_component_impl::*, item::Item};
-    static PROPERTIES: std::sync::OnceLock<Box<[ItemProperties]>> = std::sync::OnceLock::new();
-    PROPERTIES.get_or_init(|| {
-        (0..ITEM_ID_LIMIT)
-            .map(|id| {
-                let item = Item::from_id(id);
-                let armor_slot = item
-                    .and_then(component::<EquippableImpl>)
-                    .and_then(|equipment| {
-                        Some(
-                            ARMOR_START
-                                + match equipment.slot {
-                                    EquipmentSlot::Head(_) => 0,
-                                    EquipmentSlot::Chest(_) => 1,
-                                    EquipmentSlot::Legs(_) => 2,
-                                    EquipmentSlot::Feet(_) => 3,
-                                    _ => return None,
-                                },
-                        )
-                    });
-                let remainder = if [
-                    Item::MILK_BUCKET.id,
-                    Item::WATER_BUCKET.id,
-                    Item::LAVA_BUCKET.id,
-                ]
-                .contains(&id)
-                {
-                    Some(ItemKind::Item(Item::BUCKET.id))
-                } else if [Item::HONEY_BOTTLE.id, Item::DRAGON_BREATH.id].contains(&id) {
-                    Some(ItemKind::Item(Item::GLASS_BOTTLE.id))
-                } else {
-                    None
-                };
-                ItemProperties {
-                    max_stack_size: item
-                        .and_then(component::<MaxStackSizeImpl>)
-                        .map_or(BLOCK_STACK_SIZE, |value| value.size),
-                    max_damage: item
-                        .and_then(component::<MaxDamageImpl>)
-                        .map_or(0, |value| value.max_damage as u32),
-                    armor_slot,
-                    remainder,
-                }
-            })
-            .collect()
-    })
+/// Per-stack consumable identity participates in stacking and persistence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ConsumableContents {
+    #[default]
+    Default,
+    Potion(u8),
+    Stew {
+        effect: u8,
+        ticks: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,6 +102,7 @@ pub struct ItemStack {
     item: ItemKind,
     count: u8,
     damage: u32,
+    contents: ConsumableContents,
 }
 
 impl ItemStack {
@@ -158,6 +115,7 @@ impl ItemStack {
             item,
             count,
             damage: 0,
+            contents: ConsumableContents::Default,
         }
     }
 
@@ -171,6 +129,35 @@ impl ItemStack {
 
     pub const fn damage(self) -> u32 {
         self.damage
+    }
+
+    pub const fn contents(self) -> ConsumableContents {
+        self.contents
+    }
+
+    pub fn with_contents(mut self, contents: ConsumableContents) -> Option<Self> {
+        use pumpkin_data::{item::Item, potion::Potion};
+        let valid = match contents {
+            ConsumableContents::Default => true,
+            ConsumableContents::Potion(id) => {
+                self.item.registry().id == Item::POTION.id
+                    && Potion::from_id(id).is_some_and(|potion| {
+                        potion.effects.iter().all(|effect| {
+                            crate::survival::effects::supported(effect.effect_type.id)
+                        })
+                    })
+            }
+            ConsumableContents::Stew { effect, ticks } => {
+                self.item.registry().id == Item::SUSPICIOUS_STEW.id
+                    && crate::survival::effects::supported(effect)
+                    && (1..=1_728_000).contains(&ticks)
+            }
+        };
+        if !valid {
+            return None;
+        }
+        self.contents = contents;
+        Some(self)
     }
 
     pub fn with_damage(mut self, damage: u32) -> Option<Self> {
@@ -192,7 +179,7 @@ impl ItemStack {
     }
 
     pub fn can_merge(self, other: Self) -> bool {
-        self.item == other.item && self.damage == other.damage
+        self.item == other.item && self.damage == other.damage && self.contents == other.contents
     }
 
     pub fn max_stack_size(self) -> u8 {

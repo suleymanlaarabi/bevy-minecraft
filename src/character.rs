@@ -168,6 +168,36 @@ pub struct CharacterMovement {
     pub sneak: bool,
 }
 
+/// Actual movement outcomes, sampled once by fixed-step gameplay consumers.
+#[derive(Component, Default, Clone, Copy)]
+pub(crate) struct CharacterActivity {
+    pub distance: f32,
+    pub vertical: f32,
+    pub sprinting: bool,
+    pub jumped: bool,
+    pub climbing: bool,
+    pub simulated: bool,
+}
+
+#[derive(Component, Clone, Copy, PartialEq)]
+pub(crate) struct Locomotion {
+    pub speed: f64,
+    pub jump_boost: f64,
+    pub sprint_allowed: bool,
+    pub slow_falling: bool,
+}
+
+impl Default for Locomotion {
+    fn default() -> Self {
+        Self {
+            speed: 1.0,
+            jump_boost: 0.0,
+            sprint_allowed: true,
+            slow_falling: false,
+        }
+    }
+}
+
 #[derive(Component, Default, Debug, Clone, Copy)]
 pub struct AutoJump;
 
@@ -182,7 +212,9 @@ pub struct Flying;
     CharacterBody,
     CharacterMotion,
     CharacterState,
-    CharacterMovement
+    CharacterMovement,
+    CharacterActivity,
+    Locomotion
 )]
 pub struct GameCharacter;
 
@@ -536,11 +568,30 @@ fn character_physics(
         &mut CharacterState,
         &CharacterBody,
         &CharacterMovement,
+        &Locomotion,
+        &mut CharacterActivity,
+        Option<&crate::survival::Health>,
         Has<AutoJump>,
         Has<Flying>,
     )>,
 ) {
-    for (transform, mut motion, mut state, body, movement, auto_jump, flying) in &mut characters {
+    for (
+        transform,
+        mut motion,
+        mut state,
+        body,
+        movement,
+        locomotion,
+        mut activity,
+        health,
+        auto_jump,
+        flying,
+    ) in &mut characters
+    {
+        *activity = CharacterActivity::default();
+        if health.is_some_and(|health| !health.alive()) {
+            continue;
+        }
         let position = transform.translation;
         // Spawns, respawns and developer tools write the transform directly.
         if motion
@@ -594,6 +645,8 @@ fn character_physics(
             movement,
             auto_jump,
             flying,
+            locomotion,
+            &mut activity,
         );
         motion.written = Some(position);
     }
@@ -635,6 +688,8 @@ fn tick(
     movement: &CharacterMovement,
     auto_jump: bool,
     flying: bool,
+    locomotion: &Locomotion,
+    activity: &mut CharacterActivity,
 ) {
     let mut velocity = motion.velocity;
     // AbstractClientPlayer.updateBob runs before travel, at 20 Hz.
@@ -681,7 +736,8 @@ fn tick(
     let sneaking = movement.sneak && !flying;
     // Vanilla `updateSwimming`: start with the eyes under water, keep swimming
     // while sprinting in water.
-    let wants_sprint = movement.sprint && !sneaking && wish != DVec3::ZERO;
+    let wants_sprint =
+        movement.sprint && locomotion.sprint_allowed && !sneaking && wish != DVec3::ZERO;
     state.swimming =
         wants_sprint && !flying && state.in_water && (state.swimming || state.eyes_in_water);
     let desired = if state.swimming {
@@ -699,7 +755,7 @@ fn tick(
     // Crouching and crawling move at 30 % and cannot sprint.
     let slow = state.pose == Pose::Crouching || (state.pose == Pose::Swimming && !state.in_water);
     let sprinting = wants_sprint && !slow;
-    let input = wish * INPUT_SCALE * if slow { SNEAK_FACTOR } else { 1.0 };
+    let input = wish * INPUT_SCALE * locomotion.speed * if slow { SNEAK_FACTOR } else { 1.0 };
     let (slipperiness, speed_factor, jump_factor) = ground_block(world, &aabb);
 
     if flying {
@@ -713,7 +769,8 @@ fn tick(
         if (state.in_water || state.in_lava) && (!state.on_ground || depth > FLUID_JUMP_THRESHOLD) {
             velocity.y += FLUID_SWIM_UP;
         } else if state.on_ground {
-            velocity.y = JUMP_VELOCITY * jump_factor;
+            velocity.y = JUMP_VELOCITY * jump_factor + locomotion.jump_boost;
+            activity.jumped = true;
             if sprinting {
                 let facing = Vec3::new(movement.look_direction.x, 0.0, movement.look_direction.z)
                     .normalize_or_zero()
@@ -729,7 +786,8 @@ fn tick(
         && wish != DVec3::ZERO
         && should_auto_jump(terrain, aabb, wish)
     {
-        velocity.y = JUMP_VELOCITY * jump_factor;
+        velocity.y = JUMP_VELOCITY * jump_factor + locomotion.jump_boost;
+        activity.jumped = true;
     }
     if sneaking && (state.in_water || state.in_lava) {
         velocity.y -= FLUID_SWIM_UP;
@@ -849,7 +907,12 @@ fn tick(
             sneaking,
             speed_factor,
         );
-        velocity.y = (velocity.y - GRAVITY) * VERTICAL_DRAG;
+        let gravity = if locomotion.slow_falling && falling {
+            0.01
+        } else {
+            GRAVITY
+        };
+        velocity.y = (velocity.y - gravity) * VERTICAL_DRAG;
         velocity.x *= friction;
         velocity.z *= friction;
     }
@@ -866,6 +929,12 @@ fn tick(
         (aabb.min.z + aabb.max.z) * 0.5,
     );
     motion.velocity = velocity;
+    let displacement = motion.position - motion.previous;
+    activity.distance = displacement.xz().length() as f32;
+    activity.vertical = displacement.y as f32;
+    activity.sprinting = sprinting;
+    activity.climbing = climbing;
+    activity.simulated = !flying;
     motion.walk_delta = (motion.position - motion.previous).xz().length() as f32 * 0.6;
     // Only the phase matters; wrapping preserves precision during long sessions.
     motion.walk_distance = (motion.walk_distance + motion.walk_delta).rem_euclid(2.0);

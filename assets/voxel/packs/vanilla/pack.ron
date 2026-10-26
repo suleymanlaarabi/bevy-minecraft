@@ -1,5 +1,4 @@
 (
-    version: 2,
     name: "Minecraft 26.3",
     layers: 1882,
     texture: "blocks_array.png",

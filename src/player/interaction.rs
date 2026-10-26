@@ -79,6 +79,7 @@ pub(super) fn register(app: &mut App) {
             .after(FollowSystems)
             .before(TransformSystems::Propagate)
             .run_if(crate::world::playing)
+            .run_if(crate::survival::player_alive)
             .run_if(in_state(InventoryState::Closed))
             .run_if(crate::devtools::panel_closed),
     );
@@ -171,6 +172,8 @@ fn update_breaking(
             &crate::inventory::PlayerInventory,
             &crate::inventory::HotbarSelection,
             &crate::character::CharacterState,
+            &crate::survival::UsingItem,
+            &crate::survival::ActiveEffects,
         ),
         With<Player>,
     >,
@@ -187,12 +190,17 @@ fn update_breaking(
         breaking.0 = None;
         return;
     };
-    let (actor, inventory, selection, player_state) = *player;
+    let (actor, inventory, selection, player_state, using, effects) = *player;
+    if using.0.is_some() {
+        breaking.0 = None;
+        return;
+    }
     let tool = selection.stack(inventory);
-    let Some(outcome) = crate::inventory::mining::outcome(state, tool, player_state) else {
+    let Some(mut outcome) = crate::inventory::mining::outcome(state, tool, player_state) else {
         breaking.0 = None;
         return;
     };
+    outcome.duration /= crate::survival::mining_speed(effects);
     swing.request_mining();
 
     if breaking.0.as_ref().is_none_or(|progress| {
@@ -265,6 +273,7 @@ fn handle_block_placement(
             &crate::inventory::PlayerInventory,
             &crate::inventory::HotbarSelection,
             &crate::character::CharacterMovement,
+            &mut crate::survival::UseInput,
         ),
         With<Player>,
     >,
@@ -276,19 +285,21 @@ fn handle_block_placement(
         block_behavior::interaction::BlockUse,
         voxel::edits::{CheckedEdit, EditBatch},
     };
-    let Some(target) = target.0 else {
-        return;
-    };
-    if !mouse.just_pressed(MouseButton::Right) {
+    let (actor, inventory, selection, movement, mut use_input) = player.into_inner();
+    use_input.0 = None;
+    if !mouse.pressed(MouseButton::Right) {
         return;
     }
-    let (actor, inventory, selection, movement) = *player;
-    let Some(state) = voxel_world.state(target.destroy) else {
-        return;
-    };
     let selected = selection.stack(inventory).map(|stack| stack.item());
     let bypass = movement.sneak && matches!(selected, Some(ItemKind::Block(_)));
-    if !bypass && let Some(entity) = targets.target(target.destroy) {
+    if !bypass
+        && let Some(target) = target.0
+        && let Some(entity) = targets.target(target.destroy)
+        && let Some(state) = voxel_world.state(target.destroy)
+    {
+        if !mouse.just_pressed(MouseButton::Right) {
+            return;
+        }
         commands.trigger(BlockUse {
             entity,
             actor,
@@ -298,6 +309,18 @@ fn handle_block_placement(
         swing.request();
         return;
     }
+    if (!matches!(selected, Some(ItemKind::Block(_))) || target.0.is_none())
+        && let Some(slot) = crate::survival::choose_use_slot(inventory, selection.0)
+    {
+        use_input.0 = Some(slot);
+        return;
+    }
+    if !mouse.just_pressed(MouseButton::Right) {
+        return;
+    }
+    let Some(target) = target.0 else {
+        return;
+    };
     let Some(ItemKind::Block(kind)) = selected else {
         return;
     };

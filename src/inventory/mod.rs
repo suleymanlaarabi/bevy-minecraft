@@ -1,4 +1,5 @@
 pub(crate) mod access;
+pub(crate) mod catalog;
 pub(crate) mod crafting;
 pub(crate) mod icons;
 mod input;
@@ -7,6 +8,7 @@ mod model;
 pub(crate) mod slots;
 mod ui;
 pub(crate) use crafting::{CraftingGrid, CraftingResult};
+pub(crate) use model::ITEM_ID_LIMIT;
 pub(crate) use ui::{lock_cursor, unlock_cursor};
 
 use bevy::prelude::*;
@@ -15,9 +17,9 @@ use input::{handle_hotbar_scroll, handle_number_keys, handle_swap_offhand};
 use crate::{game::GameState, player::Player};
 
 pub use model::{
-    ARMOR_START, BLOCK_STACK_SIZE, CRAFT_RESULT, CRAFT_START, DragMode, HOTBAR_SIZE,
-    HotbarSelection, INVENTORY_SIZE, ItemKind, ItemStack, MAIN_INVENTORY_SIZE, OFFHAND_SLOT,
-    PlayerInventory, SLOT_COUNT,
+    ARMOR_START, BLOCK_STACK_SIZE, CRAFT_RESULT, CRAFT_START, ConsumableContents, DragMode,
+    HOTBAR_SIZE, HotbarSelection, INVENTORY_SIZE, ItemKind, ItemStack, MAIN_INVENTORY_SIZE,
+    OFFHAND_SLOT, PlayerInventory, SLOT_COUNT,
 };
 
 #[derive(SubStates, Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
@@ -50,6 +52,7 @@ impl Plugin for InventoryPlugin {
             .init_resource::<InventoryCursor>()
             .init_resource::<access::InventoryActions>()
             .init_resource::<icons::BlockIcons>()
+            .add_systems(PreStartup, catalog::initialize)
             .add_systems(
                 Startup,
                 (
@@ -88,6 +91,7 @@ impl Plugin for InventoryPlugin {
                 Update,
                 toggle_inventory
                     .run_if(crate::world::playing)
+                    .run_if(crate::survival::player_alive)
                     .run_if(crate::devtools::panel_closed)
                     // Nothing to open while the world is still loading.
                     .run_if(any_with_component::<Player>),
@@ -101,6 +105,7 @@ impl Plugin for InventoryPlugin {
                 )
                     .chain()
                     .run_if(crate::devtools::panel_closed)
+                    .run_if(crate::survival::player_alive)
                     .run_if(crate::world::playing),
             )
             .add_systems(

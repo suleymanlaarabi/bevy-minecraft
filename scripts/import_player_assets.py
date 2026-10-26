@@ -11,6 +11,7 @@ import sys
 import zipfile
 from pathlib import Path
 from vanilla_held_items import import_held_items
+from vanilla_survival import import_survival
 
 DEST = Path(__file__).resolve().parents[1] / 'assets/player/vanilla'
 
@@ -42,6 +43,7 @@ def import_player_assets(jar):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(jar.read(name))
     import_held_items(jar, DEST)
+    import_survival(jar, DEST)
 
 if __name__ == '__main__':
     if len(sys.argv) > 1:

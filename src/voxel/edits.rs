@@ -168,6 +168,12 @@ pub(crate) fn edit_batch(
         });
     }
     // Neighbor rules see the complete batch, never an intermediate half-door.
+    if let Some(tool) = event.tool {
+        commands.trigger(crate::survival::Exhaustion {
+            entity: tool.actor,
+            amount: 0.005,
+        });
+    }
     for edit in &event.edits {
         apply_voxel(
             SetVoxel::with_state(edit.position, edit.state),

@@ -157,5 +157,5 @@ def import_models(jar):
     used.update(name for name in models if name.startswith('hollow:chest/'))
     models = {name: models[name] for name in sorted(used)}
     textures = {q['texture'] for quads in models.values() for q in quads}
-    return {'version':3,'blocks':states,'models':models,'chest_pivots':bind.chest_pivots,
+    return {'blocks':states,'models':models,'chest_pivots':bind.chest_pivots,
             'invisible_models':sorted(invisible & used)},textures

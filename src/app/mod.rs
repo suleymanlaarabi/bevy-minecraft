@@ -3,6 +3,7 @@
 mod assets;
 #[cfg(feature = "dev")]
 mod dev;
+mod fonts;
 
 pub use assets::{asset_directory, load_nearest};
 
@@ -83,6 +84,13 @@ impl Plugin for HollowPlugin {
         ))
         .insert_resource(UiTheme(create_dark_theme()))
         .insert_resource(ClearColor(Color::srgb_u8(15, 15, 18)))
+        .add_systems(PreStartup, fonts::install)
+        .add_systems(
+            PostUpdate,
+            fonts::style_new_text
+                .after(bevy::ui::UiSystems::Propagate)
+                .before(bevy::ui::UiSystems::Content),
+        )
         .add_systems(
             Update,
             crate::game::handle_escape.run_if(in_state(GameState::Game)),

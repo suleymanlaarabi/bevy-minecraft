@@ -1,5 +1,4 @@
 (
-    version: 2,
     name: "Faithful 32x",
     layers: 19,
     texture: "blocks_array.png",

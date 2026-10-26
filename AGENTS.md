@@ -5,7 +5,7 @@
 - Make full use of **Bevy** and its modern features.
 - Favor **ECS**, **parallelism**, and **data-oriented design** wherever possible.
 - Performance is paramount.
-- This is an unreleased beta: never retain legacy code, backward compatibility, compatibility shims, or migrations. Replace obsolete interfaces and formats directly, and reject incompatible saves or imported assets explicitly.
+- This is an unreleased beta. Saved data and generated caches are disposable and are deleted for each update. Never retain legacy code, backward compatibility, compatibility shims, migrations, format-version fields, or version checks for saves or imported assets. Replace obsolete interfaces and formats directly. Do not write code to preserve or manage old data.
 
 ## Bevy systems and query conflicts
 

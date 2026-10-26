@@ -95,7 +95,6 @@ def main():
     apply_tints(jar, models)
     deduplicate_models(models)
     models['coverage'] = coverage(models)
-    models['minecraft'] = VERSION
     models['client_sha1'] = sha1
     required = {name for top, side, bottom, _ in BLOCKS.values() for name in (top, side, bottom)}
     required.update(["water_flow", "lava_flow"])
@@ -118,7 +117,7 @@ def main():
     for key, (top, side, bottom, color) in sorted(BLOCKS.items()):
         top_tint = tint(GRASS if key == 'grass_block' else color)
         entries.append(f'        "{key}": (top: {layers[top]}, side: {layers[side]}, bottom: {layers[bottom]}, tint_top: {top_tint}, tint_side: {tint(color)}, tint_bottom: {tint(color)}),')
-    (DEST / 'pack.ron').write_text(f'(\n    version: 2,\n    name: "Minecraft {VERSION}",\n    layers: {layer_count},\n    texture: "blocks_array.png",\n    blocks: {{\n' + '\n'.join(entries) + '\n    },\n)\n')
+    (DEST / 'pack.ron').write_text(f'(\n    name: "Minecraft {VERSION}",\n    layers: {layer_count},\n    texture: "blocks_array.png",\n    blocks: {{\n' + '\n'.join(entries) + '\n    },\n)\n')
     (DEST / 'source.json').write_text(json.dumps({'minecraft': VERSION, 'client_sha1': sha1}, indent=2) + '\n')
 
 if __name__ == '__main__':

@@ -33,9 +33,7 @@ fn shade_up<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D
 }
 #[derive(Deserialize)]
 struct Imported {
-    version: u32,
     chest_pivots: [[f32; 3]; 3],
-    minecraft: String,
     textures: Vec<String>,
     /// Textures without transparent texels.
     opaque_textures: Vec<bool>,
@@ -535,7 +533,6 @@ fn library() -> &'static Library {
         let imported = match std::fs::read(crate::asset_directory().join("voxel/packs/vanilla/models.json")) {
             Ok(bytes) => {
                 let data: Imported = serde_json::from_slice(&bytes).expect("Invalid vanilla model cache; regenerate it with scripts/import_vanilla.py");
-                assert!(data.version == 3 && data.minecraft == "26.3", "Incompatible vanilla model cache; regenerate it with scripts/import_vanilla.py");
                 Some(data)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,

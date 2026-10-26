@@ -537,7 +537,7 @@ fn read_json<T: serde::de::DeserializeOwned>(
     bytes
         .map(|b| {
             serde_json::from_slice(&b)
-                .map_err(|error| err(format!("Incompatible or corrupt {key} record: {error}")))
+                .map_err(|error| err(format!("Invalid {key} record: {error}")))
         })
         .transpose()
 }

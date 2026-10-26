@@ -42,7 +42,16 @@ pub(in crate::voxel) fn update_camera_environment(
         With<VoxelViewer>,
     >,
     mut camera_liquid: ResMut<CameraLiquid>,
+    effects: Query<&crate::survival::ActiveEffects, With<crate::player::Player>>,
+    mut previous_effects: Local<(bool, bool)>,
 ) {
+    use pumpkin_data::effect::StatusEffect as E;
+    let effect_flags = effects.single().map_or((false, false), |effects| {
+        (
+            effects.level(E::NIGHT_VISION.id) > 0,
+            effects.level(E::BLINDNESS.id) > 0,
+        )
+    });
     let liquid = voxel_world
         .state(camera.0.translation.floor().as_ivec3())
         .and_then(|state| {
@@ -60,10 +69,12 @@ pub(in crate::voxel) fn update_camera_environment(
         && !sky.is_changed()
         && !settings.is_changed()
         && !camera.1.is_added()
+        && *previous_effects == effect_flags
     {
         return;
     }
     camera_liquid.set_if_neq(CameraLiquid(liquid));
+    *previous_effects = effect_flags;
 
     let (_, fog, ambient, exposure) = &mut *camera;
     exposure.ev100 = sky.ev100;
@@ -109,6 +120,18 @@ pub(in crate::voxel) fn update_camera_environment(
         };
         ambient.color = sky.ambient_color;
         ambient.brightness = sky.ambient_brightness;
+    }
+    if effect_flags.0 {
+        ambient.color = Color::WHITE;
+        ambient.brightness = ambient.brightness.max(0.65 * output);
+    }
+    if effect_flags.1 {
+        fog.color = Color::BLACK;
+        fog.directional_light_color = Color::NONE;
+        fog.falloff = FogFalloff::Linear {
+            start: 0.0,
+            end: 5.0,
+        };
     }
 }
 

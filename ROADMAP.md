@@ -32,7 +32,7 @@ Checked boxes below identify existing capabilities. Remaining-work boxes stay un
 - [x] Manual wooden door/trapdoor/gate interactions, basic support checks, and normal single/double chests.
 - [x] Hotbar and inventory interactions, armor/offhand slots, and shaped/shapeless recipes fitting the personal 2x2 grid.
 - [x] Dropped-item movement, pickup, expiration, and save/restore records.
-- [x] World creation/selection/deletion, asynchronous saves, saved player inventory and pose, chest contents, and explicit incompatible-save rejection.
+- [x] World creation/selection/deletion, asynchronous saves, saved player inventory and pose, chest contents.
 - [x] Day/night cycle, sun, moon phases, stars, clouds, and saved world time.
 - [x] Main menu, graphics settings, and developer controls.
 
@@ -88,7 +88,7 @@ Milestones group dependencies rather than require strictly serial development. S
 - [ ] Extend game item stacks with per-instance data and correct stack equality for durability, enchantments, names, effects, and portable storage.
 - [ ] Extend snapshots and saves for living entities, machines, timed work, player stats, progression, and later dimension identity.
 - [ ] Preserve state across chunk unloads and saving; prevent duplication or loss when an action overlaps a save or unload.
-- [ ] Keep generation and imported gameplay data explicit: handle supported records and reject incompatible assets or formats with actionable errors.
+- [ ] Keep generation and imported gameplay data explicit: use the current data structures directly and delete saved data and generated caches for each update.
 
 **Exit criteria:** A timed block behavior, a stateful item, and an entity all have defined activation, pause, unload, and save/restore behavior using the same world lifecycle.
 
@@ -111,16 +111,18 @@ Implementation details and static review: [M2 gathering and crafting](docs/M2_GA
 
 ## M3 - Player survival
 
-**Status: Missing.** Build on the existing character movement and equipment slots.
+**Status: Partial.** Fixed-step health, nutrition, consumables, damage, equipment mitigation, feedback, and a survival HUD are implemented. Death retains inventory; beds, experience, freezing, and the remaining death consequences are still pending.
 
-- [ ] Add health, hunger, saturation/exhaustion, eating/drinking, food effects, regeneration, and starvation.
-- [ ] Add damage sources, invulnerability windows, armor mitigation, knockback, and damage feedback.
+Implementation details and static review: [M3 survival](docs/M3_SURVIVAL.md).
+
+- [x] Add health, hunger, saturation/exhaustion, eating/drinking, food effects, regeneration, and starvation.
+- [x] Add damage sources, invulnerability windows, armor mitigation, knockback, and damage feedback.
 - [ ] Handle fall damage, drowning, suffocation, lava/fire, void damage, freezing, cactus/thorns, and hazardous blocks.
-- [ ] Add oxygen, burning, and other timed player conditions; connect sprinting and movement costs to survival rules.
+- [x] Add oxygen, burning, and other timed player conditions; connect sprinting and movement costs to survival rules.
 - [ ] Add death, a death screen, item/equipment/experience consequences, and safe respawning without duplicating inventory.
 - [ ] Make beds usable for sleeping, advancing the night, and setting a persistent respawn point; handle obstruction, nearby threats, and destroyed beds.
 - [ ] Add health, hunger, armor, air, experience, and status-effect HUD elements with clear low-resource feedback.
-- [ ] Persist player stats and conditions; replace void recovery with the intended Survival death rules while retaining safe loading behavior.
+- [x] Persist player stats and conditions; replace void recovery with the intended Survival death rules while retaining safe loading behavior.
 
 **Exit criteria:** Food, shelter, equipment, sleep, danger, death, and respawning form a coherent survival loop, and save/restore preserves its state.
 
@@ -348,7 +350,7 @@ The status column describes the current game integration, not upstream data comp
 - Favor data-oriented layouts, shared immutable capability tables, change-driven updates, parallel work on independent data, and bounded asynchronous compute/I/O.
 - Review all query and resource accesses of each affected system, including implicit accesses from `Changed<T>` and `Added<T>`. Prefer a single mutable query with change inspection, or sequential `ParamSet` access; use disjoint filters only for truly disjoint entities.
 - Extend the current edit, inventory, streaming, and save pipelines rather than creating competing authorities for the same state.
-- Replace obsolete beta interfaces/formats directly and reject incompatible saves/assets explicitly. Do not add compatibility shims, legacy paths, or migrations.
+- Replace obsolete beta interfaces/formats directly. Saved data and generated caches are deleted for each update. Never add format-version fields/checks, compatibility shims, legacy paths, migrations, or old-data preservation code.
 - For refactors, format first, record production lines excluding blank/comment-only lines, and measure the same way afterward. Reduce actual production code by removing duplication/dead plumbing; report missed reduction targets.
 - Verify code changes only with `cargo check`. Never compile in release mode or run the game. Do not add or run tests or benchmarks to validate performance optimizations; use inspection and reasoning.
 - Keep code, comments, UI text, and project documentation in English.
@@ -367,7 +369,7 @@ The scenarios below are acceptance criteria for implementation coverage, not ins
 - [ ] **Endgame:** Defeat the main bosses, receive rewards, build a beacon, record completion, and continue using the world.
 - [ ] **Creative:** Find every supported content family, build freely, fly, and switch/save modes through normal controls.
 - [ ] **Content closure:** Every major registry family is accounted for, supported content has functional behavior, and documented variant omissions do not break progression.
-- [ ] **State integrity:** Chunk unload, pause, autosave, final save, and restore preserve world/player/entity/machine state without duplicate rewards or lost inventories; incompatible data is rejected explicitly.
+- [ ] **State integrity:** Chunk unload, pause, autosave, final save, and restore preserve world/player/entity/machine state without duplicate rewards or lost inventories; saved data is disposable between updates.
 - [ ] **Delivery:** Controls/help, readable UI, sound/effects, redistributable assets, installation documentation, and error handling cover the completed feature set.
 
 The game is complete when all milestones and completion-review items are closed. Finishing the initial survival slice, loading all block models, or registering every item alone does not close the roadmap.

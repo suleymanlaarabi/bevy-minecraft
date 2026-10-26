@@ -39,6 +39,7 @@ impl Plugin for PlayerPlugin {
                 .chain()
                 .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
                 .run_if(crate::world::playing)
+                .run_if(crate::survival::player_alive)
                 .run_if(in_state(InventoryState::Closed))
                 .run_if(crate::devtools::panel_closed),
         )

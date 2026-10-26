@@ -1,4 +1,4 @@
-use super::{Crosshair, Player, PlayerCamera};
+use super::{Player, PlayerCamera};
 use crate::{
     game::GameState,
     spatial::{FollowOffset, FollowedBy},
@@ -157,6 +157,25 @@ fn spawn_player(
 ) {
     let rotation = saved.map_or(Quat::IDENTITY, |p| Quat::from_array(p.rotation).normalize());
     let pitch = saved.map_or(0.0, |p| p.pitch);
+    let survival =
+        saved
+            .map(|saved| saved.survival.clone())
+            .unwrap_or(crate::survival::SurvivalSnapshot {
+                health: default(),
+                nutrition: default(),
+                effects: default(),
+                damage: default(),
+                hazards: default(),
+                respawn: crate::survival::RespawnPoint(spawn_pos.to_array()),
+            });
+    let crate::survival::SurvivalSnapshot {
+        health,
+        nutrition,
+        effects,
+        damage,
+        hazards,
+        respawn,
+    } = survival;
     let inventory = saved.and_then(|p| p.inventory().ok()).unwrap_or_default();
     let grid = crate::inventory::CraftingGrid {
         slots: std::array::from_fn(|index| {
@@ -178,6 +197,12 @@ fn spawn_player(
     };
     commands.spawn_scene_list(bsn! {
         Player
+        health
+        nutrition
+        effects
+        damage
+        hazards
+        respawn
         inventory
         grid
         crate::inventory::HotbarSelection({saved.map_or(0, |saved| saved.selected)})
@@ -189,44 +214,5 @@ fn spawn_player(
             GlobalTransform::from_translation(spawn_pos + Vec3::Y * PLAYER_EYE_HEIGHT)
             FollowOffset({Vec3::Y * PLAYER_EYE_HEIGHT})
         ]
-    });
-
-    commands.spawn_scene(bsn! {
-        Node {
-            width: percent(100),
-            height: percent(100),
-            display: Display::Flex,
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center
-        }
-        Crosshair
-        Children [
-            Node {
-                width: px(32),
-                height: px(32),
-                position_type: PositionType::Relative
-            }
-            Children [
-                Node {
-                    width: px(2),
-                    height: px(18),
-                    position_type: PositionType::Absolute,
-                    left: px(15),
-                    top: px(7)
-                }
-                BackgroundColor(Color::WHITE)
-                --
-
-                Node {
-                    width: px(18),
-                    height: px(2),
-                    position_type: PositionType::Absolute,
-                    left: px(7),
-                    top: px(15)
-                }
-                BackgroundColor(Color::WHITE)
-            ]
-        ]
-        DespawnOnExit::<GameState>(GameState::Game)
     });
 }

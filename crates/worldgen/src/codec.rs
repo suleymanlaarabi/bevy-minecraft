@@ -74,7 +74,6 @@ fn decode_section<T: Cell>(bytes: &mut &[u8]) -> io::Result<Section<T>> {
 impl TerrainRecord {
     pub fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(32 * 1024);
-        bytes.extend_from_slice(b"HTRN\x02");
         bytes.push(self.states.section_count() as u8);
         for section in 0..self.states.section_count() {
             encode_section(self.states.section(section), &mut bytes);
@@ -85,8 +84,7 @@ impl TerrainRecord {
     }
 
     pub fn decode(mut bytes: &[u8], section_count: usize) -> io::Result<Self> {
-        if take(&mut bytes, 5)? != b"HTRN\x02" || u8::decode(&mut bytes)? as usize != section_count
-        {
+        if u8::decode(&mut bytes)? as usize != section_count {
             return Err(invalid());
         }
         let mut states = Vec::with_capacity(section_count);
@@ -111,7 +109,7 @@ impl TerrainRecord {
     }
 }
 
-/// The database stores the stage as a typed field alongside this versioned payload.
+/// The database stores the stage as a typed field alongside the payload.
 pub struct GenerationRecord {
     pub stage: crate::chunk_system::StagedChunkEnum,
     pub bytes: Vec<u8>,
@@ -228,8 +226,7 @@ pub(crate) fn encode_generated(chunk: &crate::chunk_system::Chunk) -> io::Result
         modified: false,
     }
     .encode();
-    let mut bytes = Vec::with_capacity(9 + header.len() + terrain.len());
-    bytes.extend_from_slice(b"HGEN\x03");
+    let mut bytes = Vec::with_capacity(4 + header.len() + terrain.len());
     bytes.extend_from_slice(&(header.len() as u32).to_le_bytes());
     bytes.extend_from_slice(&header);
     bytes.extend_from_slice(&terrain);
@@ -256,9 +253,6 @@ pub(crate) fn decode_generated(
     use std::sync::{Mutex, RwLock};
     let decoded = decompress_record(&record.bytes)?;
     let mut bytes = decoded.as_slice();
-    if take(&mut bytes, 5)? != b"HGEN\x03" {
-        return Err(invalid());
-    }
     let header_len = u32::from_le_bytes(take(&mut bytes, 4)?.try_into().unwrap()) as usize;
     let header: GenerationHeader =
         serde_json::from_slice(take(&mut bytes, header_len)?).map_err(io::Error::other)?;

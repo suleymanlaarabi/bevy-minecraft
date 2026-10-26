@@ -59,13 +59,24 @@ pub(super) fn player_input(
 
 /// Crouching and swimming lower the camera smoothly, as the eyes ease between poses.
 pub(super) fn follow_eye_height(
-    player: Single<(&CharacterMotion, &Transform), (With<Player>, Without<PlayerCamera>)>,
+    player: Single<
+        (
+            &CharacterMotion,
+            &Transform,
+            &crate::survival::DamageState,
+            &crate::survival::ActiveEffects,
+        ),
+        (With<Player>, Without<PlayerCamera>),
+    >,
     mut camera: Single<(&mut FollowOffset, &mut Transform, &PlayerCamera), Without<Player>>,
     view: Res<super::skin::PlayerView>,
     world: crate::voxel::VoxelWorld,
+    time: Res<Time>,
+    fixed: Res<Time<Fixed>>,
+    settings: Res<crate::settings::GraphicsSettings>,
 ) {
     use super::skin::PlayerView;
-    let (motion, player_transform) = *player;
+    let (motion, player_transform, damage, effects) = *player;
     let (offset, camera_transform, player_camera) = &mut *camera;
     let look = player_camera.look(player_transform.rotation);
     // Minecraft multiplies the view matrix by bobView; the camera world pose
@@ -106,13 +117,23 @@ pub(super) fn follow_eye_height(
     if offset.0 != eye {
         offset.0 = eye;
     }
-    let rotation = if *view == PlayerView::Front {
+    let mut rotation = if *view == PlayerView::Front {
         look * Quat::from_rotation_y(std::f32::consts::PI)
     } else if *view == PlayerView::FirstPerson {
         look * bob_rotation
     } else {
         look
     };
+    if settings.damage_camera_motion {
+        let remaining = (damage.flash_ticks as f32 - fixed.overstep_fraction()).max(0.0) / 10.0;
+        let hurt = ((1.0 - remaining).powi(4) * std::f32::consts::PI).sin() * remaining * 0.18;
+        let nausea = if effects.level(pumpkin_data::effect::StatusEffect::NAUSEA.id) > 0 {
+            (time.elapsed_secs() * 1.8).sin() * 0.015
+        } else {
+            0.0
+        };
+        rotation *= Quat::from_rotation_z(hurt + nausea);
+    }
     if camera_transform.rotation != rotation {
         camera_transform.rotation = rotation;
     }

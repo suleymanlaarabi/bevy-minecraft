@@ -500,6 +500,12 @@ fn checkpoint(
             &PlayerInventory,
             &crate::inventory::CraftingGrid,
             &crate::inventory::HotbarSelection,
+            &crate::survival::Health,
+            &crate::survival::Nutrition,
+            &crate::survival::ActiveEffects,
+            &crate::survival::DamageState,
+            &crate::survival::Hazards,
+            &crate::survival::RespawnPoint,
         ),
         With<Player>,
     >,
@@ -539,12 +545,32 @@ fn checkpoint(
         return;
     }
     // Only gameplay changes the world; `settle_exit` leaves without saving otherwise.
-    let Ok((transform, inventory, grid, selection)) = players.single() else {
+    let Ok((
+        transform,
+        inventory,
+        grid,
+        selection,
+        health,
+        nutrition,
+        effects,
+        damage,
+        hazards,
+        respawn,
+    )) = players.single()
+    else {
         return;
     };
     save.elapsed = 0.0;
     save.force = false;
     let mut player = SavedPlayer {
+        survival: crate::survival::SurvivalSnapshot {
+            health: health.clone(),
+            nutrition: nutrition.clone(),
+            effects: effects.clone(),
+            damage: damage.clone(),
+            hazards: hazards.clone(),
+            respawn: respawn.clone(),
+        },
         position: transform.translation.to_array(),
         rotation: transform.rotation.to_array(),
         pitch: cameras.single().map_or(0.0, |c| c.pitch),

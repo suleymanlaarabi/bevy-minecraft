@@ -1,4 +1,4 @@
-//! Retain a grounded checkpoint; a streaming failure must not become an endless fall.
+//! Retain a grounded checkpoint for invalid coordinate recovery.
 use super::Player;
 use crate::voxel::VoxelWorld;
 use bevy::prelude::*;
@@ -26,7 +26,7 @@ fn recover_player(
     >,
 ) {
     for (mut transform, mut checkpoint, state) in &mut players {
-        if !transform.translation.is_finite() || transform.translation.y < -8.0 {
+        if !transform.translation.is_finite() {
             if let Some(safe) = checkpoint.0 {
                 // The controller sees the jump as a teleport and drops its velocity.
                 transform.translation = safe;

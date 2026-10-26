@@ -90,17 +90,19 @@ const ARM_NIGHT_LEVEL: f32 = 0.25;
 fn dim_arm_with_daylight(
     sky: Res<crate::sky::SkyState>,
     assets: Res<SkinAssets>,
-    held_assets: Res<HeldItemAssets>,
+    held: Query<Ref<MeshMaterial3d<StandardMaterial>>, With<HeldItemPart>>,
+    damage: Single<Ref<crate::survival::DamageState>, With<crate::player::Player>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut cameras: Query<&mut AmbientLight, With<ArmCamera>>,
     mut lights: Query<&mut DirectionalLight, With<HeldItemLight>>,
 ) {
-    if !sky.is_changed() {
+    if !sky.is_changed() && !damage.is_changed() && !held.iter().any(|material| material.is_added())
+    {
         return;
     }
     let level = ARM_NIGHT_LEVEL + (1.0 - ARM_NIGHT_LEVEL) * (1.0 - sky.night);
-    let color = Color::linear_rgb(level, level, level);
-    held_assets.dim(&mut materials, color);
+    let tint = if damage.flash_ticks > 0 { 0.4 } else { 1.0 };
+    let color = Color::linear_rgb(level, level * tint, level * tint);
     for mut ambient in &mut cameras {
         if ambient.brightness != 500. * level {
             ambient.brightness = 500. * level;
@@ -111,8 +113,18 @@ fn dim_arm_with_daylight(
             light.illuminance = 6000. * level;
         }
     }
-    for handle in [&assets.arm_base, &assets.arm_outer] {
-        // `get_mut` re-uploads the material: only while the level changes.
+    let body_color = Color::linear_rgb(1.0, tint, tint);
+    for (handle, color) in held
+        .iter()
+        .map(|material| (&material.into_inner().0, color))
+        .chain([
+            (&assets.arm_base, color),
+            (&assets.arm_outer, color),
+            (&assets.base, body_color),
+            (&assets.outer, body_color),
+        ])
+    {
+        // Reading first avoids notifying the renderer when the material is unchanged.
         if materials
             .get(handle)
             .is_some_and(|material| material.base_color != color)
@@ -133,7 +145,6 @@ pub(super) fn register(app: &mut App) {
         .add_systems(Update, (load_skin, sync_parts).chain())
         .add_systems(OnEnter(InventoryState::Open), spawn_preview)
         .add_systems(OnEnter(InventoryState::Open), cancel_swing)
-        .add_systems(Update, dim_arm_with_daylight.run_if(crate::world::playing))
         .add_systems(
             Update,
             (
@@ -169,6 +180,7 @@ pub(super) fn register(app: &mut App) {
                 held_item::select,
                 held_item::advance_equipment,
                 held_item::build_visual,
+                dim_arm_with_daylight,
                 animate_first_person,
             )
                 .chain()

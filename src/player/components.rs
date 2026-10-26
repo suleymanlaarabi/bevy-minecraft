@@ -21,6 +21,10 @@ use bevy::{
     super::safety::PlayerCheckpoint,
     GameCharacter,
     AutoJump,
+    crate::survival::Living,
+    crate::survival::Nutrition,
+    crate::survival::UsingItem,
+    crate::survival::RespawnPoint,
     Visibility::default(),
     DespawnOnExit::<GameState>(GameState::Game)
 )]

@@ -6,9 +6,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub(super) const FORMAT_VERSION: u32 = 6;
-use hollow_worldgen::GENERATOR_VERSION;
-
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorldQuality {
     #[default]
@@ -38,13 +35,6 @@ pub struct WorldMetadata {
     pub quality: WorldQuality,
     pub created_at: u64,
     pub last_played: u64,
-    pub format: u32,
-    pub generator: String,
-    pub pumpkin_commit: String,
-    pub minecraft_version: String,
-    pub dimension: String,
-    pub fast_version: u32,
-    pub registry: u64,
 }
 impl WorldMetadata {
     pub(super) fn new(name: String, seed: i64, quality: WorldQuality) -> Self {
@@ -55,33 +45,9 @@ impl WorldMetadata {
             quality,
             created_at: now(),
             last_played: now(),
-            format: FORMAT_VERSION,
-            generator: GENERATOR_VERSION.into(),
-            pumpkin_commit: hollow_worldgen::PUMPKIN_COMMIT.into(),
-            minecraft_version: hollow_worldgen::MINECRAFT_VERSION.into(),
-            dimension: "overworld".into(),
-            fast_version: hollow_worldgen::FAST_GENERATION_VERSION,
-            registry: hollow_worldgen::state::registry_identity(),
         }
     }
     pub(super) fn validate(&self) -> io::Result<()> {
-        if self.format != FORMAT_VERSION {
-            return Err(io::Error::other(format!(
-                "Incompatible save format {}: expected {FORMAT_VERSION}. Create a new world.",
-                self.format
-            )));
-        }
-        if self.generator != GENERATOR_VERSION
-            || self.pumpkin_commit != hollow_worldgen::PUMPKIN_COMMIT
-            || self.minecraft_version != hollow_worldgen::MINECRAFT_VERSION
-            || self.dimension != "overworld"
-            || self.fast_version != hollow_worldgen::FAST_GENERATION_VERSION
-            || self.registry != hollow_worldgen::state::registry_identity()
-        {
-            return Err(io::Error::other(
-                "Incompatible world version, dimension, generation settings, or block registry.",
-            ));
-        }
         if uuid::Uuid::parse_str(&self.id).is_err() || self.name.trim().is_empty() {
             return Err(io::Error::other("Invalid world metadata."));
         }
@@ -96,32 +62,40 @@ pub(super) fn now() -> u64 {
         .as_secs()
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum SavedItem {
+    Block(u16),
+    Item(u16),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SavedStack {
-    pub name: String,
+    pub item: SavedItem,
     pub count: u8,
     pub damage: u32,
+    pub contents: crate::inventory::ConsumableContents,
 }
 impl SavedStack {
-    /// Keep the block identity when its item registry entry has a different key.
     pub(crate) fn capture(stack: ItemStack) -> Self {
-        let name = match stack.item() {
-            ItemKind::Block(kind) => kind.name(),
-            item => item.name(),
-        };
         Self {
-            name: name.into(),
+            item: match stack.item() {
+                ItemKind::Block(kind) => SavedItem::Block(kind.0.as_u16()),
+                ItemKind::Item(id) => SavedItem::Item(id),
+            },
             count: stack.count(),
             damage: stack.damage(),
+            contents: stack.contents(),
         }
     }
     fn item(&self) -> io::Result<ItemKind> {
-        VoxelKind::from_key(&self.name)
-            .filter(|kind| kind.is_itemizable())
-            .map(ItemKind::Block)
-            .or_else(|| ItemKind::from_name(&self.name))
-            .filter(|item| item.is_valid())
-            .ok_or_else(|| io::Error::other("Unknown saved item."))
+        match self.item {
+            SavedItem::Block(id) => {
+                pumpkin_data::BlockId::new(id).map(|id| ItemKind::Block(VoxelKind(id)))
+            }
+            SavedItem::Item(id) => Some(ItemKind::Item(id)),
+        }
+        .filter(|item| item.is_valid())
+        .ok_or_else(|| io::Error::other("Unknown saved item."))
     }
     /// Saved stacks must match the current registry's limits exactly.
     pub(crate) fn restore(&self) -> io::Result<ItemStack> {
@@ -131,12 +105,18 @@ impl SavedStack {
         }
         ItemStack::new(item, self.count)
             .with_damage(self.damage)
-            .ok_or_else(|| io::Error::other("Invalid saved item durability."))
+            .and_then(|stack| stack.with_contents(self.contents))
+            .ok_or_else(|| {
+                io::Error::other(
+                    "Invalid saved item durability or unsupported consumable contents.",
+                )
+            })
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SavedPlayer {
+    pub survival: crate::survival::SurvivalSnapshot,
     pub position: [f32; 3],
     pub rotation: [f32; 4],
     pub pitch: f32,
@@ -181,7 +161,8 @@ impl SavedPlayer {
     }
 
     pub(crate) fn inventory(&self) -> io::Result<PlayerInventory> {
-        if self.slots.len() != SLOT_COUNT
+        if !self.survival.validate()
+            || self.slots.len() != SLOT_COUNT
             || self.selected >= HOTBAR_SIZE
             || !self
                 .position

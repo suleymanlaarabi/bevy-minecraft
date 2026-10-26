@@ -270,6 +270,8 @@ pub(super) fn animate_first_person(
     swing: Single<Ref<ArmSwing>, With<PlayerCamera>>,
     motion: Single<Ref<crate::character::CharacterMotion>, With<crate::player::Player>>,
     held: Single<Ref<HeldItem>>,
+    using: Single<Ref<crate::survival::UsingItem>, With<crate::player::Player>>,
+    fixed: Res<Time<Fixed>>,
     mut arms: Query<
         (&mut Transform, &mut Visibility, Option<&HeldItem>),
         (With<FirstPersonRoot>, Without<ArmView>),
@@ -298,15 +300,36 @@ pub(super) fn animate_first_person(
                 || motion.is_changed()
                 || view.is_changed()
                 || held.is_changed()
+                || using.is_changed()
+                || using.0.is_some()
                 || transform.is_added())
         {
-            let pose = if let Some(item) = item {
+            let mut pose = if let Some(item) = item {
                 held_item::pose(swing.progress(), item.equipped, &item.display)
             } else {
                 let mut pose = first_person_pose(swing.progress());
                 pose.translation.y -= 0.6 * (1. - held.equipped);
                 pose
             };
+            if let Some(action) = using.0 {
+                let progress = using.progress();
+                let lift = (progress * 5.0).min(1.0);
+                let pulse = ((action.elapsed as f32 + fixed.overstep_fraction()) * 1.7)
+                    .sin()
+                    .abs();
+                pose.translation +=
+                    Vec3::new(-0.35 * lift, 0.25 * lift + pulse * 0.035, 0.1 * lift);
+                pose.rotation *= Quat::from_euler(
+                    EulerRot::XYZ,
+                    -0.35 * lift,
+                    0.3 * lift,
+                    if action.drinking {
+                        0.4 * lift
+                    } else {
+                        pulse * 0.08
+                    },
+                );
+            }
             transform.set_if_neq(crate::player::view_bob::pose(&motion) * pose);
         }
     }
