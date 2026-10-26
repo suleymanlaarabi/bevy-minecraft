@@ -511,24 +511,6 @@ impl GenerationCache for Cache {
         }
     }
 
-    fn get_blending_data(
-        &self,
-        chunk_x: i32,
-        chunk_z: i32,
-    ) -> Option<&crate::generation::blender::blending_data::BlendingData> {
-        let dx = chunk_x - self.x;
-        let dz = chunk_z - self.z;
-
-        if dx < 0 || dx >= self.size || dz < 0 || dz >= self.size {
-            return None;
-        }
-
-        match &self.chunks[(dx * self.size + dz) as usize] {
-            Chunk::Proto(chunk) => chunk.blending_data.as_ref(),
-            Chunk::Complete(data) => data.blending_data.as_ref(),
-        }
-    }
-
     fn is_air(&self, local_pos: &Vector3<i32>) -> bool {
         is_air(GenerationCache::get_block_state(self, local_pos))
     }
@@ -749,4 +731,3 @@ impl Cache {
         }
     }
 }
-

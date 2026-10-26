@@ -22,7 +22,6 @@ tracing = { version = "0.1.44", default-features = false, features = ["std", "at
 sha2 = { version = "0.10", default-features = false }
 bitflags = { version = "2.13.2", default-features = false, features = ["std"] }
 dashmap = { version = "6.2", default-features = false }
-itertools = { version = "0.15.0", default-features = false, features = ["use_std"] }
 rustc-hash = { version = "2.1.3", default-features = false, features = ["std"] }
 
 async-channel = "2"

@@ -127,6 +127,7 @@ pub struct GenerationRecord {
 }
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GenerationPayload {
     biomes: Vec<u8>,
     heights: Vec<Vec<i16>>,
@@ -194,6 +195,7 @@ impl GenerationPayload {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GenerationHeader {
     position: [i32; 2],
     min_y: i32,
@@ -204,21 +206,10 @@ struct GenerationHeader {
 pub(crate) fn encode_generated(chunk: &crate::chunk_system::Chunk) -> io::Result<GenerationRecord> {
     use crate::chunk_system::{Chunk, StagedChunkEnum as Stage};
     let (snapshot, metadata) = match chunk {
-        Chunk::Proto(chunk) => {
-            if chunk.blending_data.is_some() {
-                return Err(io::Error::other(
-                    "Imported blending data is unsupported by this generator format.",
-                ));
-            }
-            (
-                crate::ChunkSnapshot::from_proto(
-                    chunk,
-                    chunk.bottom_y() as i32,
-                    chunk.height() as i32,
-                ),
-                GenerationPayload::capture(chunk),
-            )
-        }
+        Chunk::Proto(chunk) => (
+            crate::ChunkSnapshot::from_proto(chunk, chunk.bottom_y() as i32, chunk.height() as i32),
+            GenerationPayload::capture(chunk),
+        ),
         Chunk::Complete(chunk) => {
             let mut metadata = chunk.metadata.as_ref().clone();
             let heightmaps = chunk.heightmap.lock().unwrap();
@@ -392,7 +383,6 @@ pub(crate) fn decode_generated(
             heightmap: Mutex::new(heightmaps),
             light: Mutex::new(terrain.light),
             metadata: Arc::new(metadata),
-            blending_data: None,
         })));
     }
     let mut chunk = crate::ProtoChunk::new(position.x, position.y, generator);

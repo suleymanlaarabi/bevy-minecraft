@@ -14,7 +14,6 @@ serde = { version = "1.0", default-features = false, features = ["derive", "std"
 serde_json = { version = "1.0", default-features = false, features = ["std"] }
 bytes = { version = "1.12", default-features = false, features = ["serde", "std"] }
 
-num-derive = { version = "0.5", default-features = false }
 num-traits = { version = "0.2", default-features = false, features = ["std"] }
 
 colored = { version = "3.1", default-features = false }
@@ -24,7 +23,6 @@ syn = { version = "3.0", default-features = false, features = ["full", "parsing"
 proc-macro2 = { version = "1.0", default-features = false, features = ["proc-macro"] , optional = true }
 
 uuid = { version = "1.29", default-features = false, features = ["serde", "v3", "v4", "std"] }
-dashmap = { version = "6.2", default-features = false }
 thiserror = { version = "2.0", default-features = false }
 
 [features]

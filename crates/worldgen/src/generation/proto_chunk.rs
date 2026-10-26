@@ -21,7 +21,6 @@ use rustc_hash::FxHashMap;
 
 use super::{
     GlobalRandomConfig, biome_coords,
-    blender::{Blender, BlenderImpl},
     feature::placed_features::PLACED_FEATURES,
     feature_order::select_features,
     noise::router::{
@@ -92,11 +91,6 @@ pub trait GenerationCache: HeightLimitView + BlockAccessor {
     }
     fn is_air(&self, local_pos: &Vector3<i32>) -> bool;
     fn get_biome_for_terrain_gen(&self, x: i32, y: i32, z: i32) -> &'static Biome;
-    fn get_blending_data(
-        &self,
-        chunk_x: i32,
-        chunk_z: i32,
-    ) -> Option<&crate::generation::blender::blending_data::BlendingData>;
     fn get_sea_level(&self) -> i32 {
         self.get_center_chunk().get_sea_level()
     }
@@ -162,7 +156,6 @@ pub struct ProtoChunk {
     sea_level: i32,
     pub stage: StagedChunkEnum,
     pub light: ChunkLight,
-    pub blending_data: Option<crate::generation::blender::blending_data::BlendingData>,
     pub pending_block_entities: Vec<NbtCompound>,
     pub(crate) pending_structure_entities: Vec<NbtCompound>,
     pub fluid_ticks: Vec<ScheduledTick<&'static Fluid>>,
@@ -204,7 +197,6 @@ impl ProtoChunk {
     pub const fn get_sea_level(&self) -> i32 {
         self.sea_level
     }
-
 
     #[must_use]
     pub fn new(x: i32, z: i32, generator: &super::generator::WorldGenerator) -> Self {
@@ -275,7 +267,6 @@ impl ProtoChunk {
                     .map(|_| LightContainer::new_empty(0))
                     .collect(),
             },
-            blending_data: None,
             pending_block_entities: Vec::new(),
             pending_structure_entities: Vec::new(),
             fluid_ticks: Vec::new(),
@@ -818,9 +809,7 @@ impl ProtoChunk {
         generator: &super::generator::VanillaGenerator,
         multi_noise_sampler: &mut MultiNoiseSampler,
     ) {
-        let base_supplier: &dyn BiomeSupplier = &generator.biome_supplier;
-        let blender = Blender::empty();
-        let biome_supplier = blender.get_biome_supplier(base_supplier);
+        let biome_supplier: &dyn BiomeSupplier = &generator.biome_supplier;
         let min_y = self.bottom_y();
         let bottom_section = section_coords::block_to_section(min_y as i32);
         let top_section = section_coords::block_to_section(min_y as i32 + self.height() as i32 - 1);
@@ -1549,9 +1538,7 @@ impl ProtoChunk {
 
         let seed = random_config.seed as i64;
 
-        let base_supplier: &dyn BiomeSupplier = &generator.biome_supplier;
-        let blender = Blender::empty();
-        let biome_supplier = blender.get_biome_supplier(base_supplier);
+        let biome_supplier: &dyn BiomeSupplier = &generator.biome_supplier;
         let mut multi_noise_sampler = MultiNoiseSampler::generate(&noise_router.multi_noise);
 
         let mut height_sampler =
@@ -1661,7 +1648,7 @@ impl ProtoChunk {
                                     &entry.structure,
                                     structure,
                                     context,
-                                    &biome_supplier,
+                                    biome_supplier,
                                     &mut multi_noise_sampler,
                                 )
                             },
@@ -1808,13 +1795,6 @@ impl GenerationCache for ProtoChunk {
     fn get_biome_for_terrain_gen(&self, x: i32, y: i32, z: i32) -> &'static Biome {
         let biome_pos = self.get_terrain_gen_biome_pos(x, y, z);
         Self::get_biome(self, biome_pos.x, biome_pos.y, biome_pos.z)
-    }
-    fn get_blending_data(
-        &self,
-        _cx: i32,
-        _cz: i32,
-    ) -> Option<&crate::generation::blender::blending_data::BlendingData> {
-        None
     }
     fn get_sea_level(&self) -> i32 {
         Self::get_sea_level(self)

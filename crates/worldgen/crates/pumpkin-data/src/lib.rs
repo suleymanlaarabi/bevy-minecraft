@@ -28,20 +28,10 @@ pub mod item;
 #[cfg(feature = "item")]
 pub mod item_stack;
 
-#[cfg(feature = "packet")]
-#[rustfmt::skip]
-#[path = "generated/packet.rs"]
-pub mod packet;
-
 #[cfg(feature = "jukebox_song")]
 #[rustfmt::skip]
 #[path = "generated/jukebox_song.rs"]
 pub mod jukebox_song;
-
-#[cfg(feature = "translation")]
-#[rustfmt::skip]
-#[path = "generated/translation.rs"]
-pub mod translation;
 
 #[cfg(feature = "registry")]
 #[rustfmt::skip]
@@ -79,17 +69,6 @@ pub mod sound {
     pub use crate::sound_enum::*;
 }
 
-#[cfg(feature = "advancement")]
-#[rustfmt::skip]
-#[path = "generated/advancement.rs"]
-pub mod advancement;
-
-#[cfg(feature = "advancement")]
-pub mod advancement_data;
-
-#[cfg(feature = "advancement")]
-pub use advancement::*;
-
 #[cfg(feature = "recipes")]
 #[rustfmt::skip]
 #[path = "generated/recipes.rs"]
@@ -107,16 +86,6 @@ pub mod data_component_impl;
 #[rustfmt::skip]
 #[path = "generated/attributes.rs"]
 pub mod attributes;
-
-#[cfg(feature = "tracked_data")]
-#[rustfmt::skip]
-#[path = "generated/tracked_data.rs"]
-pub mod tracked_data;
-
-#[cfg(feature = "meta_data_type")]
-#[rustfmt::skip]
-#[path = "generated/meta_data_type.rs"]
-pub mod meta_data_type;
 
 #[cfg(feature = "noise_parameter")]
 #[rustfmt::skip]

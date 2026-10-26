@@ -11,9 +11,7 @@ build = "build.rs"
 [features]
 default = [
     "item",
-    "packet",
     "jukebox_song",
-    "translation",
     "registry",
     "screen",
     "particle",
@@ -22,8 +20,6 @@ default = [
     "recipes",
     "data_component",
     "attributes",
-    "tracked_data",
-    "meta_data_type",
     "chunk",
     "game_event",
     "game_rules",
@@ -45,7 +41,6 @@ default = [
     "potion",
     "material_rule",
     "noise_settings",
-    "advancement",
     "carver",
     "villager",
     "placed_feature",
@@ -111,13 +106,10 @@ map_color = []
 map_decoration = []
 dye_color = []
 entity_variant = ["dye_color"]
-advancement = []
 bedrock_creative = []
 bedrock_biome = []
 item = []
-packet = []
 jukebox_song = []
-translation = []
 registry = []
 screen = []
 particle = []
@@ -126,8 +118,6 @@ sound = []
 recipes = []
 data_component = []
 attributes = []
-tracked_data = []
-meta_data_type = []
 chunk = ["noise_parameter", "biome", "chunk_status"]
 game_event = []
 game_rules = []

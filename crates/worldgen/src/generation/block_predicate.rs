@@ -1,4 +1,3 @@
-use itertools::Itertools;
 use pumpkin_data::fluid::{Fluid, FluidState};
 use pumpkin_data::tag::{self};
 use pumpkin_data::{Block, BlockDirection, BlockState, BlockStateId};
@@ -94,7 +93,7 @@ impl MatchingBlocksBlockPredicate {
             MatchingBlocksWrapper::Multiple(blocks) => blocks
                 .iter()
                 .map(|s| s.strip_prefix("minecraft:").unwrap_or(s))
-                .contains(block.name),
+                .any(|name| name == block.name),
         }
     }
 
@@ -110,7 +109,7 @@ impl MatchingBlocksBlockPredicate {
             MatchingBlocksWrapper::Multiple(blocks) => blocks
                 .iter()
                 .map(|s| s.strip_prefix("minecraft:").unwrap_or(s))
-                .contains(block.name),
+                .any(|name| name == block.name),
         }
     }
 }
@@ -176,7 +175,7 @@ impl MatchingFluidsBlockPredicate {
             MatchingBlocksWrapper::Multiple(blocks) => blocks
                 .iter()
                 .map(|s| s.strip_prefix("minecraft:").unwrap_or(s))
-                .contains(fluid.name),
+                .any(|name| name == fluid.name),
         }
     }
 
@@ -197,7 +196,7 @@ impl MatchingFluidsBlockPredicate {
             MatchingBlocksWrapper::Multiple(blocks) => blocks
                 .iter()
                 .map(|s| s.strip_prefix("minecraft:").unwrap_or(s))
-                .contains(fluid_name),
+                .any(|name| name == fluid_name),
         }
     }
 }

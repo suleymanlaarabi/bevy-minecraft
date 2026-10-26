@@ -181,7 +181,6 @@ impl Chunk {
             heightmap: Mutex::new(heightmaps),
             light: Mutex::new(snapshot.light),
             metadata,
-            blending_data: proto.blending_data,
         }))
     }
 }

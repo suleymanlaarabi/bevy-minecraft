@@ -3519,7 +3519,6 @@ dependencies = [
  "bitflags 2.13.2",
  "crc32fast",
  "dashmap",
- "itertools 0.15.0",
  "lz4_flex",
  "pumpkin-data",
  "pumpkin-nbt",
@@ -5259,9 +5258,7 @@ version = "0.2.1+26.3-26.51"
 dependencies = [
  "bytes",
  "colored",
- "dashmap",
  "md-5",
- "num-derive 0.5.1",
  "num-traits",
  "proc-macro2",
  "pumpkin-codecs",

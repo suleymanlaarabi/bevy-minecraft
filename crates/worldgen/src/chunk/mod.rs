@@ -15,7 +15,6 @@ pub struct ChunkData {
     pub heightmap: Mutex<ChunkHeightmaps>,
     pub light: Mutex<Layer<u8>>,
     pub metadata: Arc<GenerationPayload>,
-    pub blending_data: Option<crate::generation::blender::blending_data::BlendingData>,
 }
 pub struct ChunkSections {
     pub count: usize,
