@@ -8,7 +8,7 @@ use crate::generation::structure::placement::{
     GlobalStructureCache, StrongholdLayout, get_structure_chunk_in_region,
 };
 
-use super::WorldGenerator;
+use super::VanillaGenerator;
 
 /// Block-level position of a found structure plus squared distance from the
 /// search origin, used internally to track the running nearest candidate.
@@ -124,7 +124,7 @@ pub fn find_nearest_structure_start(
     structure_set: &StructureSet,
     target_structures: &[pumpkin_data::structures::StructureKeys],
     max_search_radius: i32,
-    generator: &WorldGenerator,
+    generator: &VanillaGenerator,
 ) -> Option<(BlockPos, pumpkin_data::structures::StructureKeys)> {
     use crate::{
         biome::{BiomeSupplier, MultiNoiseBiomeSupplier},
@@ -144,9 +144,6 @@ pub fn find_nearest_structure_start(
     };
     use pumpkin_data::structures::Structure;
 
-    let WorldGenerator::Noise(noise_generator) = generator else {
-        return None;
-    };
     let StructurePlacementType::RandomSpread(placement) = &structure_set.placement.placement_type
     else {
         return None;
@@ -156,8 +153,8 @@ pub fn find_nearest_structure_start(
     let chunk_origin_z = origin.0.z >> 4;
     let region_origin_x = floor_div(chunk_origin_x, placement.spacing);
     let region_origin_z = floor_div(chunk_origin_z, placement.spacing);
-    let world_seed = noise_generator.random_config.seed as i64;
-    let global_cache = &noise_generator.global_structure_cache;
+    let world_seed = generator.random_config.seed as i64;
+    let global_cache = &generator.global_structure_cache;
 
     for radius in 0..=max_search_radius {
         let mut nearest: Option<(FoundStructure, pumpkin_data::structures::StructureKeys)> = None;
@@ -175,7 +172,7 @@ pub fn find_nearest_structure_start(
                 );
                 if !should_generate_structure(
                     &structure_set.placement,
-                    &noise_generator.structure_calculator,
+                    &generator.structure_calculator,
                     chunk_x,
                     chunk_z,
                     global_cache,
@@ -186,9 +183,9 @@ pub fn find_nearest_structure_start(
                 for &key in target_structures {
                     let start =
                         global_cache.get_or_compute_structure_start(key, chunk_x, chunk_z, || {
-                            let settings = noise_generator.settings;
+                            let settings = generator.settings;
                             let mut height_sampler = SurfaceHeightEstimateSampler::generate(
-                                &noise_generator.base_router.surface_estimator,
+                                &generator.base_router.surface_estimator,
                                 &SurfaceHeightSamplerBuilderOptions::new(
                                     settings.shape.min_y as i32,
                                     settings.shape.height as i32,
@@ -197,9 +194,8 @@ pub fn find_nearest_structure_start(
                                         as usize,
                                 ),
                             );
-                            let mut biome_sampler = MultiNoiseSampler::generate(
-                                &noise_generator.base_router.multi_noise,
-                            );
+                            let mut biome_sampler =
+                                MultiNoiseSampler::generate(&generator.base_router.multi_noise);
                             let biome_supplier: &dyn BiomeSupplier =
                                 &MultiNoiseBiomeSupplier::OVERWORLD;
                             let context = StructureGeneratorContext {
@@ -208,12 +204,11 @@ pub fn find_nearest_structure_start(
                                 chunk_z,
                                 random: create_chunk_random(world_seed, chunk_x, chunk_z),
                                 sea_level: settings.sea_level,
-                                min_y: (settings.shape.min_y as i32)
-                                    .max(noise_generator.dimension.min_y),
+                                min_y: (settings.shape.min_y as i32).max(generator.dimension.min_y),
                                 height: settings
                                     .shape
                                     .height
-                                    .min(noise_generator.dimension.height as u16),
+                                    .min(generator.dimension.height as u16),
                                 height_sampler: Some(&mut height_sampler),
                                 structure_key: Some(key),
                             };

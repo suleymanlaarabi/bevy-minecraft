@@ -47,7 +47,6 @@ use crate::generation::noise::router::{
     surface_height_sampler::SurfaceHeightSamplerBuilderOptions,
 };
 use crate::generation::noise::{CHUNK_DIM, ChunkNoiseGenerator, LAVA_BLOCK, WATER_BLOCK};
-use crate::generation::section_coords::section_to_block;
 use crate::generation::structure::lazily_generate_structure;
 use crate::generation::structure::placement::should_generate_structure;
 use crate::generation::structure::structures::{
@@ -199,36 +198,21 @@ impl ProtoChunk {
     }
 
     #[must_use]
-    pub fn new(x: i32, z: i32, generator: &super::generator::WorldGenerator) -> Self {
-        let dimension = generator.dimension();
+    pub fn new(x: i32, z: i32, generator: &super::generator::VanillaGenerator) -> Self {
+        let dimension = &generator.dimension;
         let height = dimension.height as u16;
         let bottom_y = dimension.min_y as i8;
         let section_count = (height as usize) / 16;
 
-        let (generation_height, generation_bottom_y, sea_level) = match generator {
-            super::generator::WorldGenerator::Noise(noise_gen) => {
-                let shape = noise_gen
-                    .settings
-                    .shape
-                    .trim_height(bottom_y, (dimension.min_y + dimension.height) as u16);
-                (shape.height, shape.min_y, noise_gen.settings.sea_level)
-            }
-            super::generator::WorldGenerator::Flat(_)
-            | super::generator::WorldGenerator::Custom(_) => (height, bottom_y, 63),
-        };
-
-        let default_block = match generator {
-            super::generator::WorldGenerator::Noise(noise_gen) => noise_gen.default_block,
-            super::generator::WorldGenerator::Flat(_) => Block::AIR.default_state,
-            super::generator::WorldGenerator::Custom(custom_gen) => custom_gen.default_block(),
-        };
-        let biome_mixer_seed = match generator {
-            super::generator::WorldGenerator::Noise(noise_gen) => noise_gen.biome_mixer_seed,
-            super::generator::WorldGenerator::Flat(flat_gen) => {
-                crate::biome::hash_seed(flat_gen.seed)
-            }
-            super::generator::WorldGenerator::Custom(custom_gen) => custom_gen.biome_mixer_seed(),
-        };
+        let shape = generator
+            .settings
+            .shape
+            .trim_height(bottom_y, (dimension.min_y + dimension.height) as u16);
+        let generation_height = shape.height;
+        let generation_bottom_y = shape.min_y;
+        let sea_level = generator.settings.sea_level;
+        let default_block = generator.default_block;
+        let biome_mixer_seed = generator.biome_mixer_seed;
 
         let default_heightmap = [i16::MIN; CHUNK_AREA];
         Self {
@@ -309,10 +293,6 @@ impl ProtoChunk {
 
     pub fn add_structure_entity(&mut self, nbt: NbtCompound) {
         self.pending_structure_entities.push(nbt);
-    }
-
-    pub fn take_pending_structure_entities(&mut self) -> Vec<NbtCompound> {
-        std::mem::take(&mut self.pending_structure_entities)
     }
 
     pub fn schedule_fluid_tick(&mut self, x: i32, y: i32, z: i32, fluid: &'static Fluid) {
@@ -915,31 +895,6 @@ impl ProtoChunk {
         self.prime_heightmaps();
     }
 
-    pub fn spawn_mobs<T: GenerationCache>(cache: &mut T, block_registry: &dyn WorldPortalExt) {
-        let chunk = cache.get_center_chunk();
-        if chunk.stage >= StagedChunkEnum::Spawn {
-            return;
-        }
-        debug_assert_eq!(chunk.stage, StagedChunkEnum::Lighting);
-
-        let biome = chunk.get_terrain_gen_biome(
-            section_to_block(chunk.x),
-            chunk.bottom_y() as i32 + chunk.height() as i32 - 1,
-            section_to_block(chunk.z),
-        );
-        let x = chunk.x;
-        let z = chunk.z;
-
-        block_registry.spawn_mobs_for_chunk_generation(cache, biome, x, z);
-
-        let entities = cache
-            .get_center_chunk_mut()
-            .take_pending_structure_entities();
-        block_registry.spawn_structure_entities(entities);
-
-        cache.get_center_chunk_mut().stage = StagedChunkEnum::Spawn;
-    }
-
     #[must_use]
     pub fn get_terrain_gen_biome_id(&self, x: i32, y: i32, z: i32) -> u8 {
         let biome_pos = self.get_terrain_gen_biome_pos(x, y, z);
@@ -1418,9 +1373,7 @@ impl ProtoChunk {
             crate::generation::structure::height_sampler::NoiseHeightSampler::new(generator);
 
         for (i, set) in StructureSet::ALL.iter().enumerate() {
-            if let Some(ref enabled) = generator.enabled_structure_sets
-                && !enabled.contains(&i)
-            {
+            if !generator.enabled_structure_sets.contains(&i) {
                 continue;
             }
 
@@ -1554,9 +1507,7 @@ impl ProtoChunk {
         let chunk_height = self.generation_height().min(self.height());
 
         for (set_index, set) in StructureSet::ALL.iter().enumerate() {
-            if let Some(ref enabled) = generator.enabled_structure_sets
-                && !enabled.contains(&set_index)
-            {
+            if !generator.enabled_structure_sets.contains(&set_index) {
                 continue;
             }
 

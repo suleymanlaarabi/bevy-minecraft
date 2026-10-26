@@ -1,7 +1,7 @@
 //! NBT Structure Template System
 //!
 //! This module provides functionality for loading and placing Minecraft structure
-//! templates from `.nbt` files. This enables exact vanilla structure matching and
+//! templates from embedded static definitions. This enables exact vanilla structure matching and
 //! dramatically simplifies implementing structures like igloos, shipwrecks, villages, etc.
 //!
 //! # Architecture
@@ -9,19 +9,15 @@
 //! - [`StructureTemplate`]: Represents a loaded NBT template with size, palette, and blocks
 //! - [`TemplatePiece`]: A structure piece that places blocks from a template
 //! - [`Rotation`] and [`Mirror`]: Transform positions and block properties
-//! - [`TemplateCache`]: Lazy-loading cache for embedded template files
+//! - [`TemplateCache`]: Lazy-loading cache for embedded template definitions
 //!
 //! # Example Usage
 //!
 //! ```ignore
-//! use hollow_worldgen::generation::structure::template::{TemplateCache, TemplatePiece};
-//! use pumpkin_data::Rotation;
+//! use hollow_worldgen::generation::structure::template::get_template;
 //!
 //! // Load a template from the cache
-//! let template = TemplateCache::get("igloo/top").expect("Template not found");
-//!
-//! // Create a piece to place the template
-//! let piece = TemplatePiece::new(template, rotation, mirror, position);
+//! let template = get_template("igloo/top").expect("Template not found");
 //! ```
 
 mod block_state_resolver;
@@ -44,10 +40,7 @@ pub use cache::{
     TemplateCache, all_embedded_datapack_names, all_pool_names, all_structure_names,
     all_template_names, get_template, global_cache,
 };
-pub use processor::{
-    StructureProcessor, clear_dynamic_processors, load_processor_list,
-    register_dynamic_processor_list,
-};
+pub use processor::{StructureProcessor, load_processor_list};
 pub use pumpkin_data::{BlockState, Mirror as BlockMirror, Rotation as BlockRotation};
 pub use structure_template::{
     JigsawBlockInfo, Palette, PaletteEntry, SimplePalette, StructureBlockInfo, StructureEntityInfo,
@@ -380,4 +373,3 @@ pub(crate) fn get_block_entity_id(block: pumpkin_data::BlockId) -> Option<&'stat
         _ => None,
     }
 }
-

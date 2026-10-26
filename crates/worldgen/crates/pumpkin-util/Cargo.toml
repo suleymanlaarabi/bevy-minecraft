@@ -9,7 +9,6 @@ license = "GPL-3.0"
 
 [dependencies]
 pumpkin-nbt = { path = "../pumpkin-nbt", default-features = false }
-pumpkin-codecs = { path = "../pumpkin-codecs", default-features = false }
 serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1.0", default-features = false, features = ["std"] }
 bytes = { version = "1.12", default-features = false, features = ["serde", "std"] }

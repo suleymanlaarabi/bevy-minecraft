@@ -11,64 +11,12 @@ use pumpkin_util::math::block_box::BlockBox;
 use pumpkin_util::math::position::BlockPos;
 use pumpkin_util::math::vector3::Vector3;
 use pumpkin_util::random::{RandomDeriverImpl, RandomImpl};
-use serde::Deserialize;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum JigsawProjection {
     Rigid,
     TerrainMatching,
-}
-
-static DYNAMIC_POOLS: std::sync::LazyLock<dashmap::DashMap<String, Arc<TemplatePool>>> =
-    std::sync::LazyLock::new(dashmap::DashMap::new);
-
-/// Registers a dynamically-loaded template pool from a runtime datapack.
-pub fn register_dynamic_template_pool(id: &str, pool: Arc<TemplatePool>) {
-    let key = if id.contains(':') {
-        id.to_string()
-    } else {
-        format!("minecraft:{id}")
-    };
-    DYNAMIC_POOLS.insert(key, pool);
-}
-
-/// Registers a dynamically-loaded template pool from raw JSON string (e.g. from an on-disk datapack).
-pub fn register_dynamic_template_pool_json(
-    id: &str,
-    json: &str,
-) -> Result<Arc<TemplatePool>, serde_json::Error> {
-    let raw: RawTemplatePool = serde_json::from_str(json)?;
-    let elements = raw
-        .elements
-        .into_iter()
-        .filter_map(|weighted| {
-            weighted.element.into_element().map(|(kind, projection)| {
-                Arc::new(PoolElement {
-                    weight: weighted.weight,
-                    projection,
-                    kind,
-                })
-            })
-        })
-        .collect();
-    let key = if id.contains(':') {
-        id.to_string()
-    } else {
-        format!("minecraft:{id}")
-    };
-    let pool = Arc::new(TemplatePool {
-        id: key.clone(),
-        fallback: raw.fallback,
-        elements,
-    });
-    DYNAMIC_POOLS.insert(key, Arc::clone(&pool));
-    Ok(pool)
-}
-
-/// Clears all dynamically registered template pools (e.g. during datapack reload).
-pub fn clear_dynamic_template_pools() {
-    DYNAMIC_POOLS.clear();
 }
 
 pub struct TemplatePool {
@@ -101,132 +49,6 @@ pub enum ProcessorListRef {
     Named(String),
     #[default]
     Empty,
-}
-
-#[derive(Deserialize)]
-struct RawTemplatePool {
-    fallback: String,
-    elements: Vec<RawWeightedPoolElement>,
-}
-
-#[derive(Deserialize)]
-struct RawWeightedPoolElement {
-    element: RawPoolElement,
-    weight: u32,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "element_type")]
-enum RawPoolElement {
-    #[serde(rename = "minecraft:empty_pool_element")]
-    Empty,
-    #[serde(rename = "minecraft:single_pool_element")]
-    Single {
-        location: String,
-        processors: RawProcessorList,
-        projection: RawProjection,
-    },
-    #[serde(rename = "minecraft:legacy_single_pool_element")]
-    LegacySingle {
-        location: String,
-        processors: RawProcessorList,
-        projection: RawProjection,
-    },
-    #[serde(rename = "minecraft:list_pool_element")]
-    List {
-        elements: Vec<Self>,
-        projection: RawProjection,
-    },
-    #[serde(rename = "minecraft:feature_pool_element")]
-    Feature {
-        feature: String,
-        projection: RawProjection,
-    },
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RawProcessorList {
-    Named(String),
-    Inline { processors: Vec<serde_json::Value> },
-}
-
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RawProjection {
-    Rigid,
-    TerrainMatching,
-}
-
-impl From<RawProjection> for JigsawProjection {
-    fn from(value: RawProjection) -> Self {
-        match value {
-            RawProjection::Rigid => Self::Rigid,
-            RawProjection::TerrainMatching => Self::TerrainMatching,
-        }
-    }
-}
-
-impl RawPoolElement {
-    fn single(
-        location: String,
-        processors: RawProcessorList,
-        projection: RawProjection,
-        legacy: bool,
-    ) -> (PoolElementKind, JigsawProjection) {
-        let processors = match processors {
-            RawProcessorList::Named(name) => ProcessorListRef::Named(name),
-            RawProcessorList::Inline { processors } => {
-                debug_assert!(processors.is_empty());
-                ProcessorListRef::Empty
-            }
-        };
-        let resolved_template = crate::generation::structure::template::get_template(&location);
-        (
-            PoolElementKind::Single {
-                template: location,
-                resolved_template,
-                processors,
-                legacy,
-            },
-            projection.into(),
-        )
-    }
-
-    fn into_element(self) -> Option<(PoolElementKind, JigsawProjection)> {
-        match self {
-            Self::Empty => Some((PoolElementKind::Empty, JigsawProjection::Rigid)),
-            Self::Single {
-                location,
-                processors,
-                projection,
-            } => Some(Self::single(location, processors, projection, false)),
-            Self::LegacySingle {
-                location,
-                processors,
-                projection,
-            } => Some(Self::single(location, processors, projection, true)),
-            Self::List {
-                elements,
-                projection,
-            } => {
-                let projection = projection.into();
-                let elements = elements
-                    .into_iter()
-                    .filter_map(|element| element.into_element().map(|(kind, _)| kind))
-                    .collect();
-                Some((PoolElementKind::List(elements), projection))
-            }
-            Self::Feature {
-                feature,
-                projection,
-            } => {
-                let feature = feature.strip_prefix("minecraft:").unwrap_or(&feature);
-                pumpkin_data::placed_feature::PlacedFeature::from_name(feature)
-                    .map(|feature| (PoolElementKind::Feature(feature), projection.into()))
-            }
-        }
-    }
 }
 
 impl PoolElement {
@@ -577,7 +399,7 @@ impl TemplatePool {
         }
     }
 
-    /// Discovers a pool from dynamic datapacks, static codegen data, or fallback embedded assets.
+    /// Gets a cached pool from the embedded static definitions.
     #[must_use]
     pub fn discover(id: &str) -> Option<Arc<Self>> {
         static CACHE: std::sync::LazyLock<dashmap::DashMap<String, Arc<TemplatePool>>> =
@@ -589,17 +411,12 @@ impl TemplatePool {
             format!("minecraft:{id}")
         };
 
-        // 1. Dynamic datapack pools take precedence (allows overriding vanilla pools)
-        if let Some(pool) = DYNAMIC_POOLS.get(&canonical_id) {
-            return Some(Arc::clone(&pool));
-        }
-
-        // 2. Previously cached pools
+        // Previously cached pools
         if let Some(pool) = CACHE.get(&canonical_id) {
             return Some(Arc::clone(&pool));
         }
 
-        // 3. Special empty pool
+        // Special empty pool
         if canonical_id == "minecraft:empty" || id == "empty" {
             let pool = Arc::new(Self {
                 id: "minecraft:empty".to_string(),
@@ -610,7 +427,7 @@ impl TemplatePool {
             return Some(pool);
         }
 
-        // 4. Static codegen template pools from pumpkin-data
+        // Static template pools from pumpkin-data
         if let Some(static_pool) = pumpkin_data::template_pool::get_template_pool(&canonical_id) {
             let pool = Arc::new(Self::from_static(static_pool));
             CACHE.insert(canonical_id, Arc::clone(&pool));
@@ -1066,4 +883,3 @@ impl StructureGenerator for JigsawGenerator {
         )
     }
 }
-

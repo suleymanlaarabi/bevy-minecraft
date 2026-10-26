@@ -7,7 +7,7 @@ use crate::biome::{BiomeSupplier, MultiNoiseBiomeSupplier, end::TheEndBiomeSuppl
 use crate::generation::biome_coords;
 use crate::generation::noise::router::multi_noise_sampler::MultiNoiseSampler;
 
-use super::{VanillaGenerator, WorldGenerator};
+use super::VanillaGenerator;
 
 /// Finds the closest position whose sampled biome id is contained in
 /// `targets`, mirroring vanilla's `BiomeSource.findClosestBiome3d`.
@@ -23,36 +23,6 @@ use super::{VanillaGenerator, WorldGenerator};
 #[must_use]
 #[expect(clippy::implicit_hasher)]
 pub fn find_closest_biome_3d(
-    world_gen: &WorldGenerator,
-    origin: BlockPos,
-    targets: &FxHashSet<u8>,
-    horizontal_radius: i32,
-    horizontal_step: i32,
-    vertical_step: i32,
-) -> Option<(BlockPos, &'static Biome)> {
-    match world_gen {
-        WorldGenerator::Flat(flat) => {
-            // Superflat worlds use a single fixed biome everywhere, matching
-            // the resolution in `FlatGenerator::step_to_biomes`.
-            let name = flat.biome.strip_prefix("minecraft:").unwrap_or(&flat.biome);
-            let biome = Biome::from_name(name).unwrap_or(&Biome::PLAINS);
-            targets.contains(&biome.id).then_some((origin, biome))
-        }
-        WorldGenerator::Noise(generator) => find_in_noise_world(
-            generator,
-            origin,
-            targets,
-            horizontal_radius,
-            horizontal_step,
-            vertical_step,
-        ),
-        // Plugin generators only expose biomes by generating a whole chunk, so
-        // there is no sampler to search against.
-        WorldGenerator::Custom(_) => None,
-    }
-}
-
-fn find_in_noise_world(
     generator: &VanillaGenerator,
     origin: BlockPos,
     targets: &FxHashSet<u8>,
@@ -186,4 +156,3 @@ fn out_from_origin(origin: i32, min: i32, max: i32, step: i32) -> Vec<i32> {
     }
     ys
 }
-

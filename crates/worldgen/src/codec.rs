@@ -242,7 +242,7 @@ pub(crate) fn encode_generated(chunk: &crate::chunk_system::Chunk) -> io::Result
     }
     .encode();
     let mut bytes = Vec::with_capacity(9 + header.len() + terrain.len());
-    bytes.extend_from_slice(b"HGEN\x01");
+    bytes.extend_from_slice(b"HGEN\x02");
     bytes.extend_from_slice(&(header.len() as u32).to_le_bytes());
     bytes.extend_from_slice(&header);
     bytes.extend_from_slice(&terrain);
@@ -260,7 +260,7 @@ pub(crate) fn encode_generated(chunk: &crate::chunk_system::Chunk) -> io::Result
 pub(crate) fn decode_generated(
     record: GenerationRecord,
     position: crate::chunk_system::ChunkPos,
-    generator: &crate::generation::generator::WorldGenerator,
+    generator: &crate::generation::generator::VanillaGenerator,
 ) -> io::Result<crate::chunk_system::Chunk> {
     use crate::{
         chunk::{ChunkData, ChunkHeightmaps, ChunkSections},
@@ -269,13 +269,13 @@ pub(crate) fn decode_generated(
     use std::sync::{Mutex, RwLock};
     let decoded = decompress_record(&record.bytes)?;
     let mut bytes = decoded.as_slice();
-    if take(&mut bytes, 5)? != b"HGEN\x01" {
+    if take(&mut bytes, 5)? != b"HGEN\x02" {
         return Err(invalid());
     }
     let header_len = u32::from_le_bytes(take(&mut bytes, 4)?.try_into().unwrap()) as usize;
     let header: GenerationHeader =
         serde_json::from_slice(take(&mut bytes, header_len)?).map_err(io::Error::other)?;
-    let dim = generator.dimension();
+    let dim = &generator.dimension;
     if header.position != [position.x, position.y]
         || header.min_y != dim.min_y
         || header.height != dim.height
@@ -416,15 +416,14 @@ pub(crate) fn decode_generated(
     chunk.light = working_light(&terrain.light);
     // Structure collectors contain generation callbacks. Recreate their seeded recipes,
     // as the original resumable generator did, before restoring the exact saved stage.
-    if let crate::generation::generator::WorldGenerator::Noise(noise) = generator {
-        if record.stage >= Stage::StructureStart {
-            chunk.stage = Stage::Biomes;
-            chunk.set_structure_starts(noise);
-        }
-        if record.stage >= Stage::StructureReferences {
-            chunk.set_structure_references(noise);
-        }
+    if record.stage >= Stage::StructureStart {
+        chunk.stage = Stage::Biomes;
+        chunk.set_structure_starts(generator);
     }
+    if record.stage >= Stage::StructureReferences {
+        chunk.set_structure_references(generator);
+    }
+
     chunk.stage = record.stage;
     Ok(Chunk::Proto(Box::new(chunk)))
 }

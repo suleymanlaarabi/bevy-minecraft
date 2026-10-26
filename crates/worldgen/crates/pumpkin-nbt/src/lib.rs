@@ -24,8 +24,6 @@ pub mod compound;
 pub mod deserializer;
 /// Reading and writing gzip-compressed NBT.
 pub mod nbt_compress;
-/// Integration with Pumpkin's dynamic codec operations.
-pub mod nbt_ops;
 /// Low-level NBT serialization support.
 pub mod serializer;
 /// The individual NBT tag types.

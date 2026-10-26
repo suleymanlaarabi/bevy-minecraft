@@ -1,12 +1,12 @@
 use crate::ProtoChunk;
-use crate::generation::generator::WorldGenerator;
+use crate::generation::generator::VanillaGenerator;
 use crate::lighting::LightingEngineConfig;
 use crate::world::WorldPortalExt;
 
 use super::{Cache, Chunk, StagedChunkEnum};
 
 pub fn generate_single_chunk(
-    generator: &WorldGenerator,
+    generator: &VanillaGenerator,
     block_registry: &dyn WorldPortalExt,
     chunk_x: i32,
     chunk_z: i32,
@@ -23,7 +23,7 @@ pub fn generate_single_chunk(
 }
 
 pub fn generate_single_chunk_with_radius(
-    generator: &WorldGenerator,
+    generator: &VanillaGenerator,
     block_registry: &dyn WorldPortalExt,
     chunk_x: i32,
     chunk_z: i32,
@@ -52,7 +52,6 @@ pub fn generate_single_chunk_with_radius(
         StagedChunkEnum::Carvers,
         StagedChunkEnum::Features,
         StagedChunkEnum::Lighting,
-        StagedChunkEnum::Spawn,
         StagedChunkEnum::Full,
     ];
 
@@ -67,12 +66,7 @@ pub fn generate_single_chunk_with_radius(
                 | StagedChunkEnum::StructureStart
                 | StagedChunkEnum::StructureReferences
         ) {
-            cache.advance_all(
-                stage,
-                generator,
-                block_registry,
-                &LightingEngineConfig::Default,
-            );
+            cache.advance_all(stage, generator);
         } else {
             cache.advance(
                 stage,
@@ -86,4 +80,3 @@ pub fn generate_single_chunk_with_radius(
     let mid = ((cache.size * cache.size) >> 1) as usize;
     cache.chunks.swap_remove(mid)
 }
-

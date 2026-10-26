@@ -1,11 +1,8 @@
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
 use super::vector3::Vector3;
-use crate::math::vector_codec_impl;
 use bytes::BufMut;
 use num_traits::Float;
-use pumpkin_codecs::codec::list::validate_fixed_size;
-use pumpkin_codecs::{DataResult, Decode, DynamicOps, Encode, FlatTryFrom};
 
 /// A 2-dimensional vector with generic numeric components.
 #[derive(Clone, Copy, Debug, PartialEq, Hash, Eq, Default)]
@@ -193,5 +190,3 @@ impl serde::Serialize for Vector2<f32> {
         serializer.serialize_bytes(&buf)
     }
 }
-
-vector_codec_impl!(Vector2<T>, 2, x, y);

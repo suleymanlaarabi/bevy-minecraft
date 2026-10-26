@@ -25,10 +25,8 @@ pub enum StagedChunkEnum {
     Carvers,
     /// Chunk with features and structures, ready for lighting
     Features, // FEATURES
-    /// Chunk with lighting calculated, ready for spawning
-    Lighting, // INITIALIZE LIGHT
-    /// Chunk with mobs spawned, ready for finalization
-    Spawn, // SPAWN
+    /// Chunk with lighting calculated, waiting for neighboring light propagation.
+    Lighting,
     /// Fully generated chunk
     Full,
 }
@@ -46,23 +44,18 @@ impl From<u8> for StagedChunkEnum {
             7 => Self::Carvers,
             8 => Self::Features,
             9 => Self::Lighting,
-            10 => Self::Spawn,
-            11 => Self::Full,
+            10 => Self::Full,
             _ => panic!(),
         }
     }
 }
 
 impl StagedChunkEnum {
-    /// Total number of state values (0 = None … 11 = Full).
+    /// Total number of state values (0 = None … 10 = Full).
     pub const COUNT: usize = Self::Full as usize + 1;
     #[must_use]
     pub const fn get_direct_radius(self) -> i32 {
-        // self exclude
-        match self {
-            Self::Surface | Self::Features | Self::Lighting | Self::Spawn | Self::Full => 1,
-            _ => 0,
-        }
+        self.get_direct_dependencies().len().saturating_sub(1) as i32
     }
     #[must_use]
     pub const fn get_read_radius(self) -> i32 {
@@ -75,7 +68,7 @@ impl StagedChunkEnum {
     pub const fn get_write_radius(self) -> i32 {
         // self exclude
         match self {
-            Self::Features | Self::Lighting | Self::Spawn => 1,
+            Self::Features | Self::Lighting => 1,
             _ => 0,
         }
     }
@@ -86,25 +79,16 @@ impl StagedChunkEnum {
             // the Biome Step, this should be more efficient
             Self::Biomes => &[Self::Empty],
             Self::StructureStart => &[Self::Biomes],
-            Self::StructureReferences => &[
-                Self::StructureStart,
-                Self::StructureStart,
-                Self::StructureStart,
-                Self::StructureStart,
-                Self::StructureStart,
-                Self::StructureStart,
-                Self::StructureStart,
-                Self::StructureStart,
-                Self::StructureStart,
-            ],
+            // References discover their distant structure starts through the generator cache.
+            Self::StructureReferences => &[Self::StructureStart],
             Self::Noise => &[Self::StructureReferences],
             Self::Surface => &[Self::Noise, Self::Biomes],
             Self::Carvers => &[Self::Surface],
             Self::Features => &[Self::Carvers, Self::Carvers],
             Self::Lighting => &[Self::Features, Self::Features],
-            Self::Spawn => &[Self::Lighting, Self::Lighting],
-            Self::Full => &[Self::Spawn, Self::Spawn],
-            _ => panic!(),
+            // Final snapshots must wait for every neighbor that can still write their lighting.
+            Self::Full => &[Self::Lighting, Self::Lighting],
+            Self::None | Self::Empty => &[],
         }
     }
 }

@@ -13,9 +13,7 @@ default = [
     "item",
     "jukebox_song",
     "registry",
-    "screen",
     "particle",
-    "statistic",
     "sound",
     "recipes",
     "data_component",
@@ -46,15 +44,12 @@ default = [
     "placed_feature",
     "configured_feature",
     "slot_ranges",
-    "bedrock_creative",
-    "bedrock_biome",
     "map_color",
     "map_decoration",
     "dye_color",
     "entity_variant",
     "block_transformer",
     "trial_spawner",
-    "test_instance",
     "painting_variant",
     "context_provider",
     "instrument",
@@ -99,21 +94,16 @@ decorated_pot_pattern = []
 chat_type = []
 context_provider = []
 painting_variant = []
-test_instance = []
 trial_spawner = []
 block_transformer = ["block", "sound", "world", "tag"]
 map_color = []
 map_decoration = []
 dye_color = []
 entity_variant = ["dye_color"]
-bedrock_creative = []
-bedrock_biome = []
 item = []
 jukebox_song = []
 registry = []
-screen = []
 particle = []
-statistic = []
 sound = []
 recipes = []
 data_component = []

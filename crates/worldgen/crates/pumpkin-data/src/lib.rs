@@ -38,20 +38,12 @@ pub mod jukebox_song;
 #[path = "generated/registry.rs"]
 pub mod registry;
 
-#[cfg(feature = "screen")]
-#[rustfmt::skip]
-#[path = "generated/screen.rs"]
-pub mod screen;
 
 #[cfg(feature = "particle")]
 #[rustfmt::skip]
 #[path = "generated/particle.rs"]
 pub mod particle;
 
-#[cfg(feature = "statistic")]
-#[rustfmt::skip]
-#[path = "generated/statistic.rs"]
-pub mod statistic;
 
 #[cfg(feature = "sound")]
 #[rustfmt::skip]
@@ -222,15 +214,7 @@ pub mod fluid;
 #[path = "generated/block.rs"]
 pub mod block_properties;
 
-#[cfg(feature = "bedrock_creative")]
-#[rustfmt::skip]
-#[path = "generated/bedrock_creative.rs"]
-pub mod bedrock_creative;
 
-#[cfg(feature = "bedrock_biome")]
-#[rustfmt::skip]
-#[path = "generated/bedrock_biome.rs"]
-pub mod bedrock_biome;
 
 #[cfg(feature = "tag")]
 #[rustfmt::skip]
@@ -283,10 +267,6 @@ pub mod structure_metadata;
 #[path = "generated/structure_template.rs"]
 pub mod structure_template;
 
-#[cfg(feature = "test_instance")]
-#[rustfmt::skip]
-#[path = "generated/test_instance.rs"]
-pub mod test_instance;
 
 #[cfg(feature = "painting_variant")]
 #[rustfmt::skip]

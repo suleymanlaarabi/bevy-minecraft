@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub(super) const FORMAT_VERSION: u32 = 3;
+pub(super) const FORMAT_VERSION: u32 = 4;
 use hollow_worldgen::GENERATOR_VERSION;
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,4 +266,3 @@ impl Checkpoint {
                 .all(|(a, b)| a.stack == b.stack && a.position == b.position)
     }
 }
-

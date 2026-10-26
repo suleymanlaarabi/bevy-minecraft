@@ -1,34 +1,14 @@
-//! Structure template loading, transformation, and saving (1:1 matching Minecraft vanilla `StructureTemplate`).
-//!
-//! This module handles parsing vanilla Minecraft structure template files (`.nbt`)
-//! into a runtime representation with palettes, entities, block info, and transformations.
+//! Embedded vanilla structure templates, block metadata, and transformations.
 
 use std::io::Cursor;
 use std::sync::OnceLock;
 
 use pumpkin_data::{Block, BlockId, BlockStateId, Mirror, Property, Rotation};
-use pumpkin_nbt::{compound::NbtCompound, nbt_compress::read_gzip_compound_tag, tag::NbtTag};
+use pumpkin_nbt::{compound::NbtCompound, tag::NbtTag};
 use pumpkin_util::math::{block_box::BlockBox, vector3::Vector3};
-use thiserror::Error;
 
 use super::processor::StructureProcessor;
 use crate::generation::structure::structures::jigsaw::{JigsawBlock, JigsawJointType};
-
-/// Errors that can occur when loading or saving a structure template.
-#[derive(Debug, Error)]
-pub enum TemplateError {
-    #[error("Failed to decompress NBT: {0}")]
-    NbtError(#[from] pumpkin_nbt::Error),
-
-    #[error("Missing required field: {0}")]
-    MissingField(&'static str),
-
-    #[error("Invalid field type for {0}")]
-    InvalidFieldType(&'static str),
-
-    #[error("Invalid palette index: {0}")]
-    InvalidPaletteIndex(u32),
-}
 
 /// Settings used when placing, transforming, or querying a [`StructureTemplate`].
 #[derive(Clone, Debug)]
@@ -297,28 +277,6 @@ impl PaletteEntry {
             compound.put_compound("properties", properties);
         }
         compound
-    }
-
-    pub fn from_nbt_compound(compound: &NbtCompound) -> Result<Self, TemplateError> {
-        let name = compound
-            .get_string("id")
-            .ok_or(TemplateError::MissingField("palette.id"))?;
-        let block = Block::from_registry_key(name.strip_prefix("minecraft:").unwrap_or(name))
-            .ok_or(TemplateError::InvalidFieldType("palette.id"))?;
-        let mut id = block.default_state.id;
-        if let Some(properties) = compound.get_compound("properties") {
-            for (key, value) in &properties.child_tags {
-                let NbtTag::String(value) = value else {
-                    return Err(TemplateError::InvalidFieldType("palette.properties"));
-                };
-                let property = Property::from_str_pair(key, value)
-                    .ok_or(TemplateError::InvalidFieldType("palette.properties"))?;
-                id = id
-                    .with_properties(&[property])
-                    .map_err(|_| TemplateError::InvalidFieldType("palette.properties"))?;
-            }
-        }
-        Ok(Self { id })
     }
 }
 const _: () = assert!(std::mem::size_of::<PaletteEntry>() == 2);
@@ -910,23 +868,10 @@ impl StructureTemplate {
             })
     }
 
-    /// Loads a structure template from gzipped NBT bytes.
-    pub fn from_nbt_bytes(bytes: &[u8]) -> Result<Self, TemplateError> {
-        let compound = read_gzip_compound_tag(Cursor::new(bytes))?;
-        Self::from_nbt_compound(&compound)
-    }
-
-    /// Loads a structure template from a parsed NBT compound.
-    pub fn from_nbt_compound(compound: &NbtCompound) -> Result<Self, TemplateError> {
-        let mut template = Self::default();
-        template.load(compound)?;
-        Ok(template)
-    }
-
     /// Loads a structure template from a pre-parsed static template definition.
     pub fn from_static(
         static_template: &pumpkin_data::structure_template::StaticStructureTemplate,
-    ) -> Result<Self, TemplateError> {
+    ) -> Self {
         let size = Vector3::new(
             static_template.size[0],
             static_template.size[1],
@@ -996,191 +941,7 @@ impl StructureTemplate {
         };
 
         template.sync_legacy_fields();
-        Ok(template)
-    }
-
-    /// Loads the structure template from an NBT compound matching vanilla 1:1.
-    pub fn load(&mut self, compound: &NbtCompound) -> Result<(), TemplateError> {
-        self.palettes.clear();
-        self.entity_info_list.clear();
-        self.jigsaw_blocks_cache = OnceLock::new();
-
-        // 1. size
-        self.size = Self::parse_size(compound)?;
-
-        // 2. blocks
-        let blocks_list = compound
-            .get_list(Self::BLOCKS_TAG)
-            .ok_or(TemplateError::MissingField(Self::BLOCKS_TAG))?;
-
-        // 3. palettes
-        if let Some(palette_list_list) = compound.get_list(Self::PALETTE_LIST_TAG) {
-            for tag in palette_list_list {
-                let NbtTag::List(palette_list) = tag else {
-                    return Err(TemplateError::InvalidFieldType(Self::PALETTE_LIST_TAG));
-                };
-                self.load_palette(palette_list, blocks_list)?;
-            }
-        } else if let Some(palette_list) = compound.get_list(Self::PALETTE_TAG) {
-            self.load_palette(palette_list, blocks_list)?;
-        } else {
-            return Err(TemplateError::MissingField(Self::PALETTE_TAG));
-        }
-
-        // 4. entities
-        if let Some(entities_list) = compound.get_list(Self::ENTITIES_TAG) {
-            for tag in entities_list {
-                let NbtTag::Compound(entity_compound) = tag else {
-                    return Err(TemplateError::InvalidFieldType("entities entry"));
-                };
-
-                let pos_list = entity_compound
-                    .get_list(Self::ENTITY_TAG_POS)
-                    .ok_or(TemplateError::MissingField("entities.pos"))?;
-                if pos_list.len() != 3 {
-                    return Err(TemplateError::InvalidFieldType("entities.pos"));
-                }
-                let x = Self::extract_double(&pos_list[0])
-                    .ok_or(TemplateError::InvalidFieldType("entities.pos"))?;
-                let y = Self::extract_double(&pos_list[1])
-                    .ok_or(TemplateError::InvalidFieldType("entities.pos"))?;
-                let z = Self::extract_double(&pos_list[2])
-                    .ok_or(TemplateError::InvalidFieldType("entities.pos"))?;
-
-                let block_pos_list = entity_compound
-                    .get_list(Self::ENTITY_TAG_BLOCKPOS)
-                    .ok_or(TemplateError::MissingField("entities.blockPos"))?;
-                if block_pos_list.len() != 3 {
-                    return Err(TemplateError::InvalidFieldType("entities.blockPos"));
-                }
-                let bx = Self::extract_int(&block_pos_list[0])
-                    .ok_or(TemplateError::InvalidFieldType("entities.blockPos"))?;
-                let by = Self::extract_int(&block_pos_list[1])
-                    .ok_or(TemplateError::InvalidFieldType("entities.blockPos"))?;
-                let bz = Self::extract_int(&block_pos_list[2])
-                    .ok_or(TemplateError::InvalidFieldType("entities.blockPos"))?;
-
-                let nbt = entity_compound
-                    .get_compound(Self::ENTITY_TAG_NBT)
-                    .cloned()
-                    .unwrap_or_default();
-
-                self.entity_info_list.push(StructureEntityInfo::new(
-                    Vector3::new(x, y, z),
-                    Vector3::new(bx, by, bz),
-                    nbt,
-                ));
-            }
-        }
-
-        self.sync_legacy_fields();
-
-        Ok(())
-    }
-
-    fn load_palette(
-        &mut self,
-        palette_list: &[NbtTag],
-        block_list: &[NbtTag],
-    ) -> Result<(), TemplateError> {
-        let mut palette = SimplePalette::new();
-        for (i, tag) in palette_list.iter().enumerate() {
-            let NbtTag::Compound(entry_compound) = tag else {
-                return Err(TemplateError::InvalidFieldType("palette entry"));
-            };
-            let entry = PaletteEntry::from_nbt_compound(entry_compound)?;
-            palette.add_mapping(entry, i);
-        }
-
-        let mut full_block_list = Vec::new();
-        let mut block_entities_list = Vec::new();
-        let mut other_blocks_list = Vec::new();
-
-        for tag in block_list {
-            let NbtTag::Compound(block_compound) = tag else {
-                return Err(TemplateError::InvalidFieldType("blocks entry"));
-            };
-
-            let pos_list = block_compound
-                .get_list(Self::BLOCK_TAG_POS)
-                .ok_or(TemplateError::MissingField("blocks.pos"))?;
-            if pos_list.len() != 3 {
-                return Err(TemplateError::InvalidFieldType("blocks.pos"));
-            }
-
-            let x =
-                Self::extract_int(&pos_list[0]).ok_or(TemplateError::InvalidFieldType("pos"))?;
-            let y =
-                Self::extract_int(&pos_list[1]).ok_or(TemplateError::InvalidFieldType("pos"))?;
-            let z =
-                Self::extract_int(&pos_list[2]).ok_or(TemplateError::InvalidFieldType("pos"))?;
-
-            let state_idx = block_compound
-                .get_int(Self::BLOCK_TAG_STATE)
-                .ok_or(TemplateError::MissingField("blocks.state"))?
-                as usize;
-
-            let state = palette
-                .state_for(state_idx)
-                .cloned()
-                .unwrap_or_else(|| PaletteEntry::new(pumpkin_data::Block::AIR.default_state.id));
-
-            let nbt = block_compound.get_compound(Self::BLOCK_TAG_NBT).cloned();
-
-            let info = StructureBlockInfo::new(Vector3::new(x, y, z), state, nbt);
-            Self::add_to_lists(
-                info,
-                &mut full_block_list,
-                &mut block_entities_list,
-                &mut other_blocks_list,
-            );
-        }
-
-        let block_info_list =
-            Self::build_info_list(full_block_list, block_entities_list, other_blocks_list);
-        self.palettes.push(Palette::new(block_info_list));
-
-        Ok(())
-    }
-
-    fn add_to_lists(
-        info: StructureBlockInfo,
-        full_block_list: &mut Vec<StructureBlockInfo>,
-        block_entities_list: &mut Vec<StructureBlockInfo>,
-        other_blocks_list: &mut Vec<StructureBlockInfo>,
-    ) {
-        if info.nbt.is_some() {
-            block_entities_list.push(info);
-        } else if info.state.id.to_state().is_full_cube() {
-            full_block_list.push(info);
-        } else {
-            other_blocks_list.push(info);
-        }
-    }
-
-    fn build_info_list(
-        mut full_block_list: Vec<StructureBlockInfo>,
-        mut block_entities_list: Vec<StructureBlockInfo>,
-        mut other_blocks_list: Vec<StructureBlockInfo>,
-    ) -> Vec<StructureBlockInfo> {
-        let comparator = |a: &StructureBlockInfo, b: &StructureBlockInfo| {
-            a.pos
-                .y
-                .cmp(&b.pos.y)
-                .then_with(|| a.pos.x.cmp(&b.pos.x))
-                .then_with(|| a.pos.z.cmp(&b.pos.z))
-        };
-        full_block_list.sort_by(comparator);
-        other_blocks_list.sort_by(comparator);
-        block_entities_list.sort_by(comparator);
-
-        let mut result = Vec::with_capacity(
-            full_block_list.len() + other_blocks_list.len() + block_entities_list.len(),
-        );
-        result.extend(full_block_list);
-        result.extend(other_blocks_list);
-        result.extend(block_entities_list);
-        result
+        template
     }
 
     fn sync_legacy_fields(&mut self) {
@@ -1315,45 +1076,6 @@ impl StructureTemplate {
         tag
     }
 
-    fn parse_size(compound: &NbtCompound) -> Result<Vector3<i32>, TemplateError> {
-        let size_list = compound
-            .get_list(Self::SIZE_TAG)
-            .ok_or(TemplateError::MissingField(Self::SIZE_TAG))?;
-
-        if size_list.len() != 3 {
-            return Err(TemplateError::InvalidFieldType(Self::SIZE_TAG));
-        }
-
-        let x = Self::extract_int(&size_list[0])
-            .ok_or(TemplateError::InvalidFieldType(Self::SIZE_TAG))?;
-        let y = Self::extract_int(&size_list[1])
-            .ok_or(TemplateError::InvalidFieldType(Self::SIZE_TAG))?;
-        let z = Self::extract_int(&size_list[2])
-            .ok_or(TemplateError::InvalidFieldType(Self::SIZE_TAG))?;
-
-        Ok(Vector3::new(x, y, z))
-    }
-
-    fn extract_int(tag: &NbtTag) -> Option<i32> {
-        match tag {
-            NbtTag::Byte(v) => Some(i32::from(*v)),
-            NbtTag::Short(v) => Some(i32::from(*v)),
-            NbtTag::Int(v) => Some(*v),
-            NbtTag::Long(v) => Some(*v as i32),
-            _ => None,
-        }
-    }
-
-    fn extract_double(tag: &NbtTag) -> Option<f64> {
-        match tag {
-            NbtTag::Float(v) => Some(f64::from(*v)),
-            NbtTag::Double(v) => Some(*v),
-            NbtTag::Int(v) => Some(f64::from(*v)),
-            NbtTag::Long(v) => Some(*v as f64),
-            _ => None,
-        }
-    }
-
     #[must_use]
     pub const fn block_count(&self) -> usize {
         self.blocks.len()
@@ -1369,4 +1091,3 @@ impl StructureTemplate {
         !self.entities.is_empty()
     }
 }
-

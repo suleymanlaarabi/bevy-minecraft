@@ -1,11 +1,7 @@
 //! Generation identities and shared immutable output.
-use crate::{
-    generation::proto_chunk::GenerationCache,
-    world::{BlockAccessor, WorldPortalExt},
-};
+use crate::world::{BlockAccessor, WorldPortalExt};
 use pumpkin_data::{
-    Block, BlockState, BlockStateId, Mirror, Rotation, chunk::Biome,
-    dimension::Dimension as PumpkinDimension,
+    Block, BlockState, BlockStateId, Mirror, Rotation, dimension::Dimension as PumpkinDimension,
 };
 use pumpkin_util::math::{position::BlockPos, vector3::Vector3};
 #[path = "embedding_lighting.rs"]
@@ -14,7 +10,7 @@ pub use crate::chunk::io::ChunkStorage;
 pub const PUMPKIN_COMMIT: &str = "8ca5cb443272e0ac4f59b4c2ac059bdc72c2a22b";
 pub const MINECRAFT_VERSION: &str = crate::CURRENT_MC_VERSION;
 pub const FAST_GENERATION_VERSION: u32 = 2;
-pub const GENERATOR_VERSION: &str = "hollow-bevy-1";
+pub const GENERATOR_VERSION: &str = "hollow-bevy-2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dimension {
@@ -318,14 +314,5 @@ impl WorldPortalExt for VanillaBlockRegistry {
         rotation: Rotation,
     ) -> &'static BlockState {
         block.rotate(state_id, rotation)
-    }
-
-    fn spawn_mobs_for_chunk_generation(
-        &self,
-        _cache: &mut dyn GenerationCache,
-        _biome: &'static Biome,
-        _chunk_x: i32,
-        _chunk_z: i32,
-    ) {
     }
 }

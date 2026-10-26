@@ -7,8 +7,6 @@ use std::hash::Hash;
 
 use crate::math::vector2::Vector2;
 use num_traits::Euclid;
-use pumpkin_codecs::codec::list::validate_fixed_size;
-use pumpkin_codecs::{DataResult, FlatTryFrom, IntStream, comap_flat_map_codec_impl};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// An iterator that yields all `BlockPos` positions within a cuboid region.
@@ -759,29 +757,6 @@ impl<'de> Deserialize<'de> for BlockPos {
     }
 }
 
-impl From<&BlockPos> for IntStream {
-    fn from(value: &BlockPos) -> Self {
-        let Vector3 { x, y, z } = value.0;
-        Self(vec![x, y, z])
-    }
-}
-
-impl FlatTryFrom<IntStream> for BlockPos {
-    fn flat_try_from(value: IntStream) -> DataResult<Self> {
-        validate_fixed_size(value.0, 3).flat_map(|v| {
-            v.try_into().map_or_else(
-                |_| DataResult::new_error("Expected 3 elements"),
-                |arr| {
-                    let [x, y, z]: [i32; 3] = arr;
-                    DataResult::new_success(Self(Vector3::new(x, y, z)))
-                },
-            )
-        })
-    }
-}
-
-comap_flat_map_codec_impl!(IntStream => BlockPos, BlockPos::flat_try_from, IntStream::from);
-
 impl fmt::Display for BlockPos {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}, {}, {}", self.0.x, self.0.y, self.0.z)
@@ -836,4 +811,3 @@ pub const fn pack_local_chunk_section(block_pos: &BlockPos) -> i16 {
     let z = get_local_cord(block_pos.0.z);
     vector3::packed_local(&Vector3::new(x, y, z))
 }
-

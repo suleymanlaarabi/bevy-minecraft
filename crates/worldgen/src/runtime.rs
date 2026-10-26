@@ -4,7 +4,7 @@ use crate::{
     ChunkSnapshot, ChunkStorage, Dimension, ProtoChunk, TerrainQuality, VanillaBlockRegistry,
     chunk_system::generation_cache::SurfaceBiomeNeighborhood,
     chunk_system::{Cache, Chunk, ChunkPos, StagedChunkEnum as Stage},
-    generation::{generator::WorldGenerator, get_world_gen},
+    generation::generator::VanillaGenerator,
     tasks::{GenerationSystems, SchedulingDeadline, VoxelTaskBudget, WorkClass},
 };
 use bevy_app::{App, Plugin, PostUpdate};
@@ -48,7 +48,7 @@ struct Request {
 struct Shared {
     id: u64,
     settings: GenerationSettings,
-    generator: std::sync::OnceLock<Result<Arc<WorldGenerator>, String>>,
+    generator: std::sync::OnceLock<Result<Arc<VanillaGenerator>, String>>,
     initialization_waiters: Mutex<Vec<async_channel::Sender<Result<(), String>>>>,
     storage: Option<Arc<dyn ChunkStorage>>,
     cancelled: AtomicBool,
@@ -95,7 +95,7 @@ impl GenerationSession {
             errors: Mutex::default(),
         }))
     }
-    fn generator(&self) -> Arc<WorldGenerator> {
+    fn generator(&self) -> Arc<VanillaGenerator> {
         self.0
             .generator
             .get()
@@ -338,7 +338,7 @@ struct GenerationGraph(Vec<Runtime>);
 
 enum Output {
     Trimmed,
-    Initialized(Result<Arc<WorldGenerator>, String>),
+    Initialized(Result<Arc<VanillaGenerator>, String>),
     Generated(Result<(Cache, Option<ChunkSnapshot>, bool), String>),
     Stored {
         chunks: Vec<(ChunkPos, Chunk)>,
@@ -372,13 +372,7 @@ fn dependencies(position: ChunkPos, stage: Stage, mut visit: impl FnMut(ChunkPos
         return;
     }
     let dependencies = stage.get_direct_dependencies();
-    // Spawn hooks in this game do not write neighbor blocks. Full is local;
-    // Spawn still waits for Lighting in the complete neighboring ring.
-    let radius = if stage == Stage::Full {
-        0
-    } else {
-        stage.get_direct_radius()
-    };
+    let radius = stage.get_direct_radius();
     for dx in -radius..=radius {
         for dz in -radius..=radius {
             let distance = dx.abs().max(dz.abs()) as usize;
@@ -727,17 +721,12 @@ fn schedule(
                 let settings = runtime.session.settings().clone();
                 let task = budget.spawn(WorkClass::Loading, 0, async move {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let mut generator = get_world_gen(
+                        let mut generator = VanillaGenerator::new(
                             Seed(settings.seed as u64),
                             settings.dimension.pumpkin(),
-                            false,
-                            Vec::new(),
-                            String::new(),
                         );
-                        if let WorldGenerator::Noise(noise) = generator.as_mut() {
-                            noise.fast_terrain = settings.quality == TerrainQuality::Fast;
-                        }
-                        Arc::from(generator)
+                        generator.fast_terrain = settings.quality == TerrainQuality::Fast;
+                        Arc::new(generator)
                     }))
                     .map_err(|_| "Generation initialization failed".to_owned());
                     Output::Initialized(result)
@@ -806,10 +795,11 @@ fn schedule(
         {
             let session = runtime.session.clone();
             let task = budget.spawn(WorkClass::Streaming, 0, async move {
-                if !session.is_cancelled()
-                    && let Some(cache) = session.generator().global_structure_cache()
-                {
-                    cache.trim_structure_starts(center.x, center.y, i32::from(radius.min(32)) + 32);
+                if !session.is_cancelled() {
+                    session
+                        .generator()
+                        .global_structure_cache
+                        .trim_structure_starts(center.x, center.y, i32::from(radius.min(32)) + 32);
                 }
                 Output::Trimmed
             });
@@ -1039,7 +1029,7 @@ fn schedule(
 fn generate(
     session: &GenerationSession,
     position: ChunkPos,
-    prepare: impl FnOnce(&WorldGenerator) -> Result<(Cache, bool), String>,
+    prepare: impl FnOnce(&VanillaGenerator) -> Result<(Cache, bool), String>,
     first: Option<Stage>,
     target: Stage,
     read_radius: i32,

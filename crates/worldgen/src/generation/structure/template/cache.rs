@@ -1,13 +1,13 @@
 //! Template caching for embedded structure templates.
 //!
 //! This module provides a lazy-loading cache for structure templates that are
-//! embedded in the binary at compile time using `include_bytes!`.
+//! embedded in the binary as generated static definitions.
 
 use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use super::{StructureTemplate, structure_template::TemplateError};
+use super::StructureTemplate;
 
 /// Vanilla's implicit namespace.
 const DEFAULT_NAMESPACE: &str = "minecraft";
@@ -31,7 +31,6 @@ fn canonicalize(name: &str) -> String {
 /// The cache is thread-safe and can be accessed from multiple threads.
 pub struct TemplateCache {
     cache: DashMap<String, Arc<StructureTemplate>>,
-    dynamic_templates: DashMap<String, Arc<[u8]>>,
 }
 
 impl Default for TemplateCache {
@@ -46,21 +45,7 @@ impl TemplateCache {
     pub fn new() -> Self {
         Self {
             cache: DashMap::new(),
-            dynamic_templates: DashMap::new(),
         }
-    }
-
-    /// Registers raw template NBT bytes from a dynamic datapack.
-    pub fn register_template(&self, name: &str, bytes: Arc<[u8]>) {
-        let key = canonicalize(name);
-        self.dynamic_templates.insert(key.clone(), bytes);
-        self.cache.remove(&key);
-    }
-
-    /// Clears all dynamically registered templates (e.g. during datapack reload).
-    pub fn clear_dynamic(&self) {
-        self.dynamic_templates.clear();
-        self.cache.clear();
     }
 
     /// Gets a template by `name`, loading it from embedded resources if not cached.
@@ -68,45 +53,22 @@ impl TemplateCache {
     /// `name` may be bare (`foo`) or namespaced (`minecraft:foo`, `pumpkin:foo`).
     ///
     /// Returns the loaded template wrapped in an `Arc`, or `None` if the template
-    /// doesn't exist or failed to load.
+    /// doesn't exist in the embedded definitions.
     pub fn get(&self, name: &str) -> Option<Arc<StructureTemplate>> {
-        match self.get_or_error(name) {
-            Ok(template) => Some(template),
-            Err(TemplateError::MissingField("template file not found")) => None,
-            Err(e) => {
-                tracing::error!("Failed to load template '{}': {}", name, e);
-                None
-            }
-        }
-    }
-
-    /// Gets a template by name, returning an error if loading fails.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the template doesn't exist or fails to parse.
-    pub fn get_or_error(&self, name: &str) -> Result<Arc<StructureTemplate>, TemplateError> {
         let key = canonicalize(name);
 
         // Check cache first
         if let Some(template) = self.cache.get(&key) {
-            return Ok(Arc::clone(&template));
+            return Some(Arc::clone(&template));
         }
 
-        let mut template = if let Some(bytes) = self.dynamic_templates.get(&key) {
-            StructureTemplate::from_nbt_bytes(&bytes)?
-        } else if let Some(static_template) =
-            pumpkin_data::structure_template::get_structure_template(&key)
-        {
-            StructureTemplate::from_static(static_template)?
-        } else {
-            return Err(TemplateError::MissingField("template file not found"));
-        };
+        let static_template = pumpkin_data::structure_template::get_structure_template(&key)?;
+        let mut template = StructureTemplate::from_static(static_template);
         template.name = Some(key.clone());
 
         let arc = Arc::new(template);
         self.cache.insert(key, Arc::clone(&arc));
-        Ok(arc)
+        Some(arc)
     }
 
     /// Preloads a list of templates into the cache.
@@ -115,8 +77,8 @@ impl TemplateCache {
     /// during gameplay.
     pub fn preload(&self, names: &[&str]) {
         for name in names {
-            if let Err(e) = self.get_or_error(name) {
-                tracing::warn!("Failed to preload template '{}': {}", name, e);
+            if self.get(name).is_none() {
+                tracing::warn!("Unknown embedded structure template: {name}");
             }
         }
     }

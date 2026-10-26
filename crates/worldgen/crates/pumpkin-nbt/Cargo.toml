@@ -8,7 +8,6 @@ rust-version = "1.96"
 license = "GPL-3.0"
 
 [dependencies]
-pumpkin-codecs = { path = "../pumpkin-codecs" }
 thiserror = { version = "2.0", default-features = false }
 bytes = { version = "1.12", default-features = false, features = ["serde", "std"] }
 uuid = { version = "1.29", default-features = false, features = ["serde", "v3", "v4", "std"] }

@@ -1,6 +1,5 @@
 use std::{borrow::Cow, fmt::Display};
 
-use pumpkin_codecs::{DataResult, FlatTryFrom, comap_flat_map_codec_impl};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -387,15 +386,3 @@ impl<'de> Deserialize<'de> for Identifier {
         Self::parse(&identifier_string).map_err(|error| serde::de::Error::custom(error.to_string()))
     }
 }
-
-comap_flat_map_codec_impl!(String => Identifier, Identifier::flat_try_from, ToString::to_string);
-
-impl FlatTryFrom<String> for Identifier {
-    fn flat_try_from(value: String) -> DataResult<Self> {
-        Self::parse(&value).map_or_else(
-            |_| DataResult::new_error(format!("Not a valid resource location: {value}")),
-            DataResult::new_success,
-        )
-    }
-}
-
