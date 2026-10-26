@@ -11,8 +11,8 @@ struct SunSettings {
 @group(constants::MATERIAL_BIND_GROUP) @binding(0)
 var<uniform> sun: SunSettings;
 
-// The quad reaches a little past the disk for its soft edge.
-const EXTENT: f32 = 1.2;
+// Keep the glow visible even when bloom is disabled.
+const EXTENT: f32 = 3.5;
 
 struct SunVaryings {
     @builtin(position) position: vec4<f32>,
@@ -24,8 +24,9 @@ struct SunVaryings {
 fn vertex(@location(0) position: vec3<f32>) -> SunVaryings {
     let forward = sun.direction.xyz;
     // The orbit is tilted, so the sun never reaches the zenith and Y is a safe up.
-    let right = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), forward));
-    let up = cross(forward, right);
+    // Face the observer inside the sky, so back-face culling keeps the disk.
+    let right = normalize(cross(forward, vec3<f32>(0.0, 1.0, 0.0)));
+    let up = cross(right, forward);
     let direction = forward + (position.x * right + position.y * up) * (sun.direction.w * EXTENT);
     var out: SunVaryings;
     // At infinity, like the moon and the stars: depth 0 in reverse Z.
@@ -36,14 +37,19 @@ fn vertex(@location(0) position: vec3<f32>) -> SunVaryings {
 
 @fragment
 fn fragment(in: SunVaryings) -> @location(0) vec4<f32> {
-    let r2 = dot(in.disk, in.disk);
-    if r2 >= 1.0 {
+    let r = length(in.disk);
+    let edge_width = max(fwidth(r), 0.002);
+    if r >= EXTENT {
         discard;
     }
-    // Limb darkening, and a soft rim against aliasing.
-    let mu = sqrt(1.0 - r2);
+    // A bright ivory center, a golden limb, and a smooth edge at any resolution.
+    let mu = sqrt(max(1.0 - r * r, 0.0));
     let limb = 1.0 - 0.6 * (1.0 - mu);
-    let edge = 1.0 - smoothstep(0.92, 1.0, sqrt(r2));
+    let edge = 1.0 - smoothstep(1.0 - edge_width, 1.0 + edge_width, r);
+    let disk = mix(vec3<f32>(1.0, 0.67, 0.30), vec3<f32>(1.0, 0.98, 0.90), mu) * (limb * edge);
+    let outside = max(r - 1.0, 0.0);
+    let halo = (0.018 * exp(-3.0 * outside) + 0.003 * exp(-outside * outside))
+        * (1.0 - smoothstep(2.0, EXTENT, r));
     // Reddened near the horizon, zero below it. Fragment stage only: the atmosphere
     // buffer is not bound for vertex shaders.
     let color = sun.color.rgb * atmosphere_transmittance(
@@ -52,5 +58,5 @@ fn fragment(in: SunVaryings) -> @location(0) vec4<f32> {
         2.0 * sun.direction.w,
     );
     // Additive: premultiplied color with zero alpha.
-    return vec4<f32>(color * (limb * edge), 0.0);
+    return vec4<f32>(color * (disk + vec3<f32>(1.0, 0.57, 0.20) * halo), 0.0);
 }

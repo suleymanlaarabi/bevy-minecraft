@@ -16,7 +16,7 @@ use bevy::{
 };
 
 const STAR_COUNT: u32 = 2600;
-/// Angular radius of the moon's disk: about four times the real one, like vanilla.
+/// A slightly larger companion to the sun, with room to see its surface and phases.
 const MOON_RADIUS: f32 = 0.035;
 /// Sort keys far behind every other transparent mesh: stars, then the moon, draw first.
 const STARS_SORT_BIAS: f32 = -1.0e9;
@@ -261,7 +261,8 @@ fn star_mesh() -> Mesh {
             colors.push(color);
         }
         let base = star * 4;
-        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        // The camera sees the inside of the sphere: wind each face inward.
+        indices.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
     }
     Mesh::new(
         PrimitiveTopology::TriangleList,

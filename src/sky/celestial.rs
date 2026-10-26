@@ -23,6 +23,8 @@ use bevy::{
 /// Output-space radiance of the sun's disk at its center: far past white, so bloom
 /// gives it a halo.
 const SUN_DISK_RADIANCE: f32 = 40.0;
+/// A stylized disk large enough to read clearly at the player's wide field of view.
+const SUN_RADIUS: f32 = 0.025;
 /// Sort key far behind every other transparent mesh, with the moon's.
 const SUN_SORT_BIAS: f32 = -1.0e8;
 /// Sine of the elevation where astronomical twilight ends, 18° below the horizon:
@@ -92,7 +94,7 @@ pub(super) struct SunDiskMesh;
 
 fn sun_settings(sky: &SkyState) -> SunSettings {
     SunSettings {
-        direction: sky.sun_direction.extend(SunDisk::EARTH.angular_size * 0.5),
+        direction: sky.sun_direction.extend(SUN_RADIUS),
         color: (Vec3::new(1.0, 0.98, 0.95) * SUN_DISK_RADIANCE).extend(1.0),
     }
 }

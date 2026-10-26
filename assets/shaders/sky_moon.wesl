@@ -25,8 +25,9 @@ struct MoonVaryings {
 fn vertex(@location(0) position: vec3<f32>) -> MoonVaryings {
     let forward = moon.direction.xyz;
     // The moon never reaches the zenith (its orbit is tilted), so Y is a safe up.
-    let right = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), forward));
-    let up = cross(forward, right);
+    // Face the observer inside the sky, so back-face culling keeps the disk.
+    let right = normalize(cross(forward, vec3<f32>(0.0, 1.0, 0.0)));
+    let up = cross(right, forward);
     let extent = moon.direction.w * HALO_EXTENT;
     let direction = forward + (position.x * right + position.y * up) * extent;
     var out: MoonVaryings;
@@ -51,7 +52,15 @@ fn value_noise(p: vec2<f32>) -> f32 {
     );
 }
 
-// Dark maria and small craters on a bright highland surface.
+// A dark bowl with a bright raised rim; all detail stays fixed on the surface.
+fn crater(p: vec2<f32>, center: vec2<f32>, radius: f32) -> f32 {
+    let distance = length(p - center) / radius;
+    let bowl = 1.0 - smoothstep(0.35, 0.85, distance);
+    let rim = smoothstep(0.75, 0.95, distance) * (1.0 - smoothstep(1.0, 1.18, distance));
+    return 0.13 * rim - 0.16 * bowl;
+}
+
+// Dark maria and distinct craters on a bright highland surface.
 fn moon_albedo(p: vec2<f32>) -> f32 {
     var maria = 0.0;
     var amplitude = 0.5;
@@ -62,13 +71,19 @@ fn moon_albedo(p: vec2<f32>) -> f32 {
         amplitude *= 0.5;
     }
     let craters = value_noise(p * 14.0);
-    return 0.9 - 0.38 * smoothstep(0.48, 0.66, maria) - 0.1 * smoothstep(0.7, 0.95, craters);
+    let relief = crater(p, vec2<f32>(0.38, -0.42), 0.19)
+        + crater(p, vec2<f32>(-0.28, 0.32), 0.13)
+        + crater(p, vec2<f32>(0.55, 0.24), 0.10)
+        + crater(p, vec2<f32>(-0.48, -0.30), 0.15);
+    return 0.9 - 0.38 * smoothstep(0.48, 0.66, maria)
+        - 0.1 * smoothstep(0.7, 0.95, craters) + relief;
 }
 
 @fragment
 fn fragment(in: MoonVaryings) -> @location(0) vec4<f32> {
     let r2 = dot(in.disk, in.disk);
     let r = sqrt(r2);
+    let edge_width = max(fwidth(r), 0.002);
     let lit_fraction = moon.phase.x;
     var color = vec3<f32>(0.0);
     if r2 < 1.0 {
@@ -79,13 +94,14 @@ fn fragment(in: MoonVaryings) -> @location(0) vec4<f32> {
         let sun = vec3<f32>(moon.phase.y * sqrt(max(1.0 - cos_phase * cos_phase, 0.0)), 0.0, cos_phase);
         let lit = smoothstep(-0.04, 0.06, dot(normal, sun));
         // Faint earthshine keeps the dark side barely visible.
-        let light = lit + 0.025;
-        let edge = 1.0 - smoothstep(0.96, 1.0, r);
+        let light = lit * (0.65 + 0.35 * normal.z) + 0.025;
+        let edge = 1.0 - smoothstep(1.0 - edge_width, 1.0, r);
         color = vec3<f32>(moon_albedo(in.disk) * light * edge);
     }
     // Scattered glow around the disk, stronger when more of it is lit.
-    let halo = 0.06 * lit_fraction * exp(-3.5 * max(r - 1.0, 0.0)) * (1.0 - step(r, 1.0) * 0.6);
-    color += vec3<f32>(halo);
+    let halo = 0.04 * lit_fraction * exp(-3.5 * max(r - 1.0, 0.0))
+        * smoothstep(0.8, 1.1, r) * (1.0 - smoothstep(2.0, HALO_EXTENT, r));
+    color += vec3<f32>(0.65, 0.78, 1.0) * halo;
     // Additive: premultiplied color with zero alpha.
     return vec4<f32>(color * moon.color.rgb * moon.color.a, 0.0);
 }
