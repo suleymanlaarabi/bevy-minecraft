@@ -268,6 +268,7 @@ pub(super) fn animate_first_person(
     state: Res<State<InventoryState>>,
     view: Res<PlayerView>,
     swing: Single<Ref<ArmSwing>, With<PlayerCamera>>,
+    motion: Single<Ref<crate::character::CharacterMotion>, With<crate::player::Player>>,
     held: Single<Ref<HeldItem>>,
     mut arms: Query<
         (&mut Transform, &mut Visibility, Option<&HeldItem>),
@@ -294,6 +295,7 @@ pub(super) fn animate_first_person(
         if shown
             && (became_visible
                 || swing.is_changed()
+                || motion.is_changed()
                 || view.is_changed()
                 || held.is_changed()
                 || transform.is_added())
@@ -305,7 +307,7 @@ pub(super) fn animate_first_person(
                 pose.translation.y -= 0.6 * (1. - held.equipped);
                 pose
             };
-            transform.set_if_neq(pose);
+            transform.set_if_neq(crate::player::view_bob::pose(&motion) * pose);
         }
     }
     for mut visibility in &mut overlays {

@@ -129,6 +129,10 @@ pub struct CharacterMotion {
     /// Camera height above the origin: it eases toward the pose's eyes, as in vanilla.
     eye: f32,
     previous_eye: f32,
+    walk_distance: f32,
+    walk_delta: f32,
+    bob: f32,
+    previous_bob: f32,
     /// `Position` written last; any other value is a teleport.
     written: Option<Vec3>,
 }
@@ -145,6 +149,15 @@ pub struct CharacterState {
 }
 
 impl CharacterMotion {
+    /// Minecraft's backwards walk interpolation and tick-smoothed bob amplitude.
+    pub(crate) fn walking_animation(&self) -> (f32, f32) {
+        let alpha = (self.elapsed / TICK).min(1.0);
+        (
+            -(self.walk_distance + self.walk_delta * alpha),
+            self.previous_bob.lerp(self.bob, alpha),
+        )
+    }
+
     /// Eased eye height above the entity origin, for the camera.
     pub fn eye_offset(&self) -> f32 {
         self.previous_eye
@@ -524,6 +537,10 @@ fn character_physics(
             motion.elapsed = 0.0;
             motion.eye = body.eye_offset(state.pose);
             motion.previous_eye = motion.eye;
+            motion.walk_distance = 0.0;
+            motion.walk_delta = 0.0;
+            motion.bob = 0.0;
+            motion.previous_bob = 0.0;
         }
         if !world.collision_ready(motion.position.as_vec3()) {
             motion.velocity = DVec3::ZERO;
@@ -572,6 +589,14 @@ fn tick(
     flying: bool,
 ) {
     let mut velocity = motion.velocity;
+    // AbstractClientPlayer.updateBob runs before travel, at 20 Hz.
+    motion.previous_bob = motion.bob;
+    let target_bob = if state.on_ground && !flying && state.pose != Pose::Swimming {
+        (velocity.xz().length() as f32).min(0.1)
+    } else {
+        0.0
+    };
+    motion.bob += (target_bob - motion.bob) * 0.4;
     let mut aabb = body.aabb(motion.position, state.pose);
 
     // Everything this tick can touch: the move, a step, a ledge probe, a jump,
@@ -793,6 +818,9 @@ fn tick(
         (aabb.min.z + aabb.max.z) * 0.5,
     );
     motion.velocity = velocity;
+    motion.walk_delta = (motion.position - motion.previous).xz().length() as f32 * 0.6;
+    // Only the phase matters; wrapping preserves precision during long sessions.
+    motion.walk_distance = (motion.walk_distance + motion.walk_delta).rem_euclid(2.0);
 }
 
 fn clamp_climbing(velocity: &mut DVec3, climbing: bool, sneaking: bool) {

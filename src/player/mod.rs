@@ -6,6 +6,7 @@ mod interaction;
 mod safety;
 pub(crate) mod skin;
 mod spawn;
+mod view_bob;
 
 use crate::{game::GameState, inventory::InventoryState};
 use bevy::prelude::*;
