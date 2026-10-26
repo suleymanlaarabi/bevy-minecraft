@@ -21,8 +21,8 @@ pub(super) fn setup(
         TextureFormat::Rgba8UnormSrgb,
         None,
     ));
-    assets.classic = mesh::skin_parts(&mut meshes, false);
-    assets.slim = mesh::skin_parts(&mut meshes, true);
+    assets.classic = mesh::skin_parts(&mut meshes);
+    assets.source = crate::load_nearest(&server, "skin.png");
     assets.base = materials.add(StandardMaterial {
         perceptual_roughness: 1.,
         reflectance: 0.,
@@ -81,7 +81,6 @@ pub(super) fn setup(
 }
 
 pub(super) fn load_skin(
-    settings: Res<SkinSettings>,
     server: Res<AssetServer>,
     mut assets: ResMut<SkinAssets>,
     mut images: ResMut<Assets<Image>>,
@@ -91,13 +90,6 @@ pub(super) fn load_skin(
     let modified = events
         .read()
         .any(|event| matches!(event, AssetEvent::Modified { id } if *id == assets.source.id()));
-    if settings.texture != assets.requested {
-        assets.requested = settings.texture.clone();
-        assets.source = crate::load_nearest(&server, settings.texture.clone());
-        assets.loaded = false;
-        assets.fallback = false;
-        assets.status = "Loading skin…".into();
-    }
     if modified {
         assets.loaded = false;
     }
@@ -108,7 +100,8 @@ pub(super) fn load_skin(
         server.get_load_state(assets.source.id()),
         Some(LoadState::Failed(_))
     ) {
-        skin_error(&mut assets, &server, "Unable to load skin.");
+        error!("Unable to load default skin.");
+        assets.loaded = true;
         return;
     }
     let Some(source) = images.get(&assets.source) else {
@@ -133,25 +126,12 @@ pub(super) fn load_skin(
                     material.base_color_texture = Some(handle.clone());
                 }
             }
-            if !assets.fallback {
-                assets.status = super::appearance::IMPORT_HINT.into();
-            }
         }
         Err(error) => {
-            skin_error(&mut assets, &server, error);
+            error!("Invalid default skin: {error}");
+            assets.loaded = true;
             return;
         }
     }
     assets.loaded = true;
-}
-
-fn skin_error(assets: &mut SkinAssets, server: &AssetServer, error: &str) {
-    assets.status = error.into();
-    if assets.texture == Handle::default() && !assets.fallback && assets.requested != "skin.png" {
-        assets.source = crate::load_nearest(server, "skin.png");
-        assets.fallback = true;
-        assets.status.push_str(" Using default skin.");
-    } else {
-        assets.loaded = true;
-    }
 }

@@ -73,11 +73,10 @@ pub(super) fn cuboid(size: Vec3, center: Vec3, uv: Vec2, texture: Vec2, inflate:
 }
 
 /// Model-space size of each body part: head, body, right/left arm, right/left leg.
-fn part_size(part: usize, slim: bool) -> Vec3 {
+fn part_size(part: usize) -> Vec3 {
     match part {
         0 => Vec3::splat(8.),
         1 => Vec3::new(8., 12., 4.),
-        2 | 3 if slim => Vec3::new(3., 12., 4.),
         _ => Vec3::new(4., 12., 4.),
     }
 }
@@ -98,7 +97,7 @@ pub(super) fn armor_parts(meshes: &mut Assets<Mesh>, inflate: f32) -> [Handle<Me
     ];
     std::array::from_fn(|part| {
         meshes.add(cuboid(
-            part_size(part, false),
+            part_size(part),
             part_center(part),
             UV[part],
             Vec2::new(64., 32.),
@@ -107,7 +106,7 @@ pub(super) fn armor_parts(meshes: &mut Assets<Mesh>, inflate: f32) -> [Handle<Me
     })
 }
 
-pub(super) fn skin_parts(meshes: &mut Assets<Mesh>, slim: bool) -> [[Handle<Mesh>; 6]; 2] {
+pub(super) fn skin_parts(meshes: &mut Assets<Mesh>) -> [[Handle<Mesh>; 6]; 2] {
     let base = [
         Vec2::new(0., 0.),
         Vec2::new(16., 16.),
@@ -127,7 +126,7 @@ pub(super) fn skin_parts(meshes: &mut Assets<Mesh>, slim: bool) -> [[Handle<Mesh
     std::array::from_fn(|layer| {
         std::array::from_fn(|part| {
             meshes.add(cuboid(
-                part_size(part, slim),
+                part_size(part),
                 part_center(part),
                 if layer == 0 { base[part] } else { outer[part] },
                 Vec2::splat(64.),

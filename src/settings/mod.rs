@@ -18,9 +18,7 @@ pub struct GameSettingsPlugin;
 
 impl Plugin for GameSettingsPlugin {
     fn build(&self, app: &mut App) {
-        app.register_type::<crate::player::SkinModel>()
-            .register_type::<crate::player::SkinSettings>()
-            .register_type::<AntiAliasingMode>()
+        app.register_type::<AntiAliasingMode>()
             .register_type::<ShadowQuality>()
             .register_type::<DisplayMode>()
             .register_type::<TexturePackId>()

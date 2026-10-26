@@ -6,7 +6,6 @@ mod interaction;
 mod safety;
 pub(crate) mod skin;
 mod spawn;
-pub use skin::{SkinModel, SkinSettings};
 
 use crate::{game::GameState, inventory::InventoryState};
 use bevy::prelude::*;

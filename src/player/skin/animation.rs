@@ -8,12 +8,11 @@ use crate::{
 use bevy::window::PrimaryWindow;
 use std::f32::consts::{PI, TAU};
 
-fn part_transform(part: usize, slim: bool, swing: f32, head: Vec2, crouch: bool) -> Transform {
-    let arm_x = if slim { 5.5 } else { 6. };
+fn part_transform(part: usize, swing: f32, head: Vec2, crouch: bool) -> Transform {
     let pivot = match part {
         0 | 1 => Vec3::new(0., 24., 0.),
-        2 => Vec3::new(-arm_x, 24., 0.),
-        3 => Vec3::new(arm_x, 24., 0.),
+        2 => Vec3::new(-6., 24., 0.),
+        3 => Vec3::new(6., 24., 0.),
         4 => Vec3::new(-2., 12., 0.),
         _ => Vec3::new(2., 12., 0.),
     };
@@ -38,7 +37,6 @@ fn part_transform(part: usize, slim: bool, swing: f32, head: Vec2, crouch: bool)
 
 // Rig roots and mesh parts are disjoint; each Transform is borrowed once.
 pub(super) fn animate_rigs(
-    settings: Res<SkinSettings>,
     window: Single<&Window, With<PrimaryWindow>>,
     portrait: Single<(&ComputedNode, &UiGlobalTransform), With<SkinPortrait>>,
     mut rigs: Query<(&SkinRig, &mut Transform), Without<SkinPart>>,
@@ -59,13 +57,7 @@ pub(super) fn animate_rigs(
     }
     for (part, mut transform) in &mut parts {
         if rigs.get(part.rig).is_ok_and(|(rig, _)| rig.preview) {
-            transform.set_if_neq(part_transform(
-                part.part,
-                settings.model == SkinModel::Slim,
-                0.,
-                head,
-                false,
-            ));
+            transform.set_if_neq(part_transform(part.part, 0., head, false));
         }
     }
 }
@@ -74,7 +66,6 @@ pub(super) fn animate_rigs(
 // through `SkinPart::rig`, so the pass is linear in parts.
 pub(super) fn animate_world(
     time: Res<Time>,
-    settings: Res<SkinSettings>,
     view: Res<PlayerView>,
     camera: Single<&PlayerCamera>,
     player: Single<(&CharacterMotion, &CharacterState, &CharacterBody), With<Player>>,
@@ -113,7 +104,6 @@ pub(super) fn animate_world(
     if hidden {
         return;
     }
-    let slim = settings.model == SkinModel::Slim;
     let crouching = character.pose == Pose::Crouching;
     let head = Vec2::new(0., -camera.pitch);
     let amplitude = (speed * 3.).min(0.7);
@@ -124,7 +114,6 @@ pub(super) fn animate_world(
         if !rig.preview {
             part_pose.set_if_neq(part_transform(
                 part.part,
-                slim,
                 rig.phase.sin() * amplitude,
                 head,
                 crouching,

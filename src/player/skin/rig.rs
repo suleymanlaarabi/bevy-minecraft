@@ -118,7 +118,6 @@ pub(super) fn spawn_world_rig(
     assets: Res<SkinAssets>,
     players: Query<Entity, Added<Player>>,
     cameras: Query<Entity, Added<PlayerCamera>>,
-    settings: Res<SkinSettings>,
     sky: Res<crate::sky::SkyState>,
 ) {
     let level = ARM_NIGHT_LEVEL + (1. - ARM_NIGHT_LEVEL) * (1. - sky.night);
@@ -172,7 +171,7 @@ pub(super) fn spawn_world_rig(
             .spawn((
                 FirstPersonArm,
                 FirstPersonRoot,
-                first_person_pose(0., settings.model == SkinModel::Slim),
+                first_person_pose(0.),
                 Visibility::Hidden,
                 ChildOf(camera),
             ))
@@ -217,20 +216,18 @@ pub(super) fn spawn_world_rig(
 }
 
 pub(super) fn sync_parts(
-    settings: Res<SkinSettings>,
     assets: Res<SkinAssets>,
     inventory: Query<Ref<PlayerInventory>, With<Player>>,
     new_parts: Query<(), Added<SkinPart>>,
     mut parts: Query<(
         &SkinPart,
-        &mut Mesh3d,
+        Ref<Mesh3d>,
         &mut MeshMaterial3d<StandardMaterial>,
         &mut Visibility,
     )>,
 ) {
     let inventory = inventory.single().ok();
-    let changed = settings.is_changed()
-        || assets.is_changed()
+    let changed = assets.is_changed()
         || inventory
             .as_ref()
             .is_some_and(|inventory| inventory.is_changed());
@@ -255,7 +252,7 @@ pub(super) fn sync_parts(
             name.strip_prefix("minecraft:").unwrap_or(name)
         ))
     });
-    for (part, mut mesh, mut material, mut visibility) in &mut parts {
+    for (part, mesh, mut material, mut visibility) in &mut parts {
         if !changed && !mesh.is_added() {
             continue;
         }
@@ -282,20 +279,6 @@ pub(super) fn sync_parts(
             } else {
                 visibility.set_if_neq(Visibility::Hidden);
             }
-        } else {
-            let handle = if settings.model == SkinModel::Slim {
-                &assets.slim[part.layer][part.part]
-            } else {
-                &assets.classic[part.layer][part.part]
-            };
-            if mesh.0 != *handle {
-                mesh.0 = handle.clone();
-            }
-            visibility.set_if_neq(if part.layer == 0 || settings.outer_layer {
-                Visibility::Inherited
-            } else {
-                Visibility::Hidden
-            });
         }
     }
 }

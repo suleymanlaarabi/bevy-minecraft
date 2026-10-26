@@ -188,15 +188,9 @@ Armor slots accept compatible equipment only; Shift-click equips it. **F** swaps
 the selected hotbar slot and offhand. **F5** cycles first-person, rear, and front
 views. Third-person cameras shorten their distance when terrain blocks the view.
 
-`assets/skin.png` is the default skin. Drop a PNG on the game window while the
-inventory is open to import another skin. Imports are decoded and validated on a
-worker before being stored in `assets/player/custom/`; the previous skin remains
-available if import fails. **Classic arms / Slim arms** chooses the model, and
-**Layers** toggles hats, jackets, sleeves, and trouser overlays. **Reset** restores
-the supplied default. Skin choices use Bevy's persistent `skin` settings group.
-Modern 64×64, legacy 64×32, and proportional HD skins up to 2048 pixels wide are
-supported. Legacy left limbs are mirrored, base layers are opaque, and outer
-layers preserve transparency. Shared meshes and textures drive the inventory
+The player always uses the supplied 64×64 `assets/skin.png` with classic arms
+and outer layers enabled. Base layers are opaque, and outer layers preserve
+transparency. Shared meshes and textures drive the inventory
 portrait, animated world model, and first-person arm. The portrait camera exists
 only while the inventory is open. The hand swings on left-click, repeats while
 mining, and swings when placing a block. Opening the inventory cancels the swing.

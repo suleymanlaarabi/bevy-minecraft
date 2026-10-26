@@ -3,22 +3,15 @@ mod mesh;
 mod texture;
 
 use crate::inventory::InventoryState;
-use bevy::{
-    prelude::*,
-    settings::{ReflectSettingsGroup, SettingsGroup},
-    tasks::Task,
-};
+use bevy::prelude::*;
 use std::collections::HashMap;
 
 mod animation;
-mod appearance;
 mod assets;
 mod held_item;
 mod rig;
 mod view_model;
 use animation::{animate_rigs, animate_world};
-use appearance::{finish_import, import_skin, sync_labels};
-pub(crate) use appearance::{reset_skin, toggle_layers, toggle_model};
 use assets::{load_skin, setup};
 use held_item::{FirstPersonRoot, HeldItem, HeldItemAssets, HeldItemPart};
 use rig::{spawn_preview, spawn_world_rig, sync_parts};
@@ -48,60 +41,25 @@ fn cycle_view(keyboard: Res<ButtonInput<KeyCode>>, mut view: ResMut<PlayerView>)
     }
 }
 
-#[derive(Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[type_path = "hollow::player"]
-pub enum SkinModel {
-    #[default]
-    Classic,
-    Slim,
-}
-
-#[derive(Resource, SettingsGroup, Reflect, Clone, Debug, PartialEq)]
-#[component(immutable)]
-#[reflect(Resource, SettingsGroup, Default)]
-#[settings_group(group = "skin")]
-#[type_path = "hollow::player"]
-pub struct SkinSettings {
-    pub texture: String,
-    pub model: SkinModel,
-    pub outer_layer: bool,
-}
-impl Default for SkinSettings {
-    fn default() -> Self {
-        Self {
-            texture: "skin.png".into(),
-            model: SkinModel::Classic,
-            outer_layer: true,
-        }
-    }
-}
-
 #[derive(Resource, Default)]
 pub(crate) struct SkinAssets {
     pub preview: Handle<Image>,
     arm_view: Handle<Image>,
     source: Handle<Image>,
-    requested: String,
     loaded: bool,
-    fallback: bool,
     texture: Handle<Image>,
     base: Handle<StandardMaterial>,
     outer: Handle<StandardMaterial>,
     arm_base: Handle<StandardMaterial>,
     arm_outer: Handle<StandardMaterial>,
     classic: [[Handle<Mesh>; 6]; 2],
-    slim: [[Handle<Mesh>; 6]; 2],
     armor_meshes: [Handle<Mesh>; 6],
     leggings_meshes: [Handle<Mesh>; 6],
     armor: HashMap<String, Handle<StandardMaterial>>,
-    pub status: String,
 }
 
 #[derive(Component, Clone, Default)]
 pub(crate) struct SkinPortrait;
-
-#[derive(Resource, Default)]
-pub(crate) struct SkinImport(Option<Task<Result<String, String>>>);
 
 #[derive(Component)]
 struct SkinRig {
@@ -123,12 +81,6 @@ struct ArmCamera;
 struct ArmView;
 #[derive(Component)]
 struct HeldItemLight;
-#[derive(Component, Clone, Default)]
-pub(crate) struct SkinModelLabel;
-#[derive(Component, Clone, Default)]
-pub(crate) struct SkinLayersLabel;
-#[derive(Component, Clone, Default)]
-pub(crate) struct SkinStatusLabel;
 
 /// Linear brightness of the first-person arm in the middle of the night.
 const ARM_NIGHT_LEVEL: f32 = 0.25;
@@ -177,12 +129,8 @@ pub(super) fn register(app: &mut App) {
         .init_asset::<held_item::HeldManifest>()
         .init_asset_loader::<held_item::HeldManifestLoader>()
         .init_resource::<SkinAssets>()
-        .init_resource::<SkinImport>()
         .add_systems(Startup, (setup, held_item::setup))
-        .add_systems(
-            Update,
-            (import_skin, finish_import, load_skin, sync_parts).chain(),
-        )
+        .add_systems(Update, (load_skin, sync_parts).chain())
         .add_systems(OnEnter(InventoryState::Open), spawn_preview)
         .add_systems(OnEnter(InventoryState::Open), cancel_swing)
         .add_systems(Update, dim_arm_with_daylight.run_if(crate::world::playing))
@@ -196,7 +144,7 @@ pub(super) fn register(app: &mut App) {
         )
         .add_systems(
             Update,
-            (animate_rigs, sync_labels)
+            animate_rigs
                 .run_if(in_state(InventoryState::Open))
                 .run_if(any_with_component::<SkinPortrait>),
         )

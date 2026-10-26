@@ -179,102 +179,53 @@ fn overlay_scene(title: &'static str, content: impl SceneList) -> impl Scene {
 fn inventory_overlay_scene(preview: Handle<Image>) -> impl Scene {
     overlay_scene(
         "Inventory",
-        (
-            bsn! {
-                        Node { column_gap: px(10), height: px(204) }
-                        Children [
-                            Node { flex_direction: FlexDirection::Column, row_gap: px(SLOT_GAP) }
-                            Children [ { slot_list(ARMOR_START..OFFHAND_SLOT, true) } ]
-                            --
-                            Node { width: px(136), height: px(204) }
-                            ImageNode { image: preview }
-                            crate::player::skin::SkinPortrait
-                            Pickable::IGNORE
-                            --
-                            Node { flex_direction: FlexDirection::Column, flex_grow: 1.0, row_gap: px(10) }
-                            Children [
-                                Text("Crafting")
-                                TextFont { font_size: FontSize::Px(15.0) }
-                                TextColor(Color::WHITE)
-                                Pickable::IGNORE
-                                --
-                                Node { align_items: AlignItems::Center, column_gap: px(8) }
-                                Children [
-                                    Node {
-                                        display: Display::Grid,
-                                        grid_template_columns: RepeatedGridTrack::px::<Vec<RepeatedGridTrack>>(2_u16, SLOT_SIZE),
-                                        column_gap: px(SLOT_GAP), row_gap: px(SLOT_GAP),
-                                    }
-                                    Children [ { slot_list(CRAFT_START..SLOT_COUNT, true) } ]
-                                    --
-                                    Text("→")
-                                    TextFont { font_size: FontSize::Px(20.0) }
-                                    TextColor(Color::srgb(0.65,0.65,0.68))
-                                    Pickable::IGNORE
-                                    --
-                                    { slot_list(CRAFT_RESULT..CRAFT_RESULT+1, true) }
-                                ]
-                                --
-                                Node { align_items: AlignItems::Center, column_gap: px(10) }
-                                Children [
-                                    { slot_list(OFFHAND_SLOT..OFFHAND_SLOT+1, true) }
-                                    --
-                                    Text("Offhand")
-                                    TextFont { font_size: FontSize::Px(13.0) }
-                                    TextColor(Color::srgb(0.65,0.65,0.68))
-                                    Pickable::IGNORE
-                                ]
-                            ]
-                        ]
-            },
-            bsn! {
-                        Node { align_items: AlignItems::Center, column_gap: px(8) }
-                        Children [
-                            Node { padding: UiRect::axes(px(8),px(5)), border: UiRect::all(px(1)) }
-                            BackgroundColor(SLOT_BG)
-                            BorderColor::all(SLOT_BORDER)
-                            on(crate::player::skin::toggle_model)
-                            Children [
-                                Text("Classic arms")
-                                crate::player::skin::SkinModelLabel
-                                TextFont { font_size: FontSize::Px(12.0) }
-                                TextColor(Color::WHITE)
-                                Pickable::IGNORE
-                            ]
-                            --
-                            Node { padding: UiRect::axes(px(8),px(5)), border: UiRect::all(px(1)) }
-                            BackgroundColor(SLOT_BG)
-                            BorderColor::all(SLOT_BORDER)
-                            on(crate::player::skin::toggle_layers)
-                            Children [
-                                Text("Layers: on")
-                                crate::player::skin::SkinLayersLabel
-                                TextFont { font_size: FontSize::Px(12.0) }
-                                TextColor(Color::WHITE)
-                                Pickable::IGNORE
-                            ]
-                            --
-                            Node { padding: UiRect::axes(px(8),px(5)), border: UiRect::all(px(1)) }
-                            BackgroundColor(SLOT_BG)
-                            BorderColor::all(SLOT_BORDER)
-                            on(crate::player::skin::reset_skin)
-                            Children [
-                                Text("Reset")
-                                TextFont { font_size: FontSize::Px(12.0) }
-                                TextColor(Color::WHITE)
-                                Pickable::IGNORE
-                            ]
-                            --
-                            Text("Drop a skin PNG to import")
-                            crate::player::skin::SkinStatusLabel
-                            TextFont { font_size: FontSize::Px(11.0) }
-                            TextColor(Color::srgb(0.65,0.65,0.68))
-                            Node { max_width: px(170) }
-                            Pickable::IGNORE
-                        ]
-
-            },
-        ),
+        bsn! {
+            Node { column_gap: px(10), height: px(204) }
+            Children [
+                Node { flex_direction: FlexDirection::Column, row_gap: px(SLOT_GAP) }
+                Children [ { slot_list(ARMOR_START..OFFHAND_SLOT, true) } ]
+                --
+                Node { width: px(136), height: px(204) }
+                ImageNode { image: preview }
+                crate::player::skin::SkinPortrait
+                Pickable::IGNORE
+                --
+                Node { flex_direction: FlexDirection::Column, flex_grow: 1.0, row_gap: px(10) }
+                Children [
+                    Text("Crafting")
+                    TextFont { font_size: FontSize::Px(15.0) }
+                    TextColor(Color::WHITE)
+                    Pickable::IGNORE
+                    --
+                    Node { align_items: AlignItems::Center, column_gap: px(8) }
+                    Children [
+                        Node {
+                            display: Display::Grid,
+                            grid_template_columns: RepeatedGridTrack::px::<Vec<RepeatedGridTrack>>(2_u16, SLOT_SIZE),
+                            column_gap: px(SLOT_GAP), row_gap: px(SLOT_GAP),
+                        }
+                        Children [ { slot_list(CRAFT_START..SLOT_COUNT, true) } ]
+                        --
+                        Text("→")
+                        TextFont { font_size: FontSize::Px(20.0) }
+                        TextColor(Color::srgb(0.65,0.65,0.68))
+                        Pickable::IGNORE
+                        --
+                        { slot_list(CRAFT_RESULT..CRAFT_RESULT+1, true) }
+                    ]
+                    --
+                    Node { align_items: AlignItems::Center, column_gap: px(10) }
+                    Children [
+                        { slot_list(OFFHAND_SLOT..OFFHAND_SLOT+1, true) }
+                        --
+                        Text("Offhand")
+                        TextFont { font_size: FontSize::Px(13.0) }
+                        TextColor(Color::srgb(0.65,0.65,0.68))
+                        Pickable::IGNORE
+                    ]
+                ]
+            ]
+        },
     )
 }
 

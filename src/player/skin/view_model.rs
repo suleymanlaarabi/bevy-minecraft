@@ -106,29 +106,26 @@ pub(super) fn advance_swing(
     }
 }
 
-pub(super) fn first_person_pose(progress: f32, slim: bool) -> Transform {
+pub(super) fn first_person_pose(progress: f32) -> Transform {
     let strike = (progress.sqrt() * PI).sin();
     let twist = (progress * progress * PI).sin();
     // Minecraft 26.3 FirstPersonHandsAndItemsRenderer.renderPlayerArm, right hand,
     // fully equipped. Preserve the transform order rather than approximating Euler angles.
     // Cache the constant part, including AvatarRenderer.renderHand's shoulder pose.
-    static BASES: OnceLock<[Mat4; 2]> = OnceLock::new();
-    let bases = BASES.get_or_init(|| {
+    static BASE: OnceLock<Mat4> = OnceLock::new();
+    let base = BASE.get_or_init(|| {
         let hand = Mat4::from_translation(Vec3::new(-1., 3.6, 3.5))
             * Mat4::from_rotation_z(120_f32.to_radians())
             * Mat4::from_rotation_x(200_f32.to_radians())
             * Mat4::from_rotation_y(-135_f32.to_radians())
             * Mat4::from_translation(Vec3::new(5.6, 0., 0.));
-        std::array::from_fn(|model| {
-            // Native cubes use Y-down, front -Z, 1/16 units and a shoulder at (-5,2,0).
-            // Our shared skin meshes use Y-up, front +Z and centered arm widths.
-            let center_x = if model == 0 { -1. } else { -0.5 };
-            hand * Mat4::from_translation(Vec3::new(-5., 2., 0.) / 16.)
-                * Mat4::from_rotation_z(0.1)
-                * Mat4::from_translation(Vec3::new(center_x, -2., 0.) / 16.)
-                * Mat4::from_rotation_x(PI)
-                * Mat4::from_scale(Vec3::splat(1. / (16. * mesh::PIXEL)))
-        })
+        // Native cubes use Y-down, front -Z, 1/16 units and a shoulder at (-5,2,0).
+        // Our shared skin meshes use Y-up, front +Z and centered arm widths.
+        hand * Mat4::from_translation(Vec3::new(-5., 2., 0.) / 16.)
+            * Mat4::from_rotation_z(0.1)
+            * Mat4::from_translation(Vec3::new(-1., -2., 0.) / 16.)
+            * Mat4::from_rotation_x(PI)
+            * Mat4::from_scale(Vec3::splat(1. / (16. * mesh::PIXEL)))
     });
     let motion = Mat4::from_translation(Vec3::new(
         0.64 - 0.3 * strike,
@@ -136,7 +133,7 @@ pub(super) fn first_person_pose(progress: f32, slim: bool) -> Transform {
         -0.72 - 0.4 * (progress * PI).sin(),
     )) * Mat4::from_rotation_y((45. + 70. * strike).to_radians())
         * Mat4::from_rotation_z((-20. * twist).to_radians());
-    Transform::from_matrix(motion * bases[usize::from(slim)])
+    Transform::from_matrix(motion * *base)
 }
 
 /// Render only the arm's physical pixel rectangle, with the full-view projection.
@@ -270,7 +267,6 @@ pub(super) fn resize_arm_target(
 pub(super) fn animate_first_person(
     state: Res<State<InventoryState>>,
     view: Res<PlayerView>,
-    settings: Res<SkinSettings>,
     swing: Single<Ref<ArmSwing>, With<PlayerCamera>>,
     held: Single<Ref<HeldItem>>,
     mut arms: Query<
@@ -298,7 +294,6 @@ pub(super) fn animate_first_person(
         if shown
             && (became_visible
                 || swing.is_changed()
-                || settings.is_changed()
                 || view.is_changed()
                 || held.is_changed()
                 || transform.is_added())
@@ -306,8 +301,7 @@ pub(super) fn animate_first_person(
             let pose = if let Some(item) = item {
                 held_item::pose(swing.progress(), item.equipped, &item.display)
             } else {
-                let mut pose =
-                    first_person_pose(swing.progress(), settings.model == SkinModel::Slim);
+                let mut pose = first_person_pose(swing.progress());
                 pose.translation.y -= 0.6 * (1. - held.equipped);
                 pose
             };
