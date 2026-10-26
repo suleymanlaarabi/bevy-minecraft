@@ -1,15 +1,5 @@
-use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::transform::TransformSystems;
-
-#[derive(PhysicsLayer, Clone, Copy, Debug, Default)]
-pub(crate) enum GameLayer {
-    #[default]
-    Default,
-    World,
-    Player,
-    DroppedItem,
-}
 
 #[derive(Component, Clone)]
 #[relationship(relationship_target = FollowedBy)]

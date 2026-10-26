@@ -1,14 +1,16 @@
 use std::{collections::HashMap, time::Duration};
 
-use avian3d::prelude::*;
-use bevy::{light::NotShadowCaster, prelude::*};
+use bevy::{
+    ecs::batching::BatchingStrategy, light::NotShadowCaster, math::DVec3, prelude::*,
+    utils::Parallel,
+};
 
 use crate::{
+    character::{Aabb, CharacterMotion, CharacterSystems, SimulationPaused, Terrain},
     game::GameState,
     inventory::{ItemKind, ItemStack, PlayerInventory},
     player::Player,
-    spatial::GameLayer,
-    voxel::VoxelAssets,
+    voxel::{VoxelAssets, VoxelWorld, chunk_at},
 };
 
 const PICKUP_DELAY: Duration = Duration::from_millis(350);
@@ -52,6 +54,98 @@ pub struct DroppedItem {
     pickup_after: Duration,
 }
 
+/// Fixed-step state; sleeping items only check the revisions of touching columns.
+#[derive(Component)]
+pub(crate) struct DropMotion {
+    position: DVec3,
+    previous: DVec3,
+    velocity: Vec3,
+    support: Option<[Option<(Entity, u64)>; 4]>,
+}
+
+impl DropMotion {
+    fn bounds(&self) -> Aabb {
+        let half = DVec3::splat(DROP_COLLIDER_SIZE as f64 * 0.5);
+        Aabb {
+            min: self.position - half,
+            max: self.position + half,
+        }
+    }
+
+    fn support_revisions(&self, world: &VoxelWorld) -> [Option<(Entity, u64)>; 4] {
+        let bounds = self.bounds();
+        let min = chunk_at(bounds.min.as_vec3());
+        let max = chunk_at(bounds.max.as_vec3());
+        let first = world.column_revision(min);
+        let x = if min.x == max.x {
+            first
+        } else {
+            world.column_revision(IVec2::new(max.x, min.y))
+        };
+        let z = if min.y == max.y {
+            first
+        } else {
+            world.column_revision(IVec2::new(min.x, max.y))
+        };
+        let last = if min.x == max.x {
+            z
+        } else if min.y == max.y {
+            x
+        } else {
+            world.column_revision(max)
+        };
+        [first, x, z, last]
+    }
+
+    fn step(&mut self, world: &VoxelWorld, terrain: &mut Terrain, dt: f32, damping: f32) {
+        self.previous = self.position;
+        if self
+            .support
+            .is_some_and(|support| support == self.support_revisions(world))
+        {
+            return;
+        }
+        if !world.collision_ready(self.position.as_vec3()) {
+            return;
+        }
+        self.support = None;
+        self.velocity.y -= 9.81 * dt;
+        self.velocity *= damping;
+        let bounds = self.bounds();
+        let delta = (self.velocity * dt).as_dvec3();
+        terrain.gather_collisions(world, bounds.expanded_towards(delta));
+        let correction = terrain.depenetrate(bounds);
+        self.position += correction;
+        let moved = terrain.collide_box(self.bounds(), delta);
+        self.position += moved;
+        let blocked = (moved - delta).abs().cmpgt(DVec3::splat(1e-7));
+        if blocked.x {
+            self.velocity.x = 0.0;
+        }
+        if blocked.z {
+            self.velocity.z = 0.0;
+        }
+        if blocked.y {
+            self.velocity.y = if delta.y < 0.0 {
+                -self.velocity.y * 0.05
+            } else {
+                0.0
+            };
+            if self.velocity.y < 0.15 {
+                self.velocity.y = 0.0;
+            }
+        }
+        if blocked.y && delta.y < 0.0 {
+            self.velocity.x *= 0.7;
+            self.velocity.z *= 0.7;
+            if self.velocity.length_squared() < 0.0025 {
+                self.velocity = Vec3::ZERO;
+                self.support = Some(self.support_revisions(world));
+            }
+        }
+    }
+}
+
 #[derive(Component)]
 struct DroppedItemVisual {
     phase: f32,
@@ -75,10 +169,19 @@ impl Plugin for DroppedItemPlugin {
                 animate_dropped_item_visuals.run_if(crate::world::playing),
             )
             .add_systems(
-                PostUpdate,
-                pickup_dropped_items
-                    .after(bevy::transform::TransformSystems::Propagate)
-                    .run_if(crate::world::playing),
+                FixedUpdate,
+                (simulate_dropped_items, pickup_dropped_items)
+                    .chain()
+                    .after(CharacterSystems)
+                    .run_if(crate::world::playing)
+                    .run_if(not(resource_exists::<SimulationPaused>)),
+            )
+            .add_systems(
+                RunFixedMainLoop,
+                interpolate_dropped_items
+                    .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop)
+                    .run_if(crate::world::playing)
+                    .run_if(not(resource_exists::<SimulationPaused>)),
             )
             .add_systems(Update, cleanup_expired_drops.run_if(crate::world::playing));
     }
@@ -145,16 +248,11 @@ fn restore_dropped_item(
 }
 
 impl DroppedItem {
-    pub(crate) fn capture(
-        &self,
-        position: Vec3,
-        velocity: Vec3,
-        now: Duration,
-    ) -> crate::world::SavedDrop {
+    pub(crate) fn capture(&self, motion: &DropMotion, now: Duration) -> crate::world::SavedDrop {
         crate::world::SavedDrop {
             stack: crate::world::SavedStack::capture(self.stack),
-            position: position.to_array(),
-            velocity: velocity.to_array(),
+            position: motion.position.as_vec3().to_array(),
+            velocity: motion.velocity.to_array(),
             remaining: self.expires_at.saturating_sub(now).as_secs_f64(),
             pickup_remaining: self.pickup_after.saturating_sub(now).as_secs_f64(),
         }
@@ -205,17 +303,12 @@ fn spawn_item(
                 expires_at,
                 pickup_after,
             },
-            RigidBody::Dynamic,
-            Collider::cuboid(DROP_COLLIDER_SIZE, DROP_COLLIDER_SIZE, DROP_COLLIDER_SIZE),
-            LinearVelocity(velocity),
-            LockedAxes::ROTATION_LOCKED,
-            LinearDamping(0.3),
-            Friction::new(0.7),
-            Restitution::new(0.05),
-            CollisionLayers::new(
-                GameLayer::DroppedItem,
-                [GameLayer::Default, GameLayer::World],
-            ),
+            DropMotion {
+                position: position.as_dvec3(),
+                previous: position.as_dvec3(),
+                velocity,
+                support: None,
+            },
             Transform::from_translation(position),
             Visibility::default(),
             DespawnOnExit(GameState::Game),
@@ -283,36 +376,72 @@ fn animate_dropped_item_visuals(
     }
 }
 
+/// Reuse each worker's collision buffer instead of allocating one per item/tick.
+fn simulate_dropped_items(
+    world: VoxelWorld,
+    time: Res<Time<Fixed>>,
+    terrain: Local<Parallel<Terrain>>,
+    mut drops: Query<&mut DropMotion>,
+) {
+    let dt = time.delta_secs();
+    let damping = (-0.3 * dt).exp();
+    // Small groups stay on this thread; larger groups share persistent worker buffers.
+    if drops.iter().len() < 128 {
+        let mut terrain = terrain.borrow_local_mut();
+        for mut motion in &mut drops {
+            motion.step(&world, &mut terrain, dt, damping);
+        }
+    } else {
+        drops
+            .par_iter_mut()
+            .batching_strategy(BatchingStrategy::new().min_batch_size(64))
+            .for_each_init(
+                || terrain.borrow_local_mut(),
+                |terrain, mut motion| motion.step(&world, terrain, dt, damping),
+            );
+    }
+}
+
+fn interpolate_dropped_items(
+    time: Res<Time<Fixed>>,
+    mut drops: Query<(&DropMotion, &mut Transform)>,
+) {
+    let alpha = time.overstep_fraction() as f64;
+    for (motion, mut transform) in &mut drops {
+        let position = motion.previous.lerp(motion.position, alpha).as_vec3();
+        if transform.translation != position {
+            transform.translation = position;
+        }
+    }
+}
+
 fn pickup_dropped_items(
-    spatial_query: SpatialQuery,
-    time: Res<Time>,
-    player: Single<(&GlobalTransform, &mut PlayerInventory), With<Player>>,
-    mut drops: Query<&mut DroppedItem>,
+    time: Res<Time<Virtual>>,
+    player: Single<(&CharacterMotion, &mut PlayerInventory), With<Player>>,
+    mut drops: Query<(Entity, &DropMotion, &mut DroppedItem)>,
     mut commands: Commands,
 ) {
-    let (player_transform, mut inventory) = player.into_inner();
+    let (player, mut inventory) = player.into_inner();
     let now = time.elapsed();
-    spatial_query.shape_intersections_callback(
-        &Collider::sphere(PICKUP_RADIUS),
-        player_transform.translation(),
-        Quat::IDENTITY,
-        &SpatialQueryFilter::from_mask(GameLayer::DroppedItem),
-        |entity| {
-            let Ok(mut drop) = drops.get_mut(entity) else {
-                return true;
-            };
-            if now < drop.pickup_after {
-                return true;
+    let half = DVec3::splat(DROP_COLLIDER_SIZE as f64 * 0.5);
+    for (entity, motion, mut drop) in &mut drops {
+        if now < drop.pickup_after {
+            continue;
+        }
+        // Sphere/box overlap, matching the pickup volume without a spatial-query engine.
+        let distance = (player.position - motion.position).abs() - half;
+        if distance.max(DVec3::ZERO).length_squared() > (PICKUP_RADIUS * PICKUP_RADIUS) as f64 {
+            continue;
+        }
+        let remaining =
+            PlayerInventory::edit(&mut inventory, |inventory| inventory.insert(drop.stack));
+        match remaining {
+            None => {
+                commands.entity(entity).despawn();
             }
-            let remaining =
-                PlayerInventory::edit(&mut inventory, |inventory| inventory.insert(drop.stack));
-            match remaining {
-                None => commands.entity(entity).despawn(),
-                Some(remaining) => drop.stack = remaining,
-            }
-            true
-        },
-    );
+            Some(remaining) => drop.stack = remaining,
+        }
+    }
 }
 
 fn cleanup_expired_drops(

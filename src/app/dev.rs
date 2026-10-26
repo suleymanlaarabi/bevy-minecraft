@@ -1,7 +1,6 @@
 //! Development-only diagnostics, enabled by the existing environment flags.
 
 use crate::game::GameState;
-use avian3d::prelude::PhysicsDiagnosticsPlugin;
 use bevy::prelude::*;
 use bevy::{
     dev_tools::fps_overlay::{FpsOverlayConfig, FpsOverlayPlugin, FrameTimeGraphConfig},
@@ -38,7 +37,6 @@ impl Plugin for DevelopmentPlugin {
         });
         if std::env::var_os("HOLLOW_DIAGNOSTICS").is_some() {
             app.add_plugins((
-                PhysicsDiagnosticsPlugin,
                 SystemInformationDiagnosticsPlugin,
                 EntityCountDiagnosticsPlugin::default(),
                 RenderDiagnosticsPlugin,

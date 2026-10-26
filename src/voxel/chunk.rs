@@ -1,15 +1,8 @@
 use super::{VoxelKind, VoxelState};
 use bevy::prelude::*;
-use hollow_worldgen::coordinates::{
-    ALL_SECTIONS, CHUNK_HEIGHT, CHUNK_VOLUME, SECTION_COUNT, SECTION_HEIGHT, SECTION_VOLUME,
-    cell_index, cell_position,
-};
-use hollow_worldgen::sections::{Layer, Section};
+use hollow_worldgen::coordinates::{ALL_SECTIONS, CHUNK_HEIGHT, SECTION_HEIGHT, cell_index};
+use hollow_worldgen::sections::Layer;
 use std::{collections::BTreeSet, sync::Arc};
-
-/// Collision classes of [`ChunkVoxels::collision_classes`].
-const FULL_CUBE: u8 = 1;
-const PARTIAL_SHAPE: u8 = 2;
 
 /// Chunk data, compressed by section. Cloning it is O(1); edits use copy-on-write
 /// while a build reads it.
@@ -27,8 +20,6 @@ pub struct ChunkVoxels {
     pub(crate) content_revision: u64,
     /// One bit per render section whose mesh is outdated.
     pub(crate) dirty_sections: u32,
-    pub(crate) collider_dirty: bool,
-    pub(crate) collider_built: bool,
     pub(crate) revision: u64,
     pub(crate) modified: bool,
     /// Disk revisions are independent of mesh invalidations and lighting task versions.
@@ -46,8 +37,6 @@ impl ChunkVoxels {
             native_edits: default(),
             content_revision: 0,
             dirty_sections: ALL_SECTIONS,
-            collider_dirty: true,
-            collider_built: false,
             revision: 0,
             modified: false,
             save_revision: 0,
@@ -153,122 +142,10 @@ impl ChunkVoxels {
         Arc::make_mut(&mut self.native_edits).insert(index);
         self.content_revision = self.content_revision.wrapping_add(1);
         self.mark_sections(Self::sections_around(local.y));
-        if old.native().collision_shapes != state.native().collision_shapes {
-            self.collider_dirty = true;
-        }
         self.modified = true;
         self.save_revision += 1;
         true
     }
-
-    /// Collision class of every cell, read once per cell: 0 none, [`FULL_CUBE`]
-    /// or [`PARTIAL_SHAPE`]. Partial cells also come back with their decoded
-    /// state. Sections without a solid block are skipped.
-    fn collision_classes(&self) -> (Vec<u8>, Vec<(usize, VoxelState)>) {
-        let class = |state: VoxelState| {
-            if state.full_collision() {
-                FULL_CUBE
-            } else if state.native().collision_shapes.is_empty() {
-                0
-            } else {
-                PARTIAL_SHAPE
-            }
-        };
-        let mut classes = vec![0u8; CHUNK_VOLUME];
-        let mut partial = Vec::new();
-        for section in 0..SECTION_COUNT {
-            let states = self.states.section(section);
-            if !states.any(|state| !state.native().collision_shapes.is_empty()) {
-                continue;
-            }
-            let start = section * SECTION_VOLUME;
-            let out = &mut classes[start..][..SECTION_VOLUME];
-            match states {
-                Section::Uniform(state) => {
-                    let value = class(*state);
-                    out.fill(value);
-                    if value == PARTIAL_SHAPE {
-                        partial.extend((0..SECTION_VOLUME).map(|offset| (start + offset, *state)));
-                    }
-                }
-                Section::Dense(states) => {
-                    for (offset, &state) in states.iter().enumerate() {
-                        let value = class(state);
-                        out[offset] = value;
-                        if value == PARTIAL_SHAPE {
-                            partial.push((start + offset, state));
-                        }
-                    }
-                }
-            }
-        }
-        (classes, partial)
-    }
-
-    /// Solid cells another body can touch. Cells enclosed by six solid neighbors of
-    /// this chunk are left out: only a one-cell shell of the terrain is kept. Border
-    /// cells stay, since the neighboring chunks are unknown here.
-
-    fn shell(classes: &[u8]) -> Vec<IVec3> {
-        classes
-            .iter()
-            .enumerate()
-            .filter(|&(_, &class)| class == FULL_CUBE)
-            .filter_map(|(index, _)| {
-                let (x, z, y) = (index & 15, (index >> 4) & 15, index >> 8);
-                // Borders are kept conservatively; interior neighbors have known
-                // linear offsets, without six coordinate conversions per cube.
-                let boundary = x == 0
-                    || x == 15
-                    || z == 0
-                    || z == 15
-                    || y == 0
-                    || y + 1 == CHUNK_HEIGHT as usize;
-                (boundary
-                    || classes[index - 1] != FULL_CUBE
-                    || classes[index + 1] != FULL_CUBE
-                    || classes[index - 16] != FULL_CUBE
-                    || classes[index + 16] != FULL_CUBE
-                    || classes[index - 256] != FULL_CUBE
-                    || classes[index + 256] != FULL_CUBE)
-                    .then(|| IVec3::new(x as i32, y as i32, z as i32))
-            })
-            .collect()
-    }
-
-    /// Full cubes retain the voxel collider; only partial shapes need compound boxes.
-    pub(crate) fn collider(
-        &self,
-        chunk: IVec2,
-    ) -> (
-        Option<avian3d::prelude::Collider>,
-        Option<avian3d::prelude::Collider>,
-    ) {
-        use avian3d::prelude::Collider;
-        let (classes, partial) = self.collision_classes();
-        let cubes = Self::shell(&classes);
-        let mut parts = Vec::new();
-        let terrain = (!cubes.is_empty()).then(|| Collider::voxels(Vec3::ONE, &cubes));
-        let origin = IVec3::new(chunk.x * 16, 0, chunk.y * 16);
-        let mut shapes = std::collections::HashMap::<[u32; 3], Collider>::new();
-        for (index, state) in partial {
-            let local = cell_position(index);
-            for shape in state.collision_boxes(origin + local) {
-                let size = shape.size();
-                if size.min_element() <= 0.0 {
-                    continue;
-                }
-                let collider = shapes
-                    .entry(size.to_array().map(f32::to_bits))
-                    .or_insert_with(|| Collider::cuboid(size.x, size.y, size.z))
-                    .clone();
-                parts.push((local.as_vec3() + shape.center(), Quat::IDENTITY, collider));
-            }
-        }
-        let partial = (!parts.is_empty()).then(|| Collider::compound(parts));
-        (terrain, partial)
-    }
-
 }
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VoxelChunk {

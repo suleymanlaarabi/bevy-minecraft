@@ -5,7 +5,6 @@ use crate::{
     inventory::PlayerInventory,
     voxel::VoxelViewer,
 };
-use avian3d::prelude::*;
 use bevy::{
     camera::Exposure,
     core_pipeline::tonemapping::Tonemapping,
@@ -21,12 +20,6 @@ use bevy::{
     super::safety::PlayerCheckpoint,
     GameCharacter,
     AutoJump,
-    // Moved by the character controller, not by the solver. As a body it still
-    // keeps terrain colliders loaded around it for the items it drops.
-    RigidBody::Kinematic,
-    // Physics ticks at 64 Hz: ease the position the camera follows between ticks.
-    // Rotation is driven by the mouse every frame and must not be eased.
-    TranslationInterpolation,
     Visibility::default(),
     DespawnOnExit::<GameState>(GameState::Game)
 )]

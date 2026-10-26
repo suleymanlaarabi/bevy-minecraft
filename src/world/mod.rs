@@ -13,7 +13,6 @@ use crate::{
         streaming::{PendingEdits, StoredChunks},
     },
 };
-use avian3d::prelude::*;
 use bevy::{
     prelude::*,
     settings::SaveSettingsSync,
@@ -154,7 +153,7 @@ impl Plugin for WorldPlugin {
             .add_systems(OnEnter(GameState::WorldCreate), ui::create_page)
             .add_systems(OnEnter(WorldSessionPhase::Saving), begin_saving)
             .add_systems(OnEnter(WorldSessionPhase::SaveError), ui::save_error)
-            .add_systems(OnEnter(WorldSessionPhase::Playing), resume_physics)
+            .add_systems(OnEnter(WorldSessionPhase::Playing), resume_session)
             .add_systems(OnExit(GameState::Game), end_session)
             .add_systems(
                 Update,
@@ -397,10 +396,8 @@ fn prepare_session(
     generator: Option<Res<WorldGenerator>>,
     settings: Res<VoxelSettings>,
     session: Option<Res<WorldSession>>,
-    mut physics: ResMut<Time<Physics>>,
     mut virtual_time: ResMut<Time<Virtual>>,
 ) {
-    physics.pause();
     virtual_time.pause();
     // Preserve the existing developer autoplay path as an explicitly ephemeral session.
     if generator.is_none() {
@@ -422,13 +419,11 @@ fn prepare_session(
 
 fn begin_saving(
     generator: Res<WorldGenerator>,
-    mut physics: ResMut<Time<Physics>>,
     mut virtual_time: ResMut<Time<Virtual>>,
     mut commands: Commands,
     mut cursors: Query<&mut CursorOptions>,
 ) {
     generator.runtime.pause();
-    physics.pause();
     virtual_time.pause();
     for mut cursor in &mut cursors {
         cursor.visible = true;
@@ -436,9 +431,8 @@ fn begin_saving(
     }
     ui::saving(&mut commands);
 }
-fn resume_physics(
+fn resume_session(
     generator: Res<WorldGenerator>,
-    mut physics: ResMut<Time<Physics>>,
     mut virtual_time: ResMut<Time<Virtual>>,
     inventory: Res<State<InventoryState>>,
     mut cursors: Query<&mut CursorOptions>,
@@ -447,7 +441,6 @@ fn resume_physics(
     overlays: Query<Entity, With<ui::SaveOverlay>>,
 ) {
     generator.runtime.resume();
-    physics.unpause();
     virtual_time.unpause();
     for mut cursor in &mut cursors {
         cursor.visible = *inventory.get() == InventoryState::Open;
@@ -480,14 +473,12 @@ fn poll_storage_errors(
     mut save: ResMut<SaveState>,
     phase: Res<State<WorldSessionPhase>>,
     mut next: ResMut<NextState<WorldSessionPhase>>,
-    mut physics: ResMut<Time<Physics>>,
 ) {
     let errors = generator.take_errors();
     if errors.is_empty() {
         return;
     }
     save.error = Some(errors.join("\n"));
-    physics.pause();
     if *phase.get() != WorldSessionPhase::SaveError {
         next.set(WorldSessionPhase::SaveError);
     }
@@ -515,8 +506,7 @@ fn checkpoint(
     cursor: Res<InventoryCursor>,
     drops: Query<(
         &crate::dropped_item::DroppedItem,
-        &Transform,
-        &LinearVelocity,
+        &crate::dropped_item::DropMotion,
     )>,
     chunks: Query<(&VoxelChunk, &ChunkVoxels)>,
     stored: Res<StoredChunks>,
@@ -574,9 +564,7 @@ fn checkpoint(
         player: Some(player),
         drops: drops
             .iter()
-            .map(|(drop, transform, velocity)| {
-                drop.capture(transform.translation, velocity.0, game_time.elapsed())
-            })
+            .map(|(drop, motion)| drop.capture(motion, game_time.elapsed()))
             .collect(),
         pending: pending
             .values()

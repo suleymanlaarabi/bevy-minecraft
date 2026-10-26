@@ -12,11 +12,17 @@ pub struct VoxelWorld<'w, 's> {
 
 impl VoxelWorld<'_, '_> {
     /// Whether the voxels around a position are loaded. Character movement reads
-    /// them directly, so it does not wait for the asynchronous terrain colliders.
+    /// them directly without building a separate collision representation.
     pub fn collision_ready(&self, position: Vec3) -> bool {
         self.index
             .get(&chunk_at(position))
             .is_some_and(|entity| self.chunks.contains(*entity))
+    }
+
+    /// Local collision cache key; unloading and reloading also changes the entity.
+    pub(crate) fn column_revision(&self, position: IVec2) -> Option<(Entity, u64)> {
+        let entity = *self.index.get(&position)?;
+        Some((entity, self.chunks.get(entity).ok()?.content_revision))
     }
 
     /// Visits every cell of an inclusive region, each column from top to bottom,
@@ -99,4 +105,3 @@ impl VoxelCommandsExt for Commands<'_, '_> {
         self
     }
 }
-

@@ -3,7 +3,6 @@ use super::{
     render::build::{ChunkBuild, ChunkSections},
     streaming::{AwaitingNeighbors, PendingChunks},
 };
-use avian3d::{prelude::Physics, schedule::PhysicsTime};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::window::{MonitorSelection, PresentMode, WindowMode};
@@ -24,7 +23,6 @@ pub(crate) struct VoxelDiagnostics {
     frames_ms: VecDeque<f64>,
     generation_ms: Vec<f64>,
     meshing_ms: Vec<f64>,
-    collider_ms: Vec<f64>,
     generated_chunks: u64,
     built_chunks: u64,
     built_vertices: u64,
@@ -38,18 +36,11 @@ impl VoxelDiagnostics {
         self.generation_ms.push(elapsed.as_secs_f64() * 1_000.0);
     }
 
-    pub(crate) fn record_build(
-        &mut self,
-        meshing: Duration,
-        collider: Duration,
-        vertices: usize,
-        triangles: usize,
-    ) {
+    pub(crate) fn record_build(&mut self, meshing: Duration, vertices: usize, triangles: usize) {
         self.built_chunks += 1;
         self.built_vertices += vertices as u64;
         self.built_triangles += triangles as u64;
         self.meshing_ms.push(meshing.as_secs_f64() * 1_000.0);
-        self.collider_ms.push(collider.as_secs_f64() * 1_000.0);
     }
 
     fn reset_frames(&mut self) {
@@ -139,7 +130,9 @@ pub(crate) fn register(app: &mut App) {
         )
         .add_systems(
             FixedUpdate,
-            benchmark_movement.run_if(in_state(GameState::Game)),
+            benchmark_movement
+                .before(crate::character::CharacterSystems)
+                .run_if(in_state(GameState::Game)),
         );
         if std::env::var_os("HOLLOW_BENCH_HEADLESS").is_some() {
             app.add_systems(
@@ -193,7 +186,8 @@ fn setup_headless_targets(
     }
 }
 
-fn reset_voxel_benchmark(mut benchmark: ResMut<VoxelBenchmark>) {
+fn reset_voxel_benchmark(mut benchmark: ResMut<VoxelBenchmark>, mut commands: Commands) {
+    commands.remove_resource::<crate::character::SimulationPaused>();
     *benchmark = VoxelBenchmark {
         simplified: benchmark.simplified,
         ..default()
@@ -214,7 +208,6 @@ fn configure_voxel_benchmark(
     mut windows: Query<&mut Window>,
     cameras: Query<Entity, With<PlayerCamera>>,
     mut lights: Query<&mut DirectionalLight>,
-    mut physics_time: ResMut<Time<Physics>>,
     mut offsets: ResMut<StreamOffsets>,
     mut stream_state: ResMut<StreamState>,
     mut benchmark: ResMut<VoxelBenchmark>,
@@ -237,7 +230,7 @@ fn configure_voxel_benchmark(
         for mut light in &mut lights {
             light.shadow_maps_enabled = false;
         }
-        physics_time.pause();
+        commands.insert_resource(crate::character::SimulationPaused);
         *offsets = StreamOffsets::new(21);
         stream_state.center = None;
         info!("voxel benchmark simplified: radius=21, AA=off, shadows=off, physics=paused");
@@ -428,7 +421,7 @@ fn report_voxel_diagnostics(
         .unwrap_or(0);
 
     info!(
-        "voxel: loaded={loaded} ready={ready} pending={} building={building} queued={queued} section_meshes={} modified={modified} frame_ms[p50={:.2} p95={:.2} p99={:.2}] generation_ms[p50={:.2} p95={:.2}] meshing_ms[p50={:.2} p95={:.2}] collider_ms[p50={:.2} p95={:.2}] generated={} built={} avg_vertices={} avg_triangles={}",
+        "voxel: loaded={loaded} ready={ready} pending={} building={building} queued={queued} section_meshes={} modified={modified} frame_ms[p50={:.2} p95={:.2} p99={:.2}] generation_ms[p50={:.2} p95={:.2}] meshing_ms[p50={:.2} p95={:.2}] generated={} built={} avg_vertices={} avg_triangles={}",
         pending.len(),
         sections
             .iter()
@@ -441,8 +434,6 @@ fn report_voxel_diagnostics(
         percentile(&diagnostics.generation_ms, 0.95),
         percentile(&diagnostics.meshing_ms, 0.50),
         percentile(&diagnostics.meshing_ms, 0.95),
-        percentile(&diagnostics.collider_ms, 0.50),
-        percentile(&diagnostics.collider_ms, 0.95),
         diagnostics.generated_chunks,
         diagnostics.built_chunks,
         average_vertices,
@@ -451,7 +442,6 @@ fn report_voxel_diagnostics(
 
     diagnostics.generation_ms.clear();
     diagnostics.meshing_ms.clear();
-    diagnostics.collider_ms.clear();
 }
 
 fn percentile(samples: &[f64], percentile: f64) -> f64 {

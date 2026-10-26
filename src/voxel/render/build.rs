@@ -391,12 +391,7 @@ pub(crate) fn poll_builds(
             #[cfg(feature = "dev")]
             if let Some(diagnostics) = diagnostics.as_deref_mut() {
                 let (vertices, triangles) = output.counts;
-                diagnostics.record_build(
-                    output.meshing_elapsed,
-                    Duration::ZERO,
-                    vertices,
-                    triangles,
-                );
+                diagnostics.record_build(output.meshing_elapsed, vertices, triangles);
             }
             build.ready = Some(output);
         }

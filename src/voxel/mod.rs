@@ -2,7 +2,6 @@
 
 mod api;
 mod chunk;
-mod collision;
 #[cfg(feature = "dev")]
 mod diagnostics;
 pub(crate) mod edits;
@@ -21,7 +20,6 @@ pub use api::{VoxelCommandsExt, VoxelWorld};
 use bevy::prelude::*;
 pub use chunk::VoxelViewer;
 pub(crate) use chunk::{ChunkVoxels, VoxelChunk};
-use collision::{poll_chunk_colliders, request_chunk_colliders};
 pub use edits::SetVoxel;
 use edits::set_voxel;
 pub use hollow_worldgen::VoxelKind;
@@ -79,8 +77,6 @@ impl Plugin for VoxelPlugin {
         .insert_resource(StreamOffsets::new(view_distance))
         .init_resource::<ChunkIndex>()
         .init_resource::<streaming::ChunkArrivals>()
-        .init_resource::<collision::ColliderRequests>()
-        .add_observer(collision::invalidate_collider)
         .add_observer(streaming::track_chunk_arrival)
         .init_resource::<StoredChunks>()
         .init_resource::<PendingChunks>()
@@ -121,8 +117,6 @@ impl Plugin for VoxelPlugin {
                 poll_builds,
                 mark_changed_chunks,
                 start_changed_builds,
-                poll_chunk_colliders,
-                request_chunk_colliders,
             )
                 .chain()
                 .in_set(VoxelPipeline)

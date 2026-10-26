@@ -3,18 +3,12 @@
 //! there are no internal-edge contacts between neighboring voxels or chunks.
 #![allow(clippy::type_complexity)]
 
-use avian3d::{
-    prelude::{Physics, PhysicsTime, Position},
-    schedule::PhysicsSystems,
-};
 use bevy::{math::DVec3, prelude::*};
 
 use crate::voxel::{VoxelKind, VoxelState, VoxelWorld};
 
-/// Seconds per game tick: all constants below are per tick, as in vanilla.
+/// All movement constants below are per vanilla game tick.
 const TICK: f32 = 1.0 / 20.0;
-/// Ticks simulated at most per fixed step, so a stall cannot spiral.
-const MAX_TICKS_PER_STEP: u32 = 3;
 const GRAVITY: f64 = 0.08;
 const VERTICAL_DRAG: f64 = 0.98;
 const AIR_DRAG: f64 = 0.91;
@@ -84,7 +78,7 @@ impl Pose {
     }
 }
 
-/// Collision box footprint. The entity's `Position` sits `origin_height` above
+/// Collision box footprint. The entity's `Transform::translation` sits `origin_height` above
 /// the feet whatever the pose, so changing pose never moves the entity.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct CharacterBody {
@@ -117,7 +111,7 @@ impl CharacterBody {
 }
 
 /// Tick-exact simulation state, in double precision so that resting contacts
-/// stay exact far from the origin. `Position` is eased between two ticks.
+/// stay exact far from the origin. `Transform::translation` is eased between two ticks.
 #[derive(Component, Default, Debug, Clone, Copy)]
 pub struct CharacterMotion {
     /// Entity origin at the last tick.
@@ -133,7 +127,7 @@ pub struct CharacterMotion {
     walk_delta: f32,
     bob: f32,
     previous_bob: f32,
-    /// `Position` written last; any other value is a teleport.
+    /// `Transform::translation` written last; any other value is a teleport.
     written: Option<Vec3>,
 }
 
@@ -183,18 +177,40 @@ pub struct AutoJump;
 pub struct Flying;
 
 #[derive(Component, Default)]
-#[require(CharacterBody, CharacterMotion, CharacterState, CharacterMovement)]
+#[require(
+    Transform,
+    CharacterBody,
+    CharacterMotion,
+    CharacterState,
+    CharacterMovement
+)]
 pub struct GameCharacter;
+
+/// Native fixed-step motion, ordered after recovery and before presentation.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct CharacterSystems;
+
+/// Development tools can suspend motion without pausing world streaming.
+#[derive(Resource)]
+pub(crate) struct SimulationPaused;
 
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            FixedPostUpdate,
-            character_physics
-                .after(PhysicsSystems::Prepare)
-                .before(PhysicsSystems::StepSimulation)
-                .run_if(crate::world::playing),
-        );
+        app.insert_resource(Time::<Fixed>::from_hz(20.0))
+            .add_systems(
+                FixedUpdate,
+                character_physics
+                    .in_set(CharacterSystems)
+                    .run_if(crate::world::playing)
+                    .run_if(not(resource_exists::<SimulationPaused>)),
+            )
+            .add_systems(
+                RunFixedMainLoop,
+                interpolate_characters
+                    .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop)
+                    .run_if(crate::world::playing)
+                    .run_if(not(resource_exists::<SimulationPaused>)),
+            );
     }
 }
 
@@ -205,7 +221,6 @@ pub(crate) struct Aabb {
 }
 
 impl Aabb {
-
     fn cell(cell: IVec3) -> Self {
         let min = cell.as_dvec3();
         Self {
@@ -221,7 +236,7 @@ impl Aabb {
         }
     }
 
-    fn expanded_towards(self, delta: DVec3) -> Self {
+    pub(crate) fn expanded_towards(self, delta: DVec3) -> Self {
         Self {
             min: self.min + delta.min(DVec3::ZERO),
             max: self.max + delta.max(DVec3::ZERO),
@@ -271,6 +286,14 @@ pub(crate) struct Terrain {
 
 impl Terrain {
     fn gather(&mut self, world: &VoxelWorld, region: Aabb) {
+        self.gather_region::<true>(world, region);
+    }
+
+    pub(crate) fn gather_collisions(&mut self, world: &VoxelWorld, region: Aabb) {
+        self.gather_region::<false>(world, region);
+    }
+
+    fn gather_region<const ENVIRONMENT: bool>(&mut self, world: &VoxelWorld, region: Aabb) {
         self.boxes.clear();
         self.fluids.clear();
         self.climbables.clear();
@@ -286,20 +309,23 @@ impl Terrain {
                 above = None;
                 return;
             };
-            if crate::block_behavior::catalog::state_behavior(state).climbable {
-                self.climbables.push(Aabb::cell(cell));
-            }
-            let fluid = fluid_of(state);
-            let covered = above
-                .is_some_and(|(position, lava)| position == cell + IVec3::Y && fluid == Some(lava));
-            above = fluid.map(|lava| (cell, lava));
-            if let Some(lava) = fluid {
-                let height = if covered { 1.0 } else { SOURCE_FLUID_HEIGHT };
-                self.fluids.push(FluidCell {
-                    cell: Aabb::cell(cell),
-                    top: cell.y as f64 + height,
-                    lava,
+            if ENVIRONMENT {
+                if crate::block_behavior::catalog::state_behavior(state).climbable {
+                    self.climbables.push(Aabb::cell(cell));
+                }
+                let fluid = fluid_of(state);
+                let covered = above.is_some_and(|(position, lava)| {
+                    position == cell + IVec3::Y && fluid == Some(lava)
                 });
+                above = fluid.map(|lava| (cell, lava));
+                if let Some(lava) = fluid {
+                    let height = if covered { 1.0 } else { SOURCE_FLUID_HEIGHT };
+                    self.fluids.push(FluidCell {
+                        cell: Aabb::cell(cell),
+                        top: cell.y as f64 + height,
+                        lava,
+                    });
+                }
             }
             if state.full_collision() {
                 self.boxes.push(Aabb::cell(cell));
@@ -313,7 +339,6 @@ impl Terrain {
             }
         });
     }
-
 
     fn collides(&self, body: &Aabb) -> bool {
         self.boxes.iter().any(|other| body.intersects(other))
@@ -355,7 +380,7 @@ impl Terrain {
     }
 
     /// Vanilla `collideBoundingBox`: Y first, then the larger horizontal axis last.
-    fn collide_box(&self, body: Aabb, delta: DVec3) -> DVec3 {
+    pub(crate) fn collide_box(&self, body: Aabb, delta: DVec3) -> DVec3 {
         let mut body = body;
         let mut result = DVec3::ZERO;
         let order = if delta.x.abs() < delta.z.abs() {
@@ -377,6 +402,37 @@ impl Terrain {
             result[axis] = moved;
         }
         result
+    }
+
+    /// Recover restored contacts and items embedded by a block placement.
+    pub(crate) fn depenetrate(&self, mut body: Aabb) -> DVec3 {
+        let mut total = DVec3::ZERO;
+        for _ in 0..4 {
+            let offset = self
+                .boxes
+                .iter()
+                .filter(|other| body.min.cmplt(other.max).all() && body.max.cmpgt(other.min).all())
+                .flat_map(|other| {
+                    (0..3).flat_map(move |axis| {
+                        [
+                            other.min[axis] - body.max[axis],
+                            other.max[axis] - body.min[axis],
+                        ]
+                        .map(move |distance| {
+                            let mut offset = DVec3::ZERO;
+                            offset[axis] = distance;
+                            offset
+                        })
+                    })
+                })
+                .min_by(|a, b| a.length_squared().total_cmp(&b.length_squared()));
+            let Some(offset) = offset else {
+                break;
+            };
+            body = body.moved(offset);
+            total += offset;
+        }
+        total
     }
 
     /// Vanilla `Entity.collide`: when blocked sideways on the ground, also try the
@@ -470,14 +526,12 @@ fn ground_block(world: &VoxelWorld, body: &Aabb) -> (f64, f64, f64) {
     )
 }
 
-/// Advances every character by whole game ticks and eases `Position` between them.
+/// Advances every character by one vanilla tick using Bevy's fixed schedule.
 fn character_physics(
     world: VoxelWorld,
-    time: Res<Time>,
-    physics_time: Res<Time<Physics>>,
     mut terrain: Local<Terrain>,
     mut characters: Query<(
-        &mut Position,
+        &Transform,
         &mut CharacterMotion,
         &mut CharacterState,
         &CharacterBody,
@@ -486,18 +540,15 @@ fn character_physics(
         Has<Flying>,
     )>,
 ) {
-    if physics_time.is_paused() {
-        return;
-    }
-    for (mut position, mut motion, mut state, body, movement, auto_jump, flying) in &mut characters
-    {
-        // Spawns, respawns and benchmark moves write `Position` directly.
+    for (transform, mut motion, mut state, body, movement, auto_jump, flying) in &mut characters {
+        let position = transform.translation;
+        // Spawns, respawns and developer tools write the transform directly.
         if motion
             .written
-            .is_none_or(|written| written.distance_squared(position.0) > 1e-6)
+            .is_none_or(|written| written.distance_squared(position) > 1e-6)
         {
-            motion.position = position.0.as_dvec3();
-            if world.collision_ready(position.0) {
+            motion.position = position.as_dvec3();
+            if world.collision_ready(position) {
                 // Saved positions use f32. Restoring them as f64 can put the feet
                 // just inside a supporting face, which axis clipping cannot stop.
                 // Recover only penetration within one f32 rounding interval.
@@ -527,37 +578,49 @@ fn character_physics(
             motion.bob = 0.0;
             motion.previous_bob = 0.0;
         }
+        motion.previous = motion.position;
+        motion.previous_eye = motion.eye;
         if !world.collision_ready(motion.position.as_vec3()) {
             motion.velocity = DVec3::ZERO;
-            motion.written = Some(position.0);
+            motion.written = Some(position);
             continue;
         }
-        motion.elapsed += time.delta_secs();
-        let mut ticks = 0;
-        while motion.elapsed >= TICK {
-            motion.elapsed -= TICK;
-            motion.previous = motion.position;
-            motion.previous_eye = motion.eye;
-            if ticks < MAX_TICKS_PER_STEP {
-                tick(
-                    &world,
-                    &mut terrain,
-                    &mut motion,
-                    &mut state,
-                    body,
-                    movement,
-                    auto_jump,
-                    flying,
-                );
-                ticks += 1;
-            }
+        tick(
+            &world,
+            &mut terrain,
+            &mut motion,
+            &mut state,
+            body,
+            movement,
+            auto_jump,
+            flying,
+        );
+        motion.written = Some(position);
+    }
+}
+
+/// Present fixed-step motion every frame; mouse-driven rotation stays untouched.
+fn interpolate_characters(
+    time: Res<Time<Fixed>>,
+    mut characters: Query<(&mut Transform, &mut CharacterMotion)>,
+) {
+    let alpha = time.overstep_fraction();
+    for (mut transform, mut motion) in &mut characters {
+        if motion
+            .written
+            .is_none_or(|written| written.distance_squared(transform.translation) > 1e-6)
+        {
+            continue;
         }
-        let eased = motion
+        motion.elapsed = alpha * TICK;
+        let position = motion
             .previous
-            .lerp(motion.position, (motion.elapsed / TICK) as f64)
+            .lerp(motion.position, alpha as f64)
             .as_vec3();
-        position.0 = eased;
-        motion.written = Some(eased);
+        if transform.translation != position {
+            transform.translation = position;
+        }
+        motion.written = Some(position);
     }
 }
 
@@ -890,4 +953,3 @@ fn should_auto_jump(terrain: &Terrain, aabb: Aabb, wish: DVec3) -> bool {
         && !terrain.collides(&ahead.moved(DVec3::Y * AUTO_JUMP_HEIGHT))
         && !terrain.collides(&aabb.moved(DVec3::Y * AUTO_JUMP_HEIGHT))
 }
-

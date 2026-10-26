@@ -11,7 +11,6 @@ use crate::{
     settings::GameSettingsPlugin,
     voxel::VoxelPlugin,
 };
-use avian3d::prelude::PhysicsPlugins;
 use bevy::{
     feathers::{FeathersPlugins, dark_theme::create_dark_theme, theme::UiTheme},
     prelude::*,
@@ -74,7 +73,6 @@ impl Plugin for HollowPlugin {
             plugins,
             FeathersPlugins,
             GameSettingsPlugin,
-            PhysicsPlugins::default(),
             VoxelPlugin::default(),
             GamePlugin,
         ));

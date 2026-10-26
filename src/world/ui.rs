@@ -463,13 +463,11 @@ pub(super) fn saving(commands: &mut Commands) {
 pub(super) fn save_error(
     mut commands: Commands,
     save: Res<SaveState>,
-    mut physics: ResMut<Time<Physics>>,
     mut virtual_time: ResMut<Time<Virtual>>,
     mut cursors: Query<&mut CursorOptions>,
     overlays: Query<Entity, With<SaveOverlay>>,
     players: Query<(), With<Player>>,
 ) {
-    physics.pause();
     virtual_time.pause();
     for entity in &overlays {
         commands.entity(entity).despawn();

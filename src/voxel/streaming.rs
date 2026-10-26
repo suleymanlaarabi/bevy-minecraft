@@ -4,8 +4,7 @@ use super::{
     lighting::LitEdits,
     render::build::{ChunkSections, NeedsChunkBuild},
 };
-use crate::{game::GameState, spatial::GameLayer};
-use avian3d::prelude::*;
+use crate::game::GameState;
 use bevy::{
     platform::collections::{HashMap, HashSet, hash_map::Entry},
     prelude::*,
@@ -89,11 +88,9 @@ pub(super) fn track_chunk_arrival(
     event: On<Add<VoxelChunk>>,
     chunks: Query<&VoxelChunk>,
     mut arrivals: ResMut<ChunkArrivals>,
-    mut colliders: ResMut<super::collision::ColliderRequests>,
 ) {
     if let Ok(chunk) = chunks.get(event.entity) {
         arrivals.pending.push(chunk.position);
-        colliders.0.insert(event.entity);
     }
 }
 
@@ -340,7 +337,6 @@ fn spawn_chunk(
         return;
     };
     voxels.dirty_sections = ALL_SECTIONS;
-    voxels.collider_dirty = true;
     let lit_edits = !voxels.native_edits.is_empty();
     let origin = position * CHUNK_SIZE;
     let mut entity = commands.entity(chunk_entity);
@@ -348,15 +344,6 @@ fn spawn_chunk(
         VoxelChunk { position },
         voxels,
         Transform::from_xyz(origin.x as f32, 0.0, origin.y as f32),
-        CollisionLayers::new(
-            GameLayer::World,
-            [
-                GameLayer::Default,
-                GameLayer::Player,
-                GameLayer::DroppedItem,
-            ],
-        ),
-        Friction::new(0.8),
         Visibility::default(),
         AwaitingNeighbors,
         hollow_worldgen::runtime::ChunkRetention,
@@ -469,7 +456,6 @@ pub(crate) fn refresh_neighbors_of_spawned(
     }
 }
 
-
 pub(crate) fn cleanup_removed_chunk(
     event: On<Remove<ChunkVoxels>>,
     chunks: Query<(&VoxelChunk, &ChunkVoxels)>,
@@ -521,7 +507,6 @@ pub(super) fn cleanup_voxel_world(
         *world.resource_mut::<super::lighting::BlockLightEdits>() = default();
         *world.resource_mut::<StreamState>() = StreamState::default();
         *world.resource_mut::<ChunkArrivals>() = ChunkArrivals::default();
-        *world.resource_mut::<super::collision::ColliderRequests>() = default();
     });
 }
 
@@ -541,9 +526,5 @@ fn unload_chunk(commands: &mut Commands, entity: Entity) {
         AwaitingNeighbors,
         LitEdits,
         super::edits::EditedChunk,
-        super::collision::ColliderBuild,
-        super::collision::PartialCollider,
-        Collider,
-        RigidBody,
     )>();
 }
