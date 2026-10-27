@@ -28,6 +28,7 @@ pub enum SurvivalSystems {
     Consume,
     Metabolism,
     Damage,
+    Reactions,
 }
 
 pub(crate) fn player_alive(players: Query<&Health, With<crate::player::Player>>) -> bool {
@@ -63,8 +64,9 @@ impl Plugin for SurvivalPlugin {
                     SurvivalSystems::Consume.after(SurvivalSystems::Environment),
                     SurvivalSystems::Metabolism.after(SurvivalSystems::Consume),
                     SurvivalSystems::Damage.after(SurvivalSystems::Metabolism),
+                    SurvivalSystems::Reactions.after(SurvivalSystems::Damage),
                 )
-                    .run_if(crate::simulation::running),
+                    .in_set(crate::simulation::SimulationSystems::Actors),
             )
             .add_systems(
                 FixedUpdate,
@@ -81,6 +83,8 @@ impl Plugin for SurvivalPlugin {
                         .chain()
                         .in_set(SurvivalSystems::Metabolism),
                     damage::resolve.in_set(SurvivalSystems::Damage),
+                    (metabolism::damage_response, consume::damage_response)
+                        .in_set(SurvivalSystems::Reactions),
                 ),
             )
             .add_systems(OnEnter(InventoryState::Open), consume::cancel)

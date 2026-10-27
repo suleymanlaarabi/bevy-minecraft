@@ -193,7 +193,7 @@ pub(super) fn update_sky_state(
     time_of_day: Res<TimeOfDay>,
     fixed: Res<Time<Fixed>>,
     phase: Res<State<crate::world::WorldSessionPhase>>,
-    paused: Option<Res<crate::character::SimulationPaused>>,
+    paused: Option<Res<crate::simulation::SimulationPaused>>,
     mut sky: ResMut<SkyState>,
 ) {
     let mut presented = *time_of_day;

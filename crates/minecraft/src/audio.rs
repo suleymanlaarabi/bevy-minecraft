@@ -31,7 +31,7 @@ impl Plugin for GameAudioPlugin {
                     .after(crate::character::CharacterSystems)
                     .run_if(crate::world::playing)
                     .run_if(crate::survival::player_alive)
-                    .run_if(not(resource_exists::<crate::character::SimulationPaused>)),
+                    .run_if(not(resource_exists::<crate::simulation::SimulationPaused>)),
             );
     }
 }

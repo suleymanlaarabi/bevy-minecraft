@@ -41,13 +41,17 @@ impl FixedPosition {
     }
 }
 
+/// Shared render sample; suspending this set also freezes all controller pose interpolation.
+#[derive(Resource, Default, PartialEq)]
+pub struct InterpolationAlpha(pub f32);
+
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InterpolatePosition;
 
 pub struct FixedPositionPlugin;
 impl Plugin for FixedPositionPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.init_resource::<InterpolationAlpha>().add_systems(
             RunFixedMainLoop,
             interpolate
                 .in_set(InterpolatePosition)
@@ -56,13 +60,21 @@ impl Plugin for FixedPositionPlugin {
     }
 }
 
-fn interpolate(time: Res<Time<Fixed>>, mut bodies: Query<(&mut FixedPosition, &mut Transform)>) {
-    let alpha = time.overstep_fraction() as f64;
+fn interpolate(
+    time: Res<Time<Fixed>>,
+    mut interpolation: ResMut<InterpolationAlpha>,
+    mut bodies: Query<(&mut FixedPosition, &mut Transform)>,
+) {
+    let alpha = time.overstep_fraction();
+    interpolation.set_if_neq(InterpolationAlpha(alpha));
     for (mut position, mut transform) in &mut bodies {
         if position.externally_moved(&transform) {
             continue;
         }
-        let translation = position.previous.lerp(position.current, alpha).as_vec3();
+        let translation = position
+            .previous
+            .lerp(position.current, alpha as f64)
+            .as_vec3();
         if transform.translation != translation {
             transform.translation = translation;
         }

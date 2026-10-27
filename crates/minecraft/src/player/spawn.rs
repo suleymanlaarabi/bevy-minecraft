@@ -112,7 +112,6 @@ pub(super) fn finish_spawn_loading(
     mut commands: Commands,
     loading: VoxelLoading,
     spawns: Query<(Entity, &Transform), With<PendingSpawn>>,
-    screens: Query<Entity, With<LoadingScreen>>,
     session: Option<Res<crate::world::WorldSession>>,
     mut cursor: ResMut<crate::inventory::InventoryCursor>,
     mut next_phase: ResMut<NextState<crate::world::WorldSessionPhase>>,
@@ -129,9 +128,7 @@ pub(super) fn finish_spawn_loading(
             continue;
         }
         commands.entity(entity).despawn();
-        for screen in &screens {
-            commands.entity(screen).despawn();
-        }
+        commands.despawn_all::<With<LoadingScreen>>();
         let saved = session.as_ref().and_then(|s| s.resume.player.as_ref());
         spawn_player(&mut commands, transform.translation, saved);
         if session.is_some() {

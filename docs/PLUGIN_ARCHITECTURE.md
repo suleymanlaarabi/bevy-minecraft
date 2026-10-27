@@ -4,6 +4,9 @@ This refactor is **in progress**. The shared services described below are used b
 the Minecraft application; they are not a second, disconnected engine. The full
 architecture plan is not implemented yet. The content catalog and fluid services now accept plugin-defined blocks and states.
 See [Content and fluid plugins](CONTENT_AND_FLUID_PLUGINS.md) for the implemented API and its boundaries.
+The subsequent [actor composition refactor](ECS_COMPOSITION.md) adds shared fixed-step
+positions and interpolation, separates damage reactions, and uses native hierarchy
+and bulk cleanup APIs. Its scope, tradeoffs and code accounting are reported there.
 
 ## Implemented boundaries
 
@@ -11,7 +14,7 @@ See [Content and fluid plugins](CONTENT_AND_FLUID_PLUGINS.md) for the implemente
 | --- | --- |
 | `hollow-core` | Typed numeric keys, `VoxelCell`, coordinates, copy-on-write sections, cuboid faces, bounds and the generic 32-bit terrain codec. |
 | `hollow-engine` | Generic chunk components, read access, checked terrain writes, sparse terrain indexes, pending edits, block factories, ray traversal and typed entity work queues. |
-| `hollow-features` | Statically dispatched stack operations, contiguous copy-on-write inventories and shared elementary joint clips. |
+| `hollow-features` | Statically dispatched stack operations, contiguous copy-on-write inventories, shared elementary joint clips and fixed-step position interpolation. |
 | `hollow-minecraft` | The existing game, its content policies, world generator adapter, renderer, player, survival, menus and settings. |
 | `hollow` | Executable composition entry point. |
 
@@ -177,8 +180,9 @@ refactor must not be reported as complete or as a demonstrated code reduction.
 4. Generalize slot ownership, screen sessions, recipe processing and persistence
    registration. Generic slot operations alone do not make custom machine screens
    and saved components automatically supported.
-5. Extract reusable actor, health, effect, audio and sky services. Their current
-   implementation is isolated in the Minecraft package, not yet decomposed.
+5. Expand actor, health, effect, audio and sky services beyond the shared position
+   capability and separated damage reactions. Their content rules still belong to
+   the Minecraft package.
 6. Finish model assets and animation composition, then add the resin mixer and
    fluid example using only public APIs. Keep it disabled in the default game.
 7. Meet the production-code reduction target and repeat the same static access

@@ -445,7 +445,6 @@ fn resume_session(
     mut cursors: Query<&mut CursorOptions>,
     mut save: ResMut<SaveState>,
     mut commands: Commands,
-    overlays: Query<Entity, With<ui::SaveOverlay>>,
 ) {
     generator.runtime.resume();
     virtual_time.unpause();
@@ -457,9 +456,7 @@ fn resume_session(
             CursorGrabMode::Locked
         };
     }
-    for entity in &overlays {
-        commands.entity(entity).despawn();
-    }
+    commands.despawn_all::<With<ui::SaveOverlay>>();
     save.error = None;
 }
 

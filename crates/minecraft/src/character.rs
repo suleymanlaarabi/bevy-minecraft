@@ -208,18 +208,46 @@ pub struct GameCharacter;
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct CharacterSystems;
 
-/// Development tools can suspend motion without pausing world streaming.
-#[derive(Resource)]
-pub(crate) struct SimulationPaused;
-
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.configure_sets(
+            FixedUpdate,
+            CharacterSystems.in_set(crate::simulation::SimulationSystems::Actors),
+        )
+        .add_systems(
             FixedUpdate,
             character_physics
                 .in_set(CharacterSystems)
                 .run_if(crate::simulation::running),
+        )
+        .add_systems(
+            FixedUpdate,
+            damage_response.in_set(crate::survival::SurvivalSystems::Reactions),
         );
+    }
+}
+
+/// Controllers consume accepted impacts without participating in damage resolution.
+fn damage_response(
+    mut impacts: MessageReader<crate::survival::DamageApplied>,
+    mut motion: Query<&mut CharacterMotion>,
+    mut movement: Query<&mut CharacterMovement>,
+) {
+    for impact in impacts.read() {
+        if let Ok(mut motion) = motion.get_mut(impact.target) {
+            if impact.fatal {
+                motion.velocity = DVec3::ZERO;
+            } else if impact.impulse != Vec3::ZERO {
+                motion.velocity.x *= 0.5;
+                motion.velocity.z *= 0.5;
+                motion.velocity += impact.impulse.as_dvec3();
+            }
+        }
+        if impact.fatal
+            && let Ok(mut movement) = movement.get_mut(impact.target)
+        {
+            movement.set_if_neq(CharacterMovement::default());
+        }
     }
 }
 

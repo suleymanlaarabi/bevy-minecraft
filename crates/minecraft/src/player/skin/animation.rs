@@ -8,7 +8,7 @@ use crate::{
 use bevy::window::PrimaryWindow;
 use std::f32::consts::{PI, TAU};
 
-fn part_transform(part: usize, swing: f32, head: Vec2, crouch: bool) -> Transform {
+fn part_transform(part: u8, swing: f32, head: Vec2, crouch: bool) -> Transform {
     let pivot = match part {
         0 | 1 => Vec3::new(0., 24., 0.),
         2 => Vec3::new(-6., 24., 0.),
@@ -40,7 +40,7 @@ pub(super) fn animate_rigs(
     window: Single<&Window, With<PrimaryWindow>>,
     portrait: Single<(&ComputedNode, &UiGlobalTransform), With<SkinPortrait>>,
     mut rigs: Query<(&SkinRig, &mut Transform), Without<SkinPart>>,
-    mut parts: Query<(&SkinPart, &mut Transform), Without<SkinRig>>,
+    mut parts: Query<(&SkinPart, &ChildOf, &mut Transform), Without<SkinRig>>,
 ) {
     let (node, transform) = *portrait;
     let (_, _, center) = transform.to_scale_angle_translation();
@@ -55,15 +55,15 @@ pub(super) fn animate_rigs(
             });
         }
     }
-    for (part, mut transform) in &mut parts {
-        if rigs.get(part.rig).is_ok_and(|(rig, _)| rig.preview) {
+    for (part, parent, mut transform) in &mut parts {
+        if rigs.get(parent.parent()).is_ok_and(|(rig, _)| rig.preview) {
             transform.set_if_neq(part_transform(part.part, 0., head, false));
         }
     }
 }
 
 // Rig roots and mesh parts are genuinely disjoint entity sets; parts read their rig
-// through `SkinPart::rig`, so the pass is linear in parts.
+// through `ChildOf`, so the pass is linear in parts.
 pub(super) fn animate_world(
     time: Res<Time>,
     view: Res<PlayerView>,
@@ -73,7 +73,10 @@ pub(super) fn animate_world(
         (&mut SkinRig, &mut Transform, &mut Visibility),
         (Without<SkinPart>, Without<FirstPersonArm>),
     >,
-    mut parts: Query<(&SkinPart, &mut Transform), (Without<SkinRig>, Without<FirstPersonArm>)>,
+    mut parts: Query<
+        (&SkinPart, &ChildOf, &mut Transform),
+        (Without<SkinRig>, Without<FirstPersonArm>),
+    >,
 ) {
     let (motion, character, body) = *player;
     let hidden = *view == PlayerView::FirstPerson;
@@ -107,8 +110,8 @@ pub(super) fn animate_world(
     let crouching = character.pose == Pose::Crouching;
     let head = Vec2::new(0., -camera.pitch);
     let amplitude = (speed * 3.).min(0.7);
-    for (part, mut part_pose) in &mut parts {
-        let Ok((rig, ..)) = rigs.get(part.rig) else {
+    for (part, parent, mut part_pose) in &mut parts {
+        let Ok((rig, ..)) = rigs.get(parent.parent()) else {
             continue;
         };
         if !rig.preview {

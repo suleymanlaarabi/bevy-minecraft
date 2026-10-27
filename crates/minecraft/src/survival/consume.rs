@@ -220,3 +220,14 @@ pub(super) fn tick(
         using.0 = None;
     }
 }
+
+pub(super) fn damage_response(
+    mut impacts: MessageReader<super::DamageApplied>,
+    mut actors: Query<&mut UsingItem>,
+) {
+    for impact in impacts.read().filter(|impact| impact.fatal) {
+        if let Ok(mut using) = actors.get_mut(impact.target) {
+            using.0 = None;
+        }
+    }
+}

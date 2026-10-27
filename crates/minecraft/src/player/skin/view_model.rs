@@ -2,6 +2,7 @@
 use super::*;
 use crate::player::PlayerCamera;
 use bevy::{camera::CameraProjection, render::render_resource::Extent3d, window::PrimaryWindow};
+use hollow_features::motion::InterpolationAlpha;
 use std::{f32::consts::PI, sync::OnceLock};
 
 const SWING_TICK_DURATION: f32 = 1. / 20.;
@@ -272,6 +273,7 @@ pub(super) fn animate_first_person(
     held: Single<Ref<HeldItem>>,
     using: Single<Ref<crate::survival::UsingItem>, With<crate::player::Player>>,
     fixed: Res<Time<Fixed>>,
+    interpolation: Res<InterpolationAlpha>,
     mut arms: Query<
         (&mut Transform, &mut Visibility, Option<&HeldItem>),
         (With<FirstPersonRoot>, Without<ArmView>),
@@ -297,7 +299,7 @@ pub(super) fn animate_first_person(
         if shown
             && (became_visible
                 || swing.is_changed()
-                || fixed.is_changed()
+                || interpolation.is_changed()
                 || motion.is_changed()
                 || view.is_changed()
                 || held.is_changed()
@@ -331,9 +333,7 @@ pub(super) fn animate_first_person(
                     },
                 );
             }
-            transform.set_if_neq(
-                crate::player::view_bob::pose(&motion, fixed.overstep_fraction()) * pose,
-            );
+            transform.set_if_neq(crate::player::view_bob::pose(&motion, interpolation.0) * pose);
         }
     }
     for mut visibility in &mut overlays {

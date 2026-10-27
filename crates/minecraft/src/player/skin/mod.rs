@@ -68,9 +68,8 @@ struct SkinRig {
 }
 #[derive(Component)]
 struct SkinPart {
-    rig: Entity,
-    part: usize,
-    layer: usize,
+    part: u8,
+    layer: u8,
     armor: bool,
 }
 #[derive(Component)]

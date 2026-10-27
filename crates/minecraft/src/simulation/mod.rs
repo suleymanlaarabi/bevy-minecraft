@@ -16,6 +16,10 @@ use std::time::Duration;
 #[derive(Resource, Default, Clone, Copy)]
 pub struct GameplayClock(pub u64);
 
+/// Suspend fixed gameplay while leaving terrain streaming and loading operational.
+#[derive(Resource)]
+pub(crate) struct SimulationPaused;
+
 #[derive(Component)]
 #[component(storage = "SparseSet")]
 pub struct Simulating;
@@ -102,18 +106,6 @@ impl Plugin for GameplaySimulationPlugin {
                     .chain()
                     .run_if(running),
             )
-            .configure_sets(
-                FixedUpdate,
-                (
-                    crate::character::CharacterSystems,
-                    crate::survival::SurvivalSystems::Prepare,
-                    crate::survival::SurvivalSystems::Environment,
-                    crate::survival::SurvivalSystems::Consume,
-                    crate::survival::SurvivalSystems::Metabolism,
-                    crate::survival::SurvivalSystems::Damage,
-                )
-                    .in_set(SimulationSystems::Actors),
-            )
             .add_systems(Startup, cap_virtual_time)
             .add_systems(
                 OnEnter(crate::game::GameState::Game),
@@ -150,7 +142,7 @@ impl Plugin for GameplaySimulationPlugin {
 }
 pub(crate) fn running(
     phase: Option<Res<State<crate::world::WorldSessionPhase>>>,
-    paused: Option<Res<crate::character::SimulationPaused>>,
+    paused: Option<Res<crate::simulation::SimulationPaused>>,
 ) -> bool {
     crate::world::playing(phase) && paused.is_none()
 }
@@ -172,7 +164,7 @@ fn clear(
     *region = default();
     *waits = default();
     *diagnostics = default();
-    commands.remove_resource::<crate::character::SimulationPaused>();
+    commands.remove_resource::<crate::simulation::SimulationPaused>();
 }
 fn reset_budget(
     mut budget: ResMut<SimulationBudget>,

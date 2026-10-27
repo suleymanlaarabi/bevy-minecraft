@@ -5,11 +5,8 @@ use pumpkin_data::{
     tag::{self, Taggable},
 };
 
-use super::{ActiveEffects, ArmorStats, DamageState, Health, Nutrition, UsingItem};
-use crate::{
-    character::{CharacterMotion, CharacterMovement},
-    inventory::{ARMOR_START, PlayerInventory},
-};
+use super::{ActiveEffects, ArmorStats, DamageState, Health};
+use crate::inventory::{ARMOR_START, PlayerInventory};
 
 /// All damage enters through this buffered request, including environmental damage.
 #[derive(Message, Clone, Debug)]
@@ -42,6 +39,8 @@ pub struct DamageApplied {
     pub attacker: Option<Entity>,
     pub source: &'static DamageType,
     pub lost_health: f32,
+    /// Resolved knockback, after cooldown and equipment resistance.
+    pub impulse: Vec3,
     pub fatal: bool,
 }
 
@@ -93,10 +92,6 @@ pub(super) fn resolve(
             &ActiveEffects,
             &mut ArmorStats,
             Option<&mut PlayerInventory>,
-            Option<&mut CharacterMotion>,
-            Option<&mut Nutrition>,
-            Option<&mut CharacterMovement>,
-            Option<&mut UsingItem>,
         ),
         With<crate::simulation::Simulating>,
     >,
@@ -126,17 +121,8 @@ pub(super) fn resolve(
         if requested_amount == 0.0 {
             continue;
         }
-        let Ok((
-            mut health,
-            mut state,
-            effects,
-            mut armor,
-            inventory,
-            motion,
-            nutrition,
-            movement,
-            using,
-        )) = actors.get_mut(request.target)
+        let Ok((mut health, mut state, effects, mut armor, inventory)) =
+            actors.get_mut(request.target)
         else {
             continue;
         };
@@ -186,6 +172,8 @@ pub(super) fn resolve(
         state.flash_ticks = 10;
         state.source = source.id;
         state.direction = request.impulse.normalize_or_zero().to_array();
+        // Durability stays in the ordered transaction: breaking armor must affect
+        // the next request in this same batch, including knockback resistance.
         if let Some(mut inventory) = inventory
             && armor_applies
         {
@@ -196,35 +184,17 @@ pub(super) fn resolve(
             });
             armor.set_if_neq(equipment(&inventory));
         }
-        if let Some(mut nutrition) = nutrition {
-            nutrition.exhaust(source.exhaustion);
-        }
-        if let Some(mut motion) = motion {
-            if fresh && !source.has_tag(&tag::DamageType::MINECRAFT_NO_KNOCKBACK) {
-                let impulse = request.impulse * (1.0 - armor.knockback_resistance);
-                if impulse != Vec3::ZERO {
-                    motion.velocity.x *= 0.5;
-                    motion.velocity.z *= 0.5;
-                    motion.velocity += impulse.as_dvec3();
-                }
-            }
-            if !health.alive() {
-                motion.velocity = bevy::math::DVec3::ZERO;
-            }
-        }
-        if !health.alive() {
-            if let Some(mut movement) = movement {
-                *movement = CharacterMovement::default();
-            }
-            if let Some(mut using) = using {
-                using.0 = None;
-            }
-        }
+        let impulse = if fresh && !source.has_tag(&tag::DamageType::MINECRAFT_NO_KNOCKBACK) {
+            request.impulse * (1.0 - armor.knockback_resistance)
+        } else {
+            Vec3::ZERO
+        };
         applied.write(DamageApplied {
             target: request.target,
             attacker: request.attacker,
             source,
             lost_health,
+            impulse,
             fatal: !health.alive(),
         });
     }

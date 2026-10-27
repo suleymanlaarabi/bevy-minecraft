@@ -262,11 +262,7 @@ fn prepare_views(
         }) {
             continue;
         }
-        if let Some(existing) = existing {
-            for view in existing.iter() {
-                commands.entity(view).despawn();
-            }
-        }
+        commands.entity(entity).despawn_related::<BlockViews>();
         cache.prepare(&mut meshes, &mut materials, &assets, &mut clips);
         let info = state_behavior(state.0);
         let half = info.chest_half as usize;

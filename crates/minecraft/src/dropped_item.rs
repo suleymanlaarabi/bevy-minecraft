@@ -419,15 +419,10 @@ fn pickup_dropped_items(
     }
 }
 
-fn cleanup_expired_drops(
-    drops: Query<(Entity, &DroppedItem), With<crate::simulation::Simulating>>,
-    mut commands: Commands,
-) {
-    for (entity, drop) in &drops {
-        if drop.remaining.is_zero() {
-            commands.entity(entity).despawn();
-        }
-    }
+fn cleanup_expired_drops(mut commands: Commands) {
+    commands.despawn_all_where::<&DroppedItem, With<crate::simulation::Simulating>>(|drop| {
+        drop.remaining.is_zero()
+    });
 }
 
 fn advance_drop_timers(

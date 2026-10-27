@@ -263,3 +263,15 @@ pub(super) fn hazards(
         }
     }
 }
+
+/// Exhaustion follows accepted damage, independently of movement or inventory capabilities.
+pub(super) fn damage_response(
+    mut impacts: MessageReader<super::DamageApplied>,
+    mut actors: Query<&mut Nutrition>,
+) {
+    for impact in impacts.read() {
+        if let Ok(mut nutrition) = actors.get_mut(impact.target) {
+            nutrition.exhaust(impact.source.exhaustion);
+        }
+    }
+}

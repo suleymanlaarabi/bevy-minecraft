@@ -187,7 +187,7 @@ fn setup_headless_targets(
 }
 
 fn reset_voxel_benchmark(mut benchmark: ResMut<VoxelBenchmark>, mut commands: Commands) {
-    commands.remove_resource::<crate::character::SimulationPaused>();
+    commands.remove_resource::<crate::simulation::SimulationPaused>();
     *benchmark = VoxelBenchmark {
         simplified: benchmark.simplified,
         ..default()
@@ -230,7 +230,7 @@ fn configure_voxel_benchmark(
         for mut light in &mut lights {
             light.shadow_maps_enabled = false;
         }
-        commands.insert_resource(crate::character::SimulationPaused);
+        commands.insert_resource(crate::simulation::SimulationPaused);
         *offsets = StreamOffsets::new(21);
         stream_state.center = None;
         info!("voxel benchmark simplified: radius=21, AA=off, shadows=off, physics=paused");

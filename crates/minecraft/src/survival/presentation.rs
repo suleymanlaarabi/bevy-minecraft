@@ -150,13 +150,12 @@ pub(super) fn finish_respawn(
         {
             continue;
         }
+        commands.entity(loader).despawn();
         let Ok((mut transform, mut fixed_position, body, point)) = players.get_mut(target.0) else {
-            commands.entity(loader).despawn();
             continue;
         };
         let Some(safe_position) = super::placement::respawn(&world, position.translation, body)
         else {
-            commands.entity(loader).despawn();
             crate::world::report_load_error(
                 &mut commands,
                 "No safe respawn position near the saved spawn point.".into(),
@@ -174,6 +173,5 @@ pub(super) fn finish_respawn(
             crate::character::CharacterState::default(),
             UsingItem::default(),
         ));
-        commands.entity(loader).despawn();
     }
 }

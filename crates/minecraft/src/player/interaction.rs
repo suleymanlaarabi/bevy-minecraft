@@ -8,6 +8,7 @@ use bevy::{
     prelude::*,
     transform::TransformSystems,
 };
+use hollow_features::motion::InterpolationAlpha;
 
 use crate::{
     character::CharacterMotion,
@@ -148,14 +149,14 @@ fn spawn_breaking_overlay(mut commands: Commands, assets: Res<BreakingAssets>) {
 
 /// Rays start at the player's eyes: third-person cameras sit behind or in front of them.
 fn update_block_target(
-    fixed: Res<Time<Fixed>>,
+    interpolation: Res<InterpolationAlpha>,
     player: Single<(&Transform, &CharacterMotion), With<Player>>,
     camera: Single<(&PlayerCamera, &mut BlockTargetState)>,
     voxel_world: VoxelWorld,
 ) {
     let (transform, motion) = *player;
     let (camera, mut target) = camera.into_inner();
-    let origin = transform.translation + Vec3::Y * motion.eye_offset(fixed.overstep_fraction());
+    let origin = transform.translation + Vec3::Y * motion.eye_offset(interpolation.0);
     let look = camera.look(transform.rotation) * Dir3::NEG_Z;
     target.0 = targeted_state(origin, look, |position| voxel_world.state(position));
 }

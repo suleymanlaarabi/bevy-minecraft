@@ -476,13 +476,10 @@ pub(super) fn save_error(
     save: Res<SaveState>,
     mut virtual_time: ResMut<Time<Virtual>>,
     mut cursors: Query<&mut CursorOptions>,
-    overlays: Query<Entity, With<SaveOverlay>>,
     players: Query<(), With<Player>>,
 ) {
     virtual_time.pause();
-    for entity in &overlays {
-        commands.entity(entity).despawn();
-    }
+    commands.despawn_all::<With<SaveOverlay>>();
     for mut cursor in &mut cursors {
         cursor.visible = true;
         cursor.grab_mode = CursorGrabMode::None;
@@ -514,7 +511,6 @@ fn retry(
     mut next: ResMut<NextState<WorldSessionPhase>>,
     mut save: ResMut<SaveState>,
     mut commands: Commands,
-    overlays: Query<Entity, With<SaveOverlay>>,
     players: Query<(), With<Player>>,
     session: Option<Res<WorldSession>>,
     mut browser: ResMut<Browser>,
@@ -530,9 +526,7 @@ fn retry(
         }
         return;
     }
-    for entity in &overlays {
-        commands.entity(entity).despawn();
-    }
+    commands.despawn_all::<With<SaveOverlay>>();
     save.error = None;
     if save.exit_requested {
         next.set(WorldSessionPhase::Saving);

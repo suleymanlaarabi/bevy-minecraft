@@ -270,7 +270,6 @@ pub(super) fn asset_events(
 pub(super) fn build_visual(
     mut commands: Commands,
     mut held: Query<(Entity, &mut DesiredItem, &mut HeldItem), With<BuildVisual>>,
-    parts: Query<(Entity, &ChildOf), With<HeldItemPart>>,
     mut assets: ResMut<HeldItemAssets>,
     manifests: Res<Assets<HeldManifest>>,
     server: Res<AssetServer>,
@@ -310,11 +309,8 @@ pub(super) fn build_visual(
         } else {
             None
         };
-        for (entity, parent) in &parts {
-            if parent.parent() == root {
-                commands.entity(entity).despawn();
-            }
-        }
+        // This presentation root owns its complete mesh hierarchy.
+        commands.entity(root).despawn_children();
         held.item = desired.item;
         desired.rebuild = false;
         if let Some(visual) = visual {

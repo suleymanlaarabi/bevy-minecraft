@@ -28,42 +28,34 @@ fn spawn_rig(commands: &mut Commands, assets: &SkinAssets, preview: bool, parent
     }
     let render_layer = if preview { PREVIEW_LAYER } else { 0 };
     for part in 0..6 {
-        for layer in 0..2 {
-            commands.spawn((
-                SkinPart {
-                    rig,
-                    part,
-                    layer,
-                    armor: false,
-                },
-                Mesh3d(assets.classic[layer][part].clone()),
-                MeshMaterial3d(if layer == 0 {
-                    assets.base.clone()
-                } else {
-                    assets.outer.clone()
-                }),
-                Transform::default(),
-                ChildOf(rig),
-                RenderLayers::layer(render_layer),
-            ));
-        }
         // Leggings need their own shell, underneath boots and chest armor.
-        for layer in 0..2 {
+        let meshes = [
+            &assets.classic[0][part],
+            &assets.classic[1][part],
+            &assets.armor_meshes[part],
+            &assets.leggings_meshes[part],
+        ];
+        for (index, mesh) in meshes.into_iter().enumerate() {
+            let armor = index >= 2;
+            let layer = (index % 2) as u8;
             commands.spawn((
                 SkinPart {
-                    rig,
-                    part,
+                    // Six body parts and two layers fit their existing mesh indices.
+                    part: part as u8,
                     layer,
-                    armor: true,
+                    armor,
                 },
-                Mesh3d(if layer == 0 {
-                    assets.armor_meshes[part].clone()
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(if !armor && layer == 1 {
+                    assets.outer.clone()
                 } else {
-                    assets.leggings_meshes[part].clone()
+                    assets.base.clone()
                 }),
-                MeshMaterial3d(assets.base.clone()),
-                Visibility::Hidden,
-                Transform::default(),
+                if armor {
+                    Visibility::Hidden
+                } else {
+                    Visibility::Inherited
+                },
                 ChildOf(rig),
                 RenderLayers::layer(render_layer),
             ));
@@ -179,9 +171,8 @@ pub(super) fn spawn_world_rig(
         for layer in 0..2 {
             commands.spawn((
                 SkinPart {
-                    rig: arm,
                     part: 2,
-                    layer,
+                    layer: layer as u8,
                     armor: false,
                 },
                 Mesh3d(assets.classic[layer][2].clone()),
@@ -190,7 +181,6 @@ pub(super) fn spawn_world_rig(
                 } else {
                     assets.arm_outer.clone()
                 }),
-                Transform::default(),
                 ChildOf(arm),
                 RenderLayers::layer(ARM_LAYER),
                 NotShadowCaster,
