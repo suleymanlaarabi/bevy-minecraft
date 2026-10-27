@@ -41,6 +41,7 @@ struct BreakProgress {
     slot: usize,
     tool: Option<ItemStack>,
     progress: f32,
+    hit_elapsed: f32,
 }
 
 #[derive(Component, Default)]
@@ -215,6 +216,7 @@ fn update_breaking(
             slot: selection.0,
             tool,
             progress: 0.0,
+            hit_elapsed: 0.25,
         });
     }
     let progress = breaking.0.as_mut().unwrap();
@@ -223,6 +225,15 @@ fn update_breaking(
     } else {
         progress.progress + time.delta_secs() / outcome.duration
     };
+    progress.hit_elapsed += time.delta_secs();
+    if progress.progress < 1.0 && progress.hit_elapsed >= 0.25 {
+        progress.hit_elapsed %= 0.25;
+        commands.trigger(crate::audio::Sound::block(
+            state.kind(),
+            crate::audio::BlockSound::Hit,
+            target.destroy,
+        ));
+    }
     if progress.progress < 1.0 || voxel_world.state(target.destroy) != Some(state) {
         return;
     }

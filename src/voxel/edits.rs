@@ -166,6 +166,43 @@ pub(crate) fn edit_batch(
         crate::inventory::PlayerInventory::edit(&mut inventory, |inventory| {
             inventory.damage_tool(tool.slot, outcome.damage)
         });
+        if tool.expected.is_some() && inventory.slot(tool.slot).is_none() {
+            commands.trigger(crate::audio::Sound::event("entity.item.break"));
+        }
+    }
+    // Emit once per accepted action, including paired blocks and support failures.
+    if let Some(edit) = event.edits.first() {
+        use crate::audio::{BlockSound, Sound};
+        let sound = if let Some(harvest) = event.harvest {
+            Some(Sound::block(
+                harvest.state.kind(),
+                BlockSound::Break,
+                harvest.position,
+            ))
+        } else if event.consume.is_some() {
+            Some(Sound::block(
+                edit.state.kind(),
+                BlockSound::Place,
+                edit.position,
+            ))
+        } else {
+            let old = crate::block_behavior::catalog::state_behavior(edit.expected);
+            let new = crate::block_behavior::catalog::state_behavior(edit.state);
+            (old.open != new.open).then(|| {
+                Sound::block(
+                    edit.state.kind(),
+                    if new.open {
+                        BlockSound::Open
+                    } else {
+                        BlockSound::Close
+                    },
+                    edit.position,
+                )
+            })
+        };
+        if let Some(sound) = sound {
+            commands.trigger(sound);
+        }
     }
     // Neighbor rules see the complete batch, never an intermediate half-door.
     if let Some(tool) = event.tool {

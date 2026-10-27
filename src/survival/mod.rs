@@ -57,7 +57,7 @@ impl Plugin for SurvivalPlugin {
             .add_message::<DamageRequest>()
             .add_message::<DamageApplied>()
             .add_message::<presentation::SoundCue>()
-            .add_systems(Startup, (hud::load_assets, presentation::load_audio))
+            .add_systems(Startup, hud::load_assets)
             .configure_sets(
                 FixedUpdate,
                 (

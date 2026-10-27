@@ -1,5 +1,4 @@
 use bevy::{
-    audio::Volume,
     prelude::*,
     window::{CursorGrabMode, CursorOptions},
 };
@@ -16,52 +15,54 @@ use crate::{
 
 #[derive(Message, Clone, Copy)]
 pub(super) enum SoundCue {
-    Hurt,
     Eat,
     Drink,
     Burp,
     Teleport,
 }
 
-#[derive(Resource)]
-pub(super) struct SurvivalAudio([Handle<AudioSource>; 5]);
-
-pub(super) fn load_audio(mut commands: Commands, server: Res<AssetServer>) {
-    commands.insert_resource(SurvivalAudio(
-        ["hurt", "eat", "drink", "burp", "teleport"]
-            .map(|name| server.load(format!("player/vanilla/survival/audio/{name}.ogg"))),
-    ));
-}
-
 pub(super) fn play_audio(
     mut commands: Commands,
-    audio: Res<SurvivalAudio>,
-    settings: Res<crate::settings::GraphicsSettings>,
     player: Query<Entity, With<Player>>,
     mut cues: MessageReader<SoundCue>,
     mut impacts: MessageReader<DamageApplied>,
 ) {
+    use crate::audio::Sound;
+    use pumpkin_data::damage::DamageType as D;
+    for cue in cues.read() {
+        commands.trigger(Sound::event(match cue {
+            SoundCue::Eat => "entity.generic.eat",
+            SoundCue::Drink => "entity.generic.drink",
+            SoundCue::Burp => "entity.player.burp",
+            SoundCue::Teleport => "item.chorus_fruit.teleport",
+        }));
+    }
     let local = player.single().ok();
-    let hurt = impacts
-        .read()
-        .filter(|impact| Some(impact.target) == local)
-        .map(|_| SoundCue::Hurt);
-    for cue in cues.read().copied().chain(hurt) {
-        let index = match cue {
-            SoundCue::Hurt => 0,
-            SoundCue::Eat => 1,
-            SoundCue::Drink => 2,
-            SoundCue::Burp => 3,
-            SoundCue::Teleport => 4,
+    for impact in impacts.read().filter(|impact| Some(impact.target) == local) {
+        let name = if impact.fatal {
+            "entity.player.death"
+        } else if impact.source == &D::DROWN {
+            "entity.player.hurt_drown"
+        } else if [
+            &D::ON_FIRE,
+            &D::IN_FIRE,
+            &D::LAVA,
+            &D::HOT_FLOOR,
+            &D::CAMPFIRE,
+        ]
+        .contains(&impact.source)
+        {
+            "entity.player.hurt_on_fire"
+        } else if impact.source == &D::FALL {
+            if impact.lost_health > 4.0 {
+                "entity.player.big_fall"
+            } else {
+                "entity.player.small_fall"
+            }
+        } else {
+            "entity.player.hurt"
         };
-        commands.spawn((
-            AudioPlayer::new(audio.0[index].clone()),
-            PlaybackSettings {
-                volume: Volume::Linear(settings.survival_volume / 100.0),
-                ..PlaybackSettings::DESPAWN
-            },
-            DespawnOnExit(GameState::Game),
-        ));
+        commands.trigger(Sound::event(name));
     }
 }
 

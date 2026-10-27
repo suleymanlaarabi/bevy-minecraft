@@ -92,7 +92,7 @@ pub(crate) fn settings_panel(settings: GraphicsSettings) -> impl Scene {
                     --
                     @setting_row("Damage Camera Motion", toggle_control(settings.damage_camera_motion, |settings, value| settings.damage_camera_motion = value))
                     --
-                    @setting_row("Survival Sound Volume", graphics_slider(settings.survival_volume, 0.0..=100.0, |settings, value| settings.survival_volume = value))
+                    @setting_row("Sound Volume", graphics_slider(settings.gameplay_volume, 0.0..=100.0, |settings, value| settings.gameplay_volume = value))
                     --
                     @setting_row("Occlusion Culling", toggle_control(settings.occlusion_culling, |settings, value| settings.occlusion_culling = value))
                     --

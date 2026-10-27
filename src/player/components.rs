@@ -15,6 +15,8 @@ use bevy::{
 #[derive(Component, Default, Debug, Clone)]
 #[require(
     PlayerInventory,
+    crate::audio::MovementAudio,
+    crate::audio::EquipmentAudio,
     crate::inventory::HotbarSelection,
     crate::inventory::CraftingResult,
     crate::inventory::CraftingGrid,
@@ -37,6 +39,7 @@ pub struct Player;
     interaction::BreakingState,
     super::skin::ArmSwing,
     Camera3d,
+    SpatialListener,
     IsDefaultUiCamera,
     // Exposure, ambient light and fog follow the day cycle
     // (`crate::voxel::render::environment`); these are the first frame's values.

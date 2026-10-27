@@ -76,7 +76,7 @@ pub struct GraphicsSettings {
     /// Vanilla-style cloud layer (`crate::sky`).
     pub clouds: bool,
     pub damage_camera_motion: bool,
-    pub survival_volume: f32,
+    pub gameplay_volume: f32,
     pub texture_pack: TexturePackId,
     pub field_of_view: f32,
     pub view_distance: u32,
@@ -93,7 +93,7 @@ impl Default for GraphicsSettings {
             bloom: true,
             clouds: true,
             damage_camera_motion: true,
-            survival_volume: 60.0,
+            gameplay_volume: 60.0,
             texture_pack: TexturePackId::default(),
             field_of_view: 85.0,
             view_distance: 14,
@@ -106,8 +106,8 @@ impl GraphicsSettings {
     pub(super) fn normalized(mut self) -> Self {
         self.field_of_view = normalized_fov(self.field_of_view);
         self.view_distance = self.effective_view_distance();
-        self.survival_volume = if self.survival_volume.is_finite() {
-            self.survival_volume.clamp(0.0, 100.0)
+        self.gameplay_volume = if self.gameplay_volume.is_finite() {
+            self.gameplay_volume.clamp(0.0, 100.0)
         } else {
             60.0
         };

@@ -55,8 +55,9 @@ than Vanilla's hidden weaker-effect queue.
 
 ## UI, assets, and respawn
 
-`scripts/import_player_assets.py` imports the survival atlas and local sound cues.
-The local client supplied 103 HUD/effect sprites and five sound cues. HUD entities
+`scripts/import_player_assets.py` imports the survival atlas and the shared vanilla
+sound bank. `scripts/import_sounds.py` can rebuild only the sounds from the local
+Minecraft 26.3 client. See [gameplay audio](AUDIO.md) for coverage and ownership. HUD entities
 are persistent, reuse the atlas, and change only affected image rectangles, text,
 or visibility. Hearts include half values, damage blinking, poison, wither, and
 absorption. Food, armor, air, active-effect durations, and inventory nutrition

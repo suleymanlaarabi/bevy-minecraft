@@ -372,7 +372,15 @@ fn update_lighting(
 }
 fn update_open_lids(
     mut commands: Commands,
-    blocks: Query<(Entity, Ref<BlockViews>, Option<Ref<PairedWith>>), Without<Dormant>>,
+    blocks: Query<
+        (
+            Entity,
+            &BlockEntity,
+            Ref<BlockViews>,
+            Option<Ref<PairedWith>>,
+        ),
+        Without<Dormant>,
+    >,
     owners: Query<Ref<ContainerViewers>>,
     mut removed_users: RemovedComponents<ContainerViewers>,
     mut removed_pairs: RemovedComponents<PairedWith>,
@@ -381,7 +389,7 @@ fn update_open_lids(
 ) {
     let removed: bevy::platform::collections::HashSet<_> =
         removed_users.read().chain(removed_pairs.read()).collect();
-    for (entity, block_views, pair) in &blocks {
+    for (entity, block, block_views, pair) in &blocks {
         let canonical = pair.as_ref().map_or(entity, |pair| pair.0);
         let users = owners.get(canonical).ok();
         let changed = block_views.is_changed()
@@ -402,6 +410,16 @@ fn update_open_lids(
                 && let Ok(mut lid) = lids.get_mut(view.lid)
                 && lid.target != target
             {
+                if canonical == entity {
+                    commands.trigger(crate::audio::Sound::at(
+                        if target > 0.0 {
+                            "block.chest.open"
+                        } else {
+                            "block.chest.close"
+                        },
+                        block.position.as_vec3() + Vec3::splat(0.5),
+                    ));
+                }
                 lid.target = target;
                 commands.entity(view.lid).insert(MovingLid);
             }

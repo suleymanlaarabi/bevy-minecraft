@@ -435,6 +435,9 @@ fn pickup_dropped_items(
         }
         let remaining =
             PlayerInventory::edit(&mut inventory, |inventory| inventory.insert(drop.stack));
+        if remaining != Some(drop.stack) {
+            commands.trigger(crate::audio::Sound::event("entity.item.pickup"));
+        }
         match remaining {
             None => {
                 commands.entity(entity).despawn();
