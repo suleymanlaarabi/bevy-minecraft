@@ -5,12 +5,11 @@ use bevy::{
     light::NotShadowCaster,
     math::DVec3,
     prelude::*,
-    time::common_conditions::on_timer,
     utils::Parallel,
 };
 
 use crate::{
-    character::{Aabb, CharacterMotion, CharacterSystems, SimulationPaused, Terrain},
+    character::{Aabb, CharacterMotion, CharacterSystems, Terrain},
     game::GameState,
     inventory::{ItemKind, ItemStack, PlayerInventory},
     player::Player,
@@ -58,14 +57,14 @@ impl DroppedItemCommandsExt for Commands<'_, '_> {
 #[derive(Component)]
 pub struct DroppedItem {
     stack: ItemStack,
-    expires_at: Duration,
-    pickup_after: Duration,
+    remaining: Duration,
+    pickup_remaining: Duration,
 }
 
 /// Fixed-step state; sleeping items only check the revisions of touching columns.
 #[derive(Component)]
 pub(crate) struct DropMotion {
-    position: DVec3,
+    pub(crate) position: DVec3,
     previous: DVec3,
     velocity: Vec3,
     support: Option<[Option<(Entity, u64)>; 4]>,
@@ -179,24 +178,26 @@ impl Plugin for DroppedItemPlugin {
             .add_systems(
                 FixedUpdate,
                 (
+                    advance_drop_timers,
                     simulate_dropped_items,
                     pickup_dropped_items.after(CharacterSystems),
+                    cleanup_expired_drops,
                 )
                     .chain()
-                    .run_if(crate::world::playing)
-                    .run_if(not(resource_exists::<SimulationPaused>)),
+                    .in_set(crate::simulation::SimulationSystems::Actors)
+                    .run_if(crate::simulation::running),
+            )
+            .add_systems(
+                PostUpdate,
+                sync_drop_visibility
+                    .after(crate::voxel::VoxelPipeline)
+                    .before(bevy::transform::TransformSystems::Propagate),
             )
             .add_systems(
                 RunFixedMainLoop,
                 interpolate_dropped_items
                     .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop)
-                    .run_if(crate::world::playing)
-                    .run_if(not(resource_exists::<SimulationPaused>)),
-            )
-            .add_systems(
-                Update,
-                cleanup_expired_drops
-                    .run_if(crate::world::playing.and_then(on_timer(Duration::from_secs(1)))),
+                    .run_if(crate::simulation::running),
             );
     }
 }
@@ -204,7 +205,8 @@ impl Plugin for DroppedItemPlugin {
 fn spawn_dropped_item(
     event: On<SpawnDroppedItem>,
     mut commands: Commands,
-    time: Res<Time>,
+    columns: Res<crate::block_behavior::containers::GameplayColumns>,
+    active: Query<(), With<crate::simulation::Simulating>>,
     mut assets: ResMut<DroppedItemAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     voxel_assets: Res<VoxelAssets>,
@@ -214,8 +216,8 @@ fn spawn_dropped_item(
     let stack = event.stack;
     let position = event.position;
     let velocity = event.velocity;
-    let expires_at = time.elapsed() + event.lifetime;
-    let pickup_after = time.elapsed() + event.pickup_delay;
+    let remaining = event.lifetime;
+    let pickup_remaining = event.pickup_delay;
     let mesh = assets
         .meshes
         .get_or_insert_with(stack.item(), || {
@@ -242,8 +244,8 @@ fn spawn_dropped_item(
         .spawn((
             DroppedItem {
                 stack: stack,
-                expires_at,
-                pickup_after,
+                remaining,
+                pickup_remaining,
             },
             DropMotion {
                 position: position.as_dvec3(),
@@ -256,6 +258,14 @@ fn spawn_dropped_item(
             DespawnOnExit(GameState::Game),
         ))
         .id();
+    if let Some(&owner) = columns.get(&chunk_at(position)) {
+        commands
+            .entity(root)
+            .insert(crate::simulation::SimulatedIn(owner));
+        if active.contains(owner) {
+            commands.entity(root).insert(crate::simulation::Simulating);
+        }
+    }
     let visual = commands
         .spawn((
             DroppedItemVisual {
@@ -319,13 +329,13 @@ pub(crate) fn restore_drop(commands: &mut Commands, drop: crate::world::SavedDro
 }
 
 impl DroppedItem {
-    pub(crate) fn capture(&self, motion: &DropMotion, now: Duration) -> crate::world::SavedDrop {
+    pub(crate) fn capture(&self, motion: &DropMotion) -> crate::world::SavedDrop {
         crate::world::SavedDrop {
             stack: crate::world::SavedStack::capture(self.stack),
             position: motion.position.as_vec3().to_array(),
             velocity: motion.velocity.to_array(),
-            remaining: self.expires_at.saturating_sub(now).as_secs_f64(),
-            pickup_remaining: self.pickup_after.saturating_sub(now).as_secs_f64(),
+            remaining: self.remaining.as_secs_f64(),
+            pickup_remaining: self.pickup_remaining.as_secs_f64(),
         }
     }
 }
@@ -346,7 +356,7 @@ fn simulate_dropped_items(
     world: VoxelWorld,
     time: Res<Time<Fixed>>,
     terrain: Local<Parallel<Terrain>>,
-    mut drops: Query<&mut DropMotion>,
+    mut drops: Query<&mut DropMotion, With<crate::simulation::Simulating>>,
 ) {
     let dt = time.delta_secs();
     let damping = (-0.3 * dt).exp();
@@ -381,16 +391,14 @@ fn interpolate_dropped_items(
 }
 
 fn pickup_dropped_items(
-    time: Res<Time<Virtual>>,
     player: Single<(&CharacterMotion, &mut PlayerInventory), With<Player>>,
-    mut drops: Query<(Entity, &DropMotion, &mut DroppedItem)>,
+    mut drops: Query<(Entity, &DropMotion, &mut DroppedItem), With<crate::simulation::Simulating>>,
     mut commands: Commands,
 ) {
     let (player, mut inventory) = player.into_inner();
-    let now = time.elapsed();
     let half = DVec3::splat(DROP_COLLIDER_SIZE as f64 * 0.5);
     for (entity, motion, drop) in &mut drops {
-        if now < drop.pickup_after {
+        if !drop.pickup_remaining.is_zero() {
             continue;
         }
         // Sphere/box overlap, matching the pickup volume without a spatial-query engine.
@@ -418,14 +426,35 @@ fn pickup_dropped_items(
 }
 
 fn cleanup_expired_drops(
-    time: Res<Time>,
-    drops: Query<(Entity, &DroppedItem)>,
+    drops: Query<(Entity, &DroppedItem), With<crate::simulation::Simulating>>,
     mut commands: Commands,
 ) {
-    let now = time.elapsed();
     for (entity, drop) in &drops {
-        if now >= drop.expires_at {
+        if drop.remaining.is_zero() {
             commands.entity(entity).despawn();
         }
+    }
+}
+
+fn advance_drop_timers(
+    time: Res<Time<Fixed>>,
+    mut drops: Query<&mut DroppedItem, With<crate::simulation::Simulating>>,
+) {
+    for mut drop in &mut drops {
+        drop.remaining = drop.remaining.saturating_sub(time.delta());
+        drop.pickup_remaining = drop.pickup_remaining.saturating_sub(time.delta());
+    }
+}
+
+fn sync_drop_visibility(
+    rendered: Query<(), With<crate::voxel::streaming::RenderRequested>>,
+    mut drops: Query<(&crate::simulation::SimulatedIn, &mut Visibility), With<DroppedItem>>,
+) {
+    for (owner, mut visibility) in &mut drops {
+        visibility.set_if_neq(if rendered.contains(owner.0) {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
     }
 }

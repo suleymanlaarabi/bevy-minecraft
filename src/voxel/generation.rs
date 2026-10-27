@@ -63,9 +63,6 @@ impl WorldGenerator {
     pub(crate) async fn flush(&self) -> std::io::Result<()> {
         self.runtime.flush().await
     }
-    pub(crate) fn set_view(&self, center: IVec2, radius: u32) {
-        self.runtime.set_view(center, radius.min(255) as u8);
-    }
     pub(crate) fn clear_view(&self) {
         self.runtime.clear_view();
     }
@@ -112,6 +109,10 @@ impl WorldGenerator {
                     }
                     let revision = column.revision;
                     let (edited, records) = column.decode()?;
+                    let initial_ticks = generator
+                        .runtime
+                        .snapshot(position)
+                        .map(|snapshot| (snapshot.min_y, snapshot.fluid_ticks));
                     let voxels = if let Some(bytes) = edited {
                         ChunkVoxels::decode_saved(&bytes)?
                     } else {
@@ -125,8 +126,34 @@ impl WorldGenerator {
                             &voxels, position,
                         );
                     if let Some(bytes) = records {
-                        containers.restore(&bytes)?;
+                        containers.restore(&bytes, position)?;
                         containers.revision = 1;
+                    } else if let Some((min_y, ticks)) = initial_ticks {
+                        for tick in ticks.iter() {
+                            let native = IVec3::from_array(tick.position);
+                            let local = IVec3::new(
+                                native.x.rem_euclid(16),
+                                native.y - min_y,
+                                native.z.rem_euclid(16),
+                            );
+                            if let Some(cell) = hollow_worldgen::coordinates::cell_index(local) {
+                                let family = if pumpkin_data::fluid::Fluid::same_fluid_type(
+                                    tick.fluid,
+                                    pumpkin_data::fluid::Fluid::WATER.id,
+                                ) {
+                                    1
+                                } else {
+                                    2
+                                };
+                                containers.simulation.schedule(
+                                    cell as u32,
+                                    crate::simulation::TickChannel::Fluid,
+                                    family,
+                                    u64::from(tick.delay),
+                                    tick.priority,
+                                );
+                            }
+                        }
                     }
                     Ok::<_, std::io::Error>(ChunkLoad::Ready {
                         voxels,

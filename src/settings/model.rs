@@ -130,3 +130,25 @@ pub(super) fn normalized_fov(value: f32) -> f32 {
         GraphicsSettings::default().field_of_view
     }
 }
+
+/// Gameplay distance is independent of the camera and graphics settings.
+#[derive(Resource, SettingsGroup, Reflect, Clone, Copy, Debug, PartialEq, Eq)]
+#[component(immutable)]
+#[reflect(Resource, SettingsGroup, Default)]
+#[settings_group(group = "simulation")]
+#[type_path = "hollow::settings"]
+pub struct SimulationSettings {
+    pub simulation_distance: u32,
+}
+impl Default for SimulationSettings {
+    fn default() -> Self {
+        Self {
+            simulation_distance: 6,
+        }
+    }
+}
+impl SimulationSettings {
+    pub(crate) fn effective_distance(&self) -> u32 {
+        self.simulation_distance.clamp(2, 12)
+    }
+}

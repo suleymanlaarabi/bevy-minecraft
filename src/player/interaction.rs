@@ -45,7 +45,7 @@ struct BreakProgress {
 }
 
 #[derive(Component, Default)]
-pub(super) struct BreakingState(Option<BreakProgress>);
+pub(super) struct BreakingState(Option<BreakProgress>, u64);
 
 #[derive(Component)]
 struct BreakingOverlay;
@@ -79,7 +79,7 @@ pub(super) fn register(app: &mut App) {
             .in_set(PlayerInteraction)
             .after(FollowSystems)
             .before(TransformSystems::Propagate)
-            .run_if(crate::world::playing)
+            .run_if(crate::simulation::running)
             .run_if(crate::survival::player_alive)
             .run_if(in_state(InventoryState::Closed))
             .run_if(crate::devtools::panel_closed),
@@ -162,7 +162,7 @@ fn update_block_target(
 fn update_breaking(
     mut commands: Commands,
     mouse: Res<ButtonInput<MouseButton>>,
-    time: Res<Time>,
+    clock: Res<crate::simulation::GameplayClock>,
     target: Single<&BlockTargetState, With<PlayerCamera>>,
     mut breaking: Single<&mut BreakingState, With<PlayerCamera>>,
     mut swing: Single<&mut super::skin::ArmSwing, With<PlayerCamera>>,
@@ -179,6 +179,8 @@ fn update_breaking(
         With<Player>,
     >,
 ) {
+    let elapsed = clock.0.saturating_sub(breaking.1).min(2) as f32 * 0.05;
+    breaking.1 = clock.0;
     if !mouse.pressed(MouseButton::Left) {
         breaking.0 = None;
         return;
@@ -223,9 +225,9 @@ fn update_breaking(
     progress.progress = if outcome.duration == 0.0 {
         1.0
     } else {
-        progress.progress + time.delta_secs() / outcome.duration
+        progress.progress + elapsed / outcome.duration
     };
-    progress.hit_elapsed += time.delta_secs();
+    progress.hit_elapsed += elapsed;
     if progress.progress < 1.0 && progress.hit_elapsed >= 0.25 {
         progress.hit_elapsed %= 0.25;
         commands.trigger(crate::audio::Sound::block(

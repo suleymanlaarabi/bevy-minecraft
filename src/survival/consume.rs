@@ -76,20 +76,23 @@ pub(super) fn tick(
     mut random: ResMut<SurvivalRandom>,
     mut commands: Commands,
     mut sounds: MessageWriter<super::presentation::SoundCue>,
-    mut actors: Query<(
-        &mut UsingItem,
-        &UseInput,
-        &HotbarSelection,
-        &mut PlayerInventory,
-        &mut Health,
-        &mut Nutrition,
-        &mut ActiveEffects,
-        &mut Transform,
-        &mut CharacterMotion,
-        &CharacterBody,
-        &CharacterState,
-        &mut Hazards,
-    )>,
+    mut actors: Query<
+        (
+            &mut UsingItem,
+            &UseInput,
+            &HotbarSelection,
+            &mut PlayerInventory,
+            &mut Health,
+            &mut Nutrition,
+            &mut ActiveEffects,
+            &mut Transform,
+            &mut CharacterMotion,
+            &CharacterBody,
+            &CharacterState,
+            &mut Hazards,
+        ),
+        With<crate::simulation::Simulating>,
+    >,
 ) {
     let input_allowed = *state.get() == InventoryState::Closed
         && mouse.pressed(MouseButton::Right)

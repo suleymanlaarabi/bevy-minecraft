@@ -393,6 +393,7 @@ fn report_voxel_diagnostics(
     builds: Query<(), With<ChunkBuild>>,
     sections: Query<&ChunkSections>,
     pending: Res<PendingChunks>,
+    simulation: Res<crate::simulation::SimulationDiagnostics>,
 ) {
     diagnostics.elapsed += time.delta_secs_f64();
     if diagnostics.elapsed < 5.0 {
@@ -439,6 +440,18 @@ fn report_voxel_diagnostics(
         average_triangles,
     );
 
+    info!(
+        "simulation: active={} ready_cells_and_heads={} suspended={} scheduled={}/2048 neighbors={}/4096 mutations={}/4096 random={}/8192 max_lateness={} pending_write_bytes={}",
+        simulation.active_columns,
+        simulation.ready_work,
+        simulation.suspended_work,
+        simulation.scheduled_ticks,
+        simulation.neighbor_cells,
+        simulation.modified_cells,
+        simulation.random_attempts,
+        simulation.maximum_lateness,
+        simulation.pending_write_bytes
+    );
     diagnostics.generation_ms.clear();
     diagnostics.meshing_ms.clear();
 }

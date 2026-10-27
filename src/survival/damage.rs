@@ -59,7 +59,9 @@ pub(super) fn equipment(inventory: &PlayerInventory) -> ArmorStats {
     total
 }
 
-pub(super) fn refresh_equipment(mut actors: Query<(Ref<PlayerInventory>, &mut ArmorStats)>) {
+pub(super) fn refresh_equipment(
+    mut actors: Query<(Ref<PlayerInventory>, &mut ArmorStats), With<crate::simulation::Simulating>>,
+) {
     for (inventory, mut armor) in &mut actors {
         if inventory.is_changed() || armor.is_added() {
             armor.set_if_neq(equipment(&inventory));
@@ -67,7 +69,9 @@ pub(super) fn refresh_equipment(mut actors: Query<(Ref<PlayerInventory>, &mut Ar
     }
 }
 
-pub(super) fn advance_windows(mut actors: Query<&mut DamageState>) {
+pub(super) fn advance_windows(
+    mut actors: Query<&mut DamageState, With<crate::simulation::Simulating>>,
+) {
     actors.par_iter_mut().for_each(|mut state| {
         if state.invulnerable_ticks > 0 {
             state.invulnerable_ticks -= 1;
@@ -82,17 +86,20 @@ pub(super) fn advance_windows(mut actors: Query<&mut DamageState>) {
 pub(super) fn resolve(
     mut requests: MessageReader<DamageRequest>,
     mut applied: MessageWriter<DamageApplied>,
-    mut actors: Query<(
-        &mut Health,
-        &mut DamageState,
-        &ActiveEffects,
-        &mut ArmorStats,
-        Option<&mut PlayerInventory>,
-        Option<&mut CharacterMotion>,
-        Option<&mut Nutrition>,
-        Option<&mut CharacterMovement>,
-        Option<&mut UsingItem>,
-    )>,
+    mut actors: Query<
+        (
+            &mut Health,
+            &mut DamageState,
+            &ActiveEffects,
+            &mut ArmorStats,
+            Option<&mut PlayerInventory>,
+            Option<&mut CharacterMotion>,
+            Option<&mut Nutrition>,
+            Option<&mut CharacterMovement>,
+            Option<&mut UsingItem>,
+        ),
+        With<crate::simulation::Simulating>,
+    >,
 ) {
     for request in requests.read() {
         if !request.amount.is_finite()

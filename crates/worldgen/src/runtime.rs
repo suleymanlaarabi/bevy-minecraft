@@ -45,6 +45,20 @@ struct Request {
     position: ChunkPos,
     send: async_channel::Sender<Result<ChunkSnapshot, String>>,
 }
+#[derive(Clone)]
+struct ViewDemand {
+    center: IVec2,
+    radius: u8,
+    cells: Arc<[IVec2]>,
+    admission: Arc<[u32]>,
+}
+impl ViewDemand {
+    fn contains(&self, position: IVec2) -> bool {
+        self.cells
+            .binary_search_by_key(&(position.x, position.y), |p| (p.x, p.y))
+            .is_ok()
+    }
+}
 struct Shared {
     id: u64,
     settings: GenerationSettings,
@@ -52,7 +66,7 @@ struct Shared {
     initialization_waiters: Mutex<Vec<async_channel::Sender<Result<(), String>>>>,
     storage: Option<Arc<dyn ChunkStorage>>,
     cancelled: AtomicBool,
-    view: Mutex<Option<(IVec2, u8)>>,
+    view: Mutex<Option<ViewDemand>>,
     requests: Mutex<Vec<Request>>,
     snapshots: Mutex<HashMap<ChunkPos, ChunkSnapshot>>,
     entities: Mutex<HashMap<ChunkPos, Entity>>,
@@ -140,7 +154,41 @@ impl GenerationSession {
         &self.0.settings
     }
     pub fn set_view(&self, center: IVec2, radius: u8) {
-        *self.0.view.lock().unwrap() = Some((center, radius));
+        let r = i32::from(radius);
+        let cells = (-r..=r)
+            .flat_map(|x| (-r..=r).map(move |z| IVec2::new(x, z)))
+            .filter(|p| p.length_squared() <= r * r)
+            .map(|p| center + p)
+            .collect();
+        self.set_data_view(center, cells);
+    }
+    /// Exact data demand, including diagonals of the caller's rendering/simulation halo.
+    pub fn set_data_view(&self, center: IVec2, mut cells: Vec<IVec2>) {
+        cells.sort_unstable_by_key(|p| (p.x, p.y));
+        cells.dedup();
+        let mut admission: Vec<_> = (0..cells.len())
+            .map(|i| u32::try_from(i).expect("Demand fits u32 indices"))
+            .collect();
+        admission.sort_unstable_by_key(|&i| {
+            let p = cells[i as usize];
+            (
+                crate::coordinates::chunk_distance_squared(p, center),
+                p.x,
+                p.y,
+            )
+        });
+        let radius = cells
+            .iter()
+            .map(|p| (*p - center).abs().max_element())
+            .max()
+            .unwrap_or(0)
+            .min(255) as u8;
+        *self.0.view.lock().unwrap() = Some(ViewDemand {
+            center,
+            radius,
+            cells: cells.into(),
+            admission: admission.into(),
+        });
     }
     pub fn clear_view(&self) {
         *self.0.view.lock().unwrap() = None;
@@ -266,9 +314,8 @@ struct Runtime {
     roots: HashSet<ChunkPos>,
     root_order: VecDeque<ChunkPos>,
     roots_to_scan: usize,
-    view_ring: i32,
-    view_edge: i32,
-    view: Option<(IVec2, u8)>,
+    view_cursor: usize,
+    view: Option<ViewDemand>,
     changes: VecDeque<(ChunkPos, Stage, bool)>,
     candidates: VecDeque<ChunkPos>,
     ready: BinaryHeap<Reverse<(u32, i32, i32)>>,
@@ -286,8 +333,7 @@ impl Runtime {
             roots: HashSet::new(),
             root_order: VecDeque::new(),
             roots_to_scan: 0,
-            view_ring: 0,
-            view_edge: 0,
+            view_cursor: 0,
             view: None,
             changes: VecDeque::new(),
             candidates: VecDeque::new(),
@@ -306,7 +352,7 @@ impl Runtime {
         };
         if !entry.queued {
             entry.queued = true;
-            let center = self.view.map_or(IVec2::ZERO, |(center, _)| center);
+            let center = self.view.as_ref().map_or(IVec2::ZERO, |view| view.center);
             let distance = crate::coordinates::chunk_distance_squared(
                 IVec2::new(position.x, position.y),
                 center,
@@ -402,13 +448,17 @@ fn update_demands(
         graph.0.push(Runtime::new(session.clone()));
     }
     for runtime in &mut graph.0 {
-        let view = *runtime.session.0.view.lock().unwrap();
-        if runtime.view != view {
-            runtime.view = view;
-            runtime.trim_pending = view;
+        let view = runtime.session.0.view.lock().unwrap().clone();
+        let unchanged = match (&runtime.view, &view) {
+            (Some(a), Some(b)) => Arc::ptr_eq(&a.cells, &b.cells),
+            (None, None) => true,
+            _ => false,
+        };
+        if !unchanged {
+            runtime.view = view.clone();
+            runtime.trim_pending = view.as_ref().map(|view| (view.center, view.radius));
             runtime.roots_to_scan = runtime.root_order.len();
-            runtime.view_ring = 0;
-            runtime.view_edge = 0;
+            runtime.view_cursor = 0;
             let queued = std::mem::take(&mut runtime.ready);
             for Reverse((_, x, z)) in queued {
                 let position = ChunkPos::new(x, z);
@@ -422,43 +472,21 @@ fn update_demands(
             if runtime.roots_to_scan > 0 {
                 runtime.roots_to_scan -= 1;
                 let position = runtime.root_order.pop_front().unwrap();
-                let keep = view.is_some_and(|(center, radius)| {
-                    crate::coordinates::chunk_distance_squared(
-                        IVec2::new(position.x, position.y),
-                        center,
-                    ) <= i32::from(radius).pow(2)
-                });
+                let keep = view
+                    .as_ref()
+                    .is_some_and(|view| view.contains(IVec2::new(position.x, position.y)));
                 if keep {
                     runtime.root_order.push_back(position);
                 } else {
                     runtime.roots.remove(&position);
                     runtime.changes.push_back((position, Stage::Full, false));
                 }
-            } else if let Some((center, radius)) = view
-                && runtime.view_ring <= i32::from(radius)
+            } else if let Some(view) = &view
+                && runtime.view_cursor < view.cells.len()
             {
-                let r = runtime.view_ring;
-                let t = runtime.view_edge;
-                let (dx, dz) = if r == 0 {
-                    (0, 0)
-                } else if t < 2 * r {
-                    (-r + t, -r)
-                } else if t < 4 * r {
-                    (r, -r + t - 2 * r)
-                } else if t < 6 * r {
-                    (r - t + 4 * r, r)
-                } else {
-                    (-r, r - t + 6 * r)
-                };
-                runtime.view_edge += 1;
-                if r == 0 || runtime.view_edge == 8 * r {
-                    runtime.view_ring += 1;
-                    runtime.view_edge = 0;
-                }
-                if dx * dx + dz * dz > i32::from(radius).pow(2) {
-                    continue;
-                }
-                let position = ChunkPos::new(center.x + dx, center.y + dz);
+                let cell = view.cells[view.admission[runtime.view_cursor] as usize];
+                runtime.view_cursor += 1;
+                let position = ChunkPos::new(cell.x, cell.y);
                 if runtime.roots.insert(position) {
                     runtime.root_order.push_back(position);
                     runtime.changes.push_back((position, Stage::Full, true));

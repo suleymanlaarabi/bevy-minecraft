@@ -23,7 +23,6 @@ pub struct BlockBehaviorPlugin;
 impl Plugin for BlockBehaviorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<containers::GameplayColumns>()
-            .init_resource::<supports::SupportQueue>()
             .init_resource::<loot::LootRandom>()
             .init_resource::<visuals::ChestMeshes>()
             .configure_sets(
@@ -38,26 +37,14 @@ impl Plugin for BlockBehaviorPlugin {
                     .chain(),
             )
             .add_systems(PreStartup, (catalog::initialize, loot::initialize))
-            .add_systems(
-                OnEnter(crate::game::GameState::Game),
-                supports::restore.after(crate::world::PrepareSession),
-            )
             .add_observer(containers::changed)
             .add_observer(containers::unload)
             .add_observer(containers::session_closed::<containers::ViewingContainer>)
             .add_observer(containers::pairing_removed)
-            .add_observer(supports::changed)
-            .add_observer(supports::arrived)
             .add_observer(interaction::open_chest)
             .add_observer(interaction::open_manual)
             .add_observer(workbench::open)
             .add_observer(containers::session_closed::<workbench::ViewingWorkbench>)
-            .add_systems(
-                Update,
-                supports::update
-                    .run_if(crate::world::playing)
-                    .run_if(|queue: Res<supports::SupportQueue>| !queue.is_empty()),
-            )
             .add_systems(
                 PostUpdate,
                 containers::update_topology
@@ -81,10 +68,6 @@ impl Plugin for BlockBehaviorPlugin {
         visuals::register(app);
     }
 }
-fn cleanup(
-    mut columns: ResMut<containers::GameplayColumns>,
-    mut supports: ResMut<supports::SupportQueue>,
-) {
+fn cleanup(mut columns: ResMut<containers::GameplayColumns>) {
     columns.clear();
-    *supports = default();
 }

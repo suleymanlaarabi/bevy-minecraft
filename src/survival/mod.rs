@@ -48,10 +48,7 @@ pub(crate) fn mining_speed(effects: &ActiveEffects) -> f32 {
 
 impl Plugin for SurvivalPlugin {
     fn build(&self, app: &mut App) {
-        use crate::{
-            character::{CharacterSystems, SimulationPaused},
-            inventory::InventoryState,
-        };
+        use crate::{character::CharacterSystems, inventory::InventoryState};
         app.init_resource::<SurvivalRules>()
             .init_resource::<SurvivalRandom>()
             .add_message::<DamageRequest>()
@@ -67,8 +64,7 @@ impl Plugin for SurvivalPlugin {
                     SurvivalSystems::Metabolism.after(SurvivalSystems::Consume),
                     SurvivalSystems::Damage.after(SurvivalSystems::Metabolism),
                 )
-                    .run_if(crate::world::playing)
-                    .run_if(not(resource_exists::<SimulationPaused>)),
+                    .run_if(crate::simulation::running),
             )
             .add_systems(
                 FixedUpdate,

@@ -9,13 +9,16 @@ use crate::{
 };
 
 pub(super) fn locomotion(
-    mut actors: Query<(
-        &Health,
-        &ActiveEffects,
-        Option<&Nutrition>,
-        Option<&UsingItem>,
-        &mut Locomotion,
-    )>,
+    mut actors: Query<
+        (
+            &Health,
+            &ActiveEffects,
+            Option<&Nutrition>,
+            Option<&UsingItem>,
+            &mut Locomotion,
+        ),
+        With<crate::simulation::Simulating>,
+    >,
 ) {
     actors
         .par_iter_mut()
@@ -40,13 +43,16 @@ pub(super) fn locomotion(
 
 pub(super) fn nutrition(
     rules: Res<SurvivalRules>,
-    mut actors: Query<(
-        Entity,
-        &mut Health,
-        &mut Nutrition,
-        &CharacterActivity,
-        &CharacterState,
-    )>,
+    mut actors: Query<
+        (
+            Entity,
+            &mut Health,
+            &mut Nutrition,
+            &CharacterActivity,
+            &CharacterState,
+        ),
+        With<crate::simulation::Simulating>,
+    >,
     mut damage: MessageWriter<DamageRequest>,
 ) {
     for (entity, mut health, mut nutrition, activity, state) in &mut actors {
@@ -103,16 +109,19 @@ pub(super) fn nutrition(
 #[allow(clippy::type_complexity)]
 pub(super) fn hazards(
     world: VoxelWorld,
-    mut actors: Query<(
-        Entity,
-        &Health,
-        &ActiveEffects,
-        &CharacterMotion,
-        &CharacterBody,
-        &CharacterState,
-        &CharacterActivity,
-        &mut Hazards,
-    )>,
+    mut actors: Query<
+        (
+            Entity,
+            &Health,
+            &ActiveEffects,
+            &CharacterMotion,
+            &CharacterBody,
+            &CharacterState,
+            &CharacterActivity,
+            &mut Hazards,
+        ),
+        With<crate::simulation::Simulating>,
+    >,
     mut damage: MessageWriter<DamageRequest>,
 ) {
     for (entity, health, effects, motion, body, state, activity, mut hazards) in &mut actors {

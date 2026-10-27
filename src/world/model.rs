@@ -215,7 +215,7 @@ pub(crate) struct SavedDrop {
     pub pickup_remaining: f64,
 }
 impl SavedDrop {
-    pub(super) fn validate(&self) -> io::Result<()> {
+    pub(crate) fn validate(&self) -> io::Result<()> {
         let _ = self.stack.restore()?;
         if !self
             .position
@@ -235,28 +235,17 @@ impl SavedDrop {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Checkpoint {
+    pub gameplay_tick: u64,
     pub player: Option<SavedPlayer>,
-    pub drops: Vec<SavedDrop>,
     // Edits to unloaded chunks must survive even when no chunk has been materialized.
     pub pending: Vec<([i32; 3], u16)>,
-    /// Bounded support cascades resume after saving or unloading.
-    pub support_pending: Vec<[i32; 3]>,
     /// Days since the world was created ([`crate::sky::TimeOfDay`]).
     pub time_of_day: Option<f64>,
 }
 impl Checkpoint {
-    /// Equality for skipping autosaves. Drop timers tick every frame even in an idle
-    /// world, so only the drops' items and resting positions count; the time of day
-    /// always moves and is saved along with real changes.
+    /// Column revisions decide gameplay persistence. World time advances even
+    /// when this global checkpoint state is otherwise unchanged.
     pub(super) fn same_state(&self, other: &Self) -> bool {
-        self.player == other.player
-            && self.pending == other.pending
-            && self.support_pending == other.support_pending
-            && self.drops.len() == other.drops.len()
-            && self
-                .drops
-                .iter()
-                .zip(&other.drops)
-                .all(|(a, b)| a.stack == b.stack && a.position == b.position)
+        self.player == other.player && self.pending == other.pending
     }
 }

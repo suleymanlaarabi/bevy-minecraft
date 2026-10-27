@@ -98,12 +98,15 @@ pub(super) fn remove(
 }
 
 pub(super) fn tick(
-    mut actors: Query<(
-        Entity,
-        &mut Health,
-        &mut ActiveEffects,
-        Option<&mut Nutrition>,
-    )>,
+    mut actors: Query<
+        (
+            Entity,
+            &mut Health,
+            &mut ActiveEffects,
+            Option<&mut Nutrition>,
+        ),
+        With<crate::simulation::Simulating>,
+    >,
     mut damage: MessageWriter<DamageRequest>,
 ) {
     for (entity, mut health, mut effects, mut nutrition) in &mut actors {

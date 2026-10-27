@@ -228,21 +228,18 @@ pub(crate) struct SimulationPaused;
 
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(Time::<Fixed>::from_hz(20.0))
-            .add_systems(
-                FixedUpdate,
-                character_physics
-                    .in_set(CharacterSystems)
-                    .run_if(crate::world::playing)
-                    .run_if(not(resource_exists::<SimulationPaused>)),
-            )
-            .add_systems(
-                RunFixedMainLoop,
-                interpolate_characters
-                    .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop)
-                    .run_if(crate::world::playing)
-                    .run_if(not(resource_exists::<SimulationPaused>)),
-            );
+        app.add_systems(
+            FixedUpdate,
+            character_physics
+                .in_set(CharacterSystems)
+                .run_if(crate::simulation::running),
+        )
+        .add_systems(
+            RunFixedMainLoop,
+            interpolate_characters
+                .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop)
+                .run_if(crate::simulation::running),
+        );
     }
 }
 
@@ -562,18 +559,21 @@ fn ground_block(world: &VoxelWorld, body: &Aabb) -> (f64, f64, f64) {
 fn character_physics(
     world: VoxelWorld,
     mut terrain: Local<Terrain>,
-    mut characters: Query<(
-        &Transform,
-        &mut CharacterMotion,
-        &mut CharacterState,
-        &CharacterBody,
-        &CharacterMovement,
-        &Locomotion,
-        &mut CharacterActivity,
-        Option<&crate::survival::Health>,
-        Has<AutoJump>,
-        Has<Flying>,
-    )>,
+    mut characters: Query<
+        (
+            &Transform,
+            &mut CharacterMotion,
+            &mut CharacterState,
+            &CharacterBody,
+            &CharacterMovement,
+            &Locomotion,
+            &mut CharacterActivity,
+            Option<&crate::survival::Health>,
+            Has<AutoJump>,
+            Has<Flying>,
+        ),
+        With<crate::simulation::Simulating>,
+    >,
 ) {
     for (
         transform,

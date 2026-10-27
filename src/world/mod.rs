@@ -37,6 +37,9 @@ pub enum WorldSessionPhase {
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct PrepareSession;
 
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct WorldSaveCapture;
+
 pub(crate) fn playing(phase: Option<Res<State<WorldSessionPhase>>>) -> bool {
     phase.is_some_and(|p| *p.get() == WorldSessionPhase::Playing)
 }
@@ -67,6 +70,7 @@ enum Destination {
 
 #[derive(Resource, Default)]
 struct SaveState {
+    in_flight_bytes: usize,
     task: Option<Task<io::Result<SaveAck>>>,
     elapsed: f32,
     destination: Destination,
@@ -79,7 +83,7 @@ struct SaveState {
 }
 struct SaveAck {
     revisions: Vec<(IVec2, u64)>,
-    container_revisions: Vec<(IVec2, u64)>,
+    gameplay_revisions: Vec<(IVec2, u64)>,
     checkpoint: Checkpoint,
     metadata: WorldMetadata,
     final_save: bool,
@@ -176,7 +180,8 @@ impl Plugin for WorldPlugin {
                 (
                     settle_exit,
                     crate::block_behavior::containers::track_inventory_changes,
-                    checkpoint,
+                    storage_pressure,
+                    checkpoint.in_set(WorldSaveCapture),
                     poll_save,
                     crate::block_behavior::containers::cleanup_dormant,
                     hold_save_error,
@@ -497,6 +502,7 @@ fn checkpoint(
     players: Query<
         (
             &Transform,
+            &crate::character::CharacterMotion,
             &PlayerInventory,
             &crate::inventory::CraftingGrid,
             &crate::inventory::HotbarSelection,
@@ -511,19 +517,11 @@ fn checkpoint(
     >,
     cameras: Query<&PlayerCamera>,
     cursor: Res<InventoryCursor>,
-    drops: Query<(
-        &crate::dropped_item::DroppedItem,
-        &crate::dropped_item::DropMotion,
-    )>,
     chunks: Query<(&VoxelChunk, &ChunkVoxels)>,
     stored: Res<StoredChunks>,
     pending: Res<PendingEdits>,
-    containers: crate::block_behavior::containers::ContainerSnapshots,
-    supports: Query<
-        &crate::block_behavior::containers::BlockEntity,
-        With<crate::block_behavior::supports::SupportCheck>,
-    >,
-    game_time: Res<Time>,
+    gameplay: crate::block_behavior::containers::ColumnSnapshots,
+    clock: Res<crate::simulation::GameplayClock>,
     time_of_day: Res<crate::sky::TimeOfDay>,
 ) {
     let (generator, budget) = generation;
@@ -547,6 +545,7 @@ fn checkpoint(
     // Only gameplay changes the world; `settle_exit` leaves without saving otherwise.
     let Ok((
         transform,
+        motion,
         inventory,
         grid,
         selection,
@@ -571,7 +570,7 @@ fn checkpoint(
             hazards: hazards.clone(),
             respawn: respawn.clone(),
         },
-        position: transform.translation.to_array(),
+        position: motion.position.as_vec3().to_array(),
         rotation: transform.rotation.to_array(),
         pitch: cameras.single().map_or(0.0, |c| c.pitch),
         slots: (0..crate::inventory::SLOT_COUNT)
@@ -583,17 +582,9 @@ fn checkpoint(
     };
     let previous = session.last_checkpoint.as_ref().unwrap_or(&session.resume);
     player.sanitize(previous.player.as_ref().or(session.resume.player.as_ref()));
-    let mut support_pending: Vec<_> = supports
-        .iter()
-        .map(|block| block.position.to_array())
-        .collect();
-    support_pending.sort_unstable();
     let checkpoint = Checkpoint {
+        gameplay_tick: clock.0,
         player: Some(player),
-        drops: drops
-            .iter()
-            .map(|(drop, motion)| drop.capture(motion, game_time.elapsed()))
-            .collect(),
         pending: pending
             .values()
             .flat_map(|edits| {
@@ -603,7 +594,6 @@ fn checkpoint(
             })
             .collect(),
         time_of_day: Some(time_of_day.days()),
-        support_pending,
     };
     // Layers are copy-on-write: these clones only bump reference counts.
     let mut snapshots = HashMap::new();
@@ -616,9 +606,34 @@ fn checkpoint(
             snapshots.insert(position, voxels.clone());
         }
     }
-    let container_snapshots = containers.capture();
+    let candidates = gameplay.candidates();
+    let mut reservations: HashMap<_, usize> = candidates
+        .iter()
+        .map(|&(position, codec, _)| (position, codec))
+        .collect();
+    for (&position, voxels) in &snapshots {
+        *reservations.entry(position).or_default() +=
+            crate::simulation::terrain_bytes(voxels) * 8 + 4096;
+    }
+    let snapshot_bytes = candidates.iter().map(|(_, _, bytes)| bytes).sum::<usize>()
+        + snapshots.len() * std::mem::size_of::<ChunkVoxels>();
+    let codec_bytes = reservations
+        .values()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .max(crate::simulation::ENCODING_BATCH_BYTES);
+    let captured_bytes = snapshot_bytes.saturating_add(codec_bytes);
+    if captured_bytes > crate::simulation::MAX_CAPTURE_BYTES {
+        let error = io::Error::other(
+            "Gameplay work exceeds the bounded save capture budget. Resume simulation before retrying the save.",
+        );
+        save.task = Some(IoTaskPool::get().spawn(async move { Err(error) }));
+        return;
+    }
+    let gameplay_snapshots = gameplay.capture();
     if !forced
-        && container_snapshots.is_empty()
+        && gameplay_snapshots.is_empty()
         && snapshots.is_empty()
         && session
             .last_checkpoint
@@ -632,46 +647,98 @@ fn checkpoint(
     let database = session.database.clone();
     let generator = generator.clone();
     let budget = budget.clone();
+    save.in_flight_bytes = captured_bytes;
     save.task = Some(IoTaskPool::get().spawn(async move {
-        // Cache bases reach a durable transaction before their game checkpoint.
         generator.flush().await?;
-        let (prepared, revisions, container_revisions, checkpoint, metadata) = budget
+        let revisions = snapshots
+            .iter()
+            .map(|(p, v)| (*p, v.save_revision))
+            .collect();
+        let gameplay_revisions = gameplay_snapshots
+            .iter()
+            .map(|(p, data)| (*p, data.revision))
+            .collect();
+        let mut captures: HashMap<
+            _,
+            (
+                Option<ChunkVoxels>,
+                Option<crate::block_behavior::containers::ColumnSnapshot>,
+                usize,
+            ),
+        > = snapshots
+            .into_iter()
+            .map(|(position, voxels)| (position, (Some(voxels), None, reservations[&position])))
+            .collect();
+        for (position, gameplay) in gameplay_snapshots {
+            captures
+                .entry(position)
+                .or_insert_with(|| (None, None, reservations[&position]))
+                .1 = Some(gameplay);
+        }
+        let positions = captures
+            .iter()
+            .map(|(p, (terrain, gameplay, _))| ((p.x, p.y), terrain.is_some(), gameplay.is_some()))
+            .collect();
+        let (prepared, checkpoint, metadata) = budget
             .spawn(hollow_worldgen::tasks::WorkClass::Encoding, 0, async move {
-                let revisions = snapshots
-                    .iter()
-                    .map(|(p, v)| (*p, v.save_revision))
-                    .collect();
-                let records = snapshots
-                    .into_iter()
-                    .map(|(p, v)| ((p.x, p.y), v.encode_saved()))
-                    .collect();
-                let container_revisions = container_snapshots
-                    .iter()
-                    .map(|(p, data)| (*p, data.revision))
-                    .collect();
-                let container_records = container_snapshots
-                    .into_iter()
-                    .map(|(p, data)| Ok(((p.x, p.y), data.encode()?)))
-                    .collect::<io::Result<Vec<_>>>()?;
-                let prepared = storage::PreparedCheckpoint::encode(
-                    &metadata,
-                    &checkpoint,
-                    records,
-                    container_records,
-                )?;
-                Ok::<_, io::Error>((
-                    prepared,
-                    revisions,
-                    container_revisions,
-                    checkpoint,
-                    metadata,
-                ))
+                storage::PreparedCheckpoint::encode(&metadata, &checkpoint, positions)
+                    .map(|prepared| (prepared, checkpoint, metadata))
             })
             .await?;
-        database.checkpoint(prepared)?;
+        let mut captures = captures.into_iter().peekable();
+        let batches = std::iter::from_fn(move || {
+            let mut batch = Vec::new();
+            let mut bytes = 0usize;
+            while let Some((_, (_, _, cost))) = captures.peek() {
+                if !batch.is_empty()
+                    && bytes.saturating_add(*cost) > crate::simulation::ENCODING_BATCH_BYTES
+                {
+                    break;
+                }
+                bytes += *cost;
+                batch.push(captures.next().expect("Peeked column"));
+            }
+            if batch.is_empty() {
+                return None;
+            }
+            // SQL stays on this I/O worker, with a single transaction. Encoding
+            // waits on the shared compute budget; no extra writer thread/channel
+            // or whole-world vector of compressed records is retained.
+            Some(bevy::tasks::block_on(budget.spawn(
+                hollow_worldgen::tasks::WorkClass::Encoding,
+                0,
+                async move {
+                    batch
+                        .into_iter()
+                        .map(|(position, (terrain, gameplay, _))| {
+                            let terrain = terrain.map(|voxels| {
+                                hollow_worldgen::codec::compress_record(&voxels.encode_saved())
+                            });
+                            let gameplay = gameplay
+                                .map(|snapshot| {
+                                    let bytes = snapshot.encode()?;
+                                    if bytes.len() > hollow_worldgen::codec::MAX_RECORD_BYTES {
+                                        return Err(io::Error::other(
+                                            "Gameplay snapshot exceeds the record size limit.",
+                                        ));
+                                    }
+                                    Ok(hollow_worldgen::codec::compress_record(&bytes))
+                                })
+                                .transpose()?;
+                            Ok(storage::EncodedColumn {
+                                position: (position.x, position.y),
+                                terrain,
+                                gameplay,
+                            })
+                        })
+                        .collect::<io::Result<Vec<_>>>()
+                },
+            )))
+        });
+        database.checkpoint(prepared, batches)?;
         Ok(SaveAck {
             revisions,
-            container_revisions,
+            gameplay_revisions,
             checkpoint,
             metadata,
             final_save,
@@ -684,7 +751,7 @@ fn poll_save(
     mut session: Option<ResMut<WorldSession>>,
     mut chunks: Query<(&VoxelChunk, &mut ChunkVoxels)>,
     mut stored: ResMut<StoredChunks>,
-    mut container_chunks: Query<&mut crate::block_behavior::containers::GameplayColumn>,
+    mut gameplay_columns: Query<&mut crate::block_behavior::containers::GameplayColumn>,
     phase: Res<State<WorldSessionPhase>>,
     mut next_phase: ResMut<NextState<WorldSessionPhase>>,
     mut next: ResMut<NextState<GameState>>,
@@ -697,6 +764,7 @@ fn poll_save(
         return;
     };
     save.task = None;
+    save.in_flight_bytes = 0;
     match result {
         Ok(ack) => {
             if session
@@ -718,9 +786,9 @@ fn poll_save(
                     .get(position)
                     .is_some_and(|&r| r == voxels.save_revision)
             });
-            let container_revisions: HashMap<_, _> = ack.container_revisions.into_iter().collect();
-            for mut data in &mut container_chunks {
-                if let Some(&revision) = container_revisions.get(&data.position) {
+            let gameplay_revisions: HashMap<_, _> = ack.gameplay_revisions.into_iter().collect();
+            for mut data in &mut gameplay_columns {
+                if let Some(&revision) = gameplay_revisions.get(&data.position) {
                     if revision <= data.revision {
                         data.bypass_change_detection().saved_revision = revision;
                     }
@@ -766,4 +834,48 @@ fn end_session(mut commands: Commands, mut virtual_time: ResMut<Time<Virtual>>) 
                 .detach();
         }
     });
+}
+
+fn storage_pressure(
+    mut save: ResMut<SaveState>,
+    stored: Res<StoredChunks>,
+    columns: Query<(
+        &crate::block_behavior::containers::GameplayColumn,
+        &crate::simulation::ColumnSimulation,
+        Option<&crate::block_behavior::containers::LoadedTerrain>,
+        Option<&crate::block_behavior::containers::BlockEntities>,
+    )>,
+    stream: Res<crate::voxel::streaming::StreamState>,
+    mut diagnostics: ResMut<crate::simulation::SimulationDiagnostics>,
+) {
+    let mut bytes = stored
+        .values()
+        .map(crate::simulation::terrain_bytes)
+        .sum::<usize>();
+    let (mut ready, mut suspended) = (0, 0);
+    let mut oversized_retirement = false;
+    for (column, work, loaded, blocks) in &columns {
+        ready += work.ready_count();
+        suspended += work.suspended.len();
+        let retired = loaded.is_none_or(|loaded| loaded.is_empty());
+        if column.revision == column.saved_revision
+            || (!retired && stream.data.contains(&column.position))
+        {
+            continue;
+        }
+        let retained = work.estimated_bytes()
+            + blocks.map_or(0, |blocks| blocks.len())
+                * crate::block_behavior::containers::RETAINED_BLOCK_BYTES;
+        if retired {
+            bytes += retained;
+        } else if retained >= crate::simulation::MAX_PENDING_WRITE_BYTES / 2 {
+            oversized_retirement = true;
+        }
+    }
+    diagnostics.ready_work = ready;
+    diagnostics.suspended_work = suspended;
+    diagnostics.pending_write_bytes = bytes.saturating_add(save.in_flight_bytes);
+    if oversized_retirement || bytes >= crate::simulation::MAX_RETIRED_BYTES / 2 {
+        save.force = true;
+    }
 }

@@ -19,18 +19,22 @@ use bevy::{
 use crate::{game::GameState, voxel::TexturePackId};
 
 use super::model::{FOV_MAX, FOV_MIN, VIEW_DISTANCE_MAX, VIEW_DISTANCE_MIN, normalized_fov};
-use super::{AntiAliasingMode, DisplayMode, GraphicsSettings, ShadowQuality};
+use super::{AntiAliasingMode, DisplayMode, GraphicsSettings, ShadowQuality, SimulationSettings};
 
 use super::SAVE_DELAY;
 
 #[derive(Component, Clone, Copy, Debug, Default)]
 struct SettingsPanel;
 
-pub(super) fn spawn_settings_page(mut commands: Commands, settings: Res<GraphicsSettings>) {
-    commands.spawn_scene(settings_page(*settings));
+pub(super) fn spawn_settings_page(
+    mut commands: Commands,
+    settings: Res<GraphicsSettings>,
+    simulation: Res<SimulationSettings>,
+) {
+    commands.spawn_scene(settings_page(*settings, *simulation));
 }
 
-fn settings_page(settings: GraphicsSettings) -> impl Scene {
+fn settings_page(settings: GraphicsSettings, simulation: SimulationSettings) -> impl Scene {
     bsn! {
         Node {
             width: percent(100),
@@ -50,7 +54,7 @@ fn settings_page(settings: GraphicsSettings) -> impl Scene {
                 row_gap: px(8),
             }
             Children [
-                @settings_panel(settings)
+                @settings_panel(settings, simulation)
                 --
                 @back_button()
             ]
@@ -59,7 +63,10 @@ fn settings_page(settings: GraphicsSettings) -> impl Scene {
 }
 
 /// Shared graphics controls, including persistence and reset, for menus and in-game tools.
-pub(crate) fn settings_panel(settings: GraphicsSettings) -> impl Scene {
+pub(crate) fn settings_panel(
+    settings: GraphicsSettings,
+    simulation: SimulationSettings,
+) -> impl Scene {
     let settings = settings.normalized();
     bsn! {
         @pane()
@@ -118,6 +125,8 @@ pub(crate) fn settings_panel(settings: GraphicsSettings) -> impl Scene {
                     @setting_row("Field of View", fov_control(settings.field_of_view))
                     --
                     @setting_row("View Distance", view_distance_control(settings.view_distance))
+                    --
+                    @setting_row("Simulation Distance", simulation_distance_control(simulation.effective_distance()))
                     --
                     @setting_row("Display Mode", choice_control(settings.display_mode, [
                         ("Windowed", DisplayMode::Windowed),
@@ -280,12 +289,14 @@ fn reset_settings(
     mut commands: Commands,
 ) {
     let defaults = GraphicsSettings::default();
+    commands.insert_resource_if_neq(super::SimulationSettings::default());
+    commands.queue(SaveSettingsDeferred(SAVE_DELAY));
     store_settings(*settings, defaults, &mut commands);
     for panel in &panels {
         commands
             .entity(panel)
             .despawn_related::<Children>()
-            .apply_scene(settings_panel(defaults));
+            .apply_scene(settings_panel(defaults, SimulationSettings::default()));
     }
 }
 
@@ -299,4 +310,19 @@ fn store_settings(current: GraphicsSettings, updated: GraphicsSettings, commands
 
 fn back_to_menu_on_activate(_activate: On<Activate>, mut next_state: ResMut<NextState<GameState>>) {
     next_state.set(GameState::Menu);
+}
+
+fn simulation_distance_control(value: u32) -> impl Scene {
+    bsn! {
+        @FeathersSlider { @min: 2.0, @max: 12.0 }
+        Node { width: px(320), max_width: percent(100) }
+        SliderStep(1.0)
+        SliderPrecision(0)
+        SliderValue({value as f32})
+        on(slider_self_update)
+        on(|change: On<ValueChange<f32>>, mut commands: Commands| {
+            commands.insert_resource_if_neq(super::SimulationSettings { simulation_distance: (change.value.round() as u32).clamp(2, 12) });
+            commands.queue(SaveSettingsDeferred(SAVE_DELAY));
+        })
+    }
 }

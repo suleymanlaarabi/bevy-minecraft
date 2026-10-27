@@ -10,13 +10,11 @@ use std::{
     time::Duration,
 };
 
-use hollow_worldgen::codec::{
-    MAX_RECORD_BYTES, compress_record as compress, decompress_record as decompress,
-};
+use hollow_worldgen::codec::decompress_record as decompress;
 const SCHEMA: &str = "
     CREATE TABLE records(key TEXT PRIMARY KEY, value BLOB NOT NULL);
     CREATE TABLE generated(x INTEGER NOT NULL,z INTEGER NOT NULL,stage INTEGER NOT NULL,value BLOB NOT NULL,PRIMARY KEY(x,z)) WITHOUT ROWID;
-    CREATE TABLE containers(x INTEGER NOT NULL,z INTEGER NOT NULL,value BLOB NOT NULL,PRIMARY KEY(x,z)) WITHOUT ROWID;
+    CREATE TABLE gameplay(x INTEGER NOT NULL,z INTEGER NOT NULL,value BLOB NOT NULL,PRIMARY KEY(x,z)) WITHOUT ROWID;
     CREATE TABLE edited(x INTEGER NOT NULL,z INTEGER NOT NULL,value BLOB NOT NULL,PRIMARY KEY(x,z)) WITHOUT ROWID;
 ";
 
@@ -121,13 +119,13 @@ const DELETING_PREFIX: &str = ".deleting-";
 #[derive(Clone, Copy, Default)]
 struct ColumnState {
     terrain: bool,
-    containers: bool,
+    gameplay: bool,
     revision: u64,
 }
 #[derive(Default)]
 struct ColumnUpdate {
     terrain: bool,
-    containers: Option<bool>,
+    gameplay: bool,
 }
 
 /// Compressed WAL data travels to a compute worker before it is decoded.
@@ -135,15 +133,13 @@ struct ColumnUpdate {
 pub(crate) struct GameplayColumn {
     pub revision: u64,
     terrain: Option<Vec<u8>>,
-    containers: Option<Vec<u8>>,
+    gameplay: Option<Vec<u8>>,
 }
 impl GameplayColumn {
     pub fn decode(self) -> io::Result<(Option<Vec<u8>>, Option<Vec<u8>>)> {
         Ok((
             self.terrain.map(|bytes| decompress(&bytes)).transpose()?,
-            self.containers
-                .map(|bytes| decompress(&bytes))
-                .transpose()?,
+            self.gameplay.map(|bytes| decompress(&bytes)).transpose()?,
         ))
     }
 }
@@ -179,9 +175,7 @@ impl Drop for ColumnCommit<'_> {
             let state = states.get_mut(&position).expect("Published column commit");
             if self.committed {
                 state.terrain |= update.terrain;
-                if let Some(present) = update.containers {
-                    state.containers = present;
-                }
+                state.gameplay |= update.gameplay;
             }
             state.revision += 1;
         }
@@ -191,48 +185,26 @@ impl Drop for ColumnCommit<'_> {
 pub(super) struct PreparedCheckpoint {
     metadata: Vec<u8>,
     checkpoint: Vec<u8>,
-    chunks: Vec<((i32, i32), Vec<u8>)>,
-    containers: Vec<((i32, i32), Option<Vec<u8>>)>,
     updates: HashMap<(i32, i32), ColumnUpdate>,
+}
+pub(super) struct EncodedColumn {
+    pub position: (i32, i32),
+    pub terrain: Option<Vec<u8>>,
+    pub gameplay: Option<Vec<u8>>,
 }
 impl PreparedCheckpoint {
     pub(super) fn encode(
         metadata: &WorldMetadata,
         checkpoint: &Checkpoint,
-        chunks: Vec<((i32, i32), Vec<u8>)>,
-        containers: Vec<((i32, i32), Option<Vec<u8>>)>,
+        columns: Vec<((i32, i32), bool, bool)>,
     ) -> io::Result<Self> {
-        let chunks: Vec<_> = chunks
-            .into_iter()
-            .map(|(p, bytes)| (p, compress(&bytes)))
-            .collect();
-        let mut updates = HashMap::<_, ColumnUpdate>::new();
-        for &(position, _) in &chunks {
-            updates.entry(position).or_default().terrain = true;
-        }
-        let containers: Vec<_> = containers
-            .into_iter()
-            .map(|(position, bytes)| {
-                let bytes = bytes
-                    .map(|bytes| {
-                        if bytes.len() > MAX_RECORD_BYTES {
-                            return Err(err("Container snapshot exceeds the record size limit."));
-                        }
-                        Ok(compress(&bytes))
-                    })
-                    .transpose()?;
-                updates.entry(position).or_default().containers = Some(bytes.is_some());
-                Ok((position, bytes))
-            })
-            .collect::<io::Result<_>>()?;
-        let metadata = serde_json::to_vec(metadata).map_err(err)?;
-        let checkpoint = serde_json::to_vec(checkpoint).map_err(err)?;
         Ok(Self {
-            metadata,
-            checkpoint,
-            chunks,
-            containers,
-            updates,
+            metadata: serde_json::to_vec(metadata).map_err(err)?,
+            checkpoint: serde_json::to_vec(checkpoint).map_err(err)?,
+            updates: columns
+                .into_iter()
+                .map(|(position, terrain, gameplay)| (position, ColumnUpdate { terrain, gameplay }))
+                .collect(),
         })
     }
 }
@@ -252,7 +224,7 @@ impl Database {
             Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
         reader.busy_timeout(Duration::from_secs(5)).map_err(err)?;
         let mut columns = HashMap::<_, ColumnState>::new();
-        for (table, terrain) in [("edited", true), ("containers", false)] {
+        for (table, terrain) in [("edited", true), ("gameplay", false)] {
             let mut query = conn
                 .prepare(&format!("SELECT x,z FROM {table}"))
                 .map_err(err)?;
@@ -264,7 +236,7 @@ impl Database {
                 if terrain {
                     state.terrain = true;
                 } else {
-                    state.containers = true;
+                    state.gameplay = true;
                 }
             }
         }
@@ -311,16 +283,6 @@ impl Database {
         let checkpoint: Checkpoint = read_json(&conn, "checkpoint")?.unwrap_or_default();
         if let Some(player) = &checkpoint.player {
             player.inventory()?;
-        }
-        for drop in &checkpoint.drops {
-            drop.validate()?;
-        }
-        if checkpoint
-            .support_pending
-            .iter()
-            .any(|p| !(0..hollow_worldgen::coordinates::CHUNK_HEIGHT).contains(&p[1]))
-        {
-            return Err(err("Invalid pending support update."));
         }
         if checkpoint.pending.iter().any(|(p, s)| {
             !(0..hollow_worldgen::coordinates::CHUNK_HEIGHT).contains(&p[1])
@@ -394,7 +356,7 @@ impl Database {
         if state.revision % 2 != 0 {
             return Ok(None);
         }
-        if !state.terrain && !state.containers {
+        if !state.terrain && !state.gameplay {
             return Ok(Some(GameplayColumn {
                 revision: state.revision,
                 ..Default::default()
@@ -408,40 +370,40 @@ impl Database {
                 .map_err(err)
         };
         let terrain = read("SELECT value FROM edited WHERE x=?1 AND z=?2")?;
-        let containers = read("SELECT value FROM containers WHERE x=?1 AND z=?2")?;
+        let gameplay = read("SELECT value FROM gameplay WHERE x=?1 AND z=?2")?;
         tx.commit().map_err(err)?;
         Ok(Some(GameplayColumn {
             revision: state.revision,
             terrain,
-            containers,
+            gameplay,
         }))
     }
 
-    pub(super) fn checkpoint(&self, prepared: PreparedCheckpoint) -> io::Result<()> {
+    pub(super) fn checkpoint(
+        &self,
+        prepared: PreparedCheckpoint,
+        batches: impl Iterator<Item = io::Result<Vec<EncodedColumn>>>,
+    ) -> io::Result<()> {
         let PreparedCheckpoint {
             metadata,
             checkpoint,
-            chunks,
-            containers,
             updates,
         } = prepared;
         let mut conn = self.connection.lock().map_err(err)?;
         let mut publication = ColumnCommit::begin(&self.columns, updates);
         let tx = conn.transaction().map_err(err)?;
         {
-            let mut insert = tx.prepare_cached("INSERT INTO edited VALUES(?1,?2,?3) ON CONFLICT(x,z) DO UPDATE SET value=excluded.value").map_err(err)?;
-            for ((x, z), bytes) in chunks {
-                insert.execute(params![x, z, bytes]).map_err(err)?;
-            }
-        }
-        {
-            let mut insert = tx.prepare_cached("INSERT INTO containers VALUES(?1,?2,?3) ON CONFLICT(x,z) DO UPDATE SET value=excluded.value").map_err(err)?;
-            for ((x, z), bytes) in containers {
-                if let Some(bytes) = bytes {
-                    insert.execute(params![x, z, bytes]).map_err(err)?;
-                } else {
-                    tx.execute("DELETE FROM containers WHERE x=?1 AND z=?2", params![x, z])
-                        .map_err(err)?;
+            let mut terrain = tx.prepare_cached("INSERT INTO edited VALUES(?1,?2,?3) ON CONFLICT(x,z) DO UPDATE SET value=excluded.value").map_err(err)?;
+            let mut gameplay = tx.prepare_cached("INSERT INTO gameplay VALUES(?1,?2,?3) ON CONFLICT(x,z) DO UPDATE SET value=excluded.value").map_err(err)?;
+            for batch in batches {
+                for column in batch? {
+                    let (x, z) = column.position;
+                    if let Some(bytes) = column.terrain {
+                        terrain.execute(params![x, z, bytes]).map_err(err)?;
+                    }
+                    if let Some(bytes) = column.gameplay {
+                        gameplay.execute(params![x, z, bytes]).map_err(err)?;
+                    }
                 }
             }
         }
@@ -449,7 +411,6 @@ impl Database {
             tx.execute("INSERT INTO records VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key,bytes]).map_err(err)?;
         }
         tx.commit().map_err(err)?;
-        // Drop publishes presence and stable versions before returning the acknowledgement.
         publication.committed = true;
         Ok(())
     }

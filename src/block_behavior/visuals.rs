@@ -80,6 +80,7 @@ pub(crate) fn register(app: &mut App) {
     app.init_resource::<ViewQueue>()
         .init_resource::<LightQueue>()
         .add_systems(OnExit(crate::game::GameState::Game), clear_updates)
+        .add_observer(render_requested)
         .add_observer(changed)
         .add_observer(light_changed)
         .add_observer(chunk_departed)
@@ -232,6 +233,7 @@ fn prepare_views(
         (With<PrepareView>, Without<Dormant>),
     >,
     columns: Query<&LoadedTerrain>,
+    rendered: Query<(), With<crate::voxel::streaming::RenderRequested>>,
     views: Query<&ChestView>,
     world: VoxelWorld,
     mut cache: ResMut<ChestMeshes>,
@@ -257,6 +259,9 @@ fn prepare_views(
         else {
             continue;
         };
+        if !rendered.contains(terrain) {
+            continue;
+        }
         if existing.is_some_and(|existing| {
             existing
                 .iter()
@@ -448,4 +453,23 @@ fn animate_lids(
 fn clear_updates(mut views: ResMut<ViewQueue>, mut lights: ResMut<LightQueue>) {
     views.clear();
     lights.clear();
+}
+
+fn render_requested(
+    event: On<Add<crate::voxel::streaming::RenderRequested>>,
+    terrain: Query<&super::containers::LoadedColumn>,
+    blocks: Query<&BlockEntities>,
+    chests: Query<(), With<super::containers::Chest>>,
+    mut commands: Commands,
+) {
+    let Ok(owner) = terrain.get(event.entity) else {
+        return;
+    };
+    if let Ok(blocks) = blocks.get(owner.0) {
+        for entity in blocks.iter() {
+            if chests.contains(entity) {
+                commands.entity(entity).insert(PrepareView);
+            }
+        }
+    }
 }

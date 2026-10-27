@@ -10,7 +10,9 @@ use ui::spawn_settings_page;
 
 pub(crate) use ui::settings_panel;
 
-pub use model::{AntiAliasingMode, DisplayMode, GraphicsSettings, ShadowQuality};
+pub use model::{
+    AntiAliasingMode, DisplayMode, GraphicsSettings, ShadowQuality, SimulationSettings,
+};
 
 const SETTINGS_APP_NAME: &str = "org.hollow.game";
 /// Debounce before writing settings changed from the UI.
@@ -24,7 +26,8 @@ impl Plugin for GameSettingsPlugin {
             .register_type::<ShadowQuality>()
             .register_type::<DisplayMode>()
             .register_type::<TexturePackId>()
-            .register_type::<GraphicsSettings>();
+            .register_type::<GraphicsSettings>()
+            .register_type::<SimulationSettings>();
         apply::register(app);
         app.add_plugins(SettingsPlugin::new(SETTINGS_APP_NAME))
             .add_systems(OnEnter(GameState::Settings), spawn_settings_page)

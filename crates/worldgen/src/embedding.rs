@@ -34,6 +34,14 @@ pub enum TerrainQuality {
     Fast,
 }
 
+/// Registry IDs and native coordinates survive generation and cache round trips.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct GeneratedFluidTick {
+    pub fluid: u16,
+    pub position: [i32; 3],
+    pub delay: u8,
+    pub priority: i8,
+}
 /// Immutable section snapshot. Edits clone only the affected sections.
 #[derive(Debug, Clone)]
 pub struct ChunkSnapshot {
@@ -43,6 +51,7 @@ pub struct ChunkSnapshot {
     pub height: i32,
     pub states: crate::sections::Layer<crate::VoxelState>,
     pub light: crate::sections::Layer<u8>,
+    pub fluid_ticks: std::sync::Arc<[GeneratedFluidTick]>,
 }
 
 impl ChunkSnapshot {
@@ -70,6 +79,16 @@ impl ChunkSnapshot {
             height,
             states,
             light: lighting::working_sections(&chunk.light, height as usize / 16),
+            fluid_ticks: chunk
+                .fluid_ticks
+                .iter()
+                .map(|tick| GeneratedFluidTick {
+                    fluid: tick.value.id,
+                    position: [tick.position.0.x, tick.position.0.y, tick.position.0.z],
+                    delay: tick.delay,
+                    priority: tick.priority as i8,
+                })
+                .collect(),
         }
     }
 

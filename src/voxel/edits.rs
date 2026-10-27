@@ -5,9 +5,8 @@ use super::{
     lighting::LitEdits,
     streaming::{ChunkIndex, PendingEdits, StoredChunks},
 };
-use bevy::{ecs::system::SystemParam, platform::collections::HashSet, prelude::*};
+use bevy::{ecs::system::SystemParam, prelude::*};
 use hollow_worldgen::coordinates::{CHUNK_HEIGHT, CHUNK_SIZE, FULL_SKY, split_world_position};
-use std::collections::VecDeque;
 
 #[derive(Event, Clone, Copy, Debug)]
 pub struct SetVoxel {
@@ -45,13 +44,6 @@ pub(crate) struct VoxelEditWorld<'w, 's> {
     stored: ResMut<'w, StoredChunks>,
     pending: ResMut<'w, PendingEdits>,
     chunks: Query<'w, 's, &'static mut ChunkVoxels>,
-    connections: Local<'s, ConnectionWork>,
-}
-
-#[derive(Default)]
-struct ConnectionWork {
-    queue: VecDeque<IVec3>,
-    pending: HashSet<IVec3>,
 }
 
 pub(crate) fn set_voxel(event: On<SetVoxel>, mut commands: Commands, mut world: VoxelEditWorld) {
@@ -104,20 +96,8 @@ pub(crate) fn edit_batch(
         return;
     }
     // This is the only ChunkVoxels query: read validation and writes are sequential.
-    for (i, edit) in event.edits.iter().enumerate() {
-        let (chunk, local) = split_world_position(edit.position);
-        if event.edits[..i]
-            .iter()
-            .any(|other| other.position == edit.position)
-            || world
-                .index
-                .get(&chunk)
-                .and_then(|&entity| world.chunks.get(entity).ok())
-                .and_then(|voxels| voxels.state(local))
-                != Some(edit.expected)
-        {
-            return;
-        }
+    if !world.validate(&event.edits) {
+        return;
     }
     let mut mining = None;
     if let Some(tool) = event.tool {
@@ -213,16 +193,7 @@ pub(crate) fn edit_batch(
             amount: 0.005,
         });
     }
-    for edit in &event.edits {
-        world.apply(
-            SetVoxel::with_state(edit.position, edit.state),
-            &mut commands,
-            false,
-        );
-    }
-    for edit in &event.edits {
-        world.refresh_connections(edit.position, &mut commands);
-    }
+    world.commit_validated(&event.edits, &mut commands);
     if let Some(harvest) = event.harvest
         && mining.is_none_or(|outcome| outcome.can_harvest)
     {
@@ -245,6 +216,44 @@ pub(crate) fn edit_batch(
 }
 
 impl VoxelEditWorld<'_, '_> {
+    pub(crate) fn validate(&self, edits: &[CheckedEdit]) -> bool {
+        edits.iter().enumerate().all(|(i, edit)| {
+            !edits[..i]
+                .iter()
+                .any(|other| other.position == edit.position)
+                && {
+                    let (chunk, local) = split_world_position(edit.position);
+                    self.index
+                        .get(&chunk)
+                        .and_then(|&entity| self.chunks.get(entity).ok())
+                        .and_then(|voxels| voxels.state(local))
+                        == Some(edit.expected)
+                }
+        })
+    }
+    pub(crate) fn commit(&mut self, edits: &[CheckedEdit], commands: &mut Commands) -> bool {
+        if !self.validate(edits) {
+            return false;
+        }
+        self.commit_validated(edits, commands);
+        true
+    }
+
+    // The caller must validate before any inventory side effects. No deferred
+    // commands run between that validation and these terrain writes.
+    fn commit_validated(&mut self, edits: &[CheckedEdit], commands: &mut Commands) {
+        for edit in edits {
+            self.apply(
+                SetVoxel::with_state(edit.position, edit.state),
+                commands,
+                false,
+            );
+        }
+        for edit in edits {
+            self.refresh_connections(edit.position, commands);
+        }
+    }
+
     fn apply(&mut self, edit: SetVoxel, commands: &mut Commands, refresh: bool) {
         let (chunk, local) = split_world_position(edit.world_position);
         if !(0..CHUNK_HEIGHT).contains(&local.y) {
@@ -346,7 +355,13 @@ impl VoxelEditWorld<'_, '_> {
         invalidate_border(chunk, local, &self.index, &mut self.chunks, commands);
     }
 
-    fn state(&self, position: IVec3) -> Option<VoxelState> {
+    pub(crate) fn chunk_entity(&self, chunk: IVec2) -> Option<Entity> {
+        self.index.get(&chunk).copied()
+    }
+    pub(crate) fn chunk_state(&self, entity: Entity, local: IVec3) -> Option<VoxelState> {
+        self.chunks.get(entity).ok()?.state(local)
+    }
+    pub(crate) fn state(&self, position: IVec3) -> Option<VoxelState> {
         let (chunk, local) = split_world_position(position);
         self.index
             .get(&chunk)
@@ -356,51 +371,8 @@ impl VoxelEditWorld<'_, '_> {
     }
 
     fn refresh_connections(&mut self, position: IVec3, commands: &mut Commands) {
-        const SIDES: [IVec3; 6] = [
-            IVec3::X,
-            IVec3::NEG_X,
-            IVec3::Y,
-            IVec3::NEG_Y,
-            IVec3::Z,
-            IVec3::NEG_Z,
-        ];
-        self.connections.queue.clear();
-        self.connections.pending.clear();
-        for p in std::iter::once(position).chain(SIDES.map(|d| position + d)) {
-            self.connections.queue.push_back(p);
-            self.connections.pending.insert(p);
-        }
-        while let Some(position) = self.connections.queue.pop_front() {
-            self.connections.pending.remove(&position);
-            let Some(state) = self.state(position) else {
-                continue;
-            };
-            let next = super::rules::connected(position, state, |p| self.state(p));
-            if next == state {
-                continue;
-            }
-            let (chunk, local) = split_world_position(position);
-            if let Some(&entity) = self.index.get(&chunk) {
-                if let Ok(mut voxels) = self.chunks.get_mut(entity) {
-                    voxels.set_state(local, next);
-                    commands.entity(entity).try_insert((EditedChunk, LitEdits));
-                }
-            } else if let Some(voxels) = self.stored.get_mut(&chunk) {
-                voxels.set_state(local, next);
-            }
-            commands.trigger(BlockChanged {
-                position,
-                old: state,
-                new: next,
-            });
-            invalidate_border(chunk, local, &self.index, &mut self.chunks, commands);
-            for delta in SIDES {
-                let neighbor = position + delta;
-                if self.connections.pending.insert(neighbor) {
-                    self.connections.queue.push_back(neighbor);
-                }
-            }
-        }
+        commands
+            .queue(move |world: &mut World| crate::simulation::enqueue_neighbors(world, position));
     }
 }
 
@@ -439,20 +411,34 @@ pub(super) fn border_neighbors(local: IVec3) -> impl Iterator<Item = IVec2> {
     .flatten()
 }
 
+#[derive(Resource, Default, Deref, DerefMut)]
+pub(crate) struct ConnectionBorders(std::collections::VecDeque<Entity>);
+pub(crate) fn queue_connection_border(
+    event: On<Add<super::VoxelChunk>>,
+    mut pending: ResMut<ConnectionBorders>,
+) {
+    pending.push_back(event.entity);
+}
+
 /// A loaded neighbor can restore a connection changed while it was absent.
 /// Pumpkin generates matching borders, so only edges shared with an edited
 /// chunk are inspected, and only in sections holding connection-bearing blocks.
 pub(crate) fn refresh_connection_border(
-    added: On<Add<super::VoxelChunk>>,
+    mut pending: ResMut<ConnectionBorders>,
     mut commands: Commands,
     positions: Query<&super::VoxelChunk>,
     mut world: VoxelEditWorld,
     mut seeds: Local<Vec<IVec3>>,
 ) {
-    let Ok(&super::VoxelChunk { position }) = positions.get(added.entity) else {
+    // Border discovery is preparation, outside observers. At most one arrival
+    // is scanned per frame; the resulting cells use the persistent fixed budget.
+    let Some(entity) = pending.pop_front() else {
         return;
     };
-    let Ok(own) = world.chunks.get(added.entity) else {
+    let Ok(&super::VoxelChunk { position }) = positions.get(entity) else {
+        return;
+    };
+    let Ok(own) = world.chunks.get(entity) else {
         return;
     };
     let own_modified = own.modified;

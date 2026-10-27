@@ -9,6 +9,7 @@ pub mod inventory;
 pub mod menu;
 pub mod player;
 pub mod settings;
+pub mod simulation;
 pub mod sky;
 pub mod spatial;
 pub mod survival;

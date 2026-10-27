@@ -68,11 +68,10 @@ impl Plugin for SkyPlugin {
                 .chain(),
         )
         .add_systems(
-            Update,
-            (cycle::advance_time, cycle::update_sky_state)
-                .chain()
-                .in_set(SkySystems::Advance),
+            FixedUpdate,
+            cycle::advance_time.in_set(crate::simulation::SimulationSystems::Activation),
         )
+        .add_systems(Update, cycle::update_sky_state.in_set(SkySystems::Advance))
         .add_systems(
             Update,
             (

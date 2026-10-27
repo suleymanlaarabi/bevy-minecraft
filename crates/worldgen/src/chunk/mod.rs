@@ -9,6 +9,7 @@ pub mod io;
 pub const CHUNK_AREA: usize = 256;
 
 pub struct ChunkData {
+    pub fluid_ticks: Arc<[crate::embedding::GeneratedFluidTick]>,
     pub x: i32,
     pub z: i32,
     pub section: ChunkSections,
@@ -51,6 +52,7 @@ impl ChunkSections {
 impl ChunkData {
     pub fn snapshot(&self) -> ChunkSnapshot {
         ChunkSnapshot {
+            fluid_ticks: self.fluid_ticks.clone(),
             chunk_x: self.x,
             chunk_z: self.z,
             min_y: self.section.min_y,

@@ -31,6 +31,7 @@ impl Plugin for GamePlugin {
         app.insert_state(GameState::Menu)
             .add_plugins((
                 crate::world::WorldPlugin,
+                crate::simulation::GameplaySimulationPlugin,
                 InventoryPlugin,
                 crate::audio::GameAudioPlugin,
                 crate::block_behavior::BlockBehaviorPlugin,

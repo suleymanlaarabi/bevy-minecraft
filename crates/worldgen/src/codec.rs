@@ -123,7 +123,6 @@ struct WorkingPayload {
     block_count: usize,
     block_entities: Vec<Vec<u8>>,
     structure_entities: Vec<Vec<u8>>,
-    fluid_ticks: Vec<(String, [i32; 3], u8, i32)>,
     structure_starts: Vec<String>,
     structure_references: Vec<String>,
 }
@@ -159,18 +158,6 @@ impl WorkingPayload {
             block_count: chunk.flat_block_map.len(),
             block_entities: chunk.pending_block_entities.iter().map(nbt).collect(),
             structure_entities: chunk.pending_structure_entities.iter().map(nbt).collect(),
-            fluid_ticks: chunk
-                .fluid_ticks
-                .iter()
-                .map(|tick| {
-                    (
-                        tick.value.name.to_owned(),
-                        [tick.position.0.x, tick.position.0.y, tick.position.0.z],
-                        tick.delay,
-                        tick.priority as i32,
-                    )
-                })
-                .collect(),
             structure_starts,
             structure_references: chunk
                 .structure_references
@@ -189,6 +176,7 @@ struct GenerationHeader {
     height: i32,
     biomes: Vec<u8>,
     metadata: GenerationMetadata,
+    fluid_ticks: Vec<crate::embedding::GeneratedFluidTick>,
 }
 
 /// Completed columns retain no resumable generation metadata.
@@ -218,6 +206,7 @@ pub(crate) fn encode_generated(chunk: &crate::chunk_system::Chunk) -> io::Result
         height: snapshot.height,
         biomes,
         metadata,
+        fluid_ticks: snapshot.fluid_ticks.to_vec(),
     };
     let header = serde_json::to_vec(&header).map_err(io::Error::other)?;
     let terrain = TerrainRecord {
@@ -269,6 +258,15 @@ pub(crate) fn decode_generated(
     {
         return Err(invalid());
     }
+    if header.fluid_ticks.iter().any(|tick| {
+        tick.position[0].div_euclid(16) != position.x
+            || tick.position[2].div_euclid(16) != position.y
+            || !(dim.min_y..dim.min_y + dim.height).contains(&tick.position[1])
+            || pumpkin_data::fluid::Fluid::from_id(tick.fluid).is_none()
+            || !(-3..=3).contains(&tick.priority)
+    }) {
+        return Err(invalid());
+    }
     let terrain = TerrainRecord::decode(bytes, dim.height as usize / 16)?;
     if terrain.modified {
         return Err(invalid());
@@ -295,6 +293,7 @@ pub(crate) fn decode_generated(
                 return Err(invalid());
             }
             return Ok(Chunk::Complete(Arc::new(ChunkData {
+                fluid_ticks: header.fluid_ticks.into(),
                 x: position.x,
                 z: position.y,
                 section: ChunkSections {
@@ -354,19 +353,21 @@ pub(crate) fn decode_generated(
         .iter()
         .map(read_nbt)
         .collect::<io::Result<_>>()?;
-    let fluid_ticks = metadata
+    let fluid_ticks = header
         .fluid_ticks
         .iter()
-        .map(|(name, p, delay, priority)| {
-            let value = pumpkin_data::fluid::Fluid::from_registry_key(&name).ok_or_else(invalid)?;
-            let priority = crate::tick::TickPriority::try_from(*priority).map_err(|_| invalid())?;
+        .map(|tick| {
+            let p = tick.position;
+            let value = pumpkin_data::fluid::Fluid::from_id(tick.fluid).ok_or_else(invalid)?;
+            let priority = crate::tick::TickPriority::try_from(i32::from(tick.priority))
+                .map_err(|_| invalid())?;
             if p[1] < dim.min_y || p[1] >= dim.min_y + dim.height {
                 return Err(invalid());
             }
             Ok(crate::tick::ScheduledTick {
                 value,
                 position: pumpkin_util::math::position::BlockPos::new(p[0], p[1], p[2]),
-                delay: *delay,
+                delay: tick.delay,
                 priority,
             })
         })

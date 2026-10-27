@@ -153,6 +153,7 @@ impl Chunk {
         let snapshot = crate::ChunkSnapshot::from_proto(&proto, dimension.min_y, dimension.height);
         let heightmaps = Self::build_heightmaps(&proto, dimension.min_y);
         Self::Complete(Arc::new(ChunkData {
+            fluid_ticks: snapshot.fluid_ticks,
             x: proto.x,
             z: proto.z,
             section: ChunkSections {

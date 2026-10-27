@@ -182,16 +182,26 @@ pub(super) fn restore_time(
     *sky = SkyState::new(&time_of_day);
 }
 
-pub(super) fn advance_time(time: Res<Time>, mut time_of_day: ResMut<TimeOfDay>) {
+pub(super) fn advance_time(time: Res<Time<Fixed>>, mut time_of_day: ResMut<TimeOfDay>) {
     let days = time.delta_secs() * time_of_day.speed / DAY_LENGTH_SECS;
     if days != 0.0 {
         time_of_day.advance(days);
     }
 }
 
-pub(super) fn update_sky_state(time_of_day: Res<TimeOfDay>, mut sky: ResMut<SkyState>) {
-    if time_of_day.is_changed() {
-        sky.set_if_neq(SkyState::new(&time_of_day));
+pub(super) fn update_sky_state(
+    time_of_day: Res<TimeOfDay>,
+    fixed: Res<Time<Fixed>>,
+    phase: Res<State<crate::world::WorldSessionPhase>>,
+    paused: Option<Res<crate::character::SimulationPaused>>,
+    mut sky: ResMut<SkyState>,
+) {
+    let mut presented = *time_of_day;
+    if *phase.get() == crate::world::WorldSessionPhase::Playing && paused.is_none() {
+        presented.advance(
+            fixed.overstep_fraction() * fixed.timestep().as_secs_f32() * presented.speed
+                / DAY_LENGTH_SECS,
+        );
     }
+    sky.set_if_neq(SkyState::new(&presented));
 }
-

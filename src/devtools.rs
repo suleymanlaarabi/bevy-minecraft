@@ -25,7 +25,7 @@ use crate::{
     game::GameState,
     inventory::{InventoryState, lock_cursor, unlock_cursor},
     player::{Player, clear_player_input},
-    settings::{GraphicsSettings, settings_panel},
+    settings::{GraphicsSettings, SimulationSettings, settings_panel},
     sky::TimeOfDay,
 };
 
@@ -109,12 +109,18 @@ fn spawn_panel(
     mut commands: Commands,
     time: Res<TimeOfDay>,
     settings: Res<GraphicsSettings>,
+    simulation: Res<SimulationSettings>,
     flying: Query<(), (With<Player>, With<Flying>)>,
 ) {
-    commands.spawn_scene(panel(!flying.is_empty(), *time, *settings));
+    commands.spawn_scene(panel(!flying.is_empty(), *time, *settings, *simulation));
 }
 
-fn panel(flying: bool, time: TimeOfDay, settings: GraphicsSettings) -> impl Scene {
+fn panel(
+    flying: bool,
+    time: TimeOfDay,
+    settings: GraphicsSettings,
+    simulation: SimulationSettings,
+) -> impl Scene {
     bsn! {
         Node {
             position_type: PositionType::Absolute,
@@ -163,7 +169,7 @@ fn panel(flying: bool, time: TimeOfDay, settings: GraphicsSettings) -> impl Scen
                 --
                 Node { display: Display::None }
                 PanelTab::Settings
-                Children [@settings_panel(settings)]
+                Children [@settings_panel(settings, simulation)]
             ]
         ]
     }

@@ -134,15 +134,12 @@ pub(super) fn finish_spawn_loading(
         }
         let saved = session.as_ref().and_then(|s| s.resume.player.as_ref());
         spawn_player(&mut commands, transform.translation, saved);
-        if let Some(session) = &session {
+        if session.is_some() {
             if let Some(stack) = saved
                 .and_then(|p| p.cursor.as_ref())
                 .and_then(|s| s.restore().ok())
             {
                 cursor.stack = Some(stack);
-            }
-            for drop in &session.resume.drops {
-                crate::dropped_item::restore_drop(&mut commands, drop.clone());
             }
         }
         crate::world::spawn_save_indicator(&mut commands);

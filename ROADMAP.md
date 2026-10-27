@@ -46,7 +46,7 @@ Checked boxes below identify existing capabilities. Remaining-work boxes stay un
 | Crafting | Partial | Personal 2x2 and workbench 3x3 recipes, tags, repeated crafting, and remainders exist; processing stations and recipe discovery remain. |
 | Equipment | Partial | Slots, visuals, and gathering-tool durability exist; armor protection, weapon effects, other durability costs, and equipment abilities remain. |
 | Interactive blocks | Partial | Normal chests, manual openings, and crafting tables are integrated; processing stations, machines, and special storage remain. |
-| Fluids | Partial | Rendering and character interaction exist; dynamic flow, buckets, and fluid-driven world updates remain. |
+| Fluids | Partial | Persistent Overworld water/lava flow and reactions are implemented; runtime acceptance, buckets, currents, sponges and cauldrons remain. |
 | World generation | Needs audit | The generator contains many biome/feature/structure implementations; audit their game exposure, loot, entities, and progression. |
 | Dimensions | Partial | Generation types include Nether and End; game sessions and world metadata currently select and accept only the Overworld. |
 | Simulation | Partial | Fixed character physics and targeted block updates exist; a general gameplay scheduler and random block ticking remain. |
@@ -79,12 +79,12 @@ Milestones group dependencies rather than require strictly serial development. S
 
 ## M1 - Persistent gameplay simulation
 
-**Status: Partial.** Reuse the existing fixed schedules, voxel edit pipeline, work budgets, and world lifecycle.
+**Status: Partial.** The persistent tick/column/fluid foundation is implemented and compile-checked; see [implementation and static review](docs/M1_SIMULATION.md). Bounded coherent save admission is implemented; later entity/item families and runtime acceptance remain.
 
-- [ ] Add a gameplay clock, scheduled block/fluid ticks, random ticks, and bounded neighbor-update processing; keep rendering and simulation clocks distinct.
-- [ ] Separate simulation distance from render distance, with explicit activation and deactivation rules for chunks, entities, and block machines.
-- [ ] Suspend simulation in unloaded chunks and restore pending work when they return; avoid unlimited catch-up work or forcing the whole explored world to stay active.
-- [ ] Make simulation edits use validated voxel changes so blocks, inventory transactions, support rules, lighting, and meshes stay consistent.
+- [x] Add a gameplay clock, scheduled block/fluid ticks, random ticks, and bounded neighbor-update processing; keep rendering and simulation clocks distinct.
+- [x] Separate simulation distance from render distance, with explicit activation and deactivation rules for chunks, entities, and block machines.
+- [x] Suspend simulation in unloaded chunks and restore pending work when they return; avoid unlimited catch-up work or forcing the whole explored world to stay active.
+- [x] Make simulation edits use validated voxel changes so blocks, inventory transactions, support rules, lighting, and meshes stay consistent.
 - [ ] Extend game item stacks with per-instance data and correct stack equality for durability, enchantments, names, effects, and portable storage.
 - [ ] Extend snapshots and saves for living entities, machines, timed work, player stats, progression, and later dimension identity.
 - [ ] Preserve state across chunk unloads and saving; prevent duplication or loss when an action overlaps a save or unload.
@@ -128,9 +128,9 @@ Implementation details and static review: [M3 survival](docs/M3_SURVIVAL.md).
 
 ## M4 - Dynamic environment
 
-**Status: Partial.** Static fluid surfaces, fluid movement interaction, and local placement updates already exist.
+**Status: Partial.** Persistent Overworld water/lava flow, waterlogging and block reactions are implemented with compile-only verification. Environmental growth, fire, weather and fluid tools remain.
 
-- [ ] Simulate water and lava sources, flow levels, falling flows, source regeneration rules, and updates after placement/removal.
+- [x] Simulate water and lava sources, flow levels, falling flows, source regeneration rules, and updates after placement/removal (source review and compilation; runtime acceptance pending).
 - [ ] Add bucket filling/emptying, fluid replacement, waterlogging, sponges, cauldrons, and water/lava block reactions.
 - [ ] Apply fluid currents to characters, items, and later vehicles; add bubble columns and their effects.
 - [ ] Add falling sand/gravel and related blocks, landing resolution, concrete-powder conversion, and falling-block hazards.

@@ -12,6 +12,10 @@ use bevy::{
 use std::io;
 
 pub(crate) const CONTAINER_SIZE: usize = 27;
+// Retired stateful blocks can retain slot arrays and sparse ECS/index storage.
+// Charge a populated inventory even when this particular block owns no slots.
+pub(crate) const RETAINED_BLOCK_BYTES: usize =
+    std::mem::size_of::<[Option<crate::inventory::ItemStack>; CONTAINER_SIZE]>() + 256;
 pub(crate) type ContainerInventory = ItemSlots<CONTAINER_SIZE>;
 
 #[derive(Component)]
@@ -74,8 +78,11 @@ pub(crate) struct AvailableContainer;
 #[derive(Resource, Default, Deref, DerefMut)]
 pub(crate) struct GameplayColumns(HashMap<IVec2, Entity>);
 #[derive(Component)]
+#[require(crate::simulation::ColumnSimulation)]
 pub(crate) struct GameplayColumn {
     pub position: IVec2,
+    // Only stateful blocks are indexed; a direct table would reserve 98,304
+    // entity slots per column for a typically tiny subset of cells.
     pub cells: HashMap<u32, Entity>,
     pub revision: u64,
     pub saved_revision: u64,
@@ -236,6 +243,14 @@ pub(crate) fn top_clear(world: &VoxelWorld, position: IVec3) -> bool {
 pub(crate) struct PreparedColumn {
     pub entries: Vec<(IVec3, VoxelState, ContainerInventory)>,
     pub revision: u64,
+    pub simulation: crate::simulation::ColumnSimulation,
+    pub drops: Vec<crate::world::SavedDrop>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ColumnRecord {
+    containers: Vec<ContainerRecord>,
+    simulation: crate::simulation::SimulationSnapshot,
+    drops: Vec<crate::world::SavedDrop>,
 }
 type ContainerRecord = ([i32; 3], [Option<crate::world::SavedStack>; CONTAINER_SIZE]);
 impl PreparedColumn {
@@ -270,32 +285,17 @@ impl PreparedColumn {
         result
     }
 
-    pub fn encode(&self) -> io::Result<Option<Vec<u8>>> {
-        let records: Vec<ContainerRecord> = self
-            .entries
-            .iter()
-            .filter(|(_, _, inventory)| !inventory.is_empty())
-            .map(|(position, _, inventory)| {
-                (
-                    position.to_array(),
-                    std::array::from_fn(|index| {
-                        inventory.slot(index).map(crate::world::SavedStack::capture)
-                    }),
-                )
-            })
-            .collect();
-        if records.is_empty() {
-            Ok(None)
-        } else {
-            serde_json::to_vec(&records)
-                .map(Some)
-                .map_err(io::Error::other)
+    pub fn restore(&mut self, bytes: &[u8], chunk: IVec2) -> io::Result<()> {
+        let record: ColumnRecord = serde_json::from_slice(bytes).map_err(io::Error::other)?;
+        self.simulation = crate::simulation::ColumnSimulation::restore(record.simulation)?;
+        for drop in &record.drops {
+            drop.validate()?;
+            if crate::voxel::chunk_at(Vec3::from_array(drop.position)) != chunk {
+                return Err(io::Error::other("Dropped item belongs to another column."));
+            }
         }
-    }
-
-    pub fn restore(&mut self, bytes: &[u8]) -> io::Result<()> {
-        let records: Vec<ContainerRecord> =
-            serde_json::from_slice(bytes).map_err(io::Error::other)?;
+        self.drops = record.drops;
+        let records = record.containers;
         self.entries
             .sort_unstable_by_key(|(p, _, _)| (p.y, p.z, p.x));
         let mut seen = vec![false; self.entries.len()];
@@ -360,6 +360,17 @@ pub(crate) fn spawn_for_chunk(
             .expect("Gameplay column")
             .initialized;
         if !initialized {
+            let simulation = prepared.simulation;
+            let suspended: Vec<_> = simulation.suspended.values().cloned().collect();
+            world.entity_mut(owner).insert(simulation);
+            for task in suspended {
+                world
+                    .resource_mut::<crate::simulation::BoundaryWaits>()
+                    .register(IVec2::from_array(task.chunk), owner);
+            }
+            for drop in prepared.drops {
+                crate::dropped_item::restore_drop(&mut world.commands(), drop);
+            }
             for (position, state, inventory) in prepared.entries {
                 let entity = block(world, position);
                 classify(world, entity, state);
@@ -370,9 +381,18 @@ pub(crate) fn spawn_for_chunk(
             let mut data = world
                 .get_mut::<GameplayColumn>(owner)
                 .expect("Gameplay column");
-            data.revision = prepared.revision;
+            data.revision = prepared.revision + 1;
             data.saved_revision = prepared.revision;
             data.initialized = true;
+        }
+        let dormant = std::mem::take(
+            &mut world
+                .get_mut::<crate::simulation::ColumnSimulation>(owner)
+                .expect("Column simulation")
+                .dormant_drops,
+        );
+        for drop in dormant {
+            crate::dropped_item::restore_drop(&mut world.commands(), drop);
         }
         world.entity_mut(terrain).insert(LoadedColumn(owner));
         let entities: Vec<_> = world
@@ -436,9 +456,7 @@ pub(crate) fn changed(event: On<crate::voxel::edits::BlockChanged>, mut commands
             {
                 world.entity_mut(entity).remove::<Dormant>();
             }
-            if !materialized(new.kind())
-                && world.get::<super::supports::SupportCheck>(entity).is_none()
-            {
+            if !materialized(new.kind()) {
                 world.despawn(entity);
             }
         }
@@ -652,63 +670,135 @@ pub(crate) fn track_inventory_changes(
 }
 pub(crate) fn cleanup_dormant(
     mut commands: Commands,
-    columns: Query<(
-        Entity,
-        &GameplayColumn,
-        Option<&LoadedTerrain>,
-        Option<&BlockEntities>,
-    )>,
-    work: Query<(), With<super::supports::SupportCheck>>,
+    columns: Query<(Entity, &GameplayColumn, Option<&LoadedTerrain>)>,
     stored: Res<crate::voxel::streaming::StoredChunks>,
     pending: Res<crate::voxel::streaming::PendingChunks>,
     mut index: ResMut<GameplayColumns>,
 ) {
-    for (entity, data, terrain, blocks) in &columns {
+    for (entity, data, terrain) in &columns {
         if terrain.is_none_or(|terrain| terrain.is_empty())
             && data.revision == data.saved_revision
             && !stored.contains_key(&data.position)
             && !pending.contains_key(&data.position)
-            && blocks.is_none_or(|blocks| blocks.iter().all(|entity| !work.contains(entity)))
         {
             index.remove(&data.position);
             commands.entity(entity).despawn();
         }
     }
 }
+pub(crate) struct ColumnSnapshot {
+    pub revision: u64,
+    containers: Vec<(IVec3, ContainerInventory)>,
+    simulation: crate::simulation::SimulationSnapshot,
+    drops: Vec<crate::world::SavedDrop>,
+}
+impl ColumnSnapshot {
+    pub fn encode(self) -> io::Result<Vec<u8>> {
+        let records = self
+            .containers
+            .iter()
+            .map(|(position, inventory)| {
+                (
+                    position.to_array(),
+                    std::array::from_fn(|index| {
+                        inventory.slot(index).map(crate::world::SavedStack::capture)
+                    }),
+                )
+            })
+            .collect();
+        serde_json::to_vec(&ColumnRecord {
+            containers: records,
+            simulation: self.simulation,
+            drops: self.drops,
+        })
+        .map_err(io::Error::other)
+    }
+}
 #[derive(SystemParam)]
-pub(crate) struct ContainerSnapshots<'w, 's> {
-    columns: Query<'w, 's, (&'static GameplayColumn, Option<&'static BlockEntities>)>,
-    inventories: Query<
+pub(crate) struct ColumnSnapshots<'w, 's> {
+    columns: Query<
         'w,
         's,
         (
-            &'static BlockEntity,
-            &'static BlockState,
-            &'static ContainerInventory,
+            &'static GameplayColumn,
+            Option<&'static BlockEntities>,
+            &'static crate::simulation::ColumnSimulation,
+            Option<&'static crate::simulation::SimulatedEntities>,
         ),
     >,
+    drops: Query<
+        'w,
+        's,
+        (
+            &'static crate::dropped_item::DroppedItem,
+            &'static crate::dropped_item::DropMotion,
+        ),
+    >,
+    inventories: Query<'w, 's, (&'static BlockEntity, &'static ContainerInventory)>,
 }
-impl ContainerSnapshots<'_, '_> {
-    pub fn capture(&self) -> Vec<(IVec2, PreparedColumn)> {
+impl ColumnSnapshots<'_, '_> {
+    pub fn candidates(&self) -> Vec<(IVec2, usize, usize)> {
         self.columns
             .iter()
-            .filter(|(data, _)| data.revision != data.saved_revision)
-            .map(|(data, blocks)| {
+            .filter(|(data, _, _, _)| data.revision != data.saved_revision)
+            .map(|(data, blocks, work, mobiles)| {
+                let containers = blocks
+                    .into_iter()
+                    .flat_map(|blocks| blocks.iter())
+                    .filter_map(|entity| self.inventories.get(entity).ok())
+                    .filter(|(_, inventory)| !inventory.is_empty())
+                    .count();
+                let drops = work.dormant_drops.len()
+                    + mobiles
+                        .into_iter()
+                        .flat_map(|entities| entities.iter())
+                        .filter(|&entity| self.drops.contains(entity))
+                        .count();
+                // One populated 27-slot inventory reserves 32 KiB, covering slot
+                // records plus worst-case textual contents and compression buffers.
                 (
                     data.position,
-                    PreparedColumn {
-                        entries: blocks
+                    work.capture_reservation() + containers * 32768 + drops * 2048,
+                    work.snapshot_bytes()
+                        + containers * 2 * std::mem::size_of::<(IVec3, ContainerInventory)>()
+                        + drops * 2 * std::mem::size_of::<crate::world::SavedDrop>()
+                        + 256,
+                )
+            })
+            .collect()
+    }
+    pub fn capture(&self) -> Vec<(IVec2, ColumnSnapshot)> {
+        self.columns
+            .iter()
+            .filter(|(data, _, _, _)| data.revision != data.saved_revision)
+            .map(|(data, blocks, simulation, mobiles)| {
+                (
+                    data.position,
+                    ColumnSnapshot {
+                        containers: blocks
                             .into_iter()
                             .flat_map(|blocks| blocks.iter())
                             .filter_map(|entity| {
-                                self.inventories.get(entity).ok().map(
-                                    |(block, state, inventory)| {
-                                        (block.position, state.0, inventory.clone())
-                                    },
-                                )
+                                self.inventories
+                                    .get(entity)
+                                    .ok()
+                                    .map(|(block, inventory)| (block.position, inventory.clone()))
                             })
                             .collect(),
                         revision: data.revision,
+                        simulation: simulation.capture(),
+                        drops: simulation
+                            .dormant_drops
+                            .iter()
+                            .cloned()
+                            .chain(
+                                mobiles
+                                    .into_iter()
+                                    .flat_map(|entities| entities.iter())
+                                    .filter_map(|entity| self.drops.get(entity).ok())
+                                    .map(|(drop, motion)| drop.capture(motion)),
+                            )
+                            .collect(),
                     },
                 )
             })

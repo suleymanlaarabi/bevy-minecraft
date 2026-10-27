@@ -82,6 +82,7 @@ impl Plugin for VoxelPlugin {
         .init_resource::<PendingChunks>()
         .init_resource::<PendingEdits>()
         .init_resource::<StreamState>()
+        .init_resource::<edits::ConnectionBorders>()
         .init_resource::<lighting::LightingState>()
         .init_resource::<lighting::LightingVersion>()
         .init_resource::<lighting::BlockLightEdits>()
@@ -92,7 +93,14 @@ impl Plugin for VoxelPlugin {
         .add_observer(apply_texture_pack)
         .add_observer(set_voxel)
         .add_observer(edits::edit_batch)
-        .add_observer(edits::refresh_connection_border)
+        .add_observer(edits::queue_connection_border)
+        .add_systems(
+            PostUpdate,
+            edits::refresh_connection_border
+                .after(VoxelPipeline)
+                .before(crate::block_behavior::GameplaySystems::Topology)
+                .run_if(crate::world::streaming),
+        )
         .add_observer(cleanup_removed_chunk)
         .add_systems(PreStartup, prepare_assets)
         .add_systems(Update, stream_chunks.run_if(crate::world::streaming))
