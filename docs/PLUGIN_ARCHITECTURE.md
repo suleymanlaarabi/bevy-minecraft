@@ -2,8 +2,8 @@
 
 This refactor is **in progress**. The shared services described below are used by
 the Minecraft application; they are not a second, disconnected engine. The full
-architecture plan is not implemented yet. In particular, the Minecraft content
-registry still accepts only Pumpkin's native block and state definitions.
+architecture plan is not implemented yet. The content catalog and fluid services now accept plugin-defined blocks and states.
+See [Content and fluid plugins](CONTENT_AND_FLUID_PLUGINS.md) for the implemented API and its boundaries.
 
 ## Implemented boundaries
 
@@ -123,8 +123,8 @@ model baker or multi-track animation API from the plan.
   a bulk-edit API would need a separate cost review.
 
 Remaining costs include native 32-to-16-bit state adaptation, several native
-metadata tables, scans of loaded chest views, Minecraft-specific fluid dispatch,
-and the specialized inventory-screen routing. No speedup or memory reduction
+metadata tables, scans of loaded chest views, the specialized inventory-screen routing. Fluid scheduling dispatch now uses numeric
+profile IDs; the column work scheduler itself remains in the Minecraft adapter. No speedup or memory reduction
 has been measured or claimed.
 
 ## ECS access review
@@ -159,20 +159,19 @@ Unchanged vendored/generated sources remain in the comparison; unchanged test
 source contributes equally to both sides and does not affect the delta.
 
 Rust source lines after formatting and excluding blank/comment-only lines:
-**1,526,286 before; 1,526,450 after; net +164 lines**, including the example.
+**First tranche: 1,526,286 before; 1,526,450 after; net +164 lines**, including the example.
+The subsequent content/fluid tranche is accounted for in CONTENT_AND_FLUID_PLUGINS.md.
 The net production-code reduction target is **not met**. Extraction and removal of
 obsolete plumbing have not yet offset the new service APIs and example. This
 refactor must not be reported as complete or as a demonstrated code reduction.
 
 ## Remaining implementation work
 
-1. Replace the Minecraft block/state adapter with an appendable, frozen content
-   catalog and RON import boundary. Its current state constructor still validates
-   against Pumpkin's native registry, despite the wider terrain representation.
-   Engine column bounds also still use the shared default 16-by-384-by-16 layout.
-2. Extract configurable fluid simulation, reactions, contact profiles and fluid
-   rendering; register water and lava as content plugins. They remain native
-   special cases in the Minecraft package today.
+1. Add a data-file importer on top of the Rust content registration API. The frozen
+   catalog already accepts custom definitions; RON declarations are not implemented.
+   Game column storage still uses the shared default 16-by-384-by-16 layout.
+2. Expand model asset/animation authoring beyond the shared cuboid and fluid surfaces.
+   Water, lava, fluid reactions and custom fluids already use the shared fluid API.
 3. Generalize scheduled/random/neighbor work categories and dispatch. The existing
    simulation budgets and persistent queues still belong to the Minecraft layer.
 4. Generalize slot ownership, screen sessions, recipe processing and persistence

@@ -88,9 +88,9 @@ pub(super) fn follow_eye_height(
     let look = player_camera.look(player_transform.rotation);
     // Minecraft multiplies the view matrix by bobView; the camera world pose
     // therefore needs its inverse. Hands use bobView directly in camera space.
-    let bob_pose = super::view_bob::pose(motion);
+    let bob_pose = super::view_bob::pose(motion, fixed.overstep_fraction());
     let bob_rotation = bob_pose.rotation.inverse();
-    let mut eye = Vec3::Y * motion.eye_offset();
+    let mut eye = Vec3::Y * motion.eye_offset(fixed.overstep_fraction());
     if *view == PlayerView::FirstPerson {
         eye -= look * (bob_rotation * bob_pose.translation);
     }

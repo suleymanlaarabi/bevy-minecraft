@@ -1,11 +1,11 @@
 //! Fixed gameplay time, spatial activation and shared per-frame work limits.
+use hollow_features::motion::FixedPosition;
 mod fluids;
 mod work;
 pub(crate) use work::*;
 
 use crate::{
     block_behavior::containers::{BlockEntities, GameplayColumn, GameplayColumns, LoadedColumn},
-    character::CharacterMotion,
     player::Player,
     settings::SimulationSettings,
     voxel::{VoxelChunk, chunk_at, streaming::ChunkIndex},
@@ -88,7 +88,6 @@ impl Plugin for GameplaySimulationPlugin {
             .init_resource::<SimulationDiagnostics>()
             .init_resource::<BoundaryWaits>()
             .init_resource::<RandomTickRegistry>()
-            .init_resource::<fluids::FluidCatalog>()
             .configure_sets(
                 FixedUpdate,
                 (
@@ -194,7 +193,7 @@ fn reset_budget(
 // Readiness is re-evaluated only after membership, terrain or ownership changes.
 fn activate(
     mut commands: Commands,
-    player: Query<&CharacterMotion, With<Player>>,
+    player: Query<&FixedPosition, With<Player>>,
     settings: Res<SimulationSettings>,
     index: Res<ChunkIndex>,
     mut region: ResMut<SimulationRegion>,
@@ -212,7 +211,7 @@ fn activate(
     let center = player
         .single()
         .ok()
-        .map(|motion| chunk_at(motion.position.as_vec3()));
+        .map(|motion| chunk_at(motion.current.as_vec3()));
     let radius = settings.effective_distance();
     let changed = region.center != center || region.radius != radius;
     region.center = center;
@@ -312,23 +311,15 @@ fn update_mobile_owners(
     columns: Res<GameplayColumns>,
     owners: Query<&GameplayColumn>,
     active: Query<(), With<Simulating>>,
-    mobiles: Query<
-        (
-            Entity,
-            Option<&CharacterMotion>,
-            Option<&crate::dropped_item::DropMotion>,
-            Option<&SimulatedIn>,
-            Has<Simulating>,
-        ),
-        Or<(With<CharacterMotion>, With<crate::dropped_item::DropMotion>)>,
-    >,
+    mobiles: Query<(
+        Entity,
+        &FixedPosition,
+        Option<&SimulatedIn>,
+        Has<Simulating>,
+    )>,
 ) {
-    for (entity, character, drop, previous, was_active) in &mobiles {
-        let position = character
-            .map(|motion| motion.position)
-            .or_else(|| drop.map(|motion| motion.position))
-            .expect("Mobile motion");
-        let chunk = chunk_at(position.as_vec3());
+    for (entity, position, previous, was_active) in &mobiles {
+        let chunk = chunk_at(position.current.as_vec3());
         let owner = if let Some(previous) = previous
             && owners
                 .get(previous.0)
@@ -363,10 +354,13 @@ fn track_work(
     mut columns: Query<(&mut GameplayColumn, Ref<ColumnSimulation>)>,
     drops: Query<
         &SimulatedIn,
-        Or<(
-            Changed<crate::dropped_item::DroppedItem>,
-            Changed<crate::dropped_item::DropMotion>,
-        )>,
+        (
+            With<crate::dropped_item::DroppedItem>,
+            Or<(
+                Changed<crate::dropped_item::DroppedItem>,
+                Changed<FixedPosition>,
+            )>,
+        ),
     >,
 ) {
     for (mut column, work) in &mut columns {
@@ -391,6 +385,7 @@ fn unload(
     drops: Query<(
         &crate::dropped_item::DroppedItem,
         &crate::dropped_item::DropMotion,
+        &FixedPosition,
     )>,
     mut commands: Commands,
 ) {
@@ -410,8 +405,8 @@ fn unload(
     }
     if let Some(mobiles) = mobiles {
         for entity in mobiles.iter() {
-            if let Ok((drop, motion)) = drops.get(entity) {
-                work.dormant_drops.push(drop.capture(motion));
+            if let Ok((drop, motion, position)) = drops.get(entity) {
+                work.dormant_drops.push(drop.capture(motion, position));
                 commands.entity(entity).despawn();
             } else {
                 commands

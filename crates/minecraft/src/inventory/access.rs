@@ -7,10 +7,10 @@ use crate::{
     block_behavior::containers::{
         CONTAINER_SIZE, ContainerInventory, ContainerTopology, ViewingContainer,
     },
-    character::CharacterMotion,
     player::Player,
 };
 use bevy::prelude::*;
+use hollow_features::motion::FixedPosition;
 use std::collections::VecDeque;
 
 pub(crate) const CONTAINER_START: usize = CRAFT_RESULT + 1;
@@ -45,7 +45,7 @@ pub(crate) fn apply_actions(
             &mut PlayerInventory,
             &mut super::CraftingGrid,
             Option<&crate::block_behavior::workbench::ViewingWorkbench>,
-            &CharacterMotion,
+            &FixedPosition,
             Option<&ViewingContainer>,
         ),
         With<Player>,
@@ -64,7 +64,7 @@ pub(crate) fn apply_actions(
         return;
     };
     if let Some(session) = workbench
-        && !workbenches.valid(session.0, motion.position.as_vec3())
+        && !workbenches.valid(session.0, motion.current.as_vec3())
     {
         return;
     }
@@ -74,7 +74,7 @@ pub(crate) fn apply_actions(
         return;
     }
     let mut owners = if let Some(viewing) = viewing {
-        let Some(owners) = topology.owners(viewing.0, motion.position.as_vec3()) else {
+        let Some(owners) = topology.owners(viewing.0, motion.current.as_vec3()) else {
             return;
         };
         let first = owners[0].expect("Canonical owner");

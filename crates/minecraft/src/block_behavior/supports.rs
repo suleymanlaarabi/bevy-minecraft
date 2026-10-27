@@ -45,16 +45,15 @@ pub(crate) fn evaluate(
                 other.kind() == state.kind() && state_behavior(other).upper != info.upper
             });
             let supported = info.upper
-                || sample(position - IVec3::Y)
-                    .is_some_and(|s| s.native().is_side_solid(BlockDirection::Up));
+                || sample(position - IVec3::Y).is_some_and(|s| s.is_side_solid(BlockDirection::Up));
             if !paired || !supported {
-                next = state.removed();
+                next = crate::content::fluid_catalog().residual(state);
                 drop_item = !info.upper;
                 if paired && let Some(other) = other {
                     paired_edit = Some(CheckedEdit {
                         position: other_position,
                         expected: other,
-                        state: other.removed(),
+                        state: crate::content::fluid_catalog().residual(other),
                     });
                 }
             }
@@ -67,8 +66,8 @@ pub(crate) fn evaluate(
                 BlockDirection::South,
                 BlockDirection::West,
             ][info.facing as usize];
-            if !sample(position - direction).is_some_and(|s| s.native().is_side_solid(face)) {
-                next = state.removed();
+            if !sample(position - direction).is_some_and(|s| s.is_side_solid(face)) {
+                next = crate::content::fluid_catalog().residual(state);
                 drop_item = true;
             }
         }
@@ -85,8 +84,7 @@ pub(crate) fn evaluate(
                     BlockDirection::East,
                     BlockDirection::Down,
                 ][i];
-                let attached =
-                    sample(position + delta).is_some_and(|s| s.native().is_side_solid(face));
+                let attached = sample(position + delta).is_some_and(|s| s.is_side_solid(face));
                 let inherited = i < 4
                     && sample(position + IVec3::Y).is_some_and(|s| {
                         s.kind() == state.kind() && state_behavior(s).attachments & (1 << i) != 0
@@ -102,7 +100,7 @@ pub(crate) fn evaluate(
                 }
             }
             if surviving == 0 {
-                next = state.removed();
+                next = crate::content::fluid_catalog().residual(state);
                 drop_item = true;
             }
         }

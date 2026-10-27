@@ -54,7 +54,7 @@ pub(crate) enum SupportRule {
     Vine,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct Profile {
     pub(crate) item: VoxelKind,
     pub(crate) wall: Option<VoxelKind>,
@@ -79,14 +79,17 @@ pub(crate) struct Profile {
     pub carpet: bool,
 }
 
-pub(crate) fn profile(kind: VoxelKind) -> &'static Profile {
+pub(crate) fn profile(kind: VoxelKind) -> Profile {
     static PROFILES: LazyLock<Box<[Profile]>> = LazyLock::new(|| {
         VoxelKind::ALL
             .iter()
             .map(|&kind| {
-                let item = VoxelKind(hollow_worldgen::block_relations::canonical(kind.0));
+                let item = VoxelKind::from_native(hollow_worldgen::block_relations::canonical(
+                    kind.native_id().unwrap(),
+                ));
                 let state = item.default_state();
-                let wall = hollow_worldgen::block_relations::wall(kind.0).map(VoxelKind);
+                let wall = hollow_worldgen::block_relations::wall(kind.native_id().unwrap())
+                    .map(VoxelKind::from_native);
                 let pair = if state.property(K::Half)
                     == Some(P::DoubleBlockHalf(bp::DoubleBlockHalf::Lower))
                 {
@@ -109,11 +112,13 @@ pub(crate) fn profile(kind: VoxelKind) -> &'static Profile {
                     super::FENCE
                 } else if kind.tagged(Tag::MINECRAFT_WALLS) {
                     super::WALL
-                } else if kind.tagged(Tag::C_GLASS_PANES) || kind.0 == BlockId::IRON_BARS {
+                } else if kind.tagged(Tag::C_GLASS_PANES)
+                    || kind.0 == u32::from(BlockId::IRON_BARS.as_u16())
+                {
                     super::PANE
                 } else if kind.tagged(Tag::MINECRAFT_STAIRS) {
                     super::STAIR
-                } else if kind.0 == BlockId::POINTED_DRIPSTONE {
+                } else if kind.0 == u32::from(BlockId::POINTED_DRIPSTONE.as_u16()) {
                     super::DRIPSTONE
                 } else if opening == Opening::Gate {
                     super::GATE
@@ -129,7 +134,7 @@ pub(crate) fn profile(kind: VoxelKind) -> &'static Profile {
                     wall,
                     pair,
                     ceiling: (item.tagged(Tag::MINECRAFT_ALL_HANGING_SIGNS)
-                        || item.0 == BlockId::HANGING_ROOTS)
+                        || item.0 == u32::from(BlockId::HANGING_ROOTS.as_u16()))
                         && state.property(K::Hanging).is_none(),
                     rotation: state.property(K::Rotation).is_some(),
                     face: state.property(K::Face).is_some(),
@@ -137,26 +142,29 @@ pub(crate) fn profile(kind: VoxelKind) -> &'static Profile {
                     hanging: state.property(K::Hanging).is_some(),
                     six_way: state.supports(P::Facing(bp::Facing::Up)),
                     facing_normal: item.tagged(Tag::MINECRAFT_SHULKER_BOXES)
-                        || item.0 == BlockId::LIGHTNING_ROD,
-                    facing_look: item.0 == BlockId::OBSERVER,
+                        || item.0 == u32::from(BlockId::LIGHTNING_ROD.as_u16()),
+                    facing_look: item.0 == u32::from(BlockId::OBSERVER.as_u16()),
                     family,
                     opening,
                     manual: opening != Opening::None
-                        && !matches!(kind.0, BlockId::IRON_DOOR | BlockId::IRON_TRAPDOOR),
-                    climbable: matches!(kind.0, BlockId::LADDER | BlockId::VINE),
-                    chest: kind.0 == BlockId::CHEST,
+                        && !matches!(
+                            kind.native_id().unwrap(),
+                            BlockId::IRON_DOOR | BlockId::IRON_TRAPDOOR
+                        ),
+                    climbable: matches!(kind.native_id().unwrap(), BlockId::LADDER | BlockId::VINE),
+                    chest: kind.0 == u32::from(BlockId::CHEST.as_u16()),
                     support: if opening == Opening::Door {
                         SupportRule::Door
-                    } else if kind.0 == BlockId::LADDER {
+                    } else if kind.0 == u32::from(BlockId::LADDER.as_u16()) {
                         SupportRule::WallMounted
-                    } else if kind.0 == BlockId::VINE {
+                    } else if kind.0 == u32::from(BlockId::VINE.as_u16()) {
                         SupportRule::Vine
                     } else {
                         SupportRule::None
                     },
                     slab: kind.tagged(Tag::MINECRAFT_SLABS),
                     torch: matches!(
-                        kind.0,
+                        kind.native_id().unwrap(),
                         BlockId::TORCH
                             | BlockId::WALL_TORCH
                             | BlockId::SOUL_TORCH
@@ -170,12 +178,18 @@ pub(crate) fn profile(kind: VoxelKind) -> &'static Profile {
                         || kind.tagged(Tag::MINECRAFT_ALL_HANGING_SIGNS)
                         || kind.tagged(Tag::MINECRAFT_BANNERS),
                     carpet: kind.tagged(Tag::MINECRAFT_WOOL_CARPETS)
-                        || matches!(kind.0, BlockId::MOSS_CARPET | BlockId::PALE_MOSS_CARPET),
+                        || matches!(
+                            kind.native_id().unwrap(),
+                            BlockId::MOSS_CARPET | BlockId::PALE_MOSS_CARPET
+                        ),
                 }
             })
             .collect()
     });
-    &PROFILES[kind.index()]
+    PROFILES.get(kind.index()).copied().unwrap_or(Profile {
+        item: kind,
+        ..Profile::default()
+    })
 }
 
 pub(crate) fn item_form(kind: VoxelKind) -> Option<VoxelKind> {

@@ -26,3 +26,5 @@ pub mod reconcile;
 pub mod runtime;
 pub mod tasks;
 pub use runtime::{GenerationSession, GenerationSettings, WorldGenerationPlugin};
+
+pub mod content;

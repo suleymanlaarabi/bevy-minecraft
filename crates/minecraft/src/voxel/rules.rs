@@ -152,7 +152,7 @@ pub(crate) fn connected(
                 let axis = direction(neighbor.facing());
                 axis.dot(delta) == 0
             };
-            let solid_face = neighbor.native().is_side_solid(match delta {
+            let solid_face = neighbor.is_side_solid(match delta {
                 IVec3::X => BlockDirection::West,
                 IVec3::NEG_X => BlockDirection::East,
                 IVec3::Z => BlockDirection::North,
@@ -305,7 +305,7 @@ pub(crate) fn placement(
             clicked.with(&[P::SlabType(bp::SlabType::Double), P::Waterlogged(false)]),
         )]);
     }
-    let position = if clicked.replaceable() && clicked.kind() != VoxelKind::Water {
+    let position = if clicked.replaceable() && !clicked.is_liquid() {
         destroy
     } else {
         place
@@ -320,12 +320,14 @@ pub(crate) fn placement(
             old.with(&[P::SlabType(bp::SlabType::Double), P::Waterlogged(false)]),
         )]);
     }
-    if !old.replaceable() && !old.native().is_air() && old.kind() != VoxelKind::Water {
+    if !old.replaceable() && !old.definition().is_air() && !old.is_liquid() {
         return None;
     }
     let (mut state, mounted) = placement::mounted(kind, normal, look)?;
     let kind = state.kind();
-    let id = kind.0;
+    let Some(id) = kind.native_id() else {
+        return Some(vec![(position, state)]);
+    };
     let face = facing(look);
     let wall = facing(normal);
     let upper = normal.y < -0.5 || (normal.y.abs() < 0.5 && hit.y.rem_euclid(1.0) > 0.5);
@@ -347,11 +349,11 @@ pub(crate) fn placement(
             _ => BlockDirection::Up,
         };
         let supported = if profile.hanging || profile.torch && normal.y > 0.5 {
-            support.native().is_center_solid(side)
+            support.is_center_solid(side)
         } else if normal.y > 0.5 && profile.sign_or_banner {
-            support.native().is_solid()
+            support.definition().is_solid()
         } else {
-            support.native().is_side_solid(side)
+            support.is_side_solid(side)
         };
         if !supported {
             return None;
@@ -431,13 +433,14 @@ pub(crate) fn placement(
         } else {
             position - IVec3::Y
         };
-        if !world.state(support)?.native().is_center_solid(
-            if vertical == bp::VerticalDirection::Down {
+        if !world
+            .state(support)?
+            .is_center_solid(if vertical == bp::VerticalDirection::Down {
                 BlockDirection::Down
             } else {
                 BlockDirection::Up
-            },
-        ) && world.get(support) != Some(kind)
+            })
+            && world.get(support) != Some(kind)
         {
             return None;
         }
@@ -455,7 +458,7 @@ pub(crate) fn placement(
             IVec3::Z => BlockDirection::South,
             _ => BlockDirection::North,
         };
-        if !support.native().is_side_solid(side) {
+        if !support.is_side_solid(side) {
             return None;
         }
     }
@@ -514,7 +517,9 @@ pub(crate) fn placement(
         id,
         BlockId::SEAGRASS | BlockId::TALL_SEAGRASS | BlockId::KELP | BlockId::KELP_PLANT
     );
-    if aquatic && !old.has_water() {
+    if aquatic
+        && old.definition().fluid.id != VoxelKind::Water.default_state().definition().fluid.id
+    {
         return None;
     }
     let below = world.state(position - IVec3::Y);
@@ -535,7 +540,7 @@ pub(crate) fn placement(
             || profile.opening == Opening::Door
             || id == BlockId::SNOW
             || placement::profile(kind).pair.is_some()
-            || (state.native().collision_shapes.is_empty()
+            || (state.collision_empty()
                 && id != BlockId::VINE
                 && id != BlockId::HANGING_ROOTS
                 && id != BlockId::GLOW_LICHEN
@@ -546,7 +551,7 @@ pub(crate) fn placement(
                 )));
     if floor_support
         && !below.is_some_and(|s| {
-            s.native().is_side_solid(BlockDirection::Up)
+            s.is_side_solid(BlockDirection::Up)
                 || ((aquatic
                     || id == BlockId::BAMBOO
                     || id == BlockId::CACTUS
@@ -557,14 +562,14 @@ pub(crate) fn placement(
         return None;
     }
     if id == BlockId::CACTUS {
-        let ground = below?.kind().0;
+        let ground = below?.kind().native_id()?;
         if !matches!(ground, BlockId::SAND | BlockId::RED_SAND | BlockId::CACTUS) {
             return None;
         }
         if SIDES.iter().any(|(_, delta)| {
             world
                 .state(position + *delta)
-                .is_some_and(|s| !s.native().collision_shapes.is_empty())
+                .is_some_and(|s| !s.collision_empty())
         }) {
             return None;
         }
@@ -572,25 +577,22 @@ pub(crate) fn placement(
     if id == BlockId::HANGING_ROOTS && !world.state(position + IVec3::Y)?.full_collision() {
         return None;
     }
-    if old.has_water() && state.property(K::Waterlogged).is_some() {
-        state = state.with(&[P::Waterlogged(true)]);
-    }
+    state = state.with_fluid(old.definition().fluid.id).unwrap_or(state);
     state = connected(position, state, |pos| world.state(pos));
     let mut edits = vec![(position, state)];
     if let Some(upper) = paired_position(state, position) {
         let old_upper = world.state(upper)?;
-        if !old_upper.replaceable() && !old_upper.native().is_air() {
+        if !old_upper.replaceable() && !old_upper.definition().is_air() {
             return None;
         }
         let pair = placement::profile(kind).pair?;
         let mut upper_state = state.with(&[pair.values()[1]]);
-        if upper_state.property(K::Waterlogged).is_some() {
-            upper_state = upper_state.with(&[P::Waterlogged(old_upper.has_water())]);
-        }
+        upper_state = upper_state
+            .with_fluid(old_upper.definition().fluid.id)
+            .unwrap_or(upper_state);
         if matches!(pair, placement::Pair::Horizontal)
             && !world
                 .state(upper - IVec3::Y)?
-                .native()
                 .is_side_solid(BlockDirection::Up)
         {
             return None;

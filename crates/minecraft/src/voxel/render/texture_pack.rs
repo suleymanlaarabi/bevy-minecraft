@@ -127,10 +127,18 @@ pub(crate) struct TexturePack {
 }
 
 /// Blocks still recognizable when drawn with their fallback's texture, tinted by their color.
-const TINTED_FALLBACKS: [VoxelKind; 2] = [VoxelKind::Lava, VoxelKind::MagmaBlock];
+const TINTED_FALLBACKS: [VoxelKind; 1] = [VoxelKind::MagmaBlock];
 
 fn resolve(blocks: &[Option<BlockTextureConfig>], kind: VoxelKind) -> Option<BlockTextureConfig> {
-    if matches!(kind, VoxelKind::Air | VoxelKind::Water) {
+    let state = kind.default_state();
+    let fluid = state.definition().fluid.id;
+    if state.is_air()
+        || (fluid != hollow_core::FluidId::NONE
+            && crate::content::fluid_catalog()
+                .profile(fluid)
+                .render
+                .is_some_and(|render| render.ocean_surface))
+    {
         return None;
     }
     let mut source = kind;
@@ -144,7 +152,7 @@ fn resolve(blocks: &[Option<BlockTextureConfig>], kind: VoxelKind) -> Option<Blo
         }
         source = fallback;
     };
-    if source != kind && TINTED_FALLBACKS.contains(&kind) {
+    if source != kind && (TINTED_FALLBACKS.contains(&kind) || fluid != hollow_core::FluidId::NONE) {
         let [r, g, b, _] = kind.color();
         let [base_r, base_g, base_b, _] = source.color();
         let tint = (
@@ -159,7 +167,7 @@ fn resolve(blocks: &[Option<BlockTextureConfig>], kind: VoxelKind) -> Option<Blo
 
 impl TexturePackManifest {
     fn resolved_blocks(&self) -> Result<Box<[Option<BlockTextureConfig>]>, String> {
-        let mut blocks = vec![None; pumpkin_data::BlockId::COUNT as usize];
+        let mut blocks = vec![None; VoxelKind::count()];
         for (name, &config) in &self.blocks {
             let kind = VoxelKind::from_key(name)
                 .ok_or_else(|| format!("Unknown texture pack block: {name}"))?;
@@ -211,13 +219,90 @@ impl TexturePack {
             id,
             texture_path,
             layers: manifest.layers,
-            blocks: VoxelKind::ALL
-                .iter()
-                .map(|&kind| resolve(&blocks, kind))
+            blocks: VoxelKind::all()
+                .map(|kind| resolve(&blocks, kind))
                 .collect(),
         })
     }
 
+    pub(crate) fn load_texture(
+        &self,
+        server: &AssetServer,
+        images: &mut Assets<Image>,
+    ) -> Handle<Image> {
+        use bevy::image::{CompressedImageFormats, ImageType};
+        use bevy::render::render_resource::TextureFormat;
+        let external = super::models::external_textures();
+        if external.is_empty() {
+            return block_texture(server, &self.texture_path, self.layers);
+        }
+        // Packing is initialization/pack-switch work, never performed by mesh workers.
+        // One shared array avoids a texture/material allocation per custom block.
+        let decode = |path: &str| {
+            let bytes = std::fs::read(crate::asset_directory().join(path))
+                .unwrap_or_else(|e| panic!("Cannot load content image {path}: {e}"));
+            let image = Image::from_buffer(
+                &bytes,
+                ImageType::Extension("png"),
+                CompressedImageFormats::NONE,
+                true,
+                ImageSampler::nearest(),
+                RenderAssetUsages::all(),
+            )
+            .expect("Invalid content image");
+            if image.texture_descriptor.format == TextureFormat::Rgba8UnormSrgb {
+                image
+            } else {
+                image
+                    .convert(TextureFormat::Rgba8UnormSrgb)
+                    .expect("Content image must support RGBA8")
+            }
+        };
+        let mut image = decode(&self.texture_path);
+        let width = image.width();
+        let height = image.height() / self.layers;
+        assert_eq!(
+            image.height(),
+            height * self.layers,
+            "Invalid texture array height"
+        );
+        if self.layers > 1 {
+            image
+                .reinterpret_stacked_2d_as_array(self.layers)
+                .expect("Invalid texture array");
+        }
+        let layers = self.layers + u32::try_from(external.len()).expect("Too many external images");
+        assert!(
+            layers <= 2048,
+            "Texture array exceeds the renderer's physical layer capacity"
+        );
+        let pixels = image.data.as_mut().expect("CPU texture data");
+        pixels.reserve(width as usize * height as usize * 4 * external.len());
+        for (resource, _) in external {
+            let source = decode(hollow_worldgen::content::catalog().resource(*resource));
+            let data = source.data.as_ref().unwrap();
+            // Nearest sampling matches the pack's voxel textures. Source dimensions
+            // are normalized once, so custom content can use a different resolution.
+            for y in 0..height {
+                for x in 0..width {
+                    let offset = ((y * source.height() / height) * source.width()
+                        + x * source.width() / width) as usize
+                        * 4;
+                    pixels.extend_from_slice(&data[offset..offset + 4]);
+                }
+            }
+        }
+        image.texture_descriptor.size.depth_or_array_layers = layers;
+        image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+            address_mode_u: ImageAddressMode::Repeat,
+            address_mode_v: ImageAddressMode::Repeat,
+            mag_filter: ImageFilterMode::Nearest,
+            min_filter: ImageFilterMode::Nearest,
+            mipmap_filter: ImageFilterMode::Linear,
+            ..default()
+        });
+        images.add(image)
+    }
     fn config(&self, kind: VoxelKind) -> Option<&BlockTextureConfig> {
         self.blocks[kind.index()].as_ref()
     }
@@ -262,9 +347,8 @@ impl TexturePack {
     /// `(tint, layer)` of every block face, indexed by `kind * 3 + slot` with slots
     /// top, side and bottom, as read by `voxel_material.wesl`.
     fn face_table(&self) -> Vec<[f32; 4]> {
-        VoxelKind::ALL
-            .iter()
-            .flat_map(|&kind| {
+        VoxelKind::all()
+            .flat_map(|kind| {
                 [(1, true), (0, true), (1, false)].map(|(axis, positive)| {
                     if self.config(kind).is_none() {
                         return [0.0; 4];
@@ -304,6 +388,12 @@ impl TexturePack {
             .iter()
             .enumerate()
             .map(|(index, name)| {
+                if let Some(offset) = super::models::external_textures()
+                    .iter()
+                    .position(|(_, slot)| *slot as usize == index)
+                {
+                    return [1.0, 1.0, 1.0, (self.layers + offset as u32) as f32];
+                }
                 if vanilla {
                     return [1.0, 1.0, 1.0, super::models::texture_layer(index) as f32];
                 }

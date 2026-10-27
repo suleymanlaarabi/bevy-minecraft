@@ -29,8 +29,8 @@ pub(super) fn edited_lighting(
     mut block_light: ResMut<BlockLightEdits>,
 ) {
     version.0 = version.0.wrapping_add(1);
-    let old = event.old.native();
-    let new = event.new.native();
+    let old = event.old.definition();
+    let new = event.new.definition();
     if old.luminance != new.luminance || old.opacity != new.opacity {
         block_light.0.insert(event.position);
     }
@@ -117,7 +117,7 @@ pub(crate) fn update_block_light(
             if value > 0 && value < previous {
                 light.set(neighbor, 0);
                 decrease.push_back((neighbor, value));
-                if state.native().luminance > 0 {
+                if state.definition().luminance > 0 {
                     increase.push_back(neighbor);
                 }
             } else if value > 0 {
@@ -129,7 +129,7 @@ pub(crate) fn update_block_light(
         let Some((state, value)) = light.sample(position) else {
             continue;
         };
-        let value = value.max(state.native().luminance);
+        let value = value.max(state.definition().luminance);
         light.set(position, value);
         if value <= 1 {
             continue;
@@ -139,7 +139,7 @@ pub(crate) fn update_block_light(
             let Some((state, previous)) = light.sample(neighbor) else {
                 continue;
             };
-            let propagated = value.saturating_sub(state.native().opacity.max(1));
+            let propagated = value.saturating_sub(state.definition().opacity.max(1));
             if propagated > previous {
                 light.set(neighbor, propagated);
                 increase.push_back(neighbor);

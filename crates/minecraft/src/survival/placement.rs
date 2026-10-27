@@ -20,7 +20,10 @@ pub(super) enum HazardKind {
 
 pub(super) fn hazard(kind: VoxelKind) -> HazardKind {
     use pumpkin_data::BlockId;
-    match kind.0 {
+    let Some(native) = kind.native_id() else {
+        return HazardKind::None;
+    };
+    match native {
         BlockId::FIRE | BlockId::SOUL_FIRE => HazardKind::Fire,
         BlockId::CACTUS => HazardKind::Cactus,
         BlockId::SWEET_BERRY_BUSH => HazardKind::Berry,
@@ -39,7 +42,7 @@ pub(super) fn on_support(
     pose: Pose,
 ) -> Option<Vec3> {
     let block = world.state(cell)?;
-    if block.has_water() || !matches!(hazard(block.kind()), HazardKind::None | HazardKind::Berry) {
+    if block.is_liquid() || !matches!(hazard(block.kind()), HazardKind::None | HazardKind::Berry) {
         return None;
     }
     let top = block
@@ -62,7 +65,7 @@ pub(super) fn on_support(
                 safe = false;
                 return;
             };
-            if block.has_water()
+            if block.is_liquid()
                 || matches!(
                     hazard(block.kind()),
                     HazardKind::Lava | HazardKind::Fire | HazardKind::Berry

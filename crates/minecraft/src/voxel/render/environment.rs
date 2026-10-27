@@ -3,7 +3,7 @@ use crate::{
     game::GameState,
     settings::GraphicsSettings,
     sky::SkyState,
-    voxel::{CHUNK_SIZE, VoxelKind, VoxelViewer, VoxelWorld},
+    voxel::{CHUNK_SIZE, VoxelViewer, VoxelWorld},
 };
 use bevy::{
     camera::Exposure,
@@ -24,7 +24,7 @@ pub(crate) const OPEN_AIR_SCATTERING: Color = Color::srgba(1.0, 0.9, 0.75, 0.3);
 
 /// The liquid the camera is in, if any.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
-pub(in crate::voxel) struct CameraLiquid(pub Option<VoxelKind>);
+pub(in crate::voxel) struct CameraLiquid(pub Option<hollow_core::FluidId>);
 
 /// The camera's surroundings: the day cycle's light and fog in the open, or the
 /// murk of the liquid it is in. The only writer of these camera components.
@@ -55,13 +55,10 @@ pub(in crate::voxel) fn update_camera_environment(
     let liquid = voxel_world
         .state(camera.0.translation.floor().as_ivec3())
         .and_then(|state| {
-            if state.kind() == VoxelKind::Lava {
-                Some(VoxelKind::Lava)
-            } else if state.has_water() {
-                Some(VoxelKind::Water)
-            } else {
-                None
-            }
+            let fluid = state.definition().fluid.id;
+            (fluid != hollow_core::FluidId::NONE
+                && crate::content::fluid_catalog().profile(fluid).fog.is_some())
+            .then_some(fluid)
         });
 
     // A newly spawned camera also needs initialization when the day is frozen.
@@ -81,19 +78,17 @@ pub(in crate::voxel) fn update_camera_environment(
     // Ambient brightness is pre-exposure: liquids keep a steady look at any hour by
     // giving it in output space.
     let output = 1.0 / sky.exposure();
-    if liquid == Some(VoxelKind::Lava) {
-        fog.color = Color::srgb_u8(210, 80, 10);
-        fog.directional_light_color = Color::NONE;
-        fog.falloff = FogFalloff::Linear {
-            start: 0.0,
-            end: 1.5,
+    if let Some(fluid) = liquid {
+        let profile = crate::content::fluid_catalog()
+            .profile(fluid)
+            .fog
+            .expect("Camera medium with configured fog");
+        let daylight = if profile.daylight {
+            0.15 + 0.85 * (1.0 - sky.night)
+        } else {
+            1.0
         };
-        ambient.color = Color::srgb_u8(255, 140, 60);
-        ambient.brightness = 0.28 * output;
-    } else if liquid.is_some() {
-        // A darkened vanilla water tint (#3F76E4), dimmer at night.
-        let daylight = 0.15 + 0.85 * (1.0 - sky.night);
-        let tint = Color::srgb_u8(24, 62, 138).to_linear();
+        let tint = Color::srgb_from_array(profile.color).to_linear();
         fog.color = LinearRgba::rgb(
             tint.red * daylight,
             tint.green * daylight,
@@ -102,11 +97,16 @@ pub(in crate::voxel) fn update_camera_environment(
         .into();
         fog.directional_light_color = Color::NONE;
         fog.falloff = FogFalloff::Linear {
-            start: 2.0,
-            end: 40.0,
+            start: profile.start,
+            end: profile.end,
         };
-        ambient.color = Color::srgb_u8(95, 140, 215);
-        ambient.brightness = sky.ambient_brightness * 0.55;
+        ambient.color = Color::srgb_from_array(profile.ambient);
+        ambient.brightness = profile.brightness
+            * if profile.daylight {
+                sky.ambient_brightness
+            } else {
+                output
+            };
     } else {
         // Streaming is centered on the viewer's chunk, not their exact position.
         // One chunk diagonal keeps the opaque boundary inside the loaded circle

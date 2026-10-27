@@ -1,3 +1,4 @@
+use hollow_features::motion::FixedPosition;
 use std::{collections::HashMap, time::Duration};
 
 use bevy::{
@@ -9,7 +10,7 @@ use bevy::{
 };
 
 use crate::{
-    character::{Aabb, CharacterMotion, CharacterSystems, Terrain},
+    character::{Aabb, CharacterSystems, Terrain},
     game::GameState,
     inventory::{ItemKind, ItemStack, PlayerInventory},
     player::Player,
@@ -63,24 +64,23 @@ pub struct DroppedItem {
 
 /// Fixed-step state; sleeping items only check the revisions of touching columns.
 #[derive(Component)]
+#[require(FixedPosition)]
 pub(crate) struct DropMotion {
-    pub(crate) position: DVec3,
-    previous: DVec3,
     velocity: Vec3,
     support: Option<[Option<(Entity, u64)>; 4]>,
 }
 
 impl DropMotion {
-    fn bounds(&self) -> Aabb {
+    fn bounds(position: DVec3) -> Aabb {
         let half = DVec3::splat(DROP_COLLIDER_SIZE as f64 * 0.5);
         Aabb {
-            min: self.position - half,
-            max: self.position + half,
+            min: position - half,
+            max: position + half,
         }
     }
 
-    fn support_revisions(&self, world: &VoxelWorld) -> [Option<(Entity, u64)>; 4] {
-        let bounds = self.bounds();
+    fn support_revisions(position: DVec3, world: &VoxelWorld) -> [Option<(Entity, u64)>; 4] {
+        let bounds = Self::bounds(position);
         let min = chunk_at(bounds.min.as_vec3());
         let max = chunk_at(bounds.max.as_vec3());
         let first = world.column_revision(min);
@@ -104,27 +104,34 @@ impl DropMotion {
         [first, x, z, last]
     }
 
-    fn step(&mut self, world: &VoxelWorld, terrain: &mut Terrain, dt: f32, damping: f32) {
-        self.previous = self.position;
+    fn step(
+        &mut self,
+        position: &mut FixedPosition,
+        world: &VoxelWorld,
+        terrain: &mut Terrain,
+        dt: f32,
+        damping: f32,
+    ) {
+        position.previous = position.current;
         if self
             .support
-            .is_some_and(|support| support == self.support_revisions(world))
+            .is_some_and(|support| support == Self::support_revisions(position.current, world))
         {
             return;
         }
-        if !world.collision_ready(self.position.as_vec3()) {
+        if !world.collision_ready(position.current.as_vec3()) {
             return;
         }
         self.support = None;
         self.velocity.y -= 9.81 * dt;
         self.velocity *= damping;
-        let bounds = self.bounds();
+        let bounds = Self::bounds(position.current);
         let delta = (self.velocity * dt).as_dvec3();
         terrain.gather_collisions(world, bounds.expanded_towards(delta));
         let correction = terrain.depenetrate(bounds);
-        self.position += correction;
-        let moved = terrain.collide_box(self.bounds(), delta);
-        self.position += moved;
+        position.current += correction;
+        let moved = terrain.collide_box(Self::bounds(position.current), delta);
+        position.current += moved;
         let blocked = (moved - delta).abs().cmpgt(DVec3::splat(1e-7));
         if blocked.x {
             self.velocity.x = 0.0;
@@ -147,7 +154,7 @@ impl DropMotion {
             self.velocity.z *= 0.7;
             if self.velocity.length_squared() < 0.0025 {
                 self.velocity = Vec3::ZERO;
-                self.support = Some(self.support_revisions(world));
+                self.support = Some(Self::support_revisions(position.current, world));
             }
         }
     }
@@ -192,12 +199,6 @@ impl Plugin for DroppedItemPlugin {
                 sync_drop_visibility
                     .after(crate::voxel::VoxelPipeline)
                     .before(bevy::transform::TransformSystems::Propagate),
-            )
-            .add_systems(
-                RunFixedMainLoop,
-                interpolate_dropped_items
-                    .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop)
-                    .run_if(crate::simulation::running),
             );
     }
 }
@@ -246,11 +247,10 @@ fn spawn_dropped_item(
                 pickup_remaining,
             },
             DropMotion {
-                position: position.as_dvec3(),
-                previous: position.as_dvec3(),
                 velocity,
                 support: None,
             },
+            FixedPosition::new(position),
             Transform::from_translation(position),
             Visibility::default(),
             DespawnOnExit(GameState::Game),
@@ -327,10 +327,14 @@ pub(crate) fn restore_drop(commands: &mut Commands, drop: crate::world::SavedDro
 }
 
 impl DroppedItem {
-    pub(crate) fn capture(&self, motion: &DropMotion) -> crate::world::SavedDrop {
+    pub(crate) fn capture(
+        &self,
+        motion: &DropMotion,
+        position: &FixedPosition,
+    ) -> crate::world::SavedDrop {
         crate::world::SavedDrop {
             stack: crate::world::SavedStack::capture(self.stack),
-            position: motion.position.as_vec3().to_array(),
+            position: position.current.as_vec3().to_array(),
             velocity: motion.velocity.to_array(),
             remaining: self.remaining.as_secs_f64(),
             pickup_remaining: self.pickup_remaining.as_secs_f64(),
@@ -354,15 +358,15 @@ fn simulate_dropped_items(
     world: VoxelWorld,
     time: Res<Time<Fixed>>,
     terrain: Local<Parallel<Terrain>>,
-    mut drops: Query<&mut DropMotion, With<crate::simulation::Simulating>>,
+    mut drops: Query<(&mut DropMotion, &mut FixedPosition), With<crate::simulation::Simulating>>,
 ) {
     let dt = time.delta_secs();
     let damping = (-0.3 * dt).exp();
     // Small groups stay on this thread; larger groups share persistent worker buffers.
     if drops.iter().len() < 128 {
         let mut terrain = terrain.borrow_local_mut();
-        for mut motion in &mut drops {
-            motion.step(&world, &mut terrain, dt, damping);
+        for (mut motion, mut position) in &mut drops {
+            motion.step(&mut position, &world, &mut terrain, dt, damping);
         }
     } else {
         drops
@@ -370,27 +374,19 @@ fn simulate_dropped_items(
             .batching_strategy(BatchingStrategy::new().min_batch_size(64))
             .for_each_init(
                 || terrain.borrow_local_mut(),
-                |terrain, mut motion| motion.step(&world, terrain, dt, damping),
+                |terrain, (mut motion, mut position)| {
+                    motion.step(&mut position, &world, terrain, dt, damping)
+                },
             );
     }
 }
 
-fn interpolate_dropped_items(
-    time: Res<Time<Fixed>>,
-    mut drops: Query<(&DropMotion, &mut Transform)>,
-) {
-    let alpha = time.overstep_fraction() as f64;
-    for (motion, mut transform) in &mut drops {
-        let position = motion.previous.lerp(motion.position, alpha).as_vec3();
-        if transform.translation != position {
-            transform.translation = position;
-        }
-    }
-}
-
 fn pickup_dropped_items(
-    player: Single<(&CharacterMotion, &mut PlayerInventory), With<Player>>,
-    mut drops: Query<(Entity, &DropMotion, &mut DroppedItem), With<crate::simulation::Simulating>>,
+    player: Single<(&FixedPosition, &mut PlayerInventory), With<Player>>,
+    mut drops: Query<
+        (Entity, &FixedPosition, &mut DroppedItem),
+        With<crate::simulation::Simulating>,
+    >,
     mut commands: Commands,
 ) {
     let (player, mut inventory) = player.into_inner();
@@ -400,7 +396,7 @@ fn pickup_dropped_items(
             continue;
         }
         // Sphere/box overlap, matching the pickup volume without a spatial-query engine.
-        let distance = (player.position - motion.position).abs() - half;
+        let distance = (player.current - motion.current).abs() - half;
         if distance.max(DVec3::ZERO).length_squared() > (PICKUP_RADIUS * PICKUP_RADIUS) as f64 {
             continue;
         }

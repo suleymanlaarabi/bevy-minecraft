@@ -37,7 +37,7 @@ impl SnapshotLightEngine {
         while current_pos.0.y < max_y {
             current_pos.0.y += 1;
 
-            let state = level.get_block_state(&current_pos).to_state();
+            let state = level.get_block_state(&current_pos).definition();
             if state.can_occlude() || state.opacity > 0 {
                 return false; // Hit an opaque or occluding block before reaching sky
             }
@@ -118,7 +118,7 @@ impl SnapshotLightEngine {
             }
 
             if let Some(neighbor_light) = self.get_block_light_level(level, &neighbor_pos) {
-                let neighbor_state = level.get_block_state(&neighbor_pos).to_state();
+                let neighbor_state = level.get_block_state(&neighbor_pos).definition();
                 let opacity = neighbor_state.opacity.max(1);
                 let new_light = light_level.saturating_sub(opacity);
 
@@ -160,7 +160,7 @@ impl SnapshotLightEngine {
                         continue; // Skip if already 0
                     }
 
-                    let neighbor_state = level.get_block_state(&neighbor_pos).to_state();
+                    let neighbor_state = level.get_block_state(&neighbor_pos).definition();
                     let opacity = neighbor_state.opacity.max(1);
 
                     let expected_from_removed_source = removed_light_level.saturating_sub(opacity);
@@ -244,7 +244,7 @@ impl SnapshotLightEngine {
             }
 
             let neighbor_light = self.get_sky_light_level(level, &neighbor_pos);
-            let neighbor_state = level.get_block_state(&neighbor_pos).to_state();
+            let neighbor_state = level.get_block_state(&neighbor_pos).definition();
             let opacity = if neighbor_state.can_occlude() {
                 neighbor_state.opacity.max(1)
             } else {
@@ -301,7 +301,7 @@ impl SnapshotLightEngine {
                 continue; // Already dark
             }
 
-            let neighbor_state = level.get_block_state(&neighbor_pos).to_state();
+            let neighbor_state = level.get_block_state(&neighbor_pos).definition();
             let opacity = if neighbor_state.can_occlude() {
                 neighbor_state.opacity.max(1)
             } else {
@@ -345,7 +345,7 @@ impl SnapshotLightEngine {
         }
 
         let current_light = self.get_sky_light_level(level, &pos);
-        let block_state = level.get_block_state(&pos).to_state();
+        let block_state = level.get_block_state(&pos).definition();
         let opacity = if block_state.can_occlude() {
             block_state.opacity.max(1)
         } else {

@@ -3,9 +3,7 @@ use bevy::{
     window::{CursorGrabMode, CursorOptions},
 };
 
-use super::{
-    ActiveEffects, DamageApplied, DamageState, Hazards, Health, Nutrition, RespawnPoint, UsingItem,
-};
+use super::{DamageApplied, Health, RespawnPoint, UsingItem};
 use crate::{
     game::GameState,
     inventory::InventoryState,
@@ -134,15 +132,9 @@ pub(super) fn finish_respawn(
     mut players: Query<
         (
             &mut Transform,
-            &mut Health,
-            &mut Nutrition,
-            &mut ActiveEffects,
-            &mut DamageState,
-            &mut Hazards,
-            &mut UsingItem,
-            &mut crate::character::CharacterMotion,
-            &mut crate::character::CharacterState,
+            &mut hollow_features::motion::FixedPosition,
             &crate::character::CharacterBody,
+            &RespawnPoint,
         ),
         (With<Player>, Without<RespawnLoader>),
     >,
@@ -158,19 +150,7 @@ pub(super) fn finish_respawn(
         {
             continue;
         }
-        let Ok((
-            mut transform,
-            mut health,
-            mut nutrition,
-            mut effects,
-            mut damage,
-            mut hazards,
-            mut using,
-            mut motion,
-            mut character,
-            body,
-        )) = players.get_mut(target.0)
-        else {
+        let Ok((mut transform, mut fixed_position, body, point)) = players.get_mut(target.0) else {
             commands.entity(loader).despawn();
             continue;
         };
@@ -184,14 +164,16 @@ pub(super) fn finish_respawn(
             continue;
         };
         transform.translation = safe_position;
-        *health = Health::default();
-        *nutrition = Nutrition::default();
-        *effects = ActiveEffects::default();
-        *damage = DamageState::default();
-        *hazards = Hazards::default();
-        *motion = crate::character::CharacterMotion::default();
-        *character = crate::character::CharacterState::default();
-        using.0 = None;
+        fixed_position.teleport(safe_position);
+        commands.entity(target.0).insert((
+            super::SurvivalSnapshot {
+                respawn: point.clone(),
+                ..default()
+            },
+            crate::character::CharacterMotion::default(),
+            crate::character::CharacterState::default(),
+            UsingItem::default(),
+        ));
         commands.entity(loader).despawn();
     }
 }

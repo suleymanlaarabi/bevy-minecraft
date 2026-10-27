@@ -25,7 +25,7 @@ pub(crate) const SIDE_FACING: [bp::Facing; 4] = [
     bp::Facing::West,
 ];
 
-pub(crate) fn state_behavior(state: VoxelState) -> &'static StateBehavior {
+pub(crate) fn state_behavior(state: VoxelState) -> StateBehavior {
     static STATES: LazyLock<Box<[StateBehavior]>> = LazyLock::new(|| {
         (0..pumpkin_data::BlockStateId::COUNT)
             .map(|raw| {
@@ -71,7 +71,7 @@ pub(crate) fn state_behavior(state: VoxelState) -> &'static StateBehavior {
             })
             .collect()
     });
-    &STATES[state.id() as usize]
+    STATES.get(state.id() as usize).copied().unwrap_or_default()
 }
 
 pub(crate) fn chest_partner(position: IVec3, state: VoxelState) -> Option<IVec3> {

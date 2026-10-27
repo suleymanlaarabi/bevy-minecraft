@@ -58,7 +58,7 @@ pub(super) struct Sample {
 }
 
 const ABOVE_WORLD: Sample = Sample {
-    state: VoxelKind::Air.default_state(),
+    state: VoxelState::AIR,
     info: CellInfo {
         appearance: 0,
         flags: cell::AIR,
@@ -67,7 +67,7 @@ const ABOVE_WORLD: Sample = Sample {
     light: FULL_SKY,
 };
 const BELOW_WORLD: Sample = Sample {
-    state: VoxelKind::Air.default_state(),
+    state: VoxelState::AIR,
     info: CellInfo {
         appearance: 0,
         flags: cell::AIR | cell::OCCLUDES,
@@ -99,12 +99,21 @@ impl Sample {
         self.has(cell::CUBE)
     }
     #[inline]
-    pub(super) fn water(&self) -> bool {
-        self.has(cell::WATER)
+    pub(super) fn ocean_surface(&self) -> bool {
+        self.has(cell::OCEAN_SURFACE)
     }
     #[inline]
-    pub(super) fn fluid(&self) -> u8 {
+    pub(super) fn fluid(&self) -> u32 {
         self.info.fluid
+    }
+    pub(super) fn fluid_id(&self) -> hollow_core::FluidId {
+        hollow_core::FluidId(((self.fluid() >> 8) & 0xffff) as u16)
+    }
+    pub(super) fn fluid_amount(&self) -> u8 {
+        self.fluid() as u8
+    }
+    pub(super) fn fluid_falling(&self) -> bool {
+        self.fluid() & (1 << 24) != 0
     }
     #[inline]
     pub(super) fn model(&self) -> bool {
@@ -117,8 +126,8 @@ impl Sample {
     }
     /// Whether a neighboring water face is enclosed by this solid material.
     #[inline]
-    pub(super) fn hides_water(&self) -> bool {
-        self.has(cell::OCCLUDES | cell::WATER_OCCLUDES)
+    pub(super) fn hides_fluid(&self) -> bool {
+        self.has(cell::OCCLUDES | cell::FLUID_OCCLUDES)
     }
     #[inline]
     pub(super) fn fluid_occluder(&self) -> bool {
@@ -240,8 +249,12 @@ impl ChunkNeighborhood {
     fn section_contents(&self, section: usize) -> (bool, bool) {
         let states = self.center().states.section(section);
         (
-            states.any(|state| !matches!(state.kind(), VoxelKind::Air | VoxelKind::Water)),
-            states.any(VoxelState::has_water),
+            states.any(|state| {
+                let info = super::models::cell_info(state);
+                info.flags & (cell::CUBE | cell::CUTOUT | cell::MODEL) != 0
+                    || (info.fluid != 0 && info.flags & cell::OCEAN_SURFACE == 0)
+            }),
+            states.any(|state| super::models::cell_info(state).flags & cell::OCEAN_SURFACE != 0),
         )
     }
 }
@@ -289,7 +302,7 @@ impl Padded {
         self.samples
             .reserve((PADDED_SIZE * PADDED_SIZE * (SECTION_HEIGHT + 2)) as usize);
         let mut light = [0; CHUNK_SIZE as usize];
-        let mut states = [VoxelKind::Air.default_state(); CHUNK_SIZE as usize];
+        let mut states = [VoxelState::AIR; CHUNK_SIZE as usize];
         let build_connectivity = neighborhood.cached_connectivity[section].is_none();
         let mut summary = SectionSummary::default();
         self.fluid_occluders = false;
@@ -800,7 +813,7 @@ pub(crate) fn build_sections(
                 let interleaved = translucent.is_some();
                 let water = water
                     .then(|| {
-                        water_mesh(
+                        ocean_mesh(
                             padded,
                             neighborhood,
                             index as i32 * SECTION_HEIGHT,
@@ -811,7 +824,7 @@ pub(crate) fn build_sections(
                     })
                     .flatten();
                 if let Some(water) = water {
-                    translucent.get_or_insert_default().append_water(water);
+                    translucent.get_or_insert_default().append_ocean(water);
                 }
                 let mut terrain = (padded.summary.flags & cell::CUBE != 0)
                     .then(|| greedy_mesh::<u16>(padded, true, cell::CUBE, faces))
@@ -1022,8 +1035,12 @@ const WATER_LOWERED: u32 = 1 << 16;
 
 /// Water cells stacked downward from `top` (inclusive), capped at [`WATER_DEPTH_CAP`].
 pub(super) fn water_depth(neighborhood: &ChunkNeighborhood, top: IVec3) -> u8 {
+    let family = neighborhood.sample(top).fluid_id();
+    if family == hollow_core::FluidId::NONE {
+        return 0;
+    }
     (0..WATER_DEPTH_CAP as i32)
-        .take_while(|&below| neighborhood.sample(top - IVec3::Y * below).water())
+        .take_while(|&below| neighborhood.sample(top - IVec3::Y * below).fluid_id() == family)
         .count() as u8
 }
 
@@ -1042,7 +1059,7 @@ pub(super) fn surface_depth(depths: &[u8], stride: i32, x: i32, z: i32) -> [u16;
     })
 }
 
-fn water_mesh(
+fn ocean_mesh(
     padded: &Padded,
     neighborhood: &ChunkNeighborhood,
     base: i32,
@@ -1074,26 +1091,27 @@ fn water_mesh(
                     // Only exposed water interfaces. Transparent solid cubes
                     // also enclose water: their internal contact must not add
                     // a reflective free surface behind ice or glass.
-                    let (positive, water_cell, outside) = match (a.water(), b.water()) {
-                        (true, false) if layer >= 0 && !b.hides_water() => {
-                            let mut water_cell = cell;
-                            water_cell[axis] -= 1;
-                            (true, water_cell, cell)
-                        }
-                        (false, true) if layer + 1 < dimensions[axis] && !a.hides_water() => {
-                            let mut outside = cell;
-                            outside[axis] -= 1;
-                            (false, cell, outside)
-                        }
-                        _ => {
-                            mask[i + j * width] = None;
-                            continue;
-                        }
-                    };
+                    let (positive, water_cell, outside) =
+                        match (a.ocean_surface(), b.ocean_surface()) {
+                            (true, false) if layer >= 0 && !b.hides_fluid() => {
+                                let mut water_cell = cell;
+                                water_cell[axis] -= 1;
+                                (true, water_cell, cell)
+                            }
+                            (false, true) if layer + 1 < dimensions[axis] && !a.hides_fluid() => {
+                                let mut outside = cell;
+                                outside[axis] -= 1;
+                                (false, cell, outside)
+                            }
+                            _ => {
+                                mask[i + j * width] = None;
+                                continue;
+                            }
+                        };
                     let water_cell = IVec3::from_array(water_cell);
                     // Uneven surfaces use the shared explicit fluid builder. Broad
                     // flat oceans retain greedy merging and compact water vertices.
-                    if super::fluids::explicit_water(padded, water_cell) {
+                    if super::fluids::explicit_surface(padded, water_cell) {
                         mask[i + j * width] = None;
                         continue;
                     }
@@ -1119,8 +1137,9 @@ fn water_mesh(
                     // Lower only a free surface. Water beneath a solid ceiling
                     // fills up to it, including the upper rim of any exposed side.
                     let above = padded.get(water_cell + IVec3::Y);
-                    let lowered = surface || (axis != 1 && !above.water() && !above.hides_water());
-                    let face = Face(0, positive, values);
+                    let lowered =
+                        surface || (axis != 1 && !above.ocean_surface() && !above.hides_fluid());
+                    let face = Face(padded.get(water_cell).fluid_id().0, positive, values);
                     // Voxel-sized water faces can interleave with ice and glass:
                     // even uniform neighbors keep their own depth keys.
                     mask[i + j * width] =

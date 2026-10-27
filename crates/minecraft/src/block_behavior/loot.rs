@@ -84,7 +84,7 @@ fn catalog() -> &'static [LootRule] {
                     return LootRule::None;
                 }
                 if matches!(
-                    kind.0,
+                    kind.native_id().unwrap(),
                     BlockId::COBWEB
                         | BlockId::VINE
                         | BlockId::GLOW_LICHEN
@@ -124,7 +124,7 @@ fn catalog() -> &'static [LootRule] {
                     return ItemKind::from_name(drop).map_or(LootRule::None, LootRule::Fixed);
                 }
                 if matches!(
-                    kind.0,
+                    kind.native_id().unwrap(),
                     BlockId::BUDDING_AMETHYST
                         | BlockId::GLASS
                         | BlockId::GLASS_PANE
@@ -172,7 +172,11 @@ pub(crate) fn drops(
     shears: bool,
     random: &mut LootRandom,
 ) -> [Option<ItemStack>; 2] {
-    let (first, second) = match catalog()[state.kind().0.as_u16() as usize] {
+    let (first, second) = match catalog()
+        .get(state.kind().index())
+        .copied()
+        .unwrap_or(LootRule::None)
+    {
         LootRule::None => (None, None),
         LootRule::Sheared(item) => (shears.then(|| ItemStack::new(item, 1)), None),
         LootRule::Fixed(item) => (

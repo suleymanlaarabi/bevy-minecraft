@@ -15,7 +15,7 @@ use crate::{
     inventory::{InventoryState, ItemKind, ItemStack},
     player::{Player, PlayerCamera},
     spatial::FollowSystems,
-    voxel::{VoxelKind, VoxelState, VoxelWorld},
+    voxel::{VoxelState, VoxelWorld},
 };
 
 const BLOCK_REACH: f32 = 5.0;
@@ -148,13 +148,14 @@ fn spawn_breaking_overlay(mut commands: Commands, assets: Res<BreakingAssets>) {
 
 /// Rays start at the player's eyes: third-person cameras sit behind or in front of them.
 fn update_block_target(
+    fixed: Res<Time<Fixed>>,
     player: Single<(&Transform, &CharacterMotion), With<Player>>,
     camera: Single<(&PlayerCamera, &mut BlockTargetState)>,
     voxel_world: VoxelWorld,
 ) {
     let (transform, motion) = *player;
     let (camera, mut target) = camera.into_inner();
-    let origin = transform.translation + Vec3::Y * motion.eye_offset();
+    let origin = transform.translation + Vec3::Y * motion.eye_offset(fixed.overstep_fraction());
     let look = camera.look(transform.rotation) * Dir3::NEG_Z;
     target.0 = targeted_state(origin, look, |position| voxel_world.state(position));
 }
@@ -243,7 +244,7 @@ fn update_breaking(
     let mut edits = vec![crate::voxel::edits::CheckedEdit {
         position: target.destroy,
         expected: state,
-        state: state.removed(),
+        state: crate::content::fluid_catalog().residual(state),
     }];
     if let Some(other) = crate::voxel::rules::paired_position(state, target.destroy) {
         let Some(other_state) = voxel_world.state(other) else {
@@ -253,7 +254,7 @@ fn update_breaking(
             edits.push(crate::voxel::edits::CheckedEdit {
                 position: other,
                 expected: other_state,
-                state: other_state.removed(),
+                state: crate::content::fluid_catalog().residual(other_state),
             });
         }
     }
@@ -457,21 +458,7 @@ fn targeted_state(
         BLOCK_REACH,
         1,
         sample,
-        |owner, state| {
-            if state.native().is_air() || state.kind() == VoxelKind::Water {
-                return None;
-            }
-            let lava = state.kind() == VoxelKind::Lava;
-            Some(
-                state
-                    .selection_boxes(owner)
-                    .filter(move |_| !lava)
-                    .chain(lava.then_some(hollow_core::shape::BlockBox {
-                        min: Vec3::ZERO,
-                        max: Vec3::ONE,
-                    })),
-            )
-        },
+        |owner, state| (!state.is_air()).then(|| state.selection_boxes(owner)),
     )?;
     Some(BlockTarget {
         destroy: target.owner,

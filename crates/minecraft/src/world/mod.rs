@@ -504,7 +504,7 @@ fn checkpoint(
     players: Query<
         (
             &Transform,
-            &crate::character::CharacterMotion,
+            &hollow_features::motion::FixedPosition,
             &PlayerInventory,
             &crate::inventory::CraftingGrid,
             &crate::inventory::HotbarSelection,
@@ -572,7 +572,7 @@ fn checkpoint(
             hazards: hazards.clone(),
             respawn: respawn.clone(),
         },
-        position: motion.position.as_vec3().to_array(),
+        position: motion.current.as_vec3().to_array(),
         rotation: transform.rotation.to_array(),
         pitch: cameras.single().map_or(0.0, |c| c.pitch),
         slots: (0..crate::inventory::SLOT_COUNT)

@@ -1,5 +1,6 @@
 use crate::inventory::catalog::ConsumeAction;
 use bevy::prelude::*;
+use hollow_features::motion::FixedPosition;
 
 use super::{
     ActiveEffects, Hazards, Health, ItemUse, Nutrition, SurvivalRandom, UseInput, UsingItem,
@@ -29,14 +30,14 @@ pub(crate) fn choose_slot(inventory: &PlayerInventory, selected: usize) -> Optio
 
 fn safe_teleport(
     world: &VoxelWorld,
-    motion: &CharacterMotion,
+    position: &FixedPosition,
     body: &CharacterBody,
     state: &CharacterState,
     random: &mut SurvivalRandom,
     diameter: f32,
 ) -> Option<Vec3> {
     for _ in 0..16 {
-        let candidate = motion.position.as_vec3()
+        let candidate = position.current.as_vec3()
             + Vec3::new(
                 (random.unit() - 0.5) * diameter,
                 (random.unit() - 0.5) * diameter,
@@ -87,6 +88,7 @@ pub(super) fn tick(
             &mut ActiveEffects,
             &mut Transform,
             &mut CharacterMotion,
+            &FixedPosition,
             &CharacterBody,
             &CharacterState,
             &mut Hazards,
@@ -109,6 +111,7 @@ pub(super) fn tick(
         mut effects,
         mut transform,
         mut motion,
+        position,
         body,
         character,
         mut hazards,
@@ -120,7 +123,7 @@ pub(super) fn tick(
                 input_allowed
                     && health.alive()
                     && (slot == selection.0 || slot == OFFHAND_SLOT)
-                    && world.collision_ready(motion.position.as_vec3())
+                    && world.collision_ready(position.current.as_vec3())
             })
             .and_then(|slot| {
                 let stack = inventory.slot(slot)?;
@@ -170,7 +173,7 @@ pub(super) fn tick(
                 if inventory.slot(slot).is_none() {
                     inventory.set(slot, Some(remainder));
                 } else if let Some(left) = inventory.insert(remainder) {
-                    commands.spawn_dropped_item(left, motion.position.as_vec3(), Vec3::Y);
+                    commands.spawn_dropped_item(left, position.current.as_vec3(), Vec3::Y);
                 }
             }
         });
@@ -197,7 +200,7 @@ pub(super) fn tick(
                 }
                 ConsumeAction::Teleport(diameter) => {
                     if let Some(position) =
-                        safe_teleport(&world, &motion, body, character, &mut random, *diameter)
+                        safe_teleport(&world, position, body, character, &mut random, *diameter)
                     {
                         transform.translation = position;
                         motion.velocity = bevy::math::DVec3::ZERO;

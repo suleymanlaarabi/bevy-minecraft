@@ -74,6 +74,8 @@ impl Plugin for HollowPlugin {
             plugins,
             FeathersPlugins,
             GameSettingsPlugin,
+            crate::content::MinecraftContentPlugin,
+            crate::content::fluids::MinecraftFluidsPlugins,
             VoxelPlugin::default(),
             GamePlugin,
         ));

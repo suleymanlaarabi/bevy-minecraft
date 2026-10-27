@@ -1,7 +1,7 @@
 use super::{Player, PlayerCamera};
 use crate::{
     game::GameState,
-    spatial::{FollowOffset, FollowedBy},
+    spatial::{Follow, FollowOffset},
     voxel::{VoxelLoading, VoxelSettings, VoxelViewer},
 };
 use bevy::{
@@ -158,21 +158,9 @@ fn spawn_player(
         saved
             .map(|saved| saved.survival.clone())
             .unwrap_or(crate::survival::SurvivalSnapshot {
-                health: default(),
-                nutrition: default(),
-                effects: default(),
-                damage: default(),
-                hazards: default(),
                 respawn: crate::survival::RespawnPoint(spawn_pos.to_array()),
+                ..default()
             });
-    let crate::survival::SurvivalSnapshot {
-        health,
-        nutrition,
-        effects,
-        damage,
-        hazards,
-        respawn,
-    } = survival;
     let inventory = saved.and_then(|p| p.inventory().ok()).unwrap_or_default();
     let grid = crate::inventory::CraftingGrid {
         slots: std::array::from_fn(|index| {
@@ -192,24 +180,21 @@ fn spawn_player(
         rotation: rotation * Quat::from_rotation_x(pitch),
         ..default()
     };
-    commands.spawn_scene_list(bsn! {
-        Player
-        health
-        nutrition
-        effects
-        damage
-        hazards
-        respawn
-        inventory
-        grid
-        crate::inventory::HotbarSelection({saved.map_or(0, |saved| saved.selected)})
-        player_transform
-        GlobalTransform::from_translation(spawn_pos)
-        FollowedBy [
-            PlayerCamera { pitch }
-            camera_transform
-            GlobalTransform::from_translation(spawn_pos + Vec3::Y * PLAYER_EYE_HEIGHT)
-            FollowOffset({Vec3::Y * PLAYER_EYE_HEIGHT})
-        ]
-    });
+    commands
+        .spawn((
+            Player,
+            hollow_features::motion::FixedPosition::new(spawn_pos),
+            survival,
+            inventory,
+            grid,
+            crate::inventory::HotbarSelection(saved.map_or(0, |saved| saved.selected)),
+            player_transform,
+            GlobalTransform::from_translation(spawn_pos),
+        ))
+        .with_related::<Follow>((
+            PlayerCamera { pitch },
+            camera_transform,
+            GlobalTransform::from_translation(spawn_pos + Vec3::Y * PLAYER_EYE_HEIGHT),
+            FollowOffset(Vec3::Y * PLAYER_EYE_HEIGHT),
+        ));
 }

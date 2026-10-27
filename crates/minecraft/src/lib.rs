@@ -17,3 +17,5 @@ pub mod voxel;
 pub mod world;
 
 pub use app::{asset_directory, load_nearest};
+
+pub mod content;

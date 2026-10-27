@@ -1,10 +1,7 @@
 //! Validated native states and shape metadata shared by rendering and gameplay.
 use super::VoxelKind;
 use bevy_math::prelude::*;
-use pumpkin_data::{
-    BlockId, BlockState, BlockStateId, Property, PropertyKey, block_properties::COLLISION_SHAPES,
-    block_properties::Facing,
-};
+use pumpkin_data::{BlockState, BlockStateId, Property, PropertyKey, block_properties::Facing};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
@@ -15,7 +12,7 @@ pub use hollow_core::shape::BlockBox;
 impl VoxelState {
     pub fn from_id(id: impl Into<u32>) -> Option<Self> {
         let id = id.into();
-        (id < u32::from(BlockStateId::COUNT)).then_some(Self(hollow_core::StateId(id)))
+        (id < Self::count() as u32).then_some(Self(hollow_core::StateId(id)))
     }
     pub const fn id(self) -> u32 {
         self.0.0
@@ -25,22 +22,18 @@ impl VoxelState {
             .expect("Registered Minecraft state")
     }
     pub fn kind(self) -> VoxelKind {
-        if self.native().is_air() {
-            VoxelKind::Air
-        } else {
-            VoxelKind(self.native_id().to_block_id())
-        }
+        VoxelKind(self.definition().block.0)
     }
     pub fn native(self) -> &'static BlockState {
         self.native_id().to_state()
     }
     pub fn is_opaque_cube(self) -> bool {
-        self.native().is_full_cube() && self.native().opacity == 15
-    }
-    pub fn has_water(self) -> bool {
-        self.flags() & 1 != 0
+        self.definition().is_full_cube() && self.definition().opacity == 15
     }
     fn offset_limits(self) -> (f32, f32) {
+        if !self.is_native() {
+            return (0.0, 0.0);
+        }
         static OFFSETS: std::sync::LazyLock<Box<[(f32, f32)]>> = std::sync::LazyLock::new(|| {
             VoxelKind::ALL
                 .iter()
@@ -61,16 +54,25 @@ impl VoxelState {
         let y = (((seed >> 4) & 15) as f32 / 15.0 - 1.0) * vertical;
         Vec3::new(x, y, z)
     }
-    pub fn properties(self) -> impl ExactSizeIterator<Item = Property> + Clone {
-        self.native_id().properties()
+    pub fn properties(self) -> impl Iterator<Item = Property> + Clone {
+        self.is_native()
+            .then(|| self.native_id())
+            .into_iter()
+            .flat_map(|id| id.properties())
     }
     pub fn property(self, key: PropertyKey) -> Option<Property> {
-        self.native_id().property(key)
+        self.is_native()
+            .then(|| self.native_id().property(key))
+            .flatten()
     }
     pub fn supports(self, property: Property) -> bool {
-        self.native_id().supports(property)
+        self.is_native() && self.native_id().supports(property)
     }
     pub fn with(self, edits: &[Property]) -> Self {
+        assert!(
+            self.is_native(),
+            "Native properties only; custom content uses typed PropertyId"
+        );
         let state = self
             .native_id()
             .with_properties(edits)
@@ -95,70 +97,49 @@ impl VoxelState {
     }
     pub fn collision_boxes(self, world: IVec3) -> impl Iterator<Item = BlockBox> {
         let delta = self.shape_offset(world);
-        self.native()
-            .collision_shapes
+        let shapes = super::content::catalog().shapes(self.definition().collision);
+        shapes
             .iter()
-            .map(move |&id| block_box(COLLISION_SHAPES[id as usize]).translated(delta))
+            .copied()
+            .map(move |bounds| bounds.translated(delta))
     }
     /// Selection excludes the fluid shape that Pumpkin adds to its outline iterator.
     pub fn selection_boxes(self, world: IVec3) -> impl Iterator<Item = BlockBox> {
         let delta = self.shape_offset(world);
-        self.native()
-            .outline_shapes
+        let shapes = super::content::catalog().shapes(self.definition().selection);
+        shapes
             .iter()
-            .map(move |&id| block_box(COLLISION_SHAPES[id as usize]).translated(delta))
+            .copied()
+            .map(move |bounds| bounds.translated(delta))
     }
     /// Pumpkin's shapes were extracted at the origin, whose vanilla offset is
     /// `(-h, -v, -h)` (its position hash is zero): undo that, then apply this
     /// position's offset using the native registry limits.
-    fn shape_offset(self, world: IVec3) -> Vec3 {
+    pub fn shape_offset(self, world: IVec3) -> Vec3 {
         let (horizontal, vertical) = self.offset_limits();
         self.visual_offset(world) + Vec3::new(horizontal, vertical, horizontal)
     }
-    fn flags(self) -> u8 {
-        static FLAGS: std::sync::LazyLock<Box<[u8]>> = std::sync::LazyLock::new(|| {
-            (0..BlockStateId::COUNT)
-                .map(|id| {
-                    let state = BlockStateId::new(id).expect("Native registry state");
-                    let water = matches!(
-                        state.to_block_id(),
-                        BlockId::WATER
-                            | BlockId::BUBBLE_COLUMN
-                            | BlockId::SEAGRASS
-                            | BlockId::TALL_SEAGRASS
-                            | BlockId::KELP
-                            | BlockId::KELP_PLANT
-                    ) || state.is_waterlogged();
-                    let shapes = state.to_state().collision_shapes;
-                    let full = shapes.len() == 1 && {
-                        let bounds = block_box(COLLISION_SHAPES[shapes[0] as usize]);
-                        bounds.min == Vec3::ZERO && bounds.max == Vec3::ONE
-                    };
-                    u8::from(water) | (u8::from(full) << 1)
-                })
-                .collect()
-        });
-        FLAGS[self.id() as usize]
-    }
     pub fn full_collision(self) -> bool {
-        self.flags() & 2 != 0
+        self.definition().full_collision
     }
     pub fn replaceable(self) -> bool {
-        self.native().replaceable()
-    }
-    pub fn removed(self) -> Self {
-        if self.has_water() {
-            VoxelKind::Water.default_state()
-        } else {
-            VoxelKind::Air.default_state()
-        }
+        self.definition().replaceable()
     }
 }
 impl VoxelKind {
-    pub const fn default_state(self) -> VoxelState {
-        VoxelState(hollow_core::StateId(
-            self.block().default_state.id.as_u16() as u32
-        ))
+    pub fn default_state(self) -> VoxelState {
+        VoxelState(hollow_core::StateId(if self.is_native() {
+            pumpkin_data::BlockId::new_or_air(self.0 as u16)
+                .to_block()
+                .default_state
+                .id
+                .as_u16() as u32
+        } else {
+            super::content::catalog()
+                .block(hollow_core::BlockId(self.0))
+                .default_state
+                .0
+        }))
     }
 }
 
@@ -197,12 +178,67 @@ impl hollow_core::VoxelCell for VoxelState {
         VoxelKind::Air.default_state()
     }
     fn is_liquid(self) -> bool {
-        self.has_water() || self.kind() == VoxelKind::Lava
+        self.is_liquid()
     }
     fn is_air(self) -> bool {
-        self.native().is_air()
+        self.is_air()
     }
     fn is_opaque(self) -> bool {
         self.is_opaque_cube()
+    }
+}
+
+impl VoxelState {
+    pub const AIR: Self = Self(hollow_core::StateId(0));
+    pub fn count() -> usize {
+        super::content::try_catalog().map_or(BlockStateId::COUNT as usize, |c| c.state_count())
+    }
+    pub fn is_native(self) -> bool {
+        self.id() < u32::from(BlockStateId::COUNT)
+    }
+    #[inline]
+    pub fn definition(self) -> &'static hollow_core::content::StateDefinition {
+        super::content::catalog().state(self.0)
+    }
+    pub fn is_air(self) -> bool {
+        self.definition().air
+    }
+    pub fn is_liquid(self) -> bool {
+        self.definition().fluid.id != hollow_core::FluidId::NONE
+    }
+    pub fn with_fluid(self, fluid: hollow_core::FluidId) -> Option<Self> {
+        super::content::catalog()
+            .container(self.0, fluid)
+            .and_then(|rule| Self::from_id(rule.filled.0))
+    }
+    pub fn shape_depends_on_position(self) -> bool {
+        self.offset_limits() != (0.0, 0.0)
+    }
+    pub fn collision_empty(self) -> bool {
+        super::content::catalog()
+            .shapes(self.definition().collision)
+            .is_empty()
+    }
+    pub fn selection_empty(self) -> bool {
+        super::content::catalog()
+            .shapes(self.definition().selection)
+            .is_empty()
+    }
+    pub fn is_side_solid(self, side: pumpkin_data::BlockDirection) -> bool {
+        let index = side.to_index();
+        self.definition().solid_faces & (1 << index) != 0
+    }
+    pub fn is_center_solid(self, side: pumpkin_data::BlockDirection) -> bool {
+        let index = side.to_index();
+        self.definition().center_faces & (1 << index) != 0
+    }
+    pub fn with_property(
+        self,
+        property: hollow_core::content::PropertyId,
+        value: u16,
+    ) -> Option<Self> {
+        super::content::catalog()
+            .with(self.0, property, value)
+            .map(Self)
     }
 }

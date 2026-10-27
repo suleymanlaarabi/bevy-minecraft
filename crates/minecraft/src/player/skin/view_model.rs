@@ -297,6 +297,7 @@ pub(super) fn animate_first_person(
         if shown
             && (became_visible
                 || swing.is_changed()
+                || fixed.is_changed()
                 || motion.is_changed()
                 || view.is_changed()
                 || held.is_changed()
@@ -330,7 +331,9 @@ pub(super) fn animate_first_person(
                     },
                 );
             }
-            transform.set_if_neq(crate::player::view_bob::pose(&motion) * pose);
+            transform.set_if_neq(
+                crate::player::view_bob::pose(&motion, fixed.overstep_fraction()) * pose,
+            );
         }
     }
     for mut visibility in &mut overlays {

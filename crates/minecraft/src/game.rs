@@ -37,6 +37,7 @@ impl Plugin for GamePlugin {
                 crate::block_behavior::BlockBehaviorPlugins,
                 PlayerPlugin,
                 GameMenuPlugin,
+                hollow_features::motion::FixedPositionPlugin,
                 CharacterPlugin,
                 crate::survival::SurvivalPlugin,
                 GameSpatialPlugin,
@@ -44,6 +45,10 @@ impl Plugin for GamePlugin {
                 SkyPlugin,
                 DevToolsPlugin,
             ))
+            .configure_sets(
+                RunFixedMainLoop,
+                hollow_features::motion::InterpolatePosition.run_if(crate::simulation::running),
+            )
             .add_systems(OnEnter(GameState::Menu), setup_menu_environment)
             .add_systems(OnEnter(GameState::Settings), setup_menu_environment)
             .add_systems(OnEnter(GameState::WorldSelect), setup_menu_environment)

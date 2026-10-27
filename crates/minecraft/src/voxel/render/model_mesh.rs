@@ -129,7 +129,7 @@ impl ModelGeometry {
             });
         }
     }
-    pub fn append_water(&mut self, water: TerrainGeometry) {
+    pub fn append_ocean(&mut self, water: TerrainGeometry) {
         for (quad, indices) in water
             .vertices
             .chunks_exact(4)
@@ -137,6 +137,11 @@ impl ModelGeometry {
         {
             let first = self.vertices.len() as u32;
             let (axis, positive) = super::meshing::face_direction(quad[0]);
+            let family = hollow_core::FluidId((quad[0][0] >> 18) as u16);
+            let profile = crate::content::fluid_catalog().profile(family);
+            let render = profile
+                .render
+                .expect("Ocean surface classified by shared renderer");
             let mut normal = Vec3::ZERO;
             normal[axis] = if positive { 1.0 } else { -1.0 };
             // Recover the owning water cells (their center for a merged face)
@@ -150,17 +155,25 @@ impl ModelGeometry {
                 let v = quad[i];
                 let mut position = TerrainGeometry::position(v);
                 if v[1] & (1 << 16) != 0 {
-                    position.y -= 1.0 / 9.0;
+                    position.y -= 1.0 / (f32::from(profile.max_amount()) + 1.0);
                 }
                 self.vertex(
                     position,
                     normal.to_array(),
                     [0.0; 2],
                     [
-                        models::fluid_texture(1, false),
+                        models::fluid_texture(
+                            hollow_core::FluidId((quad[0][0] >> 18) as u16),
+                            false,
+                        ),
                         v[1] & 4095,
                         0,
-                        1 | (((v[1] >> 12) & 15) << 1),
+                        u32::from(render.effect)
+                            | if render.effect & 1 != 0 {
+                                ((v[1] >> 12) & 15) << 1
+                            } else {
+                                0
+                            },
                     ],
                 );
                 position
@@ -301,8 +314,10 @@ pub(super) fn section(
             for x in 0..CHUNK_SIZE {
                 let local = IVec3::new(x, y, z);
                 let sample = padded.get(local);
-                let uneven_water = super::fluids::explicit_water(padded, local);
-                if !sample.model() && !uneven_water {
+                let uneven_water = super::fluids::explicit_surface(padded, local);
+                let free_surface =
+                    sample.fluid_id() != hollow_core::FluidId::NONE && !sample.ocean_surface();
+                if !sample.model() && !uneven_water && !free_surface {
                     continue;
                 }
                 let world = origin + local;
@@ -415,7 +430,7 @@ pub(super) fn section(
                         cutout.quad(q, translation, face, tint, None);
                     }
                 };
-                if sample.fluid() >> 4 == 2 {
+                if free_surface && !sample.state.definition().fluid.embedded {
                     super::fluids::visit(padded, local, &mut emit);
                 } else {
                     if sample.model()
@@ -424,7 +439,7 @@ pub(super) fn section(
                     {
                         models::visit_quads(sample.state, world, &mut emit);
                     }
-                    if uneven_water {
+                    if uneven_water || free_surface {
                         super::fluids::visit(padded, local, emit);
                     }
                 }

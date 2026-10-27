@@ -143,7 +143,7 @@ impl UsingItem {
 #[derive(Component, Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RespawnPoint(pub [f32; 3]);
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Bundle, Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SurvivalSnapshot {
     pub health: Health,
     pub nutrition: Nutrition,

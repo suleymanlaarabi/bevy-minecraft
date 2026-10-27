@@ -26,7 +26,7 @@ pub(crate) struct ScheduledTick {
     pub order: u64,
     pub cell: u32,
     pub channel: TickChannel,
-    pub expected: u16,
+    pub expected: u32,
 }
 #[derive(Default, Clone)]
 struct ScheduledWork {
@@ -232,7 +232,7 @@ pub(crate) struct SimulationSnapshot {
     suspended: Vec<BoundaryWork>,
 }
 impl ColumnSimulation {
-    fn invalidate(&mut self, cell: u32, block: u16, fluid: u16) {
+    fn invalidate(&mut self, cell: u32, block: u32, fluid: u32) {
         for (channel, expected) in [(TickChannel::Block, block), (TickChannel::Fluid, fluid)] {
             if let Some(work) = self.scheduled.as_mut() {
                 if let Some(tick) = work.cells.get(&(cell, channel)).copied()
@@ -345,7 +345,7 @@ impl ColumnSimulation {
         &mut self,
         cell: u32,
         channel: TickChannel,
-        expected: u16,
+        expected: u32,
         delay: u64,
         priority: i8,
     ) {
@@ -502,11 +502,12 @@ pub(crate) fn enqueue_neighbors(world: &mut World, position: IVec3) {
                 .and_then(|voxels| voxels.state(local))
                 .map(|state| {
                     (
-                        state.kind().0.as_u16(),
+                        state.kind().0,
                         world
                             .resource::<super::fluids::FluidCatalog>()
                             .info(state)
-                            .family as u16,
+                            .family
+                            .0 as u32,
                     )
                 })
         } else {
@@ -612,39 +613,15 @@ pub(crate) fn process_neighbors(
             continue;
         }
         if reasons & NEIGHBOR_FLUID != 0 {
-            match fluids.reaction(position, state, |p| world.state(p)) {
-                Ok(Some(product)) => {
-                    let _ = world.commit(
-                        &[CheckedEdit {
-                            position,
-                            expected: state,
-                            state: product,
-                        }],
-                        &mut commands,
-                    );
-                    budget.mutations -= 1;
-                    diagnostics.modified_cells += 1;
-                    continue;
-                }
-                Err(chunk) => {
-                    work.suspended.insert(
-                        (cell, PendingChannel::Neighbor),
-                        BoundaryWork {
-                            chunk: chunk.to_array(),
-                            cell,
-                            reasons,
-                            tick: None,
-                        },
-                    );
-                    waits.register(chunk, owner);
-                    continue;
-                }
-                Ok(None) => {}
-            }
-
             let family = fluids.info(state).family;
-            if family != super::fluids::FluidFamily::Empty {
-                work.schedule(cell, TickChannel::Fluid, family as u16, family.delay(), 0);
+            if family != hollow_core::FluidId::NONE && fluids.profile(family).automatic {
+                work.schedule(
+                    cell,
+                    TickChannel::Fluid,
+                    u32::from(family.0),
+                    fluids.profile(family).delay,
+                    0,
+                );
             }
         }
         if let Ok(Some(edit)) = support {
@@ -684,9 +661,9 @@ pub(crate) struct RandomTickRegistry {
 impl RandomTickRegistry {
     #[allow(dead_code)]
     pub(crate) fn register(&mut self, state: VoxelState, handler: RandomHandler) {
-        self.handlers.get_or_insert_with(|| {
-            vec![None; pumpkin_data::BlockStateId::COUNT as usize].into_boxed_slice()
-        })[state.id() as usize] = Some(handler);
+        self.handlers
+            .get_or_insert_with(|| vec![None; VoxelState::count()].into_boxed_slice())
+            [state.id() as usize] = Some(handler);
     }
 }
 pub(crate) fn random_ticks(
@@ -727,11 +704,13 @@ pub(crate) fn random_ticks(
             let section = sections.trailing_zeros() as usize;
             sections &= sections - 1;
             work.random_sections &= !(1 << section);
-            if voxels
-                .states
-                .section(section)
-                .any(|state| handlers[state.id() as usize].is_some())
-            {
+            if voxels.states.section(section).any(|state| {
+                handlers
+                    .get(state.id() as usize)
+                    .copied()
+                    .flatten()
+                    .is_some()
+            }) {
                 work.random_sections |= 1 << section;
             }
         }
@@ -753,7 +732,7 @@ pub(crate) fn random_ticks(
                 let cell = section * 4096 + (key as u32 & 4095);
                 let position = cell_position(column.position, cell);
                 let state = voxels.states.get(cell as usize);
-                if let Some(handler) = handlers[state.id() as usize] {
+                if let Some(handler) = handlers.get(state.id() as usize).copied().flatten() {
                     handler(position, state, &mut commands);
                 }
             }

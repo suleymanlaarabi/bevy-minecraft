@@ -195,7 +195,7 @@ impl WorldGenerator {
         let top = |cells: &dyn Fn(usize) -> VoxelKind| {
             (0..HEIGHT)
                 .rev()
-                .find(|&y| cells(index(8, y, 8)) != VoxelKind::Air)
+                .find(|&y| !cells(index(8, y, 8)).default_state().is_air())
         };
         for radius in 0i32..=16 {
             for dx in -radius..=radius {

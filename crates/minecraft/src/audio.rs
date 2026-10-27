@@ -1,4 +1,5 @@
 //! Shared vanilla sound bank: registry-indexed block profiles and weighted variants.
+use hollow_features::motion::FixedPosition;
 use std::collections::HashMap;
 
 use bevy::{
@@ -10,9 +11,7 @@ pub(crate) use pumpkin_data::sound::Sound as SoundId;
 use serde::Deserialize;
 
 use crate::{
-    character::{
-        CharacterActivity, CharacterBody, CharacterMotion, CharacterMovement, CharacterState,
-    },
+    character::{CharacterActivity, CharacterBody, CharacterMovement, CharacterState},
     game::GameState,
     player::{Player, PlayerCamera},
     voxel::{VoxelKind, VoxelWorld},
@@ -297,7 +296,7 @@ fn movement_audio(
     world: VoxelWorld,
     mut players: Query<
         (
-            &CharacterMotion,
+            &FixedPosition,
             &CharacterBody,
             &CharacterState,
             &CharacterMovement,
@@ -310,10 +309,11 @@ fn movement_audio(
 ) {
     for (motion, body, state, movement, activity, mut audio, flying) in &mut players {
         audio.water_cooldown = (audio.water_cooldown - time.delta_secs()).max(0.0);
-        let position = motion.position.as_vec3();
-        let previous = audio
-            .previous
-            .replace((position, state.on_ground, state.in_water));
+        let position = motion.current.as_vec3();
+        let previous =
+            audio
+                .previous
+                .replace((position, state.on_ground, state.in_swimmable_fluid));
         if !activity.simulated || flying || activity.distance > 4.0 {
             audio.distance = 0.0;
             continue;
@@ -325,10 +325,10 @@ fn movement_audio(
             audio.distance = 0.0;
             continue;
         }
-        if state.in_water != water {
+        if state.in_swimmable_fluid != water {
             audio.distance = 0.0;
         }
-        if state.in_water {
+        if state.in_swimmable_fluid {
             audio.distance += activity.distance.hypot(activity.vertical);
             if audio.water_cooldown == 0.0 {
                 let sound = if !water {
@@ -352,7 +352,7 @@ fn movement_audio(
         let support = [floor, floor - IVec3::Y].into_iter().find_map(|position| {
             world
                 .state(position)
-                .filter(|state| !state.native().is_air())
+                .filter(|state| !state.definition().is_air())
                 .map(|state| (position, state))
         });
         if state.on_ground && !grounded {
@@ -383,7 +383,7 @@ fn movement_audio(
             let position = (feet + Vec3::Y * 0.05).floor().as_ivec3();
             world
                 .state(position)
-                .filter(|state| !state.native().is_air())
+                .filter(|state| !state.definition().is_air())
                 .map(|state| (position, state))
                 .or(support)
         };

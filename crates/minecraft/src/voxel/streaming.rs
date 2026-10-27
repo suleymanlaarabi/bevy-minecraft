@@ -163,7 +163,10 @@ pub(crate) fn stream_chunks(
     mut state: ResMut<StreamState>,
     sections: Query<&ChunkSections>,
     player: Query<
-        (&crate::character::CharacterMotion, &crate::survival::Health),
+        (
+            &hollow_features::motion::FixedPosition,
+            &crate::survival::Health,
+        ),
         With<crate::player::Player>,
     >,
     simulation: Res<crate::settings::SimulationSettings>,
@@ -184,7 +187,7 @@ pub(crate) fn stream_chunks(
     let center = chunk_at(viewer.translation());
     let simulation_center = player.single().ok().map_or(center, |(motion, health)| {
         if health.alive() {
-            chunk_at(motion.position.as_vec3())
+            chunk_at(motion.current.as_vec3())
         } else {
             center
         }

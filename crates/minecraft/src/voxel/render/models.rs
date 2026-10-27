@@ -3,7 +3,7 @@
 use super::texture_pack::{TexturePackId, manifest_keys};
 use crate::voxel::{VoxelKind, VoxelState};
 use bevy::prelude::*;
-use pumpkin_data::{BlockId, Property, PropertyKey};
+use pumpkin_data::{BlockId, Property};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{
@@ -107,6 +107,8 @@ struct Library {
     /// Face slots of greedy cubes, indexed by [`CellInfo::appearance`].
     appearances: Vec<Appearance>,
     texture_layers: Vec<u32>,
+    external: Vec<(hollow_core::ResourceId, u32)>,
+    block_slots: Box<[[u32; 6]]>,
     special_layers: u32,
     animations: Vec<Animation>,
     animated_layers: Box<[bool; 2048]>,
@@ -115,7 +117,7 @@ struct Library {
 /// Per-state mesher flags (bits of [`CellInfo::flags`]).
 pub(crate) mod cell {
     pub(crate) const AIR: u8 = 1;
-    pub(crate) const WATER: u8 = 1 << 1;
+    pub(crate) const OCEAN_SURFACE: u8 = 1 << 1;
     /// Opaque full cube: hides neighbor faces and darkens corners.
     pub(crate) const OCCLUDES: u8 = 1 << 2;
     /// Opaque cube drawn by the greedy terrain mesher.
@@ -125,7 +127,7 @@ pub(crate) mod cell {
     /// Explicit model quads.
     pub(crate) const MODEL: u8 = 1 << 5;
     /// Full cube: bounds water without necessarily hiding block faces or light.
-    pub(crate) const WATER_OCCLUDES: u8 = 1 << 6;
+    pub(crate) const FLUID_OCCLUDES: u8 = 1 << 6;
     /// Partial solid shape: clip fluid faces against its native outline boxes.
     pub(crate) const FLUID_OCCLUDER: u8 = 1 << 7;
 }
@@ -135,10 +137,12 @@ pub(crate) struct CellInfo {
     /// Greedy cube appearance (0 when not a cube), packed in 14 vertex bits.
     pub(crate) appearance: u16,
     pub(crate) flags: u8,
-    /// Family in the high nibble (water=1, lava=2); amount 1..=8, or falling=9.
-    /// Uses the byte that was padding in this four-byte per-state record.
-    pub(crate) fluid: u8,
+    /// Amount in bits 0..8, FluidId in bits 8..24 and falling in bit 24.
+    /// The eight-byte record covers all registered fluid families without truncation.
+    pub(crate) fluid: u32,
 }
+
+const _: () = assert!(std::mem::size_of::<CellInfo>() == 8);
 
 /// One face of a greedy cube: a model face-table slot, whether the block tint
 /// applies, and the dihedral transform from block UVs to the model's UVs.
@@ -281,33 +285,45 @@ impl Appearances {
 }
 
 pub(crate) fn translucent_kind(kind: VoxelKind) -> bool {
-    matches!(kind.0, BlockId::ICE | BlockId::FROSTED_ICE)
+    hollow_worldgen::content::catalog()
+        .visual(hollow_core::BlockId(kind.0))
+        .is_some_and(|v| v.translucent)
+        || kind
+            .native_id()
+            .is_some_and(|id| matches!(id, BlockId::ICE | BlockId::FROSTED_ICE))
         || kind.tagged(pumpkin_data::tag::Block::C_GLASS_BLOCKS)
         || kind.tagged(pumpkin_data::tag::Block::C_GLASS_PANES)
 }
 
 fn base_flags(state: VoxelState) -> u8 {
     let mut flags = 0;
-    if state.native().is_air() {
+    if state.definition().is_air() {
         flags |= cell::AIR;
     }
-    if state.has_water() {
-        flags |= cell::WATER;
+    let fluid = state.definition().fluid.id;
+    if fluid != hollow_core::FluidId::NONE
+        && fluid.0 < (1 << 14)
+        && crate::content::fluid_catalog()
+            .profile(fluid)
+            .render
+            .is_some_and(|render| render.ocean_surface && render.translucent)
+    {
+        flags |= cell::OCEAN_SURFACE;
     }
     if state.is_opaque_cube() {
         flags |= cell::OCCLUDES;
     }
-    if state.native().is_full_cube() {
+    if state.definition().is_full_cube() {
         // Full cubes enclose adjacent water regardless of texture transparency.
         // In particular, dry leaves and roots cover the water below them: drawing
         // a lowered free surface there creates a visible blue ledge underneath.
         // Keep this separate from visual occlusion so cutouts still show holes
         // and transmit light. Waterlogged neighbors also share the fluid family.
-        flags |= cell::WATER_OCCLUDES;
+        flags |= cell::FLUID_OCCLUDES;
     }
-    if state.native().can_occlude()
-        && !state.native().is_full_cube()
-        && !state.native().outline_shapes.is_empty()
+    if state.definition().can_occlude()
+        && !state.definition().is_full_cube()
+        && !state.selection_empty()
     {
         flags |= cell::FLUID_OCCLUDER;
     }
@@ -315,38 +331,28 @@ fn base_flags(state: VoxelState) -> u8 {
 }
 
 fn state_info(state: VoxelState) -> CellInfo {
-    let family = if state.has_water() {
-        1
-    } else if state.kind() == VoxelKind::Lava {
-        2
-    } else {
-        0
-    };
-    let level = if family != 0 {
-        state
-            .property(PropertyKey::Level)
-            .and_then(|value| match value {
-                Property::Level(level) => Some(level),
-                _ => None,
-            })
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    let fluid = state.definition().fluid;
+    let visible = fluid.id != hollow_core::FluidId::NONE
+        && crate::content::fluid_catalog()
+            .profile(fluid.id)
+            .render
+            .is_some();
     CellInfo {
         appearance: 0,
         flags: base_flags(state),
-        fluid: if family == 0 {
-            0
+        fluid: if visible {
+            u32::from(fluid.id.0) << 8 | u32::from(fluid.amount) | (u32::from(fluid.falling) << 24)
         } else {
-            family << 4 | if level >= 8 { 9 } else { 8 - level }
+            0
         },
     }
 }
 
 /// Cells without a greedy cube and with something to draw use explicit models.
 fn finish(mut info: CellInfo, state: VoxelState) -> CellInfo {
-    if info.flags & (cell::AIR | cell::CUBE | cell::CUTOUT) == 0 && state.kind() != VoxelKind::Water
+    if info.flags & (cell::AIR | cell::CUBE | cell::CUTOUT) == 0
+        && (state.definition().fluid.id == hollow_core::FluidId::NONE
+            || state.definition().fluid.embedded)
     {
         info.flags |= cell::MODEL;
     }
@@ -566,13 +572,13 @@ fn library() -> &'static Library {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => panic!("Cannot read vanilla model cache: {error}"),
         };
-        let mut recipes = (0..pumpkin_data::BlockStateId::COUNT).map(|_| Recipe::default()).collect::<Vec<_>>();
-        let mut cells = vec![CellInfo::default(); pumpkin_data::BlockStateId::COUNT as usize];
+        let mut recipes = (0..VoxelState::count() as u32).map(|_| Recipe::default()).collect::<Vec<_>>();
+        let mut cells = vec![CellInfo::default(); VoxelState::count()];
         let mut appearances = Appearances::default();
         let pack_keys = manifest_keys(TexturePackId::Vanilla);
         let Some(imported) = imported else {
             warn!("Vanilla models unavailable: using shape-based models; run scripts/import_vanilla.py");
-            for raw in 0..pumpkin_data::BlockStateId::COUNT {
+            for raw in 0..VoxelState::count() as u32 {
                 let Some(state) = VoxelState::from_id(raw) else { continue; };
                 let mut info = state_info(state);
                 if state.is_opaque_cube() && pack_cube(&pack_keys, state.kind()) {
@@ -581,7 +587,7 @@ fn library() -> &'static Library {
                 }
                 cells[raw as usize] = finish(info, state);
             }
-            return Library { chests: None, recipes: recipes.into(), cells: cells.into(), appearances: appearances.list, textures: Vec::new(), opaque_textures: Vec::new(), texture_layers: Vec::new(), special_layers: 0, animations: Vec::new(), animated_layers: Box::new([false; 2048]) };
+            return augment_content(Library { chests: None, recipes: recipes.into(), cells: cells.into(), appearances: appearances.list, textures: Vec::new(), opaque_textures: Vec::new(), texture_layers: Vec::new(), special_layers: 0, animations: Vec::new(), animated_layers: Box::new([false; 2048]), external: Vec::new(), block_slots: Box::new([]) });
         };
         let model_ids: HashMap<_, _> = imported.models.keys().enumerate().map(|(index, name)| (name.clone(), index)).collect();
         let models: Vec<_> = {
@@ -589,7 +595,7 @@ fn library() -> &'static Library {
             for (name, quads) in imported.models { models[model_ids[&name]] = quads; }
             models
         };
-        let mut blocks: Vec<Option<BlockModel>> = (0..BlockId::COUNT).map(|_| None).collect();
+        let mut blocks: Vec<Option<BlockModel>> = (0..VoxelKind::count()).map(|_| None).collect();
         for (name, value) in imported.blocks {
             // Vanilla also ships blockstate files for these two entities.
             if matches!(name.as_str(), "item_frame" | "glow_item_frame") { continue; }
@@ -605,7 +611,7 @@ fn library() -> &'static Library {
         let mut rotations = HashMap::<(usize, i32, i32, bool), Arc<[ModelQuad]>>::new();
         let mut assemblies = HashMap::<Vec<usize>, Arc<[ModelQuad]>>::new();
         let mut missing = std::collections::HashSet::new();
-        for raw in 0..pumpkin_data::BlockStateId::COUNT {
+        for raw in 0..VoxelState::count() as u32 {
             let Some(state) = VoxelState::from_id(raw) else { continue; };
             let kind = state.kind();
             let Some(block) = blocks[kind.index()].as_ref() else {
@@ -655,7 +661,7 @@ fn library() -> &'static Library {
             } else if let Some(faces) = model_faces {
                 let class = if state.is_opaque_cube() {
                     cell::CUBE
-                } else if state.native().is_full_cube() {
+                } else if state.definition().is_full_cube() {
                     cell::CUTOUT
                 } else {
                     0
@@ -693,18 +699,125 @@ fn library() -> &'static Library {
                 pivot: Vec3::from_array(imported.chest_pivots[i]),
             }
         });
-        Library { chests: Some(chests), recipes: recipes.into(), textures: imported.textures, opaque_textures: imported.opaque_textures, cells: cells.into(), appearances: appearances.list, texture_layers: imported.texture_layers, special_layers: imported.special_layers, animations: imported.animations, animated_layers }
+        augment_content(Library { chests: Some(chests), recipes: recipes.into(), textures: imported.textures, opaque_textures: imported.opaque_textures, cells: cells.into(), appearances: appearances.list, texture_layers: imported.texture_layers, special_layers: imported.special_layers, animations: imported.animations, animated_layers, external: Vec::new(), block_slots: Box::new([]) })
     })
+}
+/// Resolve custom asset names once, before any mesh task is scheduled.
+fn augment_content(mut library: Library) -> Library {
+    let content = hollow_worldgen::content::catalog();
+    let original_texture_count = library.textures.len();
+    let mut referenced = vec![false; content.resource_count()];
+    for (_, profile) in crate::content::fluid_catalog().profiles() {
+        if let Some(render) = profile.render {
+            referenced[render.still.index()] = true;
+            referenced[render.flowing.index()] = true;
+        }
+    }
+    for kind in VoxelKind::all() {
+        if let Some(visual) = content.visual(hollow_core::BlockId(kind.0)) {
+            for resource in visual.faces {
+                referenced[resource.index()] = true;
+            }
+        }
+    }
+    let mut slots = Vec::with_capacity(content.resource_count());
+    for index in 0..content.resource_count() {
+        if !referenced[index] {
+            slots.push(None);
+            continue;
+        }
+        let id = hollow_core::ResourceId(index as u32);
+        let path = content.resource(id);
+        let slot = if path.ends_with(".png") {
+            let slot = library.textures.len() as u32;
+            library.textures.push(path.to_owned());
+            library.external.push((id, slot));
+            Some(slot)
+        } else {
+            let name = path.strip_prefix("minecraft:block/").unwrap_or(path);
+            library
+                .textures
+                .iter()
+                .position(|name_in_pack| name_in_pack == name)
+                .map(|i| i as u32)
+        };
+        slots.push(slot);
+    }
+    let added = library.textures.len() - original_texture_count;
+    for appearance in &mut library.appearances {
+        for face in &mut appearance.faces {
+            if face.slot as usize >= original_texture_count {
+                face.slot += added as u32;
+            }
+        }
+    }
+    library.block_slots = VoxelKind::all()
+        .filter(|kind| !kind.is_native())
+        .map(|kind| {
+            let visual = content.visual(hollow_core::BlockId(kind.0));
+            std::array::from_fn(|face| {
+                visual
+                    .and_then(|v| slots[v.faces[face].index()])
+                    .unwrap_or_else(|| {
+                        // A missing visual is explicit; resource lists have no implied material layout.
+                        library.textures.len() as u32
+                            + VoxelKind::Stone.index() as u32 * 3
+                            + if face / 2 == 1 {
+                                if face % 2 == 1 { 0 } else { 2 }
+                            } else {
+                                1
+                            }
+                    })
+            })
+        })
+        .collect();
+    for kind in VoxelKind::all().filter(|kind| !kind.is_native()) {
+        let resources = library.block_slots[kind.index() - VoxelKind::ALL.len()];
+        let faces = resources.map(|slot| CubeFace { slot, ..default() });
+        let appearance = u16::try_from(library.appearances.len())
+            .ok()
+            .filter(|id| *id > 0 && *id < 1 << 14);
+        if let Some(appearance) = appearance {
+            let mut used = false;
+            for raw in content.block(hollow_core::BlockId(kind.0)).states.clone() {
+                let state = content.state(hollow_core::StateId(raw));
+                if state.full_cube
+                    && state.opacity == 15
+                    && state.fluid.id == hollow_core::FluidId::NONE
+                    && content
+                        .visual(hollow_core::BlockId(kind.0))
+                        .is_some_and(|v| !v.translucent)
+                {
+                    library.cells[raw as usize].appearance = appearance;
+                    library.cells[raw as usize].flags =
+                        (library.cells[raw as usize].flags & !cell::MODEL) | cell::CUBE;
+                    used = true;
+                }
+            }
+            if used {
+                library.appearances.push(Appearance {
+                    faces,
+                    tint: VoxelKind::Air,
+                });
+            }
+        }
+    }
+    library
+}
+pub(crate) fn external_textures() -> &'static [(hollow_core::ResourceId, u32)] {
+    &library().external
 }
 fn pack_cube(keys: &[bool], kind: VoxelKind) -> bool {
     // These keys already have the exact top/side/bottom mapping in all packs.
     // Logs with an explicit axis use the model path, as do slabs and farmland.
-    !matches!(
-        kind.0,
-        BlockId::DIRT_PATH | BlockId::FARMLAND | BlockId::SNOW
-    ) && !kind.tagged(pumpkin_data::tag::Block::MINECRAFT_STAIRS)
+    kind.is_native()
+        && !matches!(
+            kind.native_id().unwrap(),
+            BlockId::DIRT_PATH | BlockId::FARMLAND | BlockId::SNOW
+        )
+        && !kind.tagged(pumpkin_data::tag::Block::MINECRAFT_STAIRS)
         && !kind.tagged(pumpkin_data::tag::Block::MINECRAFT_SLABS)
-        && keys[kind.index()]
+        && keys.get(kind.index()).copied().unwrap_or(false)
 }
 /// Mesher classification of a state.
 #[inline]
@@ -750,19 +863,44 @@ pub(crate) fn special_layers() -> u32 {
     library().special_layers
 }
 
-pub(crate) fn fluid_texture(family: u8, flowing: bool) -> u32 {
-    static SLOTS: OnceLock<[[u32; 2]; 2]> = OnceLock::new();
-    SLOTS.get_or_init(|| {
-        [VoxelKind::Water, VoxelKind::Lava].map(|kind| {
-            ["still", "flow"].map(|suffix| {
-                let name = format!("{}_{}", kind.name(), suffix);
-                texture_names()
-                    .iter()
-                    .position(|texture| texture == &name)
-                    .map_or_else(|| fallback_slot(kind, 1, true), |index| index as u32)
+pub(crate) fn fluid_texture(family: hollow_core::FluidId, flowing: bool) -> u32 {
+    static SLOTS: OnceLock<Box<[[u32; 2]]>> = OnceLock::new();
+    let slots = SLOTS.get_or_init(|| {
+        let content = hollow_worldgen::content::catalog();
+        crate::content::fluid_catalog()
+            .profiles()
+            .map(|(_, profile)| {
+                let Some(render) = profile.render else {
+                    return [0; 2];
+                };
+                [render.still, render.flowing].map(|resource| {
+                    let name = content
+                        .resource(resource)
+                        .strip_prefix("minecraft:block/")
+                        .unwrap_or(content.resource(resource));
+                    texture_names()
+                        .iter()
+                        .position(|texture| texture == name)
+                        .map_or_else(
+                            || {
+                                fallback_slot(
+                                    VoxelKind(
+                                        content
+                                            .state(profile.standing[profile.max_amount() as usize])
+                                            .block
+                                            .0,
+                                    ),
+                                    1,
+                                    true,
+                                )
+                            },
+                            |index| index as u32,
+                        )
+                })
             })
-        })
-    })[(family - 1) as usize][usize::from(flowing)]
+            .collect()
+    });
+    slots[family.index() - 1][usize::from(flowing)]
 }
 
 /// Fixed descriptor prefix, followed by cumulative animation timeline entries.
@@ -828,6 +966,10 @@ pub(crate) fn fallback_slot(kind: VoxelKind, axis: usize, positive: bool) -> u32
     fallback_slot_after(texture_names().len(), kind, axis, positive)
 }
 fn fallback_slot_after(textures: usize, kind: VoxelKind, axis: usize, positive: bool) -> u32 {
+    if !kind.is_native() {
+        return library().block_slots[kind.index() - VoxelKind::ALL.len()]
+            [axis * 2 + usize::from(positive)];
+    }
     textures as u32
         + kind.index() as u32 * 3
         + if axis == 1 {
@@ -837,24 +979,13 @@ fn fallback_slot_after(textures: usize, kind: VoxelKind, axis: usize, positive: 
         }
 }
 fn fallback(state: VoxelState, world: IVec3, mut visit: impl FnMut(&ModelQuad)) {
-    if state.native().is_air()
-        || state.kind() == VoxelKind::Water
-        || state.kind().0 == BlockId::BUBBLE_COLUMN
-    {
+    if state.is_air() || (state.is_liquid() && !state.definition().fluid.embedded) {
         return;
     }
     let kind = state.kind();
     let translucent = translucent_kind(kind);
     let mut any = false;
-    for b in state
-        .selection_boxes(world)
-        .chain(
-            (kind == VoxelKind::Lava).then_some(hollow_core::shape::BlockBox {
-                min: Vec3::ZERO,
-                max: Vec3::ONE,
-            }),
-        )
-    {
+    for b in state.selection_boxes(world) {
         any = true;
         let full_cube = b.min == Vec3::ZERO && b.max == Vec3::ONE;
         for face in b.faces() {
@@ -905,7 +1036,7 @@ pub(crate) fn tint_index(kind: VoxelKind) -> u8 {
     static INDICES: std::sync::LazyLock<Box<[u8]>> = std::sync::LazyLock::new(|| {
         VoxelKind::ALL
             .iter()
-            .map(|kind| match kind.0 {
+            .map(|kind| match kind.native_id().unwrap() {
                 BlockId::SPRUCE_LEAVES => 2,
                 BlockId::BIRCH_LEAVES => 3,
                 id if kind.tagged(pumpkin_data::tag::Block::MINECRAFT_LEAVES)
@@ -918,7 +1049,7 @@ pub(crate) fn tint_index(kind: VoxelKind) -> u8 {
             })
             .collect()
     });
-    INDICES[kind.index()]
+    INDICES.get(kind.index()).copied().unwrap_or(0)
 }
 
 pub(crate) fn tint(kind: VoxelKind) -> [f32; 3] {

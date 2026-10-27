@@ -1,11 +1,12 @@
 use bevy::prelude::*;
+use hollow_features::motion::FixedPosition;
 use pumpkin_data::{damage::DamageType, effect::StatusEffect as E};
 
 use super::placement::{HazardKind, hazard};
 use super::{ActiveEffects, DamageRequest, Hazards, Health, Nutrition, SurvivalRules, UsingItem};
 use crate::{
-    character::{CharacterActivity, CharacterBody, CharacterMotion, CharacterState, Locomotion},
-    voxel::{VoxelKind, VoxelWorld},
+    character::{CharacterActivity, CharacterBody, CharacterState, Locomotion},
+    voxel::VoxelWorld,
 };
 
 pub(super) fn locomotion(
@@ -62,7 +63,7 @@ pub(super) fn nutrition(
         if activity.jumped {
             nutrition.exhaust(if activity.sprinting { 0.2 } else { 0.05 });
         }
-        if state.in_water {
+        if state.in_swimmable_fluid {
             nutrition.exhaust(activity.distance.hypot(activity.vertical) * 0.01);
         } else if state.on_ground && activity.sprinting {
             nutrition.exhaust(activity.distance * 0.1);
@@ -114,7 +115,7 @@ pub(super) fn hazards(
             Entity,
             &Health,
             &ActiveEffects,
-            &CharacterMotion,
+            &FixedPosition,
             &CharacterBody,
             &CharacterState,
             &CharacterActivity,
@@ -128,7 +129,7 @@ pub(super) fn hazards(
         if !health.alive() || !activity.simulated {
             continue;
         }
-        let position = motion.position.as_vec3();
+        let position = motion.current.as_vec3();
         if !world.collision_ready(position) {
             continue;
         }
@@ -137,11 +138,7 @@ pub(super) fn hazards(
         if activity.vertical < 0.0 {
             hazards.fall_distance -= activity.vertical;
         }
-        if state.in_water
-            || state.in_lava
-            || activity.climbing
-            || effects.level(E::SLOW_FALLING.id) > 0
-        {
+        if state.in_fluid || activity.climbing || effects.level(E::SLOW_FALLING.id) > 0 {
             if hazards.fall_distance != 0.0 {
                 hazards.fall_distance = 0.0;
             }
@@ -153,7 +150,7 @@ pub(super) fn hazards(
             }
             hazards.fall_distance = 0.0;
         }
-        if state.eyes_in_water && effects.level(E::WATER_BREATHING.id) == 0 {
+        if state.eyes_in_swimmable_fluid && effects.level(E::WATER_BREATHING.id) == 0 {
             hazards.air_used += 1;
             if hazards.air_used >= 320 {
                 hazards.air_used = 300;
@@ -164,6 +161,10 @@ pub(super) fn hazards(
         }
         hazards.contact_ticks = (hazards.contact_ticks + 1) % 10;
         let mut fire = false;
+        let mut extinguishes = false;
+        let mut fluid_damage = 0.0f32;
+        let mut fluid_source = hollow_core::FluidId::NONE;
+        let mut fluid_ignites = false;
         let mut contact = None;
         let min = (feet - Vec3::new(body.half_width + 0.01, 0.01, body.half_width + 0.01))
             .floor()
@@ -176,10 +177,32 @@ pub(super) fn hazards(
             ))
         .floor()
         .as_ivec3();
-        world.visit_cells(min, max, |_, block| {
+        world.visit_cells(min, max, |cell, block| {
             let Some(block) = block else {
                 return;
             };
+            let fluid = block.definition().fluid.id;
+            if fluid != hollow_core::FluidId::NONE
+                && feet.y
+                    < cell.y as f32 + {
+                        let covered = world
+                            .state(cell + IVec3::Y)
+                            .is_some_and(|s| s.definition().fluid.id == fluid);
+                        if covered {
+                            1.0
+                        } else {
+                            crate::content::fluid_catalog().fill_height(block) as f32
+                        }
+                    }
+            {
+                let contact = crate::content::fluid_catalog().profile(fluid).contact;
+                extinguishes |= contact.extinguishes;
+                fluid_ignites |= contact.ignites;
+                if contact.damage > fluid_damage {
+                    fluid_damage = contact.damage;
+                    fluid_source = fluid;
+                }
+            }
             match hazard(block.kind()) {
                 HazardKind::Fire => fire = true,
                 HazardKind::Cactus => contact = Some((&DamageType::CACTUS, 1.0)),
@@ -198,11 +221,11 @@ pub(super) fn hazards(
                 _ => {}
             }
         });
-        if state.in_water {
+        if extinguishes {
             if hazards.burning_ticks > 0 {
                 hazards.burning_ticks = 0;
             }
-        } else if state.in_lava || fire {
+        } else if fluid_ignites || fire {
             hazards.burning_ticks = 160;
         }
         if hazards.burning_ticks > 0 {
@@ -212,8 +235,12 @@ pub(super) fn hazards(
             }
         }
         if hazards.contact_ticks == 0 {
-            if state.in_lava {
-                damage.write(DamageRequest::new(entity, &DamageType::LAVA, 4.0));
+            if fluid_damage > 0.0 {
+                damage.write(DamageRequest::new(
+                    entity,
+                    crate::content::fluid_damage_source(fluid_source),
+                    fluid_damage,
+                ));
             } else if fire {
                 damage.write(DamageRequest::new(entity, &DamageType::IN_FIRE, 1.0));
             }
@@ -222,7 +249,7 @@ pub(super) fn hazards(
             }
             if let Some(block) = world.state(eye.floor().as_ivec3()) {
                 let local_eye = eye - eye.floor();
-                if block.kind() != VoxelKind::Air
+                if !block.is_air()
                     && block.collision_boxes(eye.floor().as_ivec3()).any(|shape| {
                         local_eye.cmpgt(shape.min).all() && local_eye.cmplt(shape.max).all()
                     })

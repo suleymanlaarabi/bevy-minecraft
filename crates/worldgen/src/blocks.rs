@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct VoxelKind(pub BlockId);
+pub struct VoxelKind(pub u32);
 
 impl Default for VoxelKind {
     fn default() -> Self {
@@ -17,7 +17,7 @@ macro_rules! block_tuning {
     ($($kind:ident: $native:ident, $fallback:ident, $color:expr;)*) => {
         #[allow(non_upper_case_globals)]
         impl VoxelKind {
-            $(pub const $kind: Self = Self(BlockId::$native);)*
+            $(pub const $kind: Self = Self(BlockId::$native.as_u16() as u32);)*
             const fn tuned_fallback(self) -> Option<Self> {
                 match self {$(Self::$kind => Some(Self::$fallback),)* _ => None}
             }
@@ -141,24 +141,35 @@ impl VoxelKind {
         let mut kinds = [Self::Air; BlockId::COUNT as usize];
         let mut i = 0;
         while i < kinds.len() {
-            kinds[i] = Self(BlockId::new_or_air(i as u16));
+            kinds[i] = Self(i as u32);
             i += 1;
         }
         kinds
     };
 
     pub const fn index(self) -> usize {
-        self.0.as_u16() as usize
+        self.0 as usize
     }
-    pub const fn block(self) -> &'static Block {
-        self.0.to_block()
+    pub fn block(self) -> &'static Block {
+        self.native_id().expect("Native-only metadata").to_block()
     }
-    pub const fn name(self) -> &'static str {
-        self.block().name
+    pub fn name(self) -> &'static str {
+        if self.is_native() {
+            self.block().name
+        } else {
+            &super::content::catalog()
+                .block(hollow_core::BlockId(self.0))
+                .name
+        }
     }
     pub fn from_key(key: &str) -> Option<Self> {
         Block::from_registry_key(key.strip_prefix("minecraft:").unwrap_or(key))
-            .map(|block| Self(block.id))
+            .map(|block| Self::from_native(block.id))
+            .or_else(|| {
+                super::content::try_catalog()?
+                    .resolve(key)
+                    .map(|id| Self(id.0))
+            })
     }
 
     pub fn itemizable() -> &'static [Self] {
@@ -171,28 +182,39 @@ impl VoxelKind {
         })
     }
 
-    pub const fn is_itemizable(self) -> bool {
-        self.block().item_id != 0 && !matches!(self, Self::Air | Self::Water | Self::Lava)
+    pub fn is_itemizable(self) -> bool {
+        self.is_native()
+            && self.block().item_id != 0
+            && !matches!(self, Self::Air | Self::Water | Self::Lava)
     }
-    pub const fn is_solid(self) -> bool {
-        !self.block().default_state.collision_shapes.is_empty()
+    pub fn is_solid(self) -> bool {
+        if self.is_native() {
+            !self.block().default_state.collision_shapes.is_empty()
+        } else {
+            !self.default_state().collision_empty()
+        }
     }
-    pub const fn is_breakable(self) -> bool {
-        self.block().hardness >= 0.0 && !self.block().default_state.is_air() && !self.is_liquid()
+    pub fn is_breakable(self) -> bool {
+        self.default_state().definition().hardness >= 0.0
+            && !self.default_state().is_air()
+            && !self.is_liquid()
     }
-    pub const fn is_liquid(self) -> bool {
-        matches!(self, Self::Water | Self::Lava)
+    pub fn is_liquid(self) -> bool {
+        self.default_state().is_liquid()
     }
-    pub const fn is_opaque(self) -> bool {
-        self.block().default_state.is_full_cube() && self.block().default_state.opacity == 15
+    pub fn is_opaque(self) -> bool {
+        self.default_state().is_opaque_cube()
     }
 
     pub fn fallback(self) -> Self {
+        if !self.is_native() {
+            return self;
+        }
         if let Some(fallback) = self.tuned_fallback() {
             return fallback;
         }
-        if let Some(id) = super::block_relations::material(self.0) {
-            return Self(id);
+        if let Some(id) = super::block_relations::material(self.native_id().unwrap()) {
+            return Self::from_native(id);
         }
         if self.tagged(pumpkin_data::tag::Block::MINECRAFT_LEAVES) || !self.is_solid() {
             Self::Leaves
@@ -206,8 +228,28 @@ impl VoxelKind {
     }
 
     pub fn tagged(self, tag: pumpkin_data::tag::Tag) -> bool {
-        self.0.has_tag(tag)
+        self.native_id().is_some_and(|id| id.has_tag(tag))
     }
 }
 
-const _: () = assert!(std::mem::size_of::<VoxelKind>() == 2);
+impl VoxelKind {
+    pub const fn from_native(id: BlockId) -> Self {
+        Self(id.as_u16() as u32)
+    }
+    pub const fn is_native(self) -> bool {
+        self.0 < BlockId::COUNT as u32
+    }
+    pub fn native_id(self) -> Option<BlockId> {
+        self.is_native().then(|| BlockId::new_or_air(self.0 as u16))
+    }
+    pub fn count() -> usize {
+        super::content::try_catalog().map_or(BlockId::COUNT as usize, |c| c.block_count())
+    }
+    pub fn all() -> impl Iterator<Item = Self> {
+        (0..Self::count()).map(|id| Self(id as u32))
+    }
+    pub fn physics(self) -> &'static hollow_core::content::BlockDefinition {
+        super::content::catalog().block(hollow_core::BlockId(self.0))
+    }
+}
+const _: () = assert!(std::mem::size_of::<VoxelKind>() == 4);

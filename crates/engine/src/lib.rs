@@ -25,3 +25,7 @@ impl<T: VoxelCell> Plugin for VoxelWorldPlugin<T> {
     }
 }
 pub mod raycast;
+
+pub mod content;
+
+pub mod fluids;

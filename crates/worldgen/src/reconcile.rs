@@ -6,7 +6,6 @@ use crate::{
     coordinates::SECTION_VOLUME,
     sections::{Layer, Section},
 };
-use pumpkin_data::BlockStateId;
 use pumpkin_util::math::{position::BlockPos, vector2::Vector2};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -47,13 +46,10 @@ impl SnapshotAccess {
     pub(crate) fn is_chunk_loaded(&self, pos: &Vector2<i32>) -> bool {
         self.chunks.contains_key(&(pos.x, pos.y))
     }
-    pub(crate) fn get_block_state(&self, pos: &BlockPos) -> BlockStateId {
+    pub(crate) fn get_block_state(&self, pos: &BlockPos) -> VoxelState {
         self.index(pos)
             .and_then(|(p, i)| self.chunks.get(&p).map(|chunk| chunk.states.get(i)))
-            .map_or(BlockStateId::AIR, |state| {
-                BlockStateId::new(u16::try_from(state.id()).expect("Minecraft lighting state"))
-                    .unwrap()
-            })
+            .unwrap_or(VoxelState::AIR)
     }
     pub(crate) fn light(&self, pos: &BlockPos) -> Option<u8> {
         let (p, i) = self.index(pos)?;
@@ -103,8 +99,8 @@ impl LightingSnapshots {
                         continue;
                     }
                     for i in section * SECTION_VOLUME..(section + 1) * SECTION_VOLUME {
-                        let old = old.states.get(i).native();
-                        let new = snapshot.states.get(i).native();
+                        let old = old.states.get(i).definition();
+                        let new = snapshot.states.get(i).definition();
                         let sky_changed = old.opacity != new.opacity
                             || old.can_occlude() != new.can_occlude()
                             || old.is_solid_render() != new.is_solid_render();
@@ -167,12 +163,12 @@ impl LightingSnapshots {
             for section in 0..states.section_count() {
                 if !states
                     .section(section)
-                    .any(|state| state.native().luminance > 0)
+                    .any(|state| state.definition().luminance > 0)
                 {
                     continue;
                 }
                 for i in section * SECTION_VOLUME..(section + 1) * SECTION_VOLUME {
-                    let emission = states.get(i).native().luminance;
+                    let emission = states.get(i).definition().luminance;
                     if emission == 0 {
                         continue;
                     }

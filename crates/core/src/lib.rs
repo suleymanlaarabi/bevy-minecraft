@@ -16,7 +16,17 @@ macro_rules! identity {
         }
     )*};
 }
-identity!(BlockId, StateId);
+identity!(BlockId, StateId, ShapeId, ResourceId);
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct FluidId(pub u16);
+impl FluidId {
+    pub const NONE: Self = Self(0);
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+pub mod content;
 
 /// Statically dispatched cell semantics; storage and world access know no content registry.
 pub trait VoxelCell: Copy + Eq + std::fmt::Debug + Send + Sync + 'static {

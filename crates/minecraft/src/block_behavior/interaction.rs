@@ -7,13 +7,14 @@ use super::{
     },
 };
 use crate::{
-    character::{Aabb, CharacterBody, CharacterMotion, CharacterState, GameCharacter},
+    character::{Aabb, CharacterBody, CharacterState, GameCharacter},
     voxel::{
         VoxelState, VoxelWorld,
         edits::{CheckedEdit, EditBatch},
     },
 };
 use bevy::{ecs::system::SystemParam, prelude::*};
+use hollow_features::motion::FixedPosition;
 use pumpkin_data::Property as P;
 
 #[derive(EntityEvent)]
@@ -44,7 +45,7 @@ pub(crate) struct BlockCollisions<'w, 's> {
         'w,
         's,
         (
-            &'static CharacterMotion,
+            &'static FixedPosition,
             &'static CharacterBody,
             &'static CharacterState,
         ),
@@ -55,7 +56,7 @@ impl BlockCollisions<'_, '_> {
     pub fn intersects(&self, position: IVec3, state: VoxelState) -> bool {
         let origin = position.as_dvec3();
         self.characters.iter().any(|(motion, body, character)| {
-            let bounds = body.aabb(motion.position, character.pose);
+            let bounds = body.aabb(motion.current, character.pose);
             state.collision_boxes(position).any(|shape| {
                 bounds.intersects(&Aabb {
                     min: origin + shape.min.as_dvec3(),
@@ -70,7 +71,7 @@ pub(crate) fn open_chest(
     mut commands: Commands,
     chests: Query<&BlockState, (With<Chest>, Without<Dormant>)>,
     topology: ContainerTopology,
-    actors: Query<&CharacterMotion>,
+    actors: Query<&FixedPosition>,
     mut next: ResMut<NextState<crate::inventory::InventoryState>>,
 ) {
     if !chests
@@ -85,7 +86,7 @@ pub(crate) fn open_chest(
     let Some(owner) = topology.canonical(event.entity) else {
         return;
     };
-    if topology.owners(owner, motion.position.as_vec3()).is_none() {
+    if topology.owners(owner, motion.current.as_vec3()).is_none() {
         return;
     }
     commands.entity(event.actor).insert(ViewingContainer(owner));
@@ -100,7 +101,7 @@ pub(crate) fn open_manual(
     >,
     world: VoxelWorld,
     collisions: BlockCollisions,
-    actors: Query<&CharacterMotion>,
+    actors: Query<&FixedPosition>,
 ) {
     let Ok((block, state, door, gate)) = blocks.get(event.entity) else {
         return;
@@ -109,7 +110,7 @@ pub(crate) fn open_manual(
         || world.state(block.position) != Some(state.0)
         || !actors.get(event.actor).is_ok_and(|motion| {
             motion
-                .position
+                .current
                 .as_vec3()
                 .distance_squared(block.position.as_vec3() + Vec3::splat(0.5))
                 <= 25.0

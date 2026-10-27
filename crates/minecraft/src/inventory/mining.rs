@@ -27,7 +27,8 @@ struct Catalog {
 fn catalog() -> &'static Catalog {
     static CATALOG: OnceLock<Catalog> = OnceLock::new();
     CATALOG.get_or_init(|| {
-        let bare = VoxelKind::ALL
+        let bare = VoxelKind::all()
+            .collect::<Vec<_>>()
             .iter()
             .map(|_| ToolBlock {
                 speed: 1.0,
@@ -66,11 +67,16 @@ fn catalog() -> &'static Catalog {
                     .map(|kind| {
                         let matches = |rule: &&pumpkin_data::data_component_impl::ToolRule| {
                             match &rule.blocks {
-                                IDSet::Tag(tag) => kind
-                                    .block()
-                                    .is_tagged_with(tag)
-                                    .expect("Valid tool block tag"),
-                                IDSet::IDs(blocks) => blocks.iter().any(|block| block.id == kind.0),
+                                IDSet::Tag(tag) => {
+                                    kind.is_native()
+                                        && kind
+                                            .block()
+                                            .is_tagged_with(tag)
+                                            .expect("Valid tool block tag")
+                                }
+                                IDSet::IDs(blocks) => blocks
+                                    .iter()
+                                    .any(|block| u32::from(block.id.as_u16()) == kind.0),
                             }
                         };
                         let speed = tool
@@ -116,20 +122,27 @@ pub(crate) fn outcome(
     player: &CharacterState,
 ) -> Option<MiningOutcome> {
     let kind = state.kind();
-    let hardness = state.native().hardness;
-    if hardness < 0.0 || state.native().is_air() || kind.is_liquid() {
+    let hardness = state.definition().hardness;
+    if hardness < 0.0 || state.definition().is_air() || kind.is_liquid() {
         return None;
     }
     let catalog = catalog();
     let profile_id = tool.map_or(0, |stack| catalog.items[stack.item().id() as usize]);
     let profile = &catalog.profiles[usize::from(profile_id)];
-    let block = profile.blocks[kind.0.as_u16() as usize];
+    let block = profile
+        .blocks
+        .get(kind.index())
+        .copied()
+        .unwrap_or(ToolBlock {
+            speed: 1.0,
+            correct: false,
+        });
     let mut duration = hardness / block.speed.max(f32::MIN_POSITIVE);
-    let can_harvest = !state.native().tool_required() || block.correct;
+    let can_harvest = !state.definition().tool_required() || block.correct;
     if !can_harvest {
         duration *= 3.0;
     }
-    if player.eyes_in_water {
+    if player.eyes_in_swimmable_fluid {
         duration *= 5.0;
     }
     if !player.on_ground {

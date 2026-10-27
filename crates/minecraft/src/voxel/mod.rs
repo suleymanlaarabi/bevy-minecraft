@@ -97,7 +97,10 @@ impl Plugin for VoxelPlugin {
                 .run_if(crate::world::streaming),
         )
         .add_observer(cleanup_removed_chunk)
-        .add_systems(PreStartup, prepare_assets)
+        .add_systems(
+            PreStartup,
+            prepare_assets.after(hollow_engine::blocks::FinalizeBlockContent),
+        )
         .add_systems(Update, stream_chunks.run_if(crate::world::streaming))
         .add_systems(
             Update,

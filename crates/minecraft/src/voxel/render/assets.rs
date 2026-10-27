@@ -1,6 +1,6 @@
 use super::{
     material::{ModelBlend, ModelMaterial, VoxelCutoutMaterial, VoxelMaterial, WaterMaterial},
-    texture_pack::{TexturePack, block_texture},
+    texture_pack::TexturePack,
 };
 use bevy::render::storage::ShaderBuffer;
 use bevy::{
@@ -69,6 +69,7 @@ pub(crate) fn prepare_assets(
     mut cutout_materials: ResMut<Assets<VoxelCutoutMaterial>>,
     mut model_materials: ResMut<Assets<ModelMaterial>>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     let pack = TexturePack::load(
         settings
@@ -77,7 +78,7 @@ pub(crate) fn prepare_assets(
                 settings.texture_pack
             }),
     );
-    let blocks = block_texture(&asset_server, &pack.texture_path, pack.layers);
+    let blocks = pack.load_texture(&asset_server, &mut images);
     let faces = buffers.add(pack.cube_face_buffer());
     let model_faces = buffers.add(pack.model_face_buffer());
     let vanilla_models = pack.vanilla_models();
@@ -129,6 +130,7 @@ pub(crate) fn apply_texture_pack(
     mut cutout_materials: ResMut<Assets<VoxelCutoutMaterial>>,
     mut model_materials: ResMut<Assets<ModelMaterial>>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     let (Some(texture_pack), Some(voxel_assets)) = (texture_pack.as_deref_mut(), voxel_assets)
     else {
@@ -139,7 +141,7 @@ pub(crate) fn apply_texture_pack(
     }
 
     let next_pack = TexturePack::load(settings.texture_pack);
-    let blocks = block_texture(&asset_server, &next_pack.texture_path, next_pack.layers);
+    let blocks = next_pack.load_texture(&asset_server, &mut images);
     // Meshes only store cube appearances: the face table carries the pack's layers and tints.
     let cube_faces = buffers.add(next_pack.cube_face_buffer());
     let animations = buffers.add(next_pack.animation_buffer());

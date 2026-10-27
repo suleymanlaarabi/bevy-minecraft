@@ -35,7 +35,7 @@ impl ItemKind {
             .map(|_| Self(id))
     }
 
-    pub const fn for_block(kind: VoxelKind) -> Self {
+    pub fn for_block(kind: VoxelKind) -> Self {
         Self(kind.block().item_id)
     }
 

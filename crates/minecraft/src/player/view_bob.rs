@@ -3,8 +3,8 @@ use crate::character::CharacterMotion;
 use bevy::prelude::*;
 use std::f32::consts::PI;
 
-pub(super) fn pose(motion: &CharacterMotion) -> Transform {
-    let (distance, bob) = motion.walking_animation();
+pub(super) fn pose(motion: &CharacterMotion, alpha: f32) -> Transform {
+    let (distance, bob) = motion.walking_animation(alpha);
     let phase = distance * PI;
     let (sin, cos) = phase.sin_cos();
     Transform::from_xyz(sin * bob * 0.5, -(cos * bob).abs(), 0.0).with_rotation(

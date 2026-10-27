@@ -9,6 +9,7 @@ use bevy::{
     platform::collections::HashMap,
     prelude::*,
 };
+use hollow_features::motion::FixedPosition;
 use std::io;
 
 pub(crate) const CONTAINER_SIZE: usize = 27;
@@ -249,11 +250,9 @@ impl Plugin for ChestPlugin {
 
 pub(crate) fn top_clear(world: &VoxelWorld, position: IVec3) -> bool {
     position.y + 1 >= hollow_core::coordinates::CHUNK_HEIGHT
-        || world.state(position + IVec3::Y).is_some_and(|state| {
-            !state
-                .native()
-                .is_side_solid(pumpkin_data::BlockDirection::Down)
-        })
+        || world
+            .state(position + IVec3::Y)
+            .is_some_and(|state| !state.is_side_solid(pumpkin_data::BlockDirection::Down))
 }
 
 #[derive(Clone, Default)]
@@ -656,13 +655,13 @@ pub(crate) fn validate_sessions(
     sessions: Query<(
         Entity,
         &ViewingContainer,
-        &crate::character::CharacterMotion,
+        &hollow_features::motion::FixedPosition,
     )>,
     topology: ContainerTopology,
 ) {
     for (entity, viewing, motion) in &sessions {
         if topology
-            .owners(viewing.0, motion.position.as_vec3())
+            .owners(viewing.0, motion.current.as_vec3())
             .is_none()
         {
             commands.entity(entity).remove::<ViewingContainer>();
@@ -761,6 +760,7 @@ pub(crate) struct ColumnSnapshots<'w, 's> {
         (
             &'static crate::dropped_item::DroppedItem,
             &'static crate::dropped_item::DropMotion,
+            &'static FixedPosition,
         ),
     >,
     inventories: Query<'w, 's, (&'static BlockEntity, &'static ContainerInventory)>,
@@ -825,7 +825,7 @@ impl ColumnSnapshots<'_, '_> {
                                     .into_iter()
                                     .flat_map(|entities| entities.iter())
                                     .filter_map(|entity| self.drops.get(entity).ok())
-                                    .map(|(drop, motion)| drop.capture(motion)),
+                                    .map(|(drop, motion, position)| drop.capture(motion, position)),
                             )
                             .collect(),
                     },
