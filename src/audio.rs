@@ -67,10 +67,11 @@ impl Sound {
         Self {
             key: SoundKey::Event(id),
             position: None,
-            volume: if id == SoundId::EntityItemPickup {
-                0.25
-            } else {
-                1.0
+            volume: match id {
+                SoundId::EntityItemPickup => 0.25,
+                SoundId::EntityPlayerSwim => 0.15,
+                SoundId::EntityPlayerSplash => 0.35,
+                _ => 1.0,
             },
             pitch: 1.0,
         }
@@ -286,10 +287,13 @@ fn play_sound(
 pub(crate) struct MovementAudio {
     previous: Option<(Vec3, bool, bool)>,
     distance: f32,
+    // Shared by strokes and splashes so surface bobbing cannot layer both sounds.
+    water_cooldown: f32,
 }
 
 fn movement_audio(
     mut commands: Commands,
+    time: Res<Time<Fixed>>,
     world: VoxelWorld,
     mut players: Query<
         (
@@ -305,25 +309,44 @@ fn movement_audio(
     >,
 ) {
     for (motion, body, state, movement, activity, mut audio, flying) in &mut players {
-        let previous =
-            audio
-                .previous
-                .replace((motion.position.as_vec3(), state.on_ground, state.in_water));
+        audio.water_cooldown = (audio.water_cooldown - time.delta_secs()).max(0.0);
+        let position = motion.position.as_vec3();
+        let previous = audio
+            .previous
+            .replace((position, state.on_ground, state.in_water));
         if !activity.simulated || flying || activity.distance > 4.0 {
             audio.distance = 0.0;
             continue;
         }
-        let feet = motion.position.as_vec3() - Vec3::Y * body.origin_height;
         let Some((previous_position, grounded, water)) = previous else {
             continue;
         };
-        if previous_position.distance_squared(motion.position.as_vec3()) > 16.0 {
+        if previous_position.distance_squared(position) > 16.0 {
             audio.distance = 0.0;
             continue;
         }
-        if state.in_water && !water {
-            commands.trigger(Sound::event(crate::audio::SoundId::EntityPlayerSplash));
+        if state.in_water != water {
+            audio.distance = 0.0;
         }
+        if state.in_water {
+            audio.distance += activity.distance.hypot(activity.vertical);
+            if audio.water_cooldown == 0.0 {
+                let sound = if !water {
+                    Some(SoundId::EntityPlayerSplash)
+                } else if !movement.sneak && audio.distance >= 1.2 {
+                    Some(SoundId::EntityPlayerSwim)
+                } else {
+                    None
+                };
+                if let Some(sound) = sound {
+                    commands.trigger(Sound::event(sound));
+                    audio.water_cooldown = 1.0;
+                    audio.distance = 0.0;
+                }
+            }
+            continue;
+        }
+        let feet = position - Vec3::Y * body.origin_height;
         // Fences and walls can support feet more than one block above their cell.
         let floor = (feet - Vec3::Y * 0.2).floor().as_ivec3();
         let support = [floor, floor - IVec3::Y].into_iter().find_map(|position| {
@@ -332,13 +355,13 @@ fn movement_audio(
                 .filter(|state| !state.native().is_air())
                 .map(|state| (position, state))
         });
-        if state.on_ground && !grounded && !state.in_water {
+        if state.on_ground && !grounded {
             if let Some((position, block)) = support {
                 commands.trigger(Sound::block(block.kind(), BlockSound::Fall, position));
             }
         }
         let climbing = activity.climbing;
-        if movement.sneak || (!state.on_ground && !state.in_water && !climbing) {
+        if movement.sneak || (!state.on_ground && !climbing) {
             audio.distance = 0.0;
             continue;
         }
@@ -348,28 +371,24 @@ fn movement_audio(
             } else {
                 0.0
             };
-        if audio.distance < if state.in_water { 0.8 } else { 1.0 / 0.6 } {
+        if audio.distance < 1.0 / 0.6 {
             continue;
         }
         audio.distance = 0.0;
-        if state.in_water {
-            commands.trigger(Sound::event(crate::audio::SoundId::EntityPlayerSwim));
+        let contact = if climbing {
+            let position = feet.floor().as_ivec3();
+            world.state(position).map(|state| (position, state))
         } else {
-            let contact = if climbing {
-                let position = feet.floor().as_ivec3();
-                world.state(position).map(|state| (position, state))
-            } else {
-                // Snow layers and other non-solid coverings override the support sound.
-                let position = (feet + Vec3::Y * 0.05).floor().as_ivec3();
-                world
-                    .state(position)
-                    .filter(|state| !state.native().is_air())
-                    .map(|state| (position, state))
-                    .or(support)
-            };
-            if let Some((position, block)) = contact {
-                commands.trigger(Sound::block(block.kind(), BlockSound::Step, position));
-            }
+            // Snow layers and other non-solid coverings override the support sound.
+            let position = (feet + Vec3::Y * 0.05).floor().as_ivec3();
+            world
+                .state(position)
+                .filter(|state| !state.native().is_air())
+                .map(|state| (position, state))
+                .or(support)
+        };
+        if let Some((position, block)) = contact {
+            commands.trigger(Sound::block(block.kind(), BlockSound::Step, position));
         }
     }
 }
