@@ -142,7 +142,7 @@ pub(super) fn register(app: &mut App) {
         .init_asset_loader::<held_item::HeldManifestLoader>()
         .init_resource::<SkinAssets>()
         .add_systems(Startup, (setup, held_item::setup))
-        .add_systems(Update, (load_skin, sync_parts).chain())
+        .add_systems(Update, (load_skin, sync_parts).chain_weak())
         .add_systems(OnEnter(InventoryState::Open), spawn_preview)
         .add_systems(OnEnter(InventoryState::Open), cancel_swing)
         .add_systems(
@@ -159,13 +159,7 @@ pub(super) fn register(app: &mut App) {
                 .run_if(in_state(InventoryState::Open))
                 .run_if(any_with_component::<SkinPortrait>),
         )
-        .add_systems(
-            PostUpdate,
-            resize_arm_target
-                .after(animate_first_person)
-                .before(bevy::camera::CameraUpdateSystems)
-                .run_if(crate::world::playing),
-        )
+        .add_systems(PostUpdate, resize_arm_target.run_if(crate::world::playing))
         .add_systems(
             PostUpdate,
             animate_world
@@ -183,7 +177,7 @@ pub(super) fn register(app: &mut App) {
                 dim_arm_with_daylight,
                 animate_first_person,
             )
-                .chain()
+                .chain_weak()
                 .after(crate::block_behavior::GameplaySystems::Derived)
                 .before(bevy::transform::TransformSystems::Propagate)
                 .run_if(crate::world::playing),

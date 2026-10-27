@@ -14,6 +14,7 @@ pub(super) fn register(app: &mut App) {
             .run_if(crate::world::playing),
     );
 }
+
 fn recover_player(
     world: VoxelWorld,
     mut players: Query<

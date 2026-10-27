@@ -36,7 +36,6 @@ impl Plugin for PlayerPlugin {
         .add_systems(
             RunFixedMainLoop,
             (mouse_look, player_input)
-                .chain()
                 .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
                 .run_if(crate::world::playing)
                 .run_if(crate::survival::player_alive)
