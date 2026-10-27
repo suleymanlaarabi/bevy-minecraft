@@ -9,7 +9,6 @@ import bevy_pbr::render::{
     mesh_view_bindings::{globals, view},
     pbr_functions::calculate_view,
     pbr_types::pbr_input_new,
-    view_transformations::position_world_to_clip,
 };
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0)
@@ -47,7 +46,8 @@ fn vertex(in: ModelVertex) -> ModelVaryings {
     let world_from_local = mesh_functions::get_world_from_local(in.instance_index);
     var out: ModelVaryings;
     out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(model.position, 1.0));
-    out.position = position_world_to_clip(out.world_position.xyz);
+    // Match the terrain's invariant transform at coplanar water/block contacts.
+    out.position = mesh_functions::mesh_position_local_to_clip(world_from_local, vec4<f32>(model.position, 1.0));
     out.world_normal = mesh_functions::mesh_normal_local_to_world(model.normal, in.instance_index);
     out.uv = model.uv;
     out.light = model.light;

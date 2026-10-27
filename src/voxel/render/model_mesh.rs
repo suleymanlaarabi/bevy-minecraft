@@ -24,7 +24,7 @@ pub(crate) const ATTRIBUTE_MODEL: MeshVertexAttribute =
     MeshVertexAttribute::new("BlockModel", 0x626c6f636b5f6d32, VertexFormat::Uint32x4);
 
 const POSITION_BIAS: f32 = 2.0;
-const POSITION_SCALE: f32 = 1024.0;
+pub(super) const POSITION_SCALE: f32 = 1024.0;
 const POSITION_MAX: u32 = (1 << 15) - 1;
 
 /// GPU-ready geometry, with bounds and sort keys from the original positions.

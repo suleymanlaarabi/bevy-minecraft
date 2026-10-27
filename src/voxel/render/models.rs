@@ -13,6 +13,7 @@ use std::{
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct ModelQuad {
+    #[serde(deserialize_with = "model_positions")]
     pub positions: [[f32; 3]; 4],
     pub normal: [f32; 3],
     pub uv: [[f32; 2]; 4],
@@ -29,6 +30,30 @@ pub(crate) struct ModelQuad {
     #[serde(default, rename = "shade", deserialize_with = "shade_up")]
     pub shade_up: bool,
 }
+
+fn model_positions<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<[[f32; 3]; 4], D::Error> {
+    let mut positions = <[[f32; 3]; 4]>::deserialize(deserializer)?;
+    let step = 1.0 / super::model_mesh::POSITION_SCALE;
+    for position in &mut positions {
+        *position = position.map(|value| {
+            // Models place thin faces just inside their pixel-grid planes (roots
+            // use 0.000125 blocks). Keep at least one packed position step between
+            // them and the plane, without moving exact planes or rotation noise.
+            // Resolve this once at import; mesh workers retain 16-byte vertices.
+            let plane = (value * 16.0).round() / 16.0;
+            let offset = value - plane;
+            if (1e-5..step * 0.5).contains(&offset.abs()) {
+                plane + offset.signum() * step
+            } else {
+                value
+            }
+        });
+    }
+    Ok(positions)
+}
+
 fn shade_up<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
     Ok(String::deserialize(deserializer)? == "up")
 }
@@ -99,7 +124,7 @@ pub(crate) mod cell {
     pub(crate) const CUTOUT: u8 = 1 << 4;
     /// Explicit model quads.
     pub(crate) const MODEL: u8 = 1 << 5;
-    /// Solid translucent cube: bounds water without hiding block faces or light.
+    /// Full cube: bounds water without necessarily hiding block faces or light.
     pub(crate) const WATER_OCCLUDES: u8 = 1 << 6;
     /// Partial solid shape: clip fluid faces against its native outline boxes.
     pub(crate) const FLUID_OCCLUDER: u8 = 1 << 7;
@@ -272,10 +297,12 @@ fn base_flags(state: VoxelState) -> u8 {
     if state.is_opaque_cube() {
         flags |= cell::OCCLUDES;
     }
-    if state.native().is_full_cube() && translucent_kind(state.kind()) {
-        // An ice/water or glass/water contact is not an exposed water surface.
-        // Cache this separately: these blocks must still transmit light and
-        // show the geometry behind them, unlike ordinary opaque occluders.
+    if state.native().is_full_cube() {
+        // Full cubes enclose adjacent water regardless of texture transparency.
+        // In particular, dry leaves and roots cover the water below them: drawing
+        // a lowered free surface there creates a visible blue ledge underneath.
+        // Keep this separate from visual occlusion so cutouts still show holes
+        // and transmit light. Waterlogged neighbors also share the fluid family.
         flags |= cell::WATER_OCCLUDES;
     }
     if state.native().can_occlude()

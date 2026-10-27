@@ -428,6 +428,17 @@ impl Material for ModelMaterial {
         } else {
             Some(bevy::render::render_resource::Face::Back)
         };
+        if blend == ModelBlend::Translucent
+            && !key.bind_group_data.breaking
+            && let Some(depth) = &mut descriptor.depth_stencil
+        {
+            // Reverse Z: keep water behind coplanar cutouts. The slope term
+            // covers rasterization differences at grazing angles, where a
+            // constant depth offset alone still leaves alternating fragments.
+            // Cutout holes retain background depth and still show the water.
+            depth.bias.constant = -2;
+            depth.bias.slope_scale = -1.0;
+        }
         if key.bind_group_data.breaking
             && let Some(fragment) = &mut descriptor.fragment
         {
@@ -456,7 +467,6 @@ impl Material for ModelMaterial {
         Ok(())
     }
 }
-
 
 impl From<&VoxelMaterial> for FogMaterialKey {
     fn from(material: &VoxelMaterial) -> Self {

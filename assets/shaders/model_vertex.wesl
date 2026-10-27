@@ -6,7 +6,7 @@ struct ModelVertex {
     @location(0) data: vec4<u32>,
 }
 struct ModelVaryings {
-    @builtin(position) position: vec4<f32>,
+    @invariant @builtin(position) position: vec4<f32>,
     @location(0) world_position: vec4<f32>,
     @location(1) world_normal: vec3<f32>,
     @location(2) uv: vec2<f32>,

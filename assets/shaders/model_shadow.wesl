@@ -1,13 +1,13 @@
 import super::surface_animation::surface_frame;
 import super::model_vertex::{ModelVertex, decode_model};
-import bevy_pbr::render::{mesh_functions, view_transformations::position_world_to_clip};
+import bevy_pbr::render::mesh_functions;
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var blocks: texture_2d_array<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(1) var blocks_sampler: sampler;
 @group(constants::MATERIAL_BIND_GROUP) @binding(2) var<storage, read> faces: array<vec4<f32>>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(8) var special: texture_2d_array<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(9) var special_sampler: sampler;
 struct ShadowVaryings {
-    @builtin(position) position: vec4<f32>,
+    @invariant @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) @interpolate(flat) layer: u32,
     @location(2) @interpolate(linear) unclipped_depth: f32,
@@ -17,8 +17,7 @@ fn vertex(in: ModelVertex) -> ShadowVaryings {
     var out: ShadowVaryings;
     let transform = mesh_functions::get_world_from_local(in.instance_index);
     let model = decode_model(in.data);
-    let world = mesh_functions::mesh_position_local_to_world(transform, vec4<f32>(model.position, 1.0));
-    out.position = position_world_to_clip(world.xyz);
+    out.position = mesh_functions::mesh_position_local_to_clip(transform, vec4<f32>(model.position, 1.0));
     // Effect surfaces share section meshes without casting solid model shadows.
     if (model.flags & 8u) != 0u { out.position = vec4<f32>(0.0, 0.0, 0.0, 1.0); }
     out.unclipped_depth = out.position.z;
