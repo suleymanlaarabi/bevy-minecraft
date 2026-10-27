@@ -167,7 +167,9 @@ pub(crate) fn edit_batch(
             inventory.damage_tool(tool.slot, outcome.damage)
         });
         if tool.expected.is_some() && inventory.slot(tool.slot).is_none() {
-            commands.trigger(crate::audio::Sound::event("entity.item.break"));
+            commands.trigger(crate::audio::Sound::event(
+                crate::audio::SoundId::EntityItemBreak,
+            ));
         }
     }
     // Emit once per accepted action, including paired blocks and support failures.

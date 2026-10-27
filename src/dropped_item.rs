@@ -1,8 +1,12 @@
 use std::{collections::HashMap, time::Duration};
 
 use bevy::{
-    ecs::batching::BatchingStrategy, light::NotShadowCaster, math::DVec3, prelude::*,
-    time::common_conditions::on_timer, utils::Parallel,
+    ecs::{batching::BatchingStrategy, storage::SparseSet},
+    light::NotShadowCaster,
+    math::DVec3,
+    prelude::*,
+    time::common_conditions::on_timer,
+    utils::Parallel,
 };
 
 use crate::{
@@ -10,7 +14,7 @@ use crate::{
     game::GameState,
     inventory::{ItemKind, ItemStack, PlayerInventory},
     player::Player,
-    voxel::{VoxelAssets, VoxelWorld, chunk_at},
+    voxel::{VoxelAssets, VoxelWorld, chunk_at, render::models},
 };
 
 const PICKUP_DELAY: Duration = Duration::from_millis(350);
@@ -24,6 +28,8 @@ pub struct SpawnDroppedItem {
     pub stack: ItemStack,
     pub position: Vec3,
     pub velocity: Vec3,
+    pub lifetime: Duration,
+    pub pickup_delay: Duration,
 }
 
 pub trait DroppedItemCommandsExt {
@@ -42,6 +48,8 @@ impl DroppedItemCommandsExt for Commands<'_, '_> {
             stack,
             position,
             velocity,
+            lifetime: LIFETIME,
+            pickup_delay: PICKUP_DELAY,
         });
         self
     }
@@ -153,7 +161,8 @@ struct DroppedItemVisual {
 
 #[derive(Resource, Default)]
 struct DroppedItemAssets {
-    meshes: HashMap<ItemKind, Handle<Mesh>>,
+    meshes: SparseSet<ItemKind, Handle<Mesh>>,
+    // Generational image asset IDs are sparse; share one material per actual image.
     materials: HashMap<AssetId<Image>, Handle<StandardMaterial>>,
 }
 
@@ -163,7 +172,6 @@ impl Plugin for DroppedItemPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DroppedItemAssets>()
             .add_observer(spawn_dropped_item)
-            .add_observer(restore_dropped_item)
             .add_systems(
                 Update,
                 animate_dropped_item_visuals.run_if(crate::world::playing),
@@ -203,86 +211,14 @@ fn spawn_dropped_item(
     icons: Res<crate::inventory::icons::BlockIcons>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    spawn_item(
-        &mut commands,
-        &mut assets,
-        &mut meshes,
-        &voxel_assets,
-        &icons,
-        &mut materials,
-        event.stack,
-        event.position,
-        event.velocity,
-        time.elapsed() + LIFETIME,
-        time.elapsed() + PICKUP_DELAY,
-    );
-}
-
-#[derive(Event)]
-struct RestoreDroppedItem(crate::world::SavedDrop);
-
-pub(crate) fn restore_drop(commands: &mut Commands, drop: crate::world::SavedDrop) {
-    commands.trigger(RestoreDroppedItem(drop));
-}
-
-fn restore_dropped_item(
-    event: On<RestoreDroppedItem>,
-    mut commands: Commands,
-    time: Res<Time>,
-    mut assets: ResMut<DroppedItemAssets>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    voxel_assets: Res<VoxelAssets>,
-    icons: Res<crate::inventory::icons::BlockIcons>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    let drop = &event.0;
-    if let Ok(stack) = drop.stack.restore() {
-        spawn_item(
-            &mut commands,
-            &mut assets,
-            &mut meshes,
-            &voxel_assets,
-            &icons,
-            &mut materials,
-            stack,
-            Vec3::from_array(drop.position),
-            Vec3::from_array(drop.velocity),
-            time.elapsed() + Duration::from_secs_f64(drop.remaining),
-            time.elapsed() + Duration::from_secs_f64(drop.pickup_remaining),
-        );
-    }
-}
-
-impl DroppedItem {
-    pub(crate) fn capture(&self, motion: &DropMotion, now: Duration) -> crate::world::SavedDrop {
-        crate::world::SavedDrop {
-            stack: crate::world::SavedStack::capture(self.stack),
-            position: motion.position.as_vec3().to_array(),
-            velocity: motion.velocity.to_array(),
-            remaining: self.expires_at.saturating_sub(now).as_secs_f64(),
-            pickup_remaining: self.pickup_after.saturating_sub(now).as_secs_f64(),
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_item(
-    commands: &mut Commands,
-    assets: &mut DroppedItemAssets,
-    meshes: &mut Assets<Mesh>,
-    voxel_assets: &VoxelAssets,
-    icons: &crate::inventory::icons::BlockIcons,
-    materials: &mut Assets<StandardMaterial>,
-    stack: ItemStack,
-    position: Vec3,
-    velocity: Vec3,
-    expires_at: Duration,
-    pickup_after: Duration,
-) {
+    let stack = event.stack;
+    let position = event.position;
+    let velocity = event.velocity;
+    let expires_at = time.elapsed() + event.lifetime;
+    let pickup_after = time.elapsed() + event.pickup_delay;
     let mesh = assets
         .meshes
-        .entry(stack.item())
-        .or_insert_with(|| {
+        .get_or_insert_with(stack.item(), || {
             meshes.add(match stack.item() {
                 ItemKind::Block(kind) => {
                     crate::voxel::render::model_mesh::item_geometry(kind).into_mesh()
@@ -334,7 +270,7 @@ fn spawn_item(
         ItemKind::Block(kind) => {
             commands.spawn((
                 Mesh3d(mesh),
-                MeshMaterial3d(if kind.name().contains("glass") || kind.name() == "ice" {
+                MeshMaterial3d(if models::translucent_kind(kind) {
                     voxel_assets.translucent.clone()
                 } else {
                     voxel_assets.models_cutout.clone()
@@ -367,6 +303,29 @@ fn spawn_item(
                 ChildOf(visual),
                 NotShadowCaster,
             ));
+        }
+    }
+}
+pub(crate) fn restore_drop(commands: &mut Commands, drop: crate::world::SavedDrop) {
+    if let Ok(stack) = drop.stack.restore() {
+        commands.trigger(SpawnDroppedItem {
+            stack,
+            position: Vec3::from_array(drop.position),
+            velocity: Vec3::from_array(drop.velocity),
+            lifetime: Duration::from_secs_f64(drop.remaining),
+            pickup_delay: Duration::from_secs_f64(drop.pickup_remaining),
+        });
+    }
+}
+
+impl DroppedItem {
+    pub(crate) fn capture(&self, motion: &DropMotion, now: Duration) -> crate::world::SavedDrop {
+        crate::world::SavedDrop {
+            stack: crate::world::SavedStack::capture(self.stack),
+            position: motion.position.as_vec3().to_array(),
+            velocity: motion.velocity.to_array(),
+            remaining: self.expires_at.saturating_sub(now).as_secs_f64(),
+            pickup_remaining: self.pickup_after.saturating_sub(now).as_secs_f64(),
         }
     }
 }
@@ -442,7 +401,9 @@ fn pickup_dropped_items(
         let remaining =
             PlayerInventory::edit(&mut inventory, |inventory| inventory.insert(drop.stack));
         if remaining != Some(drop.stack) {
-            commands.trigger(crate::audio::Sound::event("entity.item.pickup"));
+            commands.trigger(crate::audio::Sound::event(
+                crate::audio::SoundId::EntityItemPickup,
+            ));
         }
         match remaining {
             None => {

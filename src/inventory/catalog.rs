@@ -8,7 +8,7 @@ use pumpkin_data::{
 };
 
 use super::{
-    ARMOR_START, BLOCK_STACK_SIZE, ConsumableContents, ItemKind, ItemStack,
+    BLOCK_STACK_SIZE, ConsumableContents, ItemKind, ItemStack,
     model::{ITEM_ID_LIMIT, component},
 };
 use crate::survival::{ActiveEffect, ArmorStats};
@@ -64,8 +64,10 @@ impl ConsumableProfile {
 pub(super) struct ItemProperties {
     pub max_stack_size: u8,
     pub max_damage: u32,
-    pub armor_slot: Option<usize>,
+    /// Zero-based humanoid armor slot; inventory offsets are applied at the API boundary.
+    pub armor_slot: Option<u8>,
     pub remainder: Option<ItemKind>,
+    equip_sound: Option<crate::audio::SoundId>,
     consumable: Option<u16>,
 }
 
@@ -83,20 +85,14 @@ fn compiled() -> &'static Result<Catalog, String> {
         let items = (0..ITEM_ID_LIMIT)
             .map(|id| {
                 let item = Item::from_id(id);
-                let armor_slot = item
-                    .and_then(component::<EquippableImpl>)
-                    .and_then(|equipment| {
-                        Some(
-                            ARMOR_START
-                                + match equipment.slot {
-                                    EquipmentSlot::Head(_) => 0,
-                                    EquipmentSlot::Chest(_) => 1,
-                                    EquipmentSlot::Legs(_) => 2,
-                                    EquipmentSlot::Feet(_) => 3,
-                                    _ => return None,
-                                },
-                        )
-                    });
+                let equipment = item.and_then(component::<EquippableImpl>);
+                let armor_slot = equipment.and_then(|equipment| match equipment.slot {
+                    EquipmentSlot::Head(_) => Some(0),
+                    EquipmentSlot::Chest(_) => Some(1),
+                    EquipmentSlot::Legs(_) => Some(2),
+                    EquipmentSlot::Feet(_) => Some(3),
+                    _ => None,
+                });
                 if armor_slot.is_some()
                     && let Some(modifiers) = item.and_then(component::<AttributeModifiersImpl>)
                 {
@@ -138,6 +134,15 @@ fn compiled() -> &'static Result<Catalog, String> {
                     None
                 };
                 Ok(ItemProperties {
+                    equip_sound: equipment.and_then(|equipment| match &equipment.equip_sound {
+                        IdOr::Id(sound) => Some(*sound),
+                        IdOr::Value(sound) => crate::audio::SoundId::from_name(
+                            sound
+                                .sound_name
+                                .strip_prefix("minecraft:")
+                                .unwrap_or(&sound.sound_name),
+                        ),
+                    }),
                     max_stack_size: item
                         .and_then(component::<MaxStackSizeImpl>)
                         .map_or(BLOCK_STACK_SIZE, |value| value.size),
@@ -165,7 +170,7 @@ fn catalog() -> &'static Catalog {
 }
 
 pub(super) fn properties(item: ItemKind) -> &'static ItemProperties {
-    &catalog().items[item.registry().id as usize]
+    &catalog().items[item.id() as usize]
 }
 
 pub(crate) fn consumable(item: ItemKind) -> Option<&'static ConsumableProfile> {
@@ -174,8 +179,12 @@ pub(crate) fn consumable(item: ItemKind) -> Option<&'static ConsumableProfile> {
         .map(|index| &catalog().consumables[index as usize])
 }
 
+pub(crate) fn equip_sound(item: ItemKind) -> Option<crate::audio::SoundId> {
+    properties(item).equip_sound
+}
+
 pub(crate) fn armor(item: ItemKind) -> ArmorStats {
-    catalog().armor[item.registry().id as usize]
+    catalog().armor[item.id() as usize]
 }
 
 pub(crate) fn initialize() -> Result<(), BevyError> {

@@ -1,5 +1,6 @@
 //! Baked vanilla models. All JSON, property matching and rotations happen once;
 //! mesh workers only index shared, immutable quad lists.
+use super::texture_pack::{TexturePackId, manifest_keys};
 use crate::voxel::{VoxelKind, VoxelState};
 use bevy::prelude::*;
 use pumpkin_data::{BlockId, Property, PropertyKey};
@@ -254,7 +255,7 @@ impl Appearances {
     }
 }
 
-fn translucent_kind(kind: VoxelKind) -> bool {
+pub(crate) fn translucent_kind(kind: VoxelKind) -> bool {
     matches!(kind.0, BlockId::ICE | BlockId::FROSTED_ICE)
         || kind.tagged(pumpkin_data::tag::Block::C_GLASS_BLOCKS)
         || kind.tagged(pumpkin_data::tag::Block::C_GLASS_PANES)
@@ -541,7 +542,7 @@ fn library() -> &'static Library {
         let mut recipes = (0..pumpkin_data::BlockStateId::COUNT).map(|_| Recipe::default()).collect::<Vec<_>>();
         let mut cells = vec![CellInfo::default(); pumpkin_data::BlockStateId::COUNT as usize];
         let mut appearances = Appearances::default();
-        let pack_keys = pack_keys();
+        let pack_keys = manifest_keys(TexturePackId::Vanilla);
         let Some(imported) = imported else {
             warn!("Vanilla models unavailable: using shape-based models; run scripts/import_vanilla.py");
             for raw in 0..pumpkin_data::BlockStateId::COUNT {
@@ -668,11 +669,7 @@ fn library() -> &'static Library {
         Library { chests: Some(chests), recipes: recipes.into(), textures: imported.textures, opaque_textures: imported.opaque_textures, cells: cells.into(), appearances: appearances.list, texture_layers: imported.texture_layers, special_layers: imported.special_layers, animations: imported.animations, animated_layers }
     })
 }
-/// Block keys of the bundled vanilla manifest.
-fn pack_keys() -> std::collections::HashSet<VoxelKind> {
-    super::texture_pack::manifest_keys(super::texture_pack::TexturePackId::Vanilla)
-}
-fn pack_cube(keys: &std::collections::HashSet<VoxelKind>, kind: VoxelKind) -> bool {
+fn pack_cube(keys: &[bool], kind: VoxelKind) -> bool {
     // These keys already have the exact top/side/bottom mapping in all packs.
     // Logs with an explicit axis use the model path, as do slabs and farmland.
     !matches!(
@@ -680,7 +677,7 @@ fn pack_cube(keys: &std::collections::HashSet<VoxelKind>, kind: VoxelKind) -> bo
         BlockId::DIRT_PATH | BlockId::FARMLAND | BlockId::SNOW
     ) && !kind.tagged(pumpkin_data::tag::Block::MINECRAFT_STAIRS)
         && !kind.tagged(pumpkin_data::tag::Block::MINECRAFT_SLABS)
-        && keys.contains(&kind)
+        && keys[kind.index()]
 }
 /// Mesher classification of a state.
 #[inline]

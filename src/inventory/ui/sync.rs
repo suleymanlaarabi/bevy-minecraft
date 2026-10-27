@@ -53,26 +53,23 @@ pub(crate) fn show_game_hud(
 
 /// Points `node` at the icon of `item`, leaving it untouched when already shown.
 fn show_icon(node: &mut Mut<ImageNode>, icons: &BlockIcons, item: ItemKind) {
-    if let Some(image) = icons.item_image(item) {
-        let atlas = icons.item_atlas(item);
-        if node.image != *image
-            || node.texture_atlas.as_ref().map(|a| a.index) != atlas.as_ref().map(|a| a.index)
-        {
-            node.image = image.clone();
-            node.texture_atlas = atlas;
-        }
-        return;
+    let (image, atlas) = if let Some(image) = icons.item_image(item) {
+        (image, icons.item_atlas(item))
+    } else {
+        (icons.image(), Some(icons.atlas(item)))
+    };
+    if node.image != *image || node.texture_atlas != atlas {
+        node.image = image.clone();
+        node.texture_atlas = atlas;
     }
-    let atlas = icons.atlas(item);
-    let shown = node.image == *icons.image()
-        && node
-            .texture_atlas
-            .as_ref()
-            .is_some_and(|current| current.index == atlas.index);
-    if !shown {
-        node.image = icons.image().clone();
-        node.texture_atlas = Some(atlas);
-    }
+}
+
+fn stack_count(stack: Option<crate::inventory::ItemStack>) -> Text {
+    Text(
+        stack
+            .filter(|stack| stack.count() > 1)
+            .map_or_else(String::new, |stack| stack.count().to_string()),
+    )
 }
 
 pub(crate) fn bind_slots(
@@ -201,11 +198,7 @@ pub(crate) fn refresh_slots(
             }
             if let Ok((mut text, count)) = counts.get_mut(child) {
                 if count {
-                    text.set_if_neq(Text(
-                        stack
-                            .filter(|stack| stack.count() > 1)
-                            .map_or_else(String::new, |stack| stack.count().to_string()),
-                    ));
+                    text.set_if_neq(stack_count(stack));
                 } else {
                     let label = if stack.is_some() {
                         ""
@@ -238,12 +231,21 @@ pub(crate) fn follow_cursor_stack(
     ui_scale: Res<UiScale>,
     cursor: Res<InventoryCursor>,
     block_icons: Res<BlockIcons>,
-    view: Single<(&mut Node, &mut ImageNode, &mut Visibility), With<CursorStackView>>,
+    view: Single<
+        (
+            &mut Node,
+            &mut ImageNode,
+            &mut Visibility,
+            &mut super::SlotDisplay,
+        ),
+        With<CursorStackView>,
+    >,
     mut count: Single<&mut Text, With<CursorStackCount>>,
 ) {
-    let (mut node, mut image, mut visibility) = view.into_inner();
+    let (mut node, mut image, mut visibility, mut display) = view.into_inner();
 
     let Some(stack) = cursor.stack else {
+        display.0 = Some(None);
         visibility.set_if_neq(Visibility::Hidden);
         if !count.0.is_empty() {
             count.0.clear();
@@ -265,11 +267,9 @@ pub(crate) fn follow_cursor_stack(
         node.left = left;
         node.top = top;
     }
-    show_icon(&mut image, &block_icons, stack.item());
-    let text = if stack.count() > 1 {
-        stack.count().to_string()
-    } else {
-        String::new()
-    };
-    count.set_if_neq(Text(text));
+    if display.0 != Some(Some(stack)) || block_icons.is_changed() {
+        display.0 = Some(Some(stack));
+        show_icon(&mut image, &block_icons, stack.item());
+        count.set_if_neq(stack_count(Some(stack)));
+    }
 }

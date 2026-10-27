@@ -241,7 +241,7 @@ fn find(grid: &CraftingGrid) -> Option<RecipeMatch> {
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (3, 3, 0, 0);
     for (index, stack) in grid.slots[..grid.active_len()].iter().enumerate() {
         if let Some(stack) = stack {
-            ids[index] = Some(stack.item().registry().id);
+            ids[index] = Some(stack.item().id());
             occupied |= 1 << index;
             min_x = min_x.min(index % grid.side);
             min_y = min_y.min(index / grid.side);

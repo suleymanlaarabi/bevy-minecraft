@@ -27,11 +27,15 @@ pub enum ItemKind {
 }
 
 impl ItemKind {
-    pub fn registry(self) -> &'static pumpkin_data::item::Item {
+    pub const fn id(self) -> u16 {
         match self {
-            Self::Block(kind) => pumpkin_data::item::Item::from_id(kind.block().item_id).unwrap(),
-            Self::Item(id) => pumpkin_data::item::Item::from_id(id).unwrap(),
+            Self::Block(kind) => kind.block().item_id,
+            Self::Item(id) => id,
         }
+    }
+
+    pub fn registry(self) -> &'static pumpkin_data::item::Item {
+        pumpkin_data::item::Item::from_id(self.id()).unwrap()
     }
 
     pub fn name(self) -> &'static str {
@@ -64,7 +68,9 @@ impl ItemKind {
     }
 
     pub fn armor_slot(self) -> Option<usize> {
-        super::catalog::properties(self).armor_slot
+        super::catalog::properties(self)
+            .armor_slot
+            .map(|slot| ARMOR_START + usize::from(slot))
     }
 
     pub(crate) fn crafting_remainder(self) -> Option<ItemKind> {
@@ -82,6 +88,24 @@ impl ItemKind {
 
     pub fn from_voxel(kind: VoxelKind) -> Option<Self> {
         crate::voxel::rules::item_form(kind).map(Self::Block)
+    }
+}
+
+// Separate block and sprite domains preserve their distinct visual representations.
+impl bevy::ecs::storage::SparseSetIndex for ItemKind {
+    fn sparse_set_index(&self) -> usize {
+        match *self {
+            Self::Block(kind) => kind.index(),
+            Self::Item(id) => VoxelKind::ALL.len() + id as usize,
+        }
+    }
+
+    fn get_sparse_set_index(index: usize) -> Self {
+        if index < VoxelKind::ALL.len() {
+            Self::Block(VoxelKind::ALL[index])
+        } else {
+            Self::Item((index - VoxelKind::ALL.len()) as u16)
+        }
     }
 }
 
@@ -140,7 +164,7 @@ impl ItemStack {
         let valid = match contents {
             ConsumableContents::Default => true,
             ConsumableContents::Potion(id) => {
-                self.item.registry().id == Item::POTION.id
+                self.item.id() == Item::POTION.id
                     && Potion::from_id(id).is_some_and(|potion| {
                         potion.effects.iter().all(|effect| {
                             crate::survival::effects::supported(effect.effect_type.id)
@@ -148,7 +172,7 @@ impl ItemStack {
                     })
             }
             ConsumableContents::Stew { effect, ticks } => {
-                self.item.registry().id == Item::SUSPICIOUS_STEW.id
+                self.item.id() == Item::SUSPICIOUS_STEW.id
                     && crate::survival::effects::supported(effect)
                     && (1..=1_728_000).contains(&ticks)
             }

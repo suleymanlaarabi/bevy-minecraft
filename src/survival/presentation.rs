@@ -31,18 +31,18 @@ pub(super) fn play_audio(
     use pumpkin_data::damage::DamageType as D;
     for cue in cues.read() {
         commands.trigger(Sound::event(match cue {
-            SoundCue::Eat => "entity.generic.eat",
-            SoundCue::Drink => "entity.generic.drink",
-            SoundCue::Burp => "entity.player.burp",
-            SoundCue::Teleport => "item.chorus_fruit.teleport",
+            SoundCue::Eat => crate::audio::SoundId::EntityGenericEat,
+            SoundCue::Drink => crate::audio::SoundId::EntityGenericDrink,
+            SoundCue::Burp => crate::audio::SoundId::EntityPlayerBurp,
+            SoundCue::Teleport => crate::audio::SoundId::ItemChorusFruitTeleport,
         }));
     }
     let local = player.single().ok();
     for impact in impacts.read().filter(|impact| Some(impact.target) == local) {
         let name = if impact.fatal {
-            "entity.player.death"
+            crate::audio::SoundId::EntityPlayerDeath
         } else if impact.source == &D::DROWN {
-            "entity.player.hurt_drown"
+            crate::audio::SoundId::EntityPlayerHurtDrown
         } else if [
             &D::ON_FIRE,
             &D::IN_FIRE,
@@ -52,15 +52,15 @@ pub(super) fn play_audio(
         ]
         .contains(&impact.source)
         {
-            "entity.player.hurt_on_fire"
+            crate::audio::SoundId::EntityPlayerHurtOnFire
         } else if impact.source == &D::FALL {
             if impact.lost_health > 4.0 {
-                "entity.player.big_fall"
+                crate::audio::SoundId::EntityPlayerBigFall
             } else {
-                "entity.player.small_fall"
+                crate::audio::SoundId::EntityPlayerSmallFall
             }
         } else {
-            "entity.player.hurt"
+            crate::audio::SoundId::EntityPlayerHurt
         };
         commands.trigger(Sound::event(name));
     }

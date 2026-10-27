@@ -4,7 +4,6 @@ mod texture;
 
 use crate::inventory::InventoryState;
 use bevy::prelude::*;
-use std::collections::HashMap;
 
 mod animation;
 mod assets;
@@ -55,7 +54,8 @@ pub(crate) struct SkinAssets {
     classic: [[Handle<Mesh>; 6]; 2],
     armor_meshes: [Handle<Mesh>; 6],
     leggings_meshes: [Handle<Mesh>; 6],
-    armor: HashMap<String, Handle<StandardMaterial>>,
+    armor: Box<[u8]>,
+    armor_materials: Vec<Handle<StandardMaterial>>,
 }
 
 #[derive(Component, Clone, Default)]

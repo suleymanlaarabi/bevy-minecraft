@@ -11,11 +11,12 @@ use crate::{
 use bevy::{
     asset::{AssetLoadFailedEvent, AssetLoader, LoadContext, RenderAssetUsages, io::Reader},
     camera::visibility::RenderLayers,
+    ecs::storage::SparseSet,
     light::{NotShadowCaster, NotShadowReceiver},
     render::render_resource::PrimitiveTopology,
 };
 use serde::Deserialize;
-use std::f32::consts::PI;
+use std::{collections::HashMap, f32::consts::PI};
 
 #[derive(Component)]
 pub(super) struct FirstPersonRoot;
@@ -132,9 +133,14 @@ impl AssetLoader for HeldManifestLoader {
 #[derive(Resource, Default)]
 pub(super) struct HeldItemAssets {
     manifest: Handle<HeldManifest>,
-    sources: HashMap<ItemKind, Handle<Image>>,
-    visuals: HashMap<ItemKind, ItemVisual>,
-    failed: bevy::platform::collections::HashSet<ItemKind>,
+    // Only loaded items have cache records; the bounded identity index stores no visuals.
+    items: SparseSet<ItemKind, CachedItem>,
+}
+#[derive(Default)]
+struct CachedItem {
+    source: Option<Handle<Image>>,
+    visual: Option<ItemVisual>,
+    failed: bool,
 }
 #[derive(Component, Default, PartialEq, Eq)]
 pub(super) struct DesiredItem {
@@ -206,36 +212,44 @@ pub(super) fn asset_events(
     mut failures: MessageReader<AssetLoadFailedEvent<Image>>,
     mut manifest_failures: MessageReader<AssetLoadFailedEvent<HeldManifest>>,
     mut assets: ResMut<HeldItemAssets>,
+    mut changed: Local<Vec<AssetId<Image>>>,
+    mut failed: Local<Vec<AssetId<Image>>>,
     mut held: Query<(Entity, &mut DesiredItem, Has<WaitingForVisual>)>,
 ) {
     let manifest_changed = manifests.read().any(|event| matches!(event, AssetEvent::Added { id } | AssetEvent::Modified { id } if *id == assets.manifest.id()));
     let manifest_failed = manifest_failures
         .read()
         .any(|event| event.id == assets.manifest.id());
-    let changed: Vec<_> = images
-        .read()
-        .filter_map(|event| match event {
-            AssetEvent::Added { id } | AssetEvent::Modified { id } => Some(*id),
-            _ => None,
-        })
-        .collect();
-    let failed: Vec<_> = failures.read().map(|event| event.id).collect();
+    changed.clear();
+    failed.clear();
+    changed.extend(images.read().filter_map(|event| match event {
+        AssetEvent::Added { id } | AssetEvent::Modified { id } => Some(*id),
+        _ => None,
+    }));
+    failed.extend(failures.read().map(|event| event.id));
     if manifest_changed {
-        assets.visuals.clear();
-        assets.sources.clear();
-        assets.failed.clear();
+        assets.items.clear();
+    } else if !changed.is_empty() {
+        // Invalidate inactive cached items too, so switching back cannot use stale geometry.
+        for item in assets.items.values_mut() {
+            if item
+                .source
+                .as_ref()
+                .is_some_and(|source| changed.contains(&source.id()))
+            {
+                item.visual = None;
+                item.failed = false;
+            }
+        }
     }
     for (entity, mut desired, waiting) in &mut held {
         let source = desired
             .item
-            .and_then(|item| assets.sources.get(&item))
+            .and_then(|item| assets.items.get(item))
+            .and_then(|item| item.source.as_ref())
             .map(Handle::id);
         let reloaded = source.is_some_and(|source| changed.contains(&source));
         if manifest_changed || reloaded {
-            if let Some(item) = desired.item {
-                assets.visuals.remove(&item);
-                assets.failed.remove(&item);
-            }
             desired.rebuild = true;
             commands
                 .entity(entity)
@@ -278,7 +292,7 @@ pub(super) fn build_visual(
             }
             let definition = manifests
                 .get(&assets.manifest)
-                .and_then(|manifest| manifest.items[item.registry().id as usize].as_ref());
+                .and_then(|manifest| manifest.items[item.id() as usize].as_ref());
             let Some(visual) = assets.visual(
                 item,
                 definition,
@@ -347,7 +361,8 @@ impl HeldItemAssets {
         voxel_assets: &VoxelAssets,
         icons: &BlockIcons,
     ) -> Option<ItemVisual> {
-        if let Some(visual) = self.visuals.get(&item) {
+        let cached = self.items.get_or_insert_with(item, CachedItem::default);
+        if let Some(visual) = &cached.visual {
             return Some(visual.clone());
         }
         let display = definition.map(|definition| definition.display.transform());
@@ -374,10 +389,9 @@ impl HeldItemAssets {
                 }),
             }
         } else {
-            let source = self
-                .sources
-                .entry(item)
-                .or_insert_with(|| {
+            let source = cached
+                .source
+                .get_or_insert_with(|| {
                     sprite.map_or_else(
                         || icons.item_image(item).cloned().unwrap_or_default(),
                         |sprite| {
@@ -390,21 +404,20 @@ impl HeldItemAssets {
                 server.get_load_state(source.id()),
                 Some(bevy::asset::LoadState::Failed(_))
             );
-            if failed && self.failed.insert(item) {
+            if failed && !cached.failed {
+                cached.failed = true;
                 error!(
                     "Held-item texture failed for {}; using the missing-item visual",
                     item.name()
                 );
             }
-            let mut source = if self.failed.contains(&item) {
+            let mut source = if cached.failed {
                 icons.missing_image().clone()
             } else {
                 source
             };
-            let Some(image) = images.get(&source) else {
-                return None;
-            };
-            let (offset, scale) = if sprite.is_some() || self.failed.contains(&item) {
+            let image = images.get(&source)?;
+            let (offset, scale) = if sprite.is_some() || cached.failed {
                 (Vec2::ZERO, Vec2::ONE)
             } else {
                 icons.item_uv(item).unwrap_or((Vec2::ZERO, Vec2::ONE))
@@ -412,19 +425,17 @@ impl HeldItemAssets {
             let mesh = if let Some(mesh) = sprite_mesh(image, offset, scale) {
                 mesh
             } else {
-                if self.failed.insert(item) {
+                if !cached.failed {
+                    cached.failed = true;
                     error!(
                         "Invalid held-item image for {}; using the missing-item visual",
                         item.name()
                     );
                 }
                 source = icons.missing_image().clone();
-                let Some(mesh) = images
+                let mesh = images
                     .get(&source)
-                    .and_then(|image| sprite_mesh(image, Vec2::ZERO, Vec2::ONE))
-                else {
-                    return None;
-                };
+                    .and_then(|image| sprite_mesh(image, Vec2::ZERO, Vec2::ONE))?;
                 mesh
             };
             ItemVisual {
@@ -446,7 +457,7 @@ impl HeldItemAssets {
                 ),
             }
         };
-        self.visuals.insert(item, visual.clone());
+        cached.visual = Some(visual.clone());
         Some(visual)
     }
 }

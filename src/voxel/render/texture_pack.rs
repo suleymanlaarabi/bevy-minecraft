@@ -175,15 +175,14 @@ impl TexturePackManifest {
 }
 
 /// Native block identities present in a validated manifest.
-pub(crate) fn manifest_keys(id: TexturePackId) -> std::collections::HashSet<VoxelKind> {
+pub(crate) fn manifest_keys(id: TexturePackId) -> Box<[bool]> {
     let manifest: TexturePackManifest =
         ron::from_str(id.manifest_source()).expect("Invalid texture pack manifest");
-    let blocks = manifest
+    manifest
         .resolved_blocks()
-        .expect("Invalid texture pack identities");
-    VoxelKind::ALL
-        .into_iter()
-        .filter(|kind| blocks[kind.index()].is_some())
+        .expect("Invalid texture pack identities")
+        .iter()
+        .map(Option::is_some)
         .collect()
 }
 

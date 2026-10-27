@@ -121,9 +121,7 @@ pub(crate) fn outcome(
         return None;
     }
     let catalog = catalog();
-    let profile_id = tool.map_or(0, |stack| {
-        catalog.items[stack.item().registry().id as usize]
-    });
+    let profile_id = tool.map_or(0, |stack| catalog.items[stack.item().id() as usize]);
     let profile = &catalog.profiles[usize::from(profile_id)];
     let block = profile.blocks[kind.0.as_u16() as usize];
     let mut duration = hardness / block.speed.max(f32::MIN_POSITIVE);

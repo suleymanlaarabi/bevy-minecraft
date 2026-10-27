@@ -62,6 +62,7 @@ fn empty_slot_label(index: usize) -> &'static str {
 }
 
 #[derive(Component, Clone, Default)]
+#[require(SlotDisplay)]
 pub(crate) struct CursorStackView;
 
 #[derive(Component, Clone, Default)]

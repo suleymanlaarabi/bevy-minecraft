@@ -3,8 +3,10 @@ use std::collections::HashMap;
 
 use bevy::{
     audio::{SpatialScale, Volume},
+    ecs::storage::SparseSet,
     prelude::*,
 };
+pub(crate) use pumpkin_data::sound::Sound as SoundId;
 use serde::Deserialize;
 
 use crate::{
@@ -48,7 +50,7 @@ pub(crate) enum BlockSound {
 
 #[derive(Clone, Copy)]
 enum SoundKey {
-    Event(&'static str),
+    Event(SoundId),
     Block(VoxelKind, BlockSound),
 }
 
@@ -61,11 +63,11 @@ pub(crate) struct Sound {
 }
 
 impl Sound {
-    pub fn event(name: &'static str) -> Self {
+    pub fn event(id: SoundId) -> Self {
         Self {
-            key: SoundKey::Event(name),
+            key: SoundKey::Event(id),
             position: None,
-            volume: if name == "entity.item.pickup" {
+            volume: if id == SoundId::EntityItemPickup {
                 0.25
             } else {
                 1.0
@@ -74,10 +76,10 @@ impl Sound {
         }
     }
 
-    pub fn at(name: &'static str, position: Vec3) -> Self {
+    pub fn at(id: SoundId, position: Vec3) -> Self {
         Self {
             position: Some(position),
-            ..Self::event(name)
+            ..Self::event(id)
         }
     }
 
@@ -127,22 +129,22 @@ struct Variant {
 }
 
 struct SoundEvent {
-    variants: Vec<Variant>,
+    variants: Box<[Variant]>,
     weight: f32,
 }
 
 #[derive(Default)]
 struct BlockProfile {
-    events: [Option<usize>; 7],
+    events: [Option<SoundId>; 7],
     volume: f32,
     pitch: f32,
 }
 
 #[derive(Resource, Default)]
 struct SoundBank {
-    names: HashMap<String, usize>,
-    events: Vec<SoundEvent>,
-    blocks: Vec<BlockProfile>,
+    // Registry IDs index dense event storage without retaining imported names.
+    events: SparseSet<u16, SoundEvent>,
+    blocks: Box<[BlockProfile]>,
     random: u64,
 }
 
@@ -157,9 +159,8 @@ impl SoundBank {
 
 fn load_bank(mut commands: Commands, server: Res<AssetServer>) {
     let imported = std::fs::read(crate::asset_directory().join("audio/vanilla/sounds.json"))
-        .map_err(|error| error.to_string())
         .and_then(|bytes| {
-            serde_json::from_slice::<ImportedBank>(&bytes).map_err(|error| error.to_string())
+            serde_json::from_slice::<ImportedBank>(&bytes).map_err(std::io::Error::other)
         });
     let mut bank = SoundBank {
         random: 0x716a_9d38_4b25_c6ef,
@@ -168,19 +169,25 @@ fn load_bank(mut commands: Commands, server: Res<AssetServer>) {
     match imported {
         Ok(imported) => {
             for (name, variants) in imported.events {
-                bank.names.insert(name, bank.events.len());
-                bank.events.push(SoundEvent {
-                    weight: variants.iter().map(|variant| variant.weight).sum(),
-                    variants: variants
-                        .into_iter()
-                        .map(|variant| Variant {
-                            source: server.load(format!("audio/vanilla/{}", variant.path)),
-                            volume: variant.volume,
-                            pitch: variant.pitch,
-                            weight: variant.weight,
-                        })
-                        .collect(),
-                });
+                let Some(id) = SoundId::from_name(&name) else {
+                    warn!("Unknown imported sound event: {name}");
+                    continue;
+                };
+                bank.events.insert(
+                    id as u16,
+                    SoundEvent {
+                        weight: variants.iter().map(|variant| variant.weight).sum(),
+                        variants: variants
+                            .into_iter()
+                            .map(|variant| Variant {
+                                source: server.load(format!("audio/vanilla/{}", variant.path)),
+                                volume: variant.volume,
+                                pitch: variant.pitch,
+                                weight: variant.weight,
+                            })
+                            .collect(),
+                    },
+                );
             }
             bank.blocks = VoxelKind::ALL
                 .iter()
@@ -195,8 +202,7 @@ fn load_bank(mut commands: Commands, server: Res<AssetServer>) {
                                 block
                                     .sounds
                                     .get(action)
-                                    .and_then(|name| bank.names.get(name))
-                                    .copied()
+                                    .and_then(|name| SoundId::from_name(name))
                             },
                         ),
                         volume: block.volume,
@@ -231,7 +237,7 @@ fn play_sound(
         }
     }
     let (event, volume, pitch) = match sound.key {
-        SoundKey::Event(name) => (bank.names.get(name).copied(), sound.volume, sound.pitch),
+        SoundKey::Event(id) => (Some(id), sound.volume, sound.pitch),
         SoundKey::Block(kind, action) => {
             let Some(profile) = bank.blocks.get(kind.index()) else {
                 return;
@@ -246,7 +252,9 @@ fn play_sound(
     let Some(event) = event else { return };
     let choice = bank.random();
     let variation = 0.9 + bank.random() * 0.2;
-    let event = &bank.events[event];
+    let Some(event) = bank.events.get(event as u16) else {
+        return;
+    };
     let mut remaining = choice * event.weight;
     let Some(variant) = event
         .variants
@@ -314,7 +322,7 @@ fn movement_audio(
             continue;
         }
         if state.in_water && !water {
-            commands.trigger(Sound::event("entity.player.splash"));
+            commands.trigger(Sound::event(crate::audio::SoundId::EntityPlayerSplash));
         }
         // Fences and walls can support feet more than one block above their cell.
         let floor = (feet - Vec3::Y * 0.2).floor().as_ivec3();
@@ -345,7 +353,7 @@ fn movement_audio(
         }
         audio.distance = 0.0;
         if state.in_water {
-            commands.trigger(Sound::event("entity.player.swim"));
+            commands.trigger(Sound::event(crate::audio::SoundId::EntityPlayerSwim));
         } else {
             let contact = if climbing {
                 let position = feet.floor().as_ivec3();
@@ -372,7 +380,7 @@ fn button_audio(
     mut commands: Commands,
 ) {
     if buttons.contains(event.entity) {
-        let mut sound = Sound::event("ui.button.click");
+        let mut sound = Sound::event(crate::audio::SoundId::UiButtonClick);
         sound.volume = 0.25;
         commands.trigger(sound);
     }
@@ -388,7 +396,6 @@ fn equipment_audio(
         (With<Player>, Changed<crate::inventory::PlayerInventory>),
     >,
 ) {
-    use pumpkin_data::data_component_impl::{EquippableImpl, IdOr};
     for (inventory, mut audio) in &mut players {
         let equipped = core::array::from_fn(|index| {
             inventory
@@ -400,14 +407,8 @@ fn equipment_audio(
                 if before == after {
                     continue;
                 }
-                if let Some(equipment) = after.and_then(|item| item.component::<EquippableImpl>()) {
-                    let name = match &equipment.equip_sound {
-                        IdOr::Id(sound) => sound.to_name(),
-                        IdOr::Value(sound) => sound.sound_name.as_str(),
-                    };
-                    commands.trigger(Sound::event(
-                        name.strip_prefix("minecraft:").unwrap_or(name),
-                    ));
+                if let Some(sound) = after.and_then(crate::inventory::catalog::equip_sound) {
+                    commands.trigger(Sound::event(sound));
                 }
             }
         }

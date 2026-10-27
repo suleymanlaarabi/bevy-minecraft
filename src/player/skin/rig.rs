@@ -237,20 +237,8 @@ pub(super) fn sync_parts(
     // Leggings (slot 2) use their own texture layer; the other pieces share `humanoid`.
     let armor: [Option<&Handle<StandardMaterial>>; 4] = std::array::from_fn(|slot| {
         let stack = inventory.as_ref()?.slot(ARMOR_START + slot)?;
-        let name = stack
-            .item()
-            .component::<pumpkin_data::data_component_impl::EquippableImpl>()?
-            .asset_id
-            .as_ref()?;
-        let layer = if slot == 2 {
-            "humanoid_leggings"
-        } else {
-            "humanoid"
-        };
-        assets.armor.get(&format!(
-            "{layer}/{}",
-            name.strip_prefix("minecraft:").unwrap_or(name)
-        ))
+        let index = *assets.armor.get(stack.item().id() as usize)?;
+        assets.armor_materials.get(index as usize)
     });
     for (part, mesh, mut material, mut visibility) in &mut parts {
         if !changed && !mesh.is_added() {

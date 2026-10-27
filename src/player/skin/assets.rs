@@ -47,37 +47,51 @@ pub(super) fn setup(
     });
     assets.armor_meshes = mesh::armor_parts(&mut meshes, 1.);
     assets.leggings_meshes = mesh::armor_parts(&mut meshes, 0.5);
-    let root = crate::asset_directory().join("player/vanilla/entity/equipment");
-    for layer in ["humanoid", "humanoid_leggings"] {
-        let Ok(entries) = std::fs::read_dir(root.join(layer)) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_none_or(|ext| ext != "png") {
-                continue;
-            }
-            let name = path.file_stem().unwrap().to_string_lossy();
-            let key = format!("{layer}/{name}");
-            let image = crate::load_nearest(
-                &server,
-                format!("player/vanilla/entity/equipment/{key}.png"),
-            );
-            let material = materials.add(StandardMaterial {
-                base_color_texture: Some(image),
-                alpha_mode: AlphaMode::Mask(0.5),
-                base_color: if name == "leather" {
-                    Color::srgb_u8(160, 101, 64)
+    let mut armor = std::collections::HashMap::new();
+    let root = crate::asset_directory();
+    // Resolve names once and load only the shared materials referenced by actual equipment.
+    assets.armor = (0..crate::inventory::ITEM_ID_LIMIT)
+        .map(|id| {
+            let item = crate::inventory::ItemKind::Item(id);
+            let Some(name) = pumpkin_data::item::Item::from_id(id)
+                .and_then(|_| item.component::<pumpkin_data::data_component_impl::EquippableImpl>())
+                .and_then(|equipment| equipment.asset_id.as_deref())
+            else {
+                return u8::MAX;
+            };
+            let name = name.strip_prefix("minecraft:").unwrap_or(name);
+            let leggings = item.armor_slot() == Some(crate::inventory::ARMOR_START + 2);
+            *armor.entry((name, leggings)).or_insert_with(|| {
+                let layer = if leggings {
+                    "humanoid_leggings"
                 } else {
-                    Color::WHITE
-                },
-                perceptual_roughness: 0.8,
-                reflectance: 0.1,
-                ..default()
-            });
-            assets.armor.insert(key, material);
-        }
-    }
+                    "humanoid"
+                };
+                let path = format!("player/vanilla/entity/equipment/{layer}/{name}.png");
+                if !root.join(&path).is_file() {
+                    return u8::MAX;
+                }
+                let index = u8::try_from(assets.armor_materials.len())
+                    .ok()
+                    .filter(|&index| index != u8::MAX)
+                    .expect("Armor material index must fit below the missing-material sentinel");
+                let material = materials.add(StandardMaterial {
+                    base_color_texture: Some(crate::load_nearest(&server, path)),
+                    alpha_mode: AlphaMode::Mask(0.5),
+                    base_color: if name == "leather" {
+                        Color::srgb_u8(160, 101, 64)
+                    } else {
+                        Color::WHITE
+                    },
+                    perceptual_roughness: 0.8,
+                    reflectance: 0.1,
+                    ..default()
+                });
+                assets.armor_materials.push(material);
+                index
+            })
+        })
+        .collect();
 }
 
 pub(super) fn load_skin(

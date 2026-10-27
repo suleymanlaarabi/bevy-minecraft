@@ -413,9 +413,9 @@ fn update_open_lids(
                 if canonical == entity {
                     commands.trigger(crate::audio::Sound::at(
                         if target > 0.0 {
-                            "block.chest.open"
+                            crate::audio::SoundId::BlockChestOpen
                         } else {
-                            "block.chest.close"
+                            crate::audio::SoundId::BlockChestClose
                         },
                         block.position.as_vec3() + Vec3::splat(0.5),
                     ));
