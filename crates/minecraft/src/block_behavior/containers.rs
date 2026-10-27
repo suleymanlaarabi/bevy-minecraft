@@ -671,7 +671,7 @@ pub(crate) fn validate_sessions(
 pub(crate) fn session_closed<T: Component>(
     _: On<Remove<T>>,
     next: Option<ResMut<NextState<crate::inventory::InventoryState>>>,
-    mut actions: ResMut<crate::inventory::access::InventoryActions>,
+    mut actions: ResMut<Messages<crate::inventory::access::InventoryAction>>,
 ) {
     if let Some(mut next) = next {
         next.set(crate::inventory::InventoryState::Closed);

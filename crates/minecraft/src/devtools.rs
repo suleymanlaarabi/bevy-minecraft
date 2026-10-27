@@ -23,7 +23,7 @@ use bevy::{
 use crate::{
     character::Flying,
     game::GameState,
-    inventory::{InventoryState, lock_cursor, unlock_cursor},
+    inventory::InventoryState,
     player::{Player, clear_player_input},
     settings::{GraphicsSettings, SimulationSettings, settings_panel},
     sky::TimeOfDay,
@@ -52,6 +52,7 @@ struct TimeSlider;
 struct ClockText;
 
 #[derive(Component, Clone, Copy, Debug, Default)]
+#[require(hollow_features::cursor::FreeCursor)]
 struct DevPanel;
 
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -76,12 +77,7 @@ impl Plugin for DevToolsPlugin {
             // Keys held when the panel opens must not keep the player moving.
             .add_systems(
                 OnEnter(DevPanelState::Open),
-                (unlock_cursor, clear_player_input, spawn_panel),
-            )
-            // Leaving the game also closes the panel: the menus manage the cursor then.
-            .add_systems(
-                OnExit(DevPanelState::Open),
-                lock_cursor.run_if(in_state(InventoryState::Closed)),
+                (clear_player_input, spawn_panel),
             )
             .add_systems(
                 Update,

@@ -91,4 +91,3 @@ impl GrowthRules {
         base_state
     }
 }
-

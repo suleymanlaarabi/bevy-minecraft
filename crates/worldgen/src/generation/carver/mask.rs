@@ -156,4 +156,3 @@ impl CarverOutput for CarvingMask {
         self.max_y
     }
 }
-

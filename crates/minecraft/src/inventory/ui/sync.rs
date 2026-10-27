@@ -6,24 +6,7 @@ use crate::{
     inventory::{HOTBAR_SIZE, InventoryCursor, ItemKind, PlayerInventory, icons::BlockIcons},
     player::{Crosshair, Player},
 };
-use bevy::{
-    prelude::*,
-    window::{CursorGrabMode, CursorOptions, PrimaryWindow},
-};
-
-pub(crate) fn unlock_cursor(mut cursors: Query<&mut CursorOptions>) {
-    for mut cursor in &mut cursors {
-        cursor.visible = true;
-        cursor.grab_mode = CursorGrabMode::None;
-    }
-}
-
-pub(crate) fn lock_cursor(mut cursors: Query<&mut CursorOptions>) {
-    for mut cursor in &mut cursors {
-        cursor.visible = false;
-        cursor.grab_mode = CursorGrabMode::Locked;
-    }
-}
+use bevy::{prelude::*, window::PrimaryWindow};
 
 pub(crate) fn hide_game_hud(
     mut hotbar: Query<&mut Visibility, With<HotbarHud>>,

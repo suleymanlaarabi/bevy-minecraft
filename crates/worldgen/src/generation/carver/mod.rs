@@ -457,6 +457,3 @@ fn schedule_fluid_tick_for_state(
         chunk.schedule_fluid_tick(x, y, z, &Fluid::LAVA);
     }
 }
-
-
-

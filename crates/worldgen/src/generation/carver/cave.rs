@@ -306,4 +306,3 @@ pub fn get_height(p: &HeightProvider, random: &mut RandomGenerator, min_y: i8, h
         }
     }
 }
-

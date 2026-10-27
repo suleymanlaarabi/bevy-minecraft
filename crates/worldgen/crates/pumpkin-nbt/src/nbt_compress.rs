@@ -46,4 +46,3 @@ pub fn write_gzip_compound_tag_to_bytes(compound: NbtCompound) -> Result<Vec<u8>
     write_gzip_compound_tag(compound, &mut buffer)?;
     Ok(buffer)
 }
-

@@ -1,12 +1,9 @@
 #![allow(clippy::type_complexity)]
 
 use super::{CameraSensitivity, Player, PlayerCamera};
-use crate::{
-    character::{CharacterMotion, CharacterMovement},
-    spatial::FollowOffset,
-};
+use crate::character::{CharacterMotion, CharacterMovement};
 use bevy::{input::mouse::AccumulatedMouseMotion, prelude::*};
-use hollow_features::motion::InterpolationAlpha;
+use hollow_features::{motion::InterpolationAlpha, spatial::FollowOffset};
 use std::f32::consts::FRAC_PI_2;
 
 pub(crate) fn clear_player_input(mut players: Query<&mut CharacterMovement, With<Player>>) {
@@ -36,10 +33,25 @@ pub(super) fn mouse_look(
 
 pub(super) fn player_input(
     keyboard: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
     camera: Single<Ref<PlayerCamera>>,
-    player: Single<(Ref<Transform>, &mut CharacterMovement), With<Player>>,
+    player: Single<
+        (
+            Ref<Transform>,
+            &mut CharacterMovement,
+            &crate::inventory::HotbarSelection,
+            &mut crate::survival::UseInput,
+        ),
+        With<Player>,
+    >,
 ) {
-    let (transform, mut movement) = player.into_inner();
+    let (transform, mut movement, selection, use_input) = player.into_inner();
+    let mut slot = use_input.map_unchanged(|input| &mut input.0);
+    let next = slot.filter(|&slot| {
+        mouse.pressed(MouseButton::Right)
+            && (slot == selection.0 || slot == crate::inventory::OFFHAND_SLOT)
+    });
+    slot.set_if_neq(next);
     if !keyboard.is_changed()
         && !camera.is_changed()
         && !transform.is_changed()

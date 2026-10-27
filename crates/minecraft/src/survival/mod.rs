@@ -10,9 +10,10 @@ mod placement;
 mod presentation;
 
 use bevy::prelude::*;
-pub(crate) use consume::choose_slot as choose_use_slot;
+pub use consume::{ItemConsumed, ItemUsePlugin};
+pub(crate) use consume::{cancel as cancel_use, choose_slot as choose_use_slot};
 pub use damage::{DamageApplied, DamageRequest};
-pub(crate) use model::UseInput;
+pub use model::UseInput;
 pub use model::{
     ActiveEffect, ActiveEffects, ArmorStats, DamageState, Hazards, Health, Living, Nutrition,
     RespawnPoint, SurvivalRules, SurvivalSnapshot, UsingItem,
@@ -49,12 +50,11 @@ pub(crate) fn mining_speed(effects: &ActiveEffects) -> f32 {
 
 impl Plugin for SurvivalPlugin {
     fn build(&self, app: &mut App) {
-        use crate::{character::CharacterSystems, inventory::InventoryState};
+        use crate::character::CharacterSystems;
         app.init_resource::<SurvivalRules>()
-            .init_resource::<SurvivalRandom>()
+            .add_plugins(ItemUsePlugin)
             .add_message::<DamageRequest>()
             .add_message::<DamageApplied>()
-            .add_message::<presentation::SoundCue>()
             .add_systems(Startup, hud::load_assets)
             .configure_sets(
                 FixedUpdate,
@@ -78,28 +78,18 @@ impl Plugin for SurvivalPlugin {
                     )
                         .in_set(SurvivalSystems::Prepare),
                     metabolism::hazards.in_set(SurvivalSystems::Environment),
-                    consume::tick.in_set(SurvivalSystems::Consume),
                     (effects::tick, metabolism::nutrition)
                         .chain()
                         .in_set(SurvivalSystems::Metabolism),
                     damage::resolve.in_set(SurvivalSystems::Damage),
-                    (metabolism::damage_response, consume::damage_response)
-                        .in_set(SurvivalSystems::Reactions),
+                    metabolism::damage_response.in_set(SurvivalSystems::Reactions),
                 ),
-            )
-            .add_systems(OnEnter(InventoryState::Open), consume::cancel)
-            .add_systems(
-                OnEnter(crate::devtools::DevPanelState::Open),
-                consume::cancel,
             )
             .add_systems(
                 OnEnter(crate::world::WorldSessionPhase::Playing),
                 (hud::spawn, hud::show).chain(),
             )
-            .add_systems(
-                OnExit(crate::world::WorldSessionPhase::Playing),
-                (consume::cancel, hud::hide),
-            )
+            .add_systems(OnExit(crate::world::WorldSessionPhase::Playing), hud::hide)
             .add_systems(
                 Update,
                 (

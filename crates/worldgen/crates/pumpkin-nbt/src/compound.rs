@@ -470,4 +470,3 @@ impl Display for NbtTag {
         }
     }
 }
-

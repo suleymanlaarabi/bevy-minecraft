@@ -1,7 +1,4 @@
-use bevy::{
-    prelude::*,
-    window::{CursorGrabMode, CursorOptions},
-};
+use bevy::prelude::*;
 
 use super::{DamageApplied, Health, RespawnPoint, UsingItem};
 use crate::{
@@ -11,30 +8,13 @@ use crate::{
     voxel::{VoxelLoading, VoxelViewer},
 };
 
-#[derive(Message, Clone, Copy)]
-pub(super) enum SoundCue {
-    Eat,
-    Drink,
-    Burp,
-    Teleport,
-}
-
 pub(super) fn play_audio(
     mut commands: Commands,
     player: Query<Entity, With<Player>>,
-    mut cues: MessageReader<SoundCue>,
     mut impacts: MessageReader<DamageApplied>,
 ) {
     use crate::audio::Sound;
     use pumpkin_data::damage::DamageType as D;
-    for cue in cues.read() {
-        commands.trigger(Sound::event(match cue {
-            SoundCue::Eat => crate::audio::SoundId::EntityGenericEat,
-            SoundCue::Drink => crate::audio::SoundId::EntityGenericDrink,
-            SoundCue::Burp => crate::audio::SoundId::EntityPlayerBurp,
-            SoundCue::Teleport => crate::audio::SoundId::ItemChorusFruitTeleport,
-        }));
-    }
     let local = player.single().ok();
     for impact in impacts.read().filter(|impact| Some(impact.target) == local) {
         let name = if impact.fatal {
@@ -68,10 +48,8 @@ pub(super) fn play_audio(
 pub(super) struct RespawnLoader(Entity);
 
 pub(super) fn respawn_input(
-    players: Query<Ref<Health>, With<Player>>,
-    mut cursors: Query<&mut CursorOptions>,
+    players: Query<&Health, With<Player>>,
     inventory: Res<State<InventoryState>>,
-    panel: Option<Res<State<crate::devtools::DevPanelState>>>,
     mut next_inventory: ResMut<NextState<InventoryState>>,
 ) {
     let Ok(health) = players.single() else {
@@ -80,20 +58,6 @@ pub(super) fn respawn_input(
     if !health.alive() {
         if *inventory.get() == InventoryState::Open {
             next_inventory.set(InventoryState::Closed);
-        }
-    }
-    if health.is_changed() || !health.alive() {
-        for mut cursor in &mut cursors {
-            let visible = *inventory.get() == InventoryState::Open
-                || panel
-                    .as_ref()
-                    .is_some_and(|panel| *panel.get() == crate::devtools::DevPanelState::Open);
-            cursor.visible = visible;
-            cursor.grab_mode = if visible {
-                CursorGrabMode::None
-            } else {
-                CursorGrabMode::Locked
-            };
         }
     }
 }

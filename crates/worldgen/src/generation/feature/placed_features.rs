@@ -620,4 +620,3 @@ pub const fn all_placed_feature_names() -> &'static [&'static str] {
     pumpkin_data::placed_feature::PlacedFeature::all_names()
 }
 include!("../../../crates/pumpkin-data/src/generated/placed_features_generated.rs");
-

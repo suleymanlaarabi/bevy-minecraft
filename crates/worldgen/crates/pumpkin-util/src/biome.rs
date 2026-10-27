@@ -151,4 +151,3 @@ impl Weather {
         self.has_precipitation && self.warm_enough_to_rain(x, y, z, sea_level)
     }
 }
-

@@ -140,4 +140,3 @@ fn block_light_at<T: GenerationCache>(chunk: &T, x: i32, y: i32, z: i32) -> u8 {
         (z & 15) as usize,
     )
 }
-

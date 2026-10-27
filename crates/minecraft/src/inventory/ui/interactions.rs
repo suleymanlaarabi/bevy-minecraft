@@ -17,7 +17,7 @@ pub(crate) fn return_cursor_stack(
         With<Player>,
     >,
     mut cursor: ResMut<InventoryCursor>,
-    mut actions: ResMut<crate::inventory::access::InventoryActions>,
+    mut actions: ResMut<Messages<crate::inventory::access::InventoryAction>>,
     state: Res<State<GameState>>,
     mut commands: Commands,
 ) {
@@ -90,33 +90,33 @@ pub(super) fn slot_press(
     mut event: On<PointerPress>,
     slots: Query<&InventorySlotView>,
     keyboard: Res<ButtonInput<KeyCode>>,
-    mut actions: ResMut<crate::inventory::access::InventoryActions>,
+    mut actions: MessageWriter<crate::inventory::access::InventoryAction>,
 ) {
     if event.button != PointerButton::Secondary {
         return;
     }
     event.propagate(false);
     if let Ok(slot) = slots.get(event.entity) {
-        actions.push_back(click_action(slot.index, true, false, &keyboard));
+        actions.write(click_action(slot.index, true, false, &keyboard));
     }
 }
 pub(super) fn slot_click(
     mut event: On<PointerClick>,
     slots: Query<&InventorySlotView>,
     keyboard: Res<ButtonInput<KeyCode>>,
-    mut actions: ResMut<crate::inventory::access::InventoryActions>,
+    mut actions: MessageWriter<crate::inventory::access::InventoryAction>,
 ) {
     event.propagate(false);
     if event.button == PointerButton::Primary
         && let Ok(slot) = slots.get(event.entity)
     {
-        actions.push_back(click_action(slot.index, false, event.count >= 2, &keyboard));
+        actions.write(click_action(slot.index, false, event.count >= 2, &keyboard));
     }
 }
 pub(super) fn slot_drag_start(
     mut event: On<PointerDragStart>,
     slots: Query<&InventorySlotView>,
-    mut actions: ResMut<crate::inventory::access::InventoryActions>,
+    mut actions: MessageWriter<crate::inventory::access::InventoryAction>,
 ) {
     event.propagate(false);
     let mode = match event.button {
@@ -125,7 +125,7 @@ pub(super) fn slot_drag_start(
         PointerButton::Middle => return,
     };
     if let Ok(slot) = slots.get(event.entity) {
-        actions.push_back(crate::inventory::access::InventoryAction::DragStart {
+        actions.write(crate::inventory::access::InventoryAction::DragStart {
             index: slot.index,
             source: event.entity,
             mode,
@@ -135,11 +135,11 @@ pub(super) fn slot_drag_start(
 pub(super) fn slot_drag_enter(
     mut event: On<PointerDragEnter>,
     slots: Query<&InventorySlotView>,
-    mut actions: ResMut<crate::inventory::access::InventoryActions>,
+    mut actions: MessageWriter<crate::inventory::access::InventoryAction>,
 ) {
     event.propagate(false);
     if let Ok(slot) = slots.get(event.entity) {
-        actions.push_back(crate::inventory::access::InventoryAction::DragVisit {
+        actions.write(crate::inventory::access::InventoryAction::DragVisit {
             index: slot.index,
             source: event.dragged,
         });
@@ -148,11 +148,11 @@ pub(super) fn slot_drag_enter(
 pub(super) fn slot_drag_over(
     mut event: On<PointerDragOver>,
     slots: Query<&InventorySlotView>,
-    mut actions: ResMut<crate::inventory::access::InventoryActions>,
+    mut actions: MessageWriter<crate::inventory::access::InventoryAction>,
 ) {
     event.propagate(false);
     if let Ok(slot) = slots.get(event.entity) {
-        actions.push_back(crate::inventory::access::InventoryAction::DragVisit {
+        actions.write(crate::inventory::access::InventoryAction::DragVisit {
             index: slot.index,
             source: event.dragged,
         });
@@ -160,10 +160,10 @@ pub(super) fn slot_drag_over(
 }
 pub(super) fn slot_drag_end(
     mut event: On<PointerDragEnd>,
-    mut actions: ResMut<crate::inventory::access::InventoryActions>,
+    mut actions: MessageWriter<crate::inventory::access::InventoryAction>,
 ) {
     event.propagate(false);
-    actions.push_back(crate::inventory::access::InventoryAction::DragEnd(
+    actions.write(crate::inventory::access::InventoryAction::DragEnd(
         event.entity,
     ));
 }

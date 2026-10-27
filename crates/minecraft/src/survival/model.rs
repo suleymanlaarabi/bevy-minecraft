@@ -127,11 +127,12 @@ pub struct ItemUse {
 }
 
 #[derive(Component, Default, Debug)]
-#[require(UseInput)]
+#[require(UseInput, Health, ActiveEffects)]
 pub struct UsingItem(pub Option<ItemUse>);
 
+/// Held item-use intent. Any controller may set a slot; clearing it cancels use.
 #[derive(Component, Default)]
-pub(crate) struct UseInput(pub Option<usize>);
+pub struct UseInput(pub Option<usize>);
 
 impl UsingItem {
     pub fn progress(&self) -> f32 {

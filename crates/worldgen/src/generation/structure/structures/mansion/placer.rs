@@ -1037,4 +1037,3 @@ impl MansionPiecePlacer<'_> {
         );
     }
 }
-

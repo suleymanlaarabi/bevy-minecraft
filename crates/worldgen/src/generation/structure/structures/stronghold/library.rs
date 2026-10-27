@@ -345,4 +345,3 @@ impl StructurePieceBase for LibraryPiece {
         }
     }
 }
-

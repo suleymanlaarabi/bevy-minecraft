@@ -197,4 +197,3 @@ impl CanyonCarver {
         (xd * xd + zd * zd) * width_factor_per_height[y_index - 1] as f64 + (yd * yd) / 6.0 >= 1.0
     }
 }
-

@@ -302,4 +302,3 @@ impl TextComponent {
         text
     }
 }
-

@@ -32,7 +32,17 @@ impl Plugin for PlayerPlugin {
                 .chain()
                 .run_if(in_state(crate::world::WorldSessionPhase::Loading)),
         )
-        .add_systems(OnEnter(InventoryState::Open), clear_player_input)
+        .add_systems(
+            OnEnter(InventoryState::Open),
+            (
+                clear_player_input,
+                crate::survival::cancel_use::<With<Player>>,
+            ),
+        )
+        .add_systems(
+            OnEnter(crate::devtools::DevPanelState::Open),
+            crate::survival::cancel_use::<With<Player>>,
+        )
         .add_systems(
             RunFixedMainLoop,
             (mouse_look, player_input)
@@ -45,7 +55,7 @@ impl Plugin for PlayerPlugin {
         .add_systems(
             PostUpdate,
             follow_eye_height
-                .before(crate::spatial::FollowSystems)
+                .before(hollow_features::spatial::FollowSystems)
                 .run_if(crate::world::playing),
         );
         skin::register(app);

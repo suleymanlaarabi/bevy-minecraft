@@ -721,4 +721,3 @@ pub fn transform_block_properties(
         })
         .collect()
 }
-

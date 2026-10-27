@@ -232,4 +232,3 @@ fn visit_feature(
     discovered.insert(feature);
     sorted.push(feature);
 }
-

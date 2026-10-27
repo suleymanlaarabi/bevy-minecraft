@@ -259,4 +259,3 @@ const fn salt_mix(seed: i64, salt: i64) -> i64 {
     );
     mixed_seed.wrapping_add(salt)
 }
-

@@ -398,4 +398,3 @@ pub const fn hash_block_pos(x: i32, y: i32, z: i32) -> i64 {
 
     l >> 16
 }
-

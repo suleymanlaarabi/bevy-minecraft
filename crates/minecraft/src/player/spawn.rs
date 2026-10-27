@@ -1,13 +1,13 @@
 use super::{Player, PlayerCamera};
 use crate::{
     game::GameState,
-    spatial::{Follow, FollowOffset},
     voxel::{VoxelLoading, VoxelSettings, VoxelViewer},
 };
 use bevy::{
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
+use hollow_features::spatial::{Follow, FollowOffset};
 
 /// Vanilla eyes sit 1.62 above the feet; the player's origin is its box center.
 const PLAYER_EYE_HEIGHT: f32 = 0.72;

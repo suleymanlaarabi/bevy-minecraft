@@ -11,7 +11,6 @@ pub mod player;
 pub mod settings;
 pub mod simulation;
 pub mod sky;
-pub mod spatial;
 pub mod survival;
 pub mod voxel;
 pub mod world;

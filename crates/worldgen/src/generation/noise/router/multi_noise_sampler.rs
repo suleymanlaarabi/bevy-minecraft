@@ -182,4 +182,3 @@ impl<'a> MultiNoiseSampler<'a> {
         }
     }
 }
-

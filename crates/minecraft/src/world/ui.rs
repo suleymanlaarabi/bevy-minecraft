@@ -34,6 +34,7 @@ pub(super) struct FormSubmit;
 #[derive(Component, Clone, Default)]
 pub(super) struct BrowserStatus;
 #[derive(Component, Clone, Default)]
+#[require(hollow_features::cursor::FreeCursor)]
 pub(super) struct SaveOverlay;
 #[derive(Component, Clone, Default)]
 pub(super) struct SaveStatus;
@@ -475,15 +476,10 @@ pub(super) fn save_error(
     mut commands: Commands,
     save: Res<SaveState>,
     mut virtual_time: ResMut<Time<Virtual>>,
-    mut cursors: Query<&mut CursorOptions>,
     players: Query<(), With<Player>>,
 ) {
     virtual_time.pause();
     commands.despawn_all::<With<SaveOverlay>>();
-    for mut cursor in &mut cursors {
-        cursor.visible = true;
-        cursor.grab_mode = CursorGrabMode::None;
-    }
     let can_resume = !players.is_empty();
     let resume_disabled = (!can_resume).then_some(bsn! { InteractionDisabled });
     commands.spawn_scene(bsn! {

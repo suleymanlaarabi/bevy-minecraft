@@ -244,4 +244,3 @@ fn shuffle(values: &mut [usize], random: &mut RandomGenerator) {
         values.swap(index, random.next_bounded_i32(index as i32 + 1) as usize);
     }
 }
-

@@ -276,5 +276,3 @@ impl SculkLevel for ProtoChunkSculkView<'_> {
             .is_some_and(|s| s.to_state().is_full_cube())
     }
 }
-
-

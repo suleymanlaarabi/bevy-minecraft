@@ -474,4 +474,3 @@ impl VeinRules {
         BlockState::from_id(props.to_state_id(&Block::SCULK_VEIN)).id
     }
 }
-

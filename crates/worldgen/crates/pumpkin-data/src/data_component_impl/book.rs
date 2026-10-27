@@ -141,4 +141,3 @@ impl DataComponentImpl for DebugStickStateImpl {
     }
     default_impl!(DebugStickState);
 }
-

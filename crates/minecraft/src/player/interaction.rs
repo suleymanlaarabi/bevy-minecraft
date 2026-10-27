@@ -8,14 +8,13 @@ use bevy::{
     prelude::*,
     transform::TransformSystems,
 };
-use hollow_features::motion::InterpolationAlpha;
+use hollow_features::{motion::InterpolationAlpha, spatial::FollowSystems};
 
 use crate::{
     character::CharacterMotion,
     game::GameState,
     inventory::{InventoryState, ItemKind, ItemStack},
     player::{Player, PlayerCamera},
-    spatial::FollowSystems,
     voxel::{VoxelState, VoxelWorld},
 };
 

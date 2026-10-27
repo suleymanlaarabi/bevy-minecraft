@@ -260,4 +260,3 @@ impl RandomDeriverImpl for XoroshiroSplitter {
         RandomGenerator::Xoroshiro(self.split_pos(x, y, z))
     }
 }
-

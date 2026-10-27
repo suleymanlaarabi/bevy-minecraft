@@ -1,7 +1,4 @@
-use bevy::{
-    prelude::*,
-    window::{CursorGrabMode, CursorOptions},
-};
+use bevy::prelude::*;
 
 use crate::{
     character::CharacterPlugin,
@@ -11,7 +8,6 @@ use crate::{
     menu::GameMenuPlugin,
     player::PlayerPlugin,
     sky::SkyPlugin,
-    spatial::GameSpatialPlugin,
 };
 
 #[derive(Clone, Copy, Default, Eq, PartialEq, Debug, Hash, States)]
@@ -40,7 +36,8 @@ impl Plugin for GamePlugin {
                 hollow_features::motion::FixedPositionPlugin,
                 CharacterPlugin,
                 crate::survival::SurvivalPlugin,
-                GameSpatialPlugin,
+                hollow_features::spatial::FollowPlugin,
+                hollow_features::cursor::CursorCapturePlugin,
                 DroppedItemPlugin,
                 SkyPlugin,
                 DevToolsPlugin,
@@ -59,27 +56,20 @@ impl Plugin for GamePlugin {
 
 fn setup_menu_environment(
     state: Res<State<GameState>>,
-    mut cursors: Query<&mut CursorOptions>,
     mut clear_color: ResMut<ClearColor>,
     mut commands: Commands,
 ) {
-    commands.spawn((Camera2d, IsDefaultUiCamera, DespawnOnExit(*state.get())));
+    commands.spawn((
+        Camera2d,
+        IsDefaultUiCamera,
+        hollow_features::cursor::FreeCursor,
+        DespawnOnExit(*state.get()),
+    ));
 
-    for mut cursor in &mut cursors {
-        cursor.visible = true;
-        cursor.grab_mode = CursorGrabMode::None;
-    }
     clear_color.0 = Color::srgb_u8(15, 15, 18);
 }
 
-fn setup_game_environment(
-    mut cursors: Query<&mut CursorOptions>,
-    mut clear_color: ResMut<ClearColor>,
-) {
-    for mut cursor in &mut cursors {
-        cursor.visible = false;
-        cursor.grab_mode = CursorGrabMode::Locked;
-    }
+fn setup_game_environment(mut clear_color: ResMut<ClearColor>) {
     // The atmosphere adds the sky over a black background (`crate::sky`).
     clear_color.0 = Color::BLACK;
 }

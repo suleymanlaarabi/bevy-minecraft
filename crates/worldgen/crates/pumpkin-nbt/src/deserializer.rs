@@ -596,4 +596,3 @@ impl<'a, D: NbtDataSource<'a>> NbtReadHelper<'a> for NbtReadHelperBedrock<D> {
         self.reader.read_byte_array(len)
     }
 }
-

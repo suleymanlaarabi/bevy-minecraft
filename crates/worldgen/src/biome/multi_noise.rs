@@ -8,4 +8,3 @@ pub const fn to_long(float: f32) -> i64 {
 }
 
 pub type NoiseValuePoint = TargetPoint;
-

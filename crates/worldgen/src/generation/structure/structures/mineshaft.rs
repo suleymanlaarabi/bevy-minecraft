@@ -2007,4 +2007,3 @@ impl StructurePieceBase for MineShaftStairs {
         }
     }
 }
-

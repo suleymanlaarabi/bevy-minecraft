@@ -7,6 +7,9 @@ See [Content and fluid plugins](CONTENT_AND_FLUID_PLUGINS.md) for the implemente
 The subsequent [actor composition refactor](ECS_COMPOSITION.md) adds shared fixed-step
 positions and interpolation, separates damage reactions, and uses native hierarchy
 and bulk cleanup APIs. Its scope, tradeoffs and code accounting are reported there.
+[Composable capabilities](ECS_CAPABILITIES.md) continues this work with item-use
+intents and completion messages, transactional inventory batches, shared following,
+and declarative modal cursor behavior.
 
 ## Implemented boundaries
 
@@ -14,7 +17,7 @@ and bulk cleanup APIs. Its scope, tradeoffs and code accounting are reported the
 | --- | --- |
 | `hollow-core` | Typed numeric keys, `VoxelCell`, coordinates, copy-on-write sections, cuboid faces, bounds and the generic 32-bit terrain codec. |
 | `hollow-engine` | Generic chunk components, read access, checked terrain writes, sparse terrain indexes, pending edits, block factories, ray traversal and typed entity work queues. |
-| `hollow-features` | Statically dispatched stack operations, contiguous copy-on-write inventories, shared elementary joint clips and fixed-step position interpolation. |
+| `hollow-features` | Statically dispatched stack operations, contiguous copy-on-write inventories, shared elementary joint clips, fixed-step position interpolation, following and modal cursor capture. |
 | `hollow-minecraft` | The existing game, its content policies, world generator adapter, renderer, player, survival, menus and settings. |
 | `hollow` | Executable composition entry point. |
 

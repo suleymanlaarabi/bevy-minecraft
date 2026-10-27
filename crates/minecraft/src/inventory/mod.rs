@@ -9,7 +9,6 @@ pub(crate) mod slots;
 mod ui;
 pub(crate) use crafting::{CraftingGrid, CraftingResult};
 pub(crate) use model::ITEM_ID_LIMIT;
-pub(crate) use ui::{lock_cursor, unlock_cursor};
 
 use bevy::input::common_conditions::input_just_pressed;
 use bevy::prelude::*;
@@ -51,7 +50,7 @@ impl Plugin for InventoryPlugin {
     fn build(&self, app: &mut App) {
         app.add_sub_state::<InventoryState>()
             .init_resource::<InventoryCursor>()
-            .init_resource::<access::InventoryActions>()
+            .add_message::<access::InventoryAction>()
             .init_resource::<icons::BlockIcons>()
             .add_systems(PreStartup, catalog::initialize)
             .add_systems(
@@ -77,16 +76,11 @@ impl Plugin for InventoryPlugin {
             .add_systems(OnEnter(GameState::Game), ui::spawn_hotbar_hud)
             .add_systems(
                 OnEnter(InventoryState::Open),
-                (
-                    ui::unlock_cursor,
-                    ui::hide_game_hud,
-                    ui::spawn_inventory_overlay,
-                )
-                    .chain(),
+                (ui::hide_game_hud, ui::spawn_inventory_overlay).chain(),
             )
             .add_systems(
                 OnExit(InventoryState::Open),
-                (ui::return_cursor_stack, ui::lock_cursor, ui::show_game_hud).chain(),
+                (ui::return_cursor_stack, ui::show_game_hud).chain(),
             )
             .add_systems(
                 Update,
@@ -148,7 +142,7 @@ fn toggle_inventory(
 
 fn reset_inventory_cursor(
     mut cursor: ResMut<InventoryCursor>,
-    mut actions: ResMut<access::InventoryActions>,
+    mut actions: ResMut<Messages<access::InventoryAction>>,
 ) {
     actions.clear();
     *cursor = InventoryCursor::default();

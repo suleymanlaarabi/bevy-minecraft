@@ -699,7 +699,6 @@ impl Hash for PotionDurationScaleImpl {
     }
 }
 
-
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct SuspiciousStewEffect {
     pub effect: Cow<'static, str>,

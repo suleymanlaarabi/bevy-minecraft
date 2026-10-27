@@ -734,4 +734,3 @@ pub fn read_data(id: DataComponent, data: &NbtTag) -> Option<Box<dyn DataCompone
         DataComponent::CushionColor => Some(CushionColorImpl::read_data(data)?.to_dyn()),
     }
 }
-

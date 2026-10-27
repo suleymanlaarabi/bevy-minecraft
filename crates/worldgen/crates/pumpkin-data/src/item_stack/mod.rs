@@ -877,4 +877,3 @@ impl From<&RecipeResultStruct> for ItemStack {
         )
     }
 }
-

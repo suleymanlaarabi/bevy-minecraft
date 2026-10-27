@@ -518,8 +518,6 @@ impl StructurePieceBase for MansionFoundationPiece {
     }
 }
 
-
-
 const fn transform(
     position: Vector3<i32>,
     mirror: TemplateMirror,
@@ -538,4 +536,3 @@ const fn transform(
     let (x, z) = rotation.rotate_offset(x, z);
     Vector3::new(x, position.y, z)
 }
-

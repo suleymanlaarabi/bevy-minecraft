@@ -17,7 +17,7 @@ use bevy::{
     prelude::*,
     settings::SaveSettingsSync,
     tasks::{IoTaskPool, Task, futures::check_ready},
-    window::{CursorGrabMode, CursorOptions, WindowCloseRequested},
+    window::WindowCloseRequested,
 };
 pub(crate) use model::{Checkpoint, SavedDrop, SavedPlayer, SavedStack};
 pub use model::{WorldMetadata, WorldQuality};
@@ -428,34 +428,19 @@ fn begin_saving(
     generator: Res<WorldGenerator>,
     mut virtual_time: ResMut<Time<Virtual>>,
     mut commands: Commands,
-    mut cursors: Query<&mut CursorOptions>,
 ) {
     generator.runtime.pause();
     virtual_time.pause();
-    for mut cursor in &mut cursors {
-        cursor.visible = true;
-        cursor.grab_mode = CursorGrabMode::None;
-    }
     ui::saving(&mut commands);
 }
 fn resume_session(
     generator: Res<WorldGenerator>,
     mut virtual_time: ResMut<Time<Virtual>>,
-    inventory: Res<State<InventoryState>>,
-    mut cursors: Query<&mut CursorOptions>,
     mut save: ResMut<SaveState>,
     mut commands: Commands,
 ) {
     generator.runtime.resume();
     virtual_time.unpause();
-    for mut cursor in &mut cursors {
-        cursor.visible = *inventory.get() == InventoryState::Open;
-        cursor.grab_mode = if cursor.visible {
-            CursorGrabMode::None
-        } else {
-            CursorGrabMode::Locked
-        };
-    }
     commands.despawn_all::<With<ui::SaveOverlay>>();
     save.error = None;
 }

@@ -303,4 +303,3 @@ fn entity_nbt(id: &str, position: Vector3<f64>) -> NbtCompound {
     nbt.put("Rotation", NbtTag::List(vec![0.0f32.into(), 0.0f32.into()]));
     nbt
 }
-

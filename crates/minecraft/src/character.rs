@@ -806,23 +806,20 @@ fn tick(
     }
     let start_y = aabb.min.y;
     let falling = velocity.y <= 0.0;
-    if flying {
-        let speed = FLY_SPEED * if sprinting { 2.0 } else { 1.0 };
-        velocity += input * speed;
-        move_body(
-            terrain,
-            &mut aabb,
-            &mut velocity,
-            state,
-            false,
-            speed_factor,
-        );
-        velocity.y *= FLY_VERTICAL_DRAG;
-        velocity.x *= AIR_DRAG;
-        velocity.z *= AIR_DRAG;
-    } else if let Some(fluid) = medium {
-        let profile = crate::content::fluid_catalog().profile(fluid);
-        let movement_profile = profile.movement;
+    let fluid_movement = if flying {
+        None
+    } else {
+        medium.map(|fluid| &crate::content::fluid_catalog().profile(fluid).movement)
+    };
+    // Force selection is content-specific; acceleration, collision and drag share one path.
+    // These coefficients are tick-local, so changing medium never changes an archetype.
+    let (acceleration, drag, gravity) = if flying {
+        (
+            FLY_SPEED * if sprinting { 2.0 } else { 1.0 },
+            DVec3::new(AIR_DRAG, FLY_VERTICAL_DRAG, AIR_DRAG),
+            0.0,
+        )
+    } else if let Some(movement_profile) = fluid_movement {
         if state.swimming {
             // Swimming follows the camera pitch.
             let look = movement.look_direction.normalize_or_zero().y as f64;
@@ -836,39 +833,21 @@ fn tick(
                 velocity.y += (look - velocity.y) * rate;
             }
         }
-        let drag = if sprinting {
+        let horizontal = if sprinting {
             movement_profile.sprint_drag
         } else {
             movement_profile.horizontal_drag
         };
-        velocity += input * movement_profile.acceleration;
-        clamp_climbing(&mut velocity, climbing, sneaking);
-        move_body(
-            terrain,
-            &mut aabb,
-            &mut velocity,
-            state,
-            sneaking,
-            speed_factor,
-        );
-        let depth = fluid_depth;
-        let vertical = if depth <= FLUID_JUMP_THRESHOLD {
+        let vertical = if fluid_depth <= FLUID_JUMP_THRESHOLD {
             movement_profile.vertical_drag
         } else {
             movement_profile.deep_vertical_drag
         };
-        velocity *= DVec3::new(drag, vertical, drag);
-        if !sprinting || !movement_profile.sprint_cancels_gravity {
-            velocity.y = if falling
-                && (velocity.y - 0.005).abs() >= MIN_VELOCITY
-                && (velocity.y - movement_profile.gravity).abs() < MIN_VELOCITY
-            {
-                -MIN_VELOCITY
-            } else {
-                velocity.y - movement_profile.gravity
-            };
-        }
-        climb_out_of_fluid(terrain, aabb, &mut velocity, state, start_y);
+        (
+            movement_profile.acceleration,
+            DVec3::new(horizontal, vertical, horizontal),
+            0.0,
+        )
     } else {
         let (friction, speed) = if state.on_ground {
             let speed = WALK_SPEED * if sprinting { SPRINT_FACTOR } else { 1.0 };
@@ -886,24 +865,42 @@ fn tick(
                 },
             )
         };
-        velocity += input * speed;
-        clamp_climbing(&mut velocity, climbing, sneaking);
-        move_body(
-            terrain,
-            &mut aabb,
-            &mut velocity,
-            state,
-            sneaking,
-            speed_factor,
-        );
         let gravity = if locomotion.slow_falling && falling {
             0.01
         } else {
             GRAVITY
         };
-        velocity.y = (velocity.y - gravity) * VERTICAL_DRAG;
-        velocity.x *= friction;
-        velocity.z *= friction;
+        (
+            speed,
+            DVec3::new(friction, VERTICAL_DRAG, friction),
+            gravity,
+        )
+    };
+    velocity += input * acceleration;
+    clamp_climbing(&mut velocity, climbing, sneaking);
+    move_body(
+        terrain,
+        &mut aabb,
+        &mut velocity,
+        state,
+        sneaking,
+        speed_factor,
+    );
+    velocity.y -= gravity;
+    velocity *= drag;
+    if let Some(movement_profile) = fluid_movement {
+        // Fluid gravity is applied after drag; air gravity is applied before it.
+        if !sprinting || !movement_profile.sprint_cancels_gravity {
+            velocity.y = if falling
+                && (velocity.y - 0.005).abs() >= MIN_VELOCITY
+                && (velocity.y - movement_profile.gravity).abs() < MIN_VELOCITY
+            {
+                -MIN_VELOCITY
+            } else {
+                velocity.y - movement_profile.gravity
+            };
+        }
+        climb_out_of_fluid(terrain, aabb, &mut velocity, state, start_y);
     }
 
     if climbing && !sneaking && (state.horizontal_collision || movement.jump) {
@@ -924,10 +921,7 @@ fn tick(
     activity.sprinting = sprinting;
     activity.climbing = climbing;
     activity.simulated = !flying;
-    motion.walk_delta = (fixed_position.current - fixed_position.previous)
-        .xz()
-        .length() as f32
-        * 0.6;
+    motion.walk_delta = activity.distance * 0.6;
     // Only the phase matters; wrapping preserves precision during long sessions.
     motion.walk_distance = (motion.walk_distance + motion.walk_delta).rem_euclid(2.0);
     FluidContactState {

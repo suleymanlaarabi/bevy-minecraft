@@ -379,4 +379,3 @@ pub struct Flammable {
     pub spread_chance: u8,
     pub burn_chance: u8,
 }
-

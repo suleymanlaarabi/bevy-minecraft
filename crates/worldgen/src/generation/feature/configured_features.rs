@@ -544,4 +544,3 @@ impl ConfiguredFeature {
 // generated code is now placed alongside other codegen outputs
 // in `src/generated` so we don’t hide it deep under `generation/feature`.
 include!("../../../crates/pumpkin-data/src/generated/configured_features_generated.rs");
-

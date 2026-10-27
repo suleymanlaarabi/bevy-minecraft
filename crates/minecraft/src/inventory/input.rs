@@ -1,7 +1,7 @@
 use crate::{
     inventory::{
         HOTBAR_SIZE, InventoryCursor, InventoryState, OFFHAND_SLOT, PlayerInventory,
-        access::{InventoryAction, InventoryActions},
+        access::InventoryAction,
     },
     player::Player,
 };
@@ -27,7 +27,7 @@ pub(super) fn handle_number_keys(
     keyboard: Res<ButtonInput<KeyCode>>,
     state: Res<State<InventoryState>>,
     cursor: Res<InventoryCursor>,
-    mut actions: ResMut<InventoryActions>,
+    mut actions: MessageWriter<InventoryAction>,
     selection: Single<&mut crate::inventory::HotbarSelection, With<Player>>,
 ) {
     let Some(hotbar_index) = pressed_hotbar_key(&keyboard) else {
@@ -46,7 +46,7 @@ pub(super) fn handle_number_keys(
                 return;
             };
 
-            actions.push_back(InventoryAction::SwapHotbar(slot_index, hotbar_index));
+            actions.write(InventoryAction::SwapHotbar(slot_index, hotbar_index));
         }
     }
 }

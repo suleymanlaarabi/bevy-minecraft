@@ -178,4 +178,3 @@ impl RandomDeriverImpl for LegacySplitter {
         RandomGenerator::Legacy(LegacyRand::from_seed((pos_hash as u64) ^ self.seed))
     }
 }
-

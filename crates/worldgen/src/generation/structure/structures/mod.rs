@@ -912,4 +912,3 @@ pub enum StructureInstance {
     /// Stores the `BlockPos` of the 'Start' so you can look it up.
     Reference(Arc<Mutex<StructurePiecesCollector>>),
 }
-

@@ -118,4 +118,3 @@ pub const MAX_HEIGHT: u32 = (1 << SIZE_BITS_Y) - 32;
 pub const MAX_COLUMN_HEIGHT: u32 = (MAX_HEIGHT >> 1) - 1;
 pub const MIN_HEIGHT: i32 = MAX_COLUMN_HEIGHT as i32 - MAX_HEIGHT as i32 + 1;
 pub const MIN_HEIGHT_CELL: i32 = MIN_HEIGHT << 4;
-

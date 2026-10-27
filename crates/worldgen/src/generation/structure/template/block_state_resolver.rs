@@ -35,4 +35,3 @@ impl BlockStateResolver {
         Self::resolve(entry, Rotation::None, Mirror::None)
     }
 }
-

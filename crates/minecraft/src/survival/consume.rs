@@ -1,18 +1,48 @@
 use crate::inventory::catalog::ConsumeAction;
-use bevy::prelude::*;
+use bevy::{ecs::query::QueryFilter, prelude::*};
 use hollow_features::motion::FixedPosition;
 
 use super::{
     ActiveEffects, Hazards, Health, ItemUse, Nutrition, SurvivalRandom, UseInput, UsingItem,
 };
 use crate::{
+    audio::{Sound, SoundId},
     character::{CharacterBody, CharacterMotion, CharacterState},
     dropped_item::DroppedItemCommandsExt,
-    inventory::{HotbarSelection, InventoryState, ItemStack, OFFHAND_SLOT, PlayerInventory},
+    inventory::{ItemStack, OFFHAND_SLOT, PlayerInventory},
     voxel::VoxelWorld,
 };
 
-pub(super) fn cancel(mut actors: Query<(&mut UsingItem, &mut UseInput)>) {
+/// Published after the inventory transaction; consumers run in the same fixed tick.
+#[derive(Message, Clone, Copy)]
+pub struct ItemConsumed {
+    pub entity: Entity,
+    pub stack: ItemStack,
+}
+
+pub struct ItemUsePlugin;
+impl Plugin for ItemUsePlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<SurvivalRandom>()
+            .add_message::<ItemConsumed>()
+            .add_systems(
+                FixedUpdate,
+                (tick, apply_consumption)
+                    .chain()
+                    .in_set(super::SurvivalSystems::Consume),
+            )
+            .add_systems(
+                FixedUpdate,
+                damage_response.in_set(super::SurvivalSystems::Reactions),
+            )
+            .add_systems(
+                OnExit(crate::world::WorldSessionPhase::Playing),
+                cancel::<()>,
+            );
+    }
+}
+
+pub(crate) fn cancel<F: QueryFilter>(mut actors: Query<(&mut UsingItem, &mut UseInput), F>) {
     for (using, input) in &mut actors {
         using.map_unchanged(|using| &mut using.0).set_if_neq(None);
         input.map_unchanged(|input| &mut input.0).set_if_neq(None);
@@ -68,69 +98,37 @@ fn safe_teleport(
     None
 }
 
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
-pub(super) fn tick(
-    mouse: Res<ButtonInput<MouseButton>>,
-    state: Res<State<InventoryState>>,
-    panel: Option<Res<State<crate::devtools::DevPanelState>>>,
+/// Controllers supply an intent; item use does not depend on local input or a body.
+fn tick(
     world: VoxelWorld,
-    mut random: ResMut<SurvivalRandom>,
     mut commands: Commands,
-    mut sounds: MessageWriter<super::presentation::SoundCue>,
+    mut consumed: MessageWriter<ItemConsumed>,
     mut actors: Query<
         (
+            Entity,
             &mut UsingItem,
             &UseInput,
-            &HotbarSelection,
             &mut PlayerInventory,
-            &mut Health,
-            &mut Nutrition,
-            &mut ActiveEffects,
-            &mut Transform,
-            &mut CharacterMotion,
+            &Health,
+            Option<&Nutrition>,
             &FixedPosition,
-            &CharacterBody,
-            &CharacterState,
-            &mut Hazards,
         ),
         With<crate::simulation::Simulating>,
     >,
 ) {
-    let input_allowed = *state.get() == InventoryState::Closed
-        && mouse.pressed(MouseButton::Right)
-        && panel
-            .as_ref()
-            .is_none_or(|panel| *panel.get() == crate::devtools::DevPanelState::Closed);
-    for (
-        mut using,
-        input,
-        selection,
-        mut inventory,
-        mut health,
-        mut nutrition,
-        mut effects,
-        mut transform,
-        mut motion,
-        position,
-        body,
-        character,
-        mut hazards,
-    ) in &mut actors
-    {
+    for (entity, mut using, input, mut inventory, health, nutrition, position) in &mut actors {
         let consumable = input
             .0
-            .filter(|&slot| {
-                input_allowed
-                    && health.alive()
-                    && (slot == selection.0 || slot == OFFHAND_SLOT)
-                    && world.collision_ready(position.current.as_vec3())
-            })
+            .filter(|_| health.alive() && world.collision_ready(position.current.as_vec3()))
             .and_then(|slot| {
                 let stack = inventory.slot(slot)?;
                 let profile = super::catalog::consumable(stack.item())?;
                 profile
                     .food
-                    .is_none_or(|food| food.can_always_eat || nutrition.food < 20)
+                    .is_none_or(|food| {
+                        nutrition
+                            .is_some_and(|nutrition| food.can_always_eat || nutrition.food < 20)
+                    })
                     .then_some((slot, stack, profile))
             });
         let Some((slot, stack, profile)) = consumable else {
@@ -154,17 +152,16 @@ pub(super) fn tick(
         let action = using.0.as_mut().unwrap();
         action.elapsed += 1;
         if action.elapsed % 8 == 1 {
-            sounds.write(if action.drinking {
-                super::presentation::SoundCue::Drink
+            commands.trigger(Sound::event(if action.drinking {
+                SoundId::EntityGenericDrink
             } else {
-                super::presentation::SoundCue::Eat
-            });
+                SoundId::EntityGenericEat
+            }));
         }
         if action.elapsed < action.duration {
             continue;
         }
-        // The same owner is borrowed through the whole transaction. No other action
-        // can consume the stack between validation and the application of its effects.
+        // Validation, consumption and remainder insertion share one inventory borrow.
         PlayerInventory::edit(&mut inventory, |inventory| {
             inventory.consume(slot, 1);
             if let Some(item) = profile.remainder {
@@ -177,47 +174,84 @@ pub(super) fn tick(
                 }
             }
         });
-        if let Some(food) = profile.food {
+        consumed.write(ItemConsumed {
+            entity,
+            stack: stack.with_count(1).expect("Consumed one item"),
+        });
+        using.0 = None;
+    }
+}
+
+fn apply_consumption(
+    mut consumed: MessageReader<ItemConsumed>,
+    mut actors: Query<(&mut Health, &mut ActiveEffects, Option<&mut Nutrition>)>,
+    mut teleports: Query<(
+        &mut Transform,
+        &mut CharacterMotion,
+        &FixedPosition,
+        &CharacterBody,
+        &CharacterState,
+        &mut Hazards,
+    )>,
+    world: VoxelWorld,
+    mut random: ResMut<SurvivalRandom>,
+    mut commands: Commands,
+) {
+    for consumed in consumed.read() {
+        let Ok((mut health, mut effects, mut nutrition)) = actors.get_mut(consumed.entity) else {
+            continue;
+        };
+        let profile =
+            super::catalog::consumable(consumed.stack.item()).expect("Consumed item profile");
+        let previous_health = *health;
+        let next_health = health.bypass_change_detection();
+        if let Some(food) = profile.food
+            && let Some(nutrition) = nutrition.as_deref_mut()
+        {
             nutrition.food = (nutrition.food as i32 + food.nutrition).clamp(0, 20) as u8;
             nutrition.saturation =
                 (nutrition.saturation + food.saturation).clamp(0.0, nutrition.food as f32);
-            sounds.write(super::presentation::SoundCue::Burp);
+            commands.trigger(Sound::event(SoundId::EntityPlayerBurp));
         }
         for effect in &profile.actions {
             match effect {
                 ConsumeAction::Apply(instances, probability) if random.unit() < *probability => {
                     for effect in instances {
-                        super::effects::apply(&mut health, &mut effects, *effect);
+                        super::effects::apply(next_health, &mut effects, *effect);
                     }
                 }
                 ConsumeAction::Clear => {
-                    super::effects::remove(&mut health, &mut effects, |_| false)
+                    super::effects::remove(next_health, &mut effects, |_| false)
                 }
                 ConsumeAction::Remove(ids) => {
-                    super::effects::remove(&mut health, &mut effects, |effect| {
+                    super::effects::remove(next_health, &mut effects, |effect| {
                         !ids.contains(&effect.id)
                     })
                 }
                 ConsumeAction::Teleport(diameter) => {
-                    if let Some(position) =
-                        safe_teleport(&world, position, body, character, &mut random, *diameter)
+                    if let Ok((mut transform, mut motion, position, body, character, mut hazards)) =
+                        teleports.get_mut(consumed.entity)
+                        && let Some(position) =
+                            safe_teleport(&world, position, body, character, &mut random, *diameter)
                     {
                         transform.translation = position;
                         motion.velocity = bevy::math::DVec3::ZERO;
                         hazards.fall_distance = 0.0;
-                        sounds.write(super::presentation::SoundCue::Teleport);
+                        commands.trigger(Sound::event(SoundId::ItemChorusFruitTeleport));
                     }
                 }
                 ConsumeAction::Sound => {
-                    sounds.write(super::presentation::SoundCue::Burp);
+                    commands.trigger(Sound::event(SoundId::EntityPlayerBurp));
                 }
                 _ => {}
             }
         }
-        for effect in profile.effects(stack.contents()) {
-            super::effects::apply(&mut health, &mut effects, effect);
+        for effect in profile.effects(consumed.stack.contents()) {
+            super::effects::apply(next_health, &mut effects, effect);
         }
-        using.0 = None;
+        if *next_health != previous_health {
+            health.set_changed();
+        }
     }
 }
 
@@ -226,8 +260,8 @@ pub(super) fn damage_response(
     mut actors: Query<&mut UsingItem>,
 ) {
     for impact in impacts.read().filter(|impact| impact.fatal) {
-        if let Ok(mut using) = actors.get_mut(impact.target) {
-            using.0 = None;
+        if let Ok(using) = actors.get_mut(impact.target) {
+            using.map_unchanged(|using| &mut using.0).set_if_neq(None);
         }
     }
 }

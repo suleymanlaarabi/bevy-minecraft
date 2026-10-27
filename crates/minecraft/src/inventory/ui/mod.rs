@@ -9,8 +9,7 @@ use bevy::prelude::*;
 pub(crate) use interactions::return_cursor_stack;
 pub(crate) use scenes::{spawn_hotbar_hud, spawn_inventory_overlay};
 pub(crate) use sync::{
-    bind_slots, follow_cursor_stack, hide_game_hud, lock_cursor, refresh_slots, show_game_hud,
-    unlock_cursor,
+    bind_slots, follow_cursor_stack, hide_game_hud, refresh_slots, show_game_hud,
 };
 
 const SLOT_SIZE: f32 = 48.0;
@@ -26,6 +25,7 @@ const PANEL_BG: Color = Color::srgba(0.10, 0.10, 0.11, 0.97);
 pub(crate) struct HotbarHud;
 
 #[derive(Component, Clone, Default)]
+#[require(hollow_features::cursor::FreeCursor)]
 struct InventoryOverlay;
 
 #[derive(Component, Clone, Copy, Default)]

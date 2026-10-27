@@ -3095,6 +3095,7 @@ dependencies = [
  "bevy_reflect",
  "bevy_time",
  "bevy_transform",
+ "bevy_window",
 ]
 
 [[package]]

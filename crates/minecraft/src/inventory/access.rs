@@ -1,4 +1,5 @@
 //! Input is ordered before mutations; each action batch borrows its owners once.
+use super::crafting::CraftDestination;
 use super::{
     CRAFT_RESULT, DragMode, DragState, INVENTORY_SIZE, InventoryCursor, ItemKind, ItemStack,
     PlayerInventory, SLOT_COUNT, slots::Slots,
@@ -11,11 +12,10 @@ use crate::{
 };
 use bevy::prelude::*;
 use hollow_features::motion::FixedPosition;
-use std::collections::VecDeque;
 
 pub(crate) const CONTAINER_START: usize = CRAFT_RESULT + 1;
 pub(crate) const MAX_VIEW_SLOTS: usize = CONTAINER_START + CONTAINER_SIZE * 2;
-#[derive(Clone, Copy, Debug)]
+#[derive(Message, Clone, Copy, Debug)]
 pub(crate) enum InventoryAction {
     SwapHotbar(usize, usize),
     Click {
@@ -35,11 +35,9 @@ pub(crate) enum InventoryAction {
     },
     DragEnd(Entity),
 }
-#[derive(Resource, Default, Deref, DerefMut)]
-pub(crate) struct InventoryActions(VecDeque<InventoryAction>);
 
 pub(crate) fn apply_actions(
-    mut actions: ResMut<InventoryActions>,
+    mut actions: ResMut<Messages<InventoryAction>>,
     mut players: Query<
         (
             &mut PlayerInventory,
@@ -58,8 +56,9 @@ pub(crate) fn apply_actions(
     if actions.is_empty() {
         return;
     }
-    // Dropping the drain also discards actions when their session is invalid.
-    let actions = actions.drain(..);
+    // This is the sole transactional consumer. Draining retains buffer capacity and
+    // discards the whole batch on an invalid session, without per-reader replay.
+    let actions = actions.drain();
     let Ok((mut inventory, mut grid, workbench, motion, viewing)) = players.single_mut() else {
         return;
     };
@@ -92,118 +91,19 @@ pub(crate) fn apply_actions(
     } else {
         [None, None]
     };
-    for action in actions {
-        let before = *grid;
-        PlayerInventory::edit(&mut inventory, |inventory| {
-            let mut slots = ScreenSlots {
-                inventory,
-                grid: grid.bypass_change_detection(),
-                containers: &mut owners,
-            };
-            match action {
-                InventoryAction::SwapHotbar(index, hotbar) => {
-                    if index == CRAFT_RESULT && !slots.container_open() {
-                        super::crafting::craft(
-                            slots.inventory,
-                            slots.grid,
-                            &mut cursor.stack,
-                            super::crafting::CraftDestination::Hotbar(hotbar),
-                        );
-                    } else {
-                        super::slots::swap(&mut slots, index, hotbar);
-                    }
-                }
-                InventoryAction::Click {
-                    index,
-                    right,
-                    shift,
-                    double,
-                } => {
-                    if cursor.drag.is_some() {
-                        return;
-                    }
-                    if index == CRAFT_RESULT {
-                        if !slots.container_open() {
-                            super::crafting::craft(
-                                slots.inventory,
-                                slots.grid,
-                                &mut cursor.stack,
-                                if shift {
-                                    super::crafting::CraftDestination::Inventory
-                                } else {
-                                    super::crafting::CraftDestination::Cursor
-                                },
-                            );
-                        }
-                    } else if shift && !right && cursor.stack.is_none() {
-                        slots.quick_move(index);
-                    } else if double && cursor.stack.is_some() {
-                        super::slots::collect(&mut slots, &mut cursor.stack);
-                    } else {
-                        super::slots::click(&mut slots, index, &mut cursor.stack, right);
-                    }
-                }
-                InventoryAction::DragStart {
-                    index,
-                    source,
-                    mode,
-                } => {
-                    if index == CRAFT_RESULT || index >= slots.len() {
-                        return;
-                    }
-                    let had_stack = cursor.stack.is_some();
-                    if !had_stack && mode == DragMode::Even {
-                        super::slots::click(&mut slots, index, &mut cursor.stack, false);
-                    }
-                    if cursor.stack.is_none() {
-                        return;
-                    }
-                    let mut visited = [false; MAX_VIEW_SLOTS];
-                    visited[index] = had_stack || mode == DragMode::OneEach;
-                    cursor.drag = Some(DragState {
-                        source_entity: source,
-                        mode,
-                        visited,
-                    });
-                }
-                InventoryAction::DragVisit { index, source } => {
-                    let Some(drag) = cursor.drag.as_mut() else {
-                        return;
-                    };
-                    if source != drag.source_entity
-                        || index >= drag.visited.len()
-                        || drag.visited[index]
-                    {
-                        return;
-                    }
-                    drag.visited[index] = true;
-                    if drag.mode == DragMode::OneEach {
-                        super::slots::click(&mut slots, index, &mut cursor.stack, true);
-                    }
-                }
-                InventoryAction::DragEnd(source) => {
-                    if cursor
-                        .drag
-                        .as_ref()
-                        .is_none_or(|drag| drag.source_entity != source)
-                    {
-                        return;
-                    }
-                    let drag = cursor.drag.take().expect("Active drag");
-                    if drag.mode == DragMode::Even {
-                        super::slots::distribute(
-                            &mut slots,
-                            &mut cursor.stack,
-                            &drag.visited,
-                            drag.mode,
-                        );
-                    }
-                }
-            }
-        });
-        if *grid != before {
-            grid.set_changed();
+    let before = *grid;
+    PlayerInventory::edit(&mut inventory, |inventory| {
+        let mut slots = ScreenSlots {
+            inventory,
+            grid: grid.bypass_change_detection(),
+            containers: &mut owners,
+        };
+        for action in actions {
+            slots.apply(action, &mut cursor);
         }
+    });
+    if *grid != before {
+        grid.set_changed();
     }
 }
 
@@ -214,6 +114,100 @@ struct ScreenSlots<'a, 'w> {
     containers: &'a mut [Option<Mut<'w, ContainerInventory>>; 2],
 }
 impl ScreenSlots<'_, '_> {
+    fn apply(&mut self, action: InventoryAction, cursor: &mut InventoryCursor) {
+        match action {
+            InventoryAction::SwapHotbar(index, hotbar) => {
+                if index == CRAFT_RESULT {
+                    self.craft(cursor, CraftDestination::Hotbar(hotbar));
+                } else {
+                    super::slots::swap(self, index, hotbar);
+                }
+            }
+            InventoryAction::Click {
+                index,
+                right,
+                shift,
+                double,
+            } => {
+                if cursor.drag.is_some() {
+                    return;
+                }
+                if index == CRAFT_RESULT {
+                    self.craft(
+                        cursor,
+                        if shift {
+                            CraftDestination::Inventory
+                        } else {
+                            CraftDestination::Cursor
+                        },
+                    );
+                } else if shift && !right && cursor.stack.is_none() {
+                    self.quick_move(index);
+                } else if double && cursor.stack.is_some() {
+                    super::slots::collect(self, &mut cursor.stack);
+                } else {
+                    super::slots::click(self, index, &mut cursor.stack, right);
+                }
+            }
+            InventoryAction::DragStart {
+                index,
+                source,
+                mode,
+            } => {
+                if index == CRAFT_RESULT || index >= self.len() {
+                    return;
+                }
+                let had_stack = cursor.stack.is_some();
+                if !had_stack && mode == DragMode::Even {
+                    super::slots::click(self, index, &mut cursor.stack, false);
+                }
+                if cursor.stack.is_none() {
+                    return;
+                }
+                let mut visited = [false; MAX_VIEW_SLOTS];
+                visited[index] = had_stack || mode == DragMode::OneEach;
+                cursor.drag = Some(DragState {
+                    source_entity: source,
+                    mode,
+                    visited,
+                });
+            }
+            InventoryAction::DragVisit { index, source } => {
+                let Some(drag) = cursor.drag.as_mut() else {
+                    return;
+                };
+                if source != drag.source_entity
+                    || index >= drag.visited.len()
+                    || drag.visited[index]
+                {
+                    return;
+                }
+                drag.visited[index] = true;
+                if drag.mode == DragMode::OneEach {
+                    super::slots::click(self, index, &mut cursor.stack, true);
+                }
+            }
+            InventoryAction::DragEnd(source) => {
+                if cursor
+                    .drag
+                    .as_ref()
+                    .is_none_or(|drag| drag.source_entity != source)
+                {
+                    return;
+                }
+                let drag = cursor.drag.take().expect("Active drag");
+                if drag.mode == DragMode::Even {
+                    super::slots::distribute(self, &mut cursor.stack, &drag.visited, drag.mode);
+                }
+            }
+        }
+    }
+
+    fn craft(&mut self, cursor: &mut InventoryCursor, destination: CraftDestination) {
+        if !self.container_open() {
+            super::crafting::craft(self.inventory, self.grid, &mut cursor.stack, destination);
+        }
+    }
     fn container_open(&self) -> bool {
         self.containers[0].is_some()
     }

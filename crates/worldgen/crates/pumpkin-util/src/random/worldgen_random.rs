@@ -92,4 +92,3 @@ impl RandomImpl for WorldgenRandom {
         self.calculate_gaussian()
     }
 }
-

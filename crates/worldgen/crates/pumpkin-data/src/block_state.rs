@@ -405,4 +405,3 @@ const WEST_SIDE_SOLID: u8 = 1 << 4;
 const EAST_SIDE_SOLID: u8 = 1 << 5;
 const DOWN_CENTER_SOLID: u8 = 1 << 6;
 const UP_CENTER_SOLID: u8 = 1 << 7;
-

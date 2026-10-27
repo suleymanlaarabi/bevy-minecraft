@@ -860,4 +860,3 @@ impl AquiferSamplerImpl for AquiferSampler {
         }
     }
 }
-

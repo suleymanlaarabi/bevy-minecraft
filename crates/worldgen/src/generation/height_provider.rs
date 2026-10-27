@@ -91,4 +91,3 @@ impl TrapezoidHeightProvider {
         i + random.next_inbetween_i32(0, m) + random.next_inbetween_i32(0, l)
     }
 }
-

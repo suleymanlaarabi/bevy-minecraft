@@ -501,4 +501,3 @@ fn box_from_corners(first: Vector3<i32>, second: Vector3<i32>) -> BlockBox {
         first.z.max(second.z),
     )
 }
-

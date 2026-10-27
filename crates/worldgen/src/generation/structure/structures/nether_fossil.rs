@@ -291,4 +291,3 @@ fn make_settings(rotation: Rotation) -> StructurePlaceSettings {
             },
         ]))
 }
-

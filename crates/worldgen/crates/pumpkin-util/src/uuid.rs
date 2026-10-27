@@ -61,4 +61,3 @@ pub fn parse_uuid(uuid: &str) -> Option<Uuid> {
 
     Some(Uuid::from_u128(uuid_int))
 }
-
