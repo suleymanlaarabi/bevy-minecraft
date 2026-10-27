@@ -5,13 +5,10 @@ pub mod biome;
 pub mod block;
 pub mod chunk;
 pub mod chunk_system;
-pub mod clip;
 pub mod generation;
 pub mod lighting;
 pub mod tick;
 pub mod world;
-
-pub use clip::{BlockHitResult, ClipBlock, ClipContext, ClipFluid};
 
 pub const CURRENT_MC_VERSION: &str = "26.3";
 
@@ -20,8 +17,7 @@ mod embedding;
 pub use embedding::*;
 pub mod block_relations;
 pub mod blocks;
-pub mod coordinates;
-pub mod sections;
+pub use hollow_core::{coordinates, sections};
 pub mod state;
 pub use blocks::VoxelKind;
 pub use state::VoxelState;

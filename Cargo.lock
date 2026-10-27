@@ -3061,8 +3061,52 @@ name = "hollow"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "hollow-minecraft",
+]
+
+[[package]]
+name = "hollow-core"
+version = "0.1.0"
+dependencies = [
+ "bevy_math",
+ "serde",
+]
+
+[[package]]
+name = "hollow-engine"
+version = "0.1.0"
+dependencies = [
+ "bevy_app",
+ "bevy_derive",
+ "bevy_ecs",
+ "bevy_math",
+ "bevy_platform",
+ "hollow-core",
+]
+
+[[package]]
+name = "hollow-features"
+version = "0.1.0"
+dependencies = [
+ "bevy_app",
+ "bevy_asset",
+ "bevy_ecs",
+ "bevy_math",
+ "bevy_reflect",
+ "bevy_time",
+ "bevy_transform",
+]
+
+[[package]]
+name = "hollow-minecraft"
+version = "0.1.0"
+dependencies = [
+ "bevy",
  "bytemuck",
  "directories",
+ "hollow-core",
+ "hollow-engine",
+ "hollow-features",
  "hollow-worldgen",
  "pumpkin-data",
  "pumpkin-util",
@@ -3086,6 +3130,7 @@ dependencies = [
  "bitflags 2.13.2",
  "crc32fast",
  "dashmap",
+ "hollow-core",
  "lz4_flex",
  "pumpkin-data",
  "pumpkin-nbt",

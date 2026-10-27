@@ -1,0 +1,12 @@
+[package]
+name = "hollow-engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hollow-core = { path = "../core" }
+bevy_app = "0.20"
+bevy_ecs = "0.20"
+bevy_derive = "0.20"
+bevy_math = "0.20"
+bevy_platform = "0.20"

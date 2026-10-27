@@ -54,7 +54,9 @@ Checked boxes below identify existing capabilities. Remaining-work boxes stay un
 | Survival, combat, and living mobs | Missing | Implement the player survival loop, damage, AI, spawning, and combat. |
 | Audio and weather | Missing | Integrate sound playback and gameplay weather beyond the existing sky/cloud presentation. |
 
-Source entry points: [game composition](src/game.rs), [player interactions](src/player/interaction.rs), [inventory and crafting](src/inventory/), [block behavior](src/block_behavior/), [voxel generation](src/voxel/generation.rs), [world lifecycle and saves](src/world/), and [world-generation crate](crates/worldgen/src/).
+Source entry points: [engine](crates/engine/src/), [shared gameplay services](crates/features/src/), [game composition](crates/minecraft/src/game.rs), [player interactions](crates/minecraft/src/player/interaction.rs), [inventory and crafting](crates/minecraft/src/inventory/), [block behavior](crates/minecraft/src/block_behavior/), [voxel generation](crates/minecraft/src/voxel/generation.rs), [world lifecycle and saves](crates/minecraft/src/world/), and [world-generation crate](crates/worldgen/src/).
+
+The plugin architecture refactor is in progress. See [implemented boundaries and remaining work](docs/PLUGIN_ARCHITECTURE.md).
 
 ## Milestone order
 

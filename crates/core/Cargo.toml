@@ -1,0 +1,8 @@
+[package]
+name = "hollow-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy_math = "0.20"
+serde = { version = "1", features = ["derive"] }

@@ -24,3 +24,6 @@ codegen-backend = "llvm"
 
 [profile.dev.package.pumpkin-codecs]
 codegen-backend = "llvm"
+
+[profile.dev.package.hollow-core]
+codegen-backend = "llvm"

@@ -11,6 +11,7 @@ publish = false
 
 
 [dependencies]
+hollow-core = { path = "../core" }
 pumpkin-nbt = { path = "crates/pumpkin-nbt", default-features = false }
 pumpkin-util = { path = "crates/pumpkin-util", default-features = false }
 pumpkin-data = { path = "crates/pumpkin-data", default-features = false, features = ["default"] }

@@ -28,16 +28,14 @@ impl ChunkSections {
             return None;
         }
         Some(
-            BlockStateId::new(
-                self.states
-                    .read()
-                    .unwrap()
-                    .get((y - self.min_y) as usize * 256 + z * 16 + x)
-                    .id(),
-            )
-            .unwrap(),
+            self.states
+                .read()
+                .unwrap()
+                .get((y - self.min_y) as usize * 256 + z * 16 + x)
+                .native_id(),
         )
     }
+
     pub fn get_rough_biome_absolute_y(&self, x: usize, y: i32, z: usize) -> Option<u8> {
         let quart_height = self.count * 4;
         let quart_y = (y - self.min_y) >> 2;

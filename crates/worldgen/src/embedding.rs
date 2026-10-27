@@ -7,10 +7,6 @@ use pumpkin_util::math::{position::BlockPos, vector3::Vector3};
 #[path = "embedding_lighting.rs"]
 mod lighting;
 pub use crate::chunk::io::ChunkStorage;
-pub const PUMPKIN_COMMIT: &str = "8ca5cb443272e0ac4f59b4c2ac059bdc72c2a22b";
-pub const MINECRAFT_VERSION: &str = crate::CURRENT_MC_VERSION;
-pub const FAST_GENERATION_VERSION: u32 = 2;
-pub const GENERATOR_VERSION: &str = "hollow-bevy-2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dimension {
@@ -92,7 +88,7 @@ impl ChunkSnapshot {
         }
     }
 
-    pub fn block_state_id(&self, x: u8, y: i32, z: u8) -> Option<u16> {
+    pub fn block_state_id(&self, x: u8, y: i32, z: u8) -> Option<u32> {
         if x >= 16 || z >= 16 || y < self.min_y || y >= self.min_y + self.height {
             return None;
         }

@@ -51,7 +51,8 @@ impl SnapshotAccess {
         self.index(pos)
             .and_then(|(p, i)| self.chunks.get(&p).map(|chunk| chunk.states.get(i)))
             .map_or(BlockStateId::AIR, |state| {
-                BlockStateId::new(state.id()).unwrap()
+                BlockStateId::new(u16::try_from(state.id()).expect("Minecraft lighting state"))
+                    .unwrap()
             })
     }
     pub(crate) fn light(&self, pos: &BlockPos) -> Option<u8> {

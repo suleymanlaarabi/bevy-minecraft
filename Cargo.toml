@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/worldgen", "crates/worldgen/crates/*"]
+members = [".", "crates/core", "crates/minecraft", "crates/engine", "crates/features", "crates/worldgen", "crates/worldgen/crates/*"]
 resolver = "3"
 
 [package]
@@ -9,48 +9,11 @@ edition = "2024"
 
 [features]
 default = []
-dev = ["bevy/bevy_dev_tools", "bevy/render_dev_tools", "bevy/sysinfo_plugin"]
+dev = ["hollow-minecraft/dev"]
 
 [dependencies]
-bevy = { version = "0.20", default-features = false, features = [
-    "std",
-    "async_executor",
-    "multi_threaded",
-    "bevy_asset",
-    "bevy_log",
-    "bevy_state",
-    "bevy_winit",
-    "keyboard",
-    "mouse",
-    "wayland",
-    # Feathers enables custom cursors; Winit must support the same cursor variants.
-    "custom_cursor",
-    "bevy_pbr",
-    "bevy_gizmos_render",
-    "bevy_anti_alias",
-    "bevy_post_process",
-    "tonemapping_luts",
-    "zstd_rust",
-    "png",
-    "bevy_ui_render",
-    "bevy_audio",
-    "vorbis",
-    "bevy_feathers",
-    "bevy_scene",
-    "bevy_settings",
-    "default_font",
-    "ui_picking",
-] }
-hollow-worldgen = { path = "crates/worldgen" }
-pumpkin-data = { path = "crates/worldgen/crates/pumpkin-data" }
-pumpkin-util = { path = "crates/worldgen/crates/pumpkin-util" }
-serde_json = "1.0"
-ron = "0.12"
-serde = { version = "1.0", features = ["derive"] }
-rusqlite = { version = "0.38", features = ["bundled"] }
-directories = "6"
-uuid = { version = "1", features = ["v4"] }
-bytemuck = "1"
+bevy = { version = "0.20", default-features = false, features = ["std"] }
+hollow-minecraft = { path = "crates/minecraft" }
 
 [profile.dev]
 opt-level = 2
@@ -96,6 +59,12 @@ debug-assertions = false
 overflow-checks = false
 
 [profile.dev.package.pumpkin-nbt]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+# Shared section storage retains the generation provider's development optimization.
+[profile.dev.package.hollow-core]
 opt-level = 3
 debug-assertions = false
 overflow-checks = false

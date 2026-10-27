@@ -28,7 +28,6 @@ pub struct GenerationSettings {
     pub seed: i64,
     pub dimension: Dimension,
     pub quality: TerrainQuality,
-    pub version: &'static str,
 }
 
 /// The game retains this column while its presentation or gameplay data is loaded.
@@ -93,7 +92,6 @@ impl GenerationSession {
                 seed,
                 dimension,
                 quality,
-                version: crate::GENERATOR_VERSION,
             },
             generator: std::sync::OnceLock::new(),
             initialization_waiters: Mutex::default(),

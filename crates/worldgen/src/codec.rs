@@ -1,112 +1,17 @@
-//! Compact shared terrain records. Uniform sections never expand during decoding.
+//! Minecraft generation records around the shared terrain codec.
 use crate::{
     VoxelState,
-    coordinates::SECTION_VOLUME,
     sections::{Layer, Section},
 };
+use hollow_core::{codec::TerrainRecord, coordinates::SECTION_VOLUME};
 use std::{io, sync::Arc};
-
-pub struct TerrainRecord {
-    pub states: Layer<VoxelState>,
-    pub light: Layer<u8>,
-    pub modified: bool,
-}
-
 fn invalid() -> io::Error {
-    io::Error::other("Invalid or truncated terrain record.")
+    io::Error::other("Invalid or truncated generation record.")
 }
-
-trait Cell: Copy + PartialEq {
-    fn encode(self, bytes: &mut Vec<u8>);
-    fn decode(bytes: &mut &[u8]) -> io::Result<Self>;
-}
-impl Cell for VoxelState {
-    fn encode(self, bytes: &mut Vec<u8>) {
-        bytes.extend_from_slice(&self.id().to_le_bytes());
-    }
-    fn decode(bytes: &mut &[u8]) -> io::Result<Self> {
-        Self::from_id(u16::from_le_bytes(take(bytes, 2)?.try_into().unwrap())).ok_or_else(invalid)
-    }
-}
-impl Cell for u8 {
-    fn encode(self, bytes: &mut Vec<u8>) {
-        bytes.push(self);
-    }
-    fn decode(bytes: &mut &[u8]) -> io::Result<Self> {
-        Ok(take(bytes, 1)?[0])
-    }
-}
-
 fn take<'a>(bytes: &mut &'a [u8], count: usize) -> io::Result<&'a [u8]> {
     let head = bytes.get(..count).ok_or_else(invalid)?;
     *bytes = &bytes[count..];
     Ok(head)
-}
-fn encode_section<T: Cell>(section: &Section<T>, bytes: &mut Vec<u8>) {
-    match section {
-        Section::Uniform(value) => {
-            bytes.push(0);
-            value.encode(bytes);
-        }
-        Section::Dense(cells) => {
-            bytes.push(1);
-            for &cell in cells.iter() {
-                cell.encode(bytes);
-            }
-        }
-    }
-}
-fn decode_section<T: Cell>(bytes: &mut &[u8]) -> io::Result<Section<T>> {
-    match u8::decode(bytes)? {
-        0 => Ok(Section::Uniform(T::decode(bytes)?)),
-        1 => {
-            let first = T::decode(bytes)?;
-            let mut cells = Arc::new([first; SECTION_VOLUME]);
-            for cell in &mut Arc::get_mut(&mut cells).unwrap()[1..] {
-                *cell = T::decode(bytes)?;
-            }
-            Ok(Section::Dense(cells))
-        }
-        _ => Err(invalid()),
-    }
-}
-
-impl TerrainRecord {
-    pub fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(32 * 1024);
-        bytes.push(self.states.section_count() as u8);
-        for section in 0..self.states.section_count() {
-            encode_section(self.states.section(section), &mut bytes);
-            encode_section(self.light.section(section), &mut bytes);
-        }
-        bytes.push(u8::from(self.modified));
-        bytes
-    }
-
-    pub fn decode(mut bytes: &[u8], section_count: usize) -> io::Result<Self> {
-        if u8::decode(&mut bytes)? as usize != section_count {
-            return Err(invalid());
-        }
-        let mut states = Vec::with_capacity(section_count);
-        let mut light = Vec::with_capacity(section_count);
-        for _ in 0..section_count {
-            states.push(decode_section(&mut bytes)?);
-            light.push(decode_section(&mut bytes)?);
-        }
-        let modified = match u8::decode(&mut bytes)? {
-            0 => false,
-            1 => true,
-            _ => return Err(invalid()),
-        };
-        if !bytes.is_empty() {
-            return Err(invalid());
-        }
-        Ok(Self {
-            states: Layer::from_sections(states),
-            light: Layer::from_sections(light),
-            modified,
-        })
-    }
 }
 
 /// The database stores the stage as a typed field alongside the payload.
@@ -267,7 +172,7 @@ pub(crate) fn decode_generated(
     }) {
         return Err(invalid());
     }
-    let terrain = TerrainRecord::decode(bytes, dim.height as usize / 16)?;
+    let terrain = TerrainRecord::<VoxelState>::decode(bytes, dim.height as usize / 16)?;
     if terrain.modified {
         return Err(invalid());
     }
@@ -377,8 +282,7 @@ pub(crate) fn decode_generated(
         chunk.flat_block_map = (0..metadata.block_count)
             .map(|i| {
                 let (x, y, z) = ((i % 4096) / 256, (i / 4096) * 16 + (i % 256) / 16, i % 16);
-                pumpkin_data::BlockStateId::new(terrain.states.get(y * 256 + z * 16 + x).id())
-                    .unwrap()
+                terrain.states.get(y * 256 + z * 16 + x).native_id()
             })
             .collect();
     }
