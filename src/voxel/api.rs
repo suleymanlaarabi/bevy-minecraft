@@ -55,11 +55,7 @@ impl VoxelWorld<'_, '_> {
 
     /// Returns the voxel at an integer world position, or `None` when it is unavailable.
     pub fn get(&self, world_position: IVec3) -> Option<VoxelKind> {
-        let (chunk_position, local_position) = split_world_position(world_position);
-        self.index
-            .get(&chunk_position)
-            .and_then(|entity| self.chunks.get(*entity).ok())
-            .and_then(|voxels| voxels.get(local_position))
+        self.state(world_position).map(VoxelState::kind)
     }
 
     pub fn state(&self, world_position: IVec3) -> Option<VoxelState> {

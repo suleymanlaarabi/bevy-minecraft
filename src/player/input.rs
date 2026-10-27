@@ -10,7 +10,7 @@ use std::f32::consts::FRAC_PI_2;
 
 pub(crate) fn clear_player_input(mut players: Query<&mut CharacterMovement, With<Player>>) {
     for mut movement in &mut players {
-        *movement = CharacterMovement::default();
+        movement.set_if_neq(CharacterMovement::default());
     }
 }
 
@@ -35,10 +35,17 @@ pub(super) fn mouse_look(
 
 pub(super) fn player_input(
     keyboard: Res<ButtonInput<KeyCode>>,
-    camera: Single<&PlayerCamera>,
-    player: Single<(&Transform, &mut CharacterMovement), With<Player>>,
+    camera: Single<Ref<PlayerCamera>>,
+    player: Single<(Ref<Transform>, &mut CharacterMovement), With<Player>>,
 ) {
     let (transform, mut movement) = player.into_inner();
+    if !keyboard.is_changed()
+        && !camera.is_changed()
+        && !transform.is_changed()
+        && !movement.is_changed()
+    {
+        return;
+    }
 
     let forward = transform.forward().as_vec3();
     let forward_flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
@@ -46,15 +53,15 @@ pub(super) fn player_input(
     let right = transform.right().as_vec3();
     let right_flat = Vec3::new(right.x, 0.0, right.z).normalize_or_zero();
 
-    movement.direction = (forward_flat * axis(&keyboard, KeyCode::KeyW, KeyCode::KeyS)
-        + right_flat * axis(&keyboard, KeyCode::KeyD, KeyCode::KeyA))
-    .normalize_or_zero();
-
-    movement.look_direction = camera.look(transform.rotation) * Vec3::NEG_Z;
-
-    movement.jump = keyboard.pressed(KeyCode::Space);
-    movement.sneak = keyboard.pressed(KeyCode::ShiftLeft);
-    movement.sprint = keyboard.pressed(KeyCode::ControlLeft);
+    movement.set_if_neq(CharacterMovement {
+        direction: (forward_flat * axis(&keyboard, KeyCode::KeyW, KeyCode::KeyS)
+            + right_flat * axis(&keyboard, KeyCode::KeyD, KeyCode::KeyA))
+        .normalize_or_zero(),
+        look_direction: camera.look(transform.rotation) * Vec3::NEG_Z,
+        jump: keyboard.pressed(KeyCode::Space),
+        sneak: keyboard.pressed(KeyCode::ShiftLeft),
+        sprint: keyboard.pressed(KeyCode::ControlLeft),
+    });
 }
 
 /// Crouching and swimming lower the camera smoothly, as the eyes ease between poses.

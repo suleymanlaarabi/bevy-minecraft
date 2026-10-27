@@ -146,7 +146,7 @@ pub(crate) fn open_manual(
         if other.kind() != state.0.kind() || state_behavior(other).upper == info.upper {
             return;
         }
-        let next = other.with(&[P::Open(if info.open { false } else { true })]);
+        let next = other.with(&[P::Open(!info.open)]);
         if collisions.intersects(position, next) {
             return;
         }

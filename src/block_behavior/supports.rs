@@ -67,6 +67,7 @@ pub(crate) fn update(
     mut queue: ResMut<SupportQueue>,
     mut entities: Local<EntityIndexSet>,
     mut checks: Query<(
+        Entity,
         &BlockEntity,
         &mut SupportCheck,
         Has<Door>,
@@ -82,7 +83,7 @@ pub(crate) fn update(
     checks
         .par_iter_many_unique_mut(&*entities)
         .for_each(|result| {
-            let Ok((block, mut check, door, wall, vine, dormant)) = result else {
+            let Ok((_, block, mut check, door, wall, vine, dormant)) = result else {
                 return;
             };
             let position = block.position;
@@ -214,10 +215,7 @@ pub(crate) fn update(
             });
         });
     // Complete the entire batch before any commit can invalidate another candidate.
-    for &entity in entities.iter() {
-        let Ok((block, check, _, _, _, _)) = checks.get(entity) else {
-            continue;
-        };
+    for (entity, block, check, _, _, _, _) in checks.iter_many_unique(&*entities).matched() {
         if !check.complete {
             continue;
         }
@@ -230,10 +228,8 @@ pub(crate) fn update(
         }
     }
     // Deferred removals have not run yet: take proposals in the original FIFO order.
-    for &entity in entities.iter() {
-        if let Ok((_, mut check, _, _, _, _)) = checks.get_mut(entity)
-            && let Some(edit) = check.edit.take()
-        {
+    for (_, _, mut check, _, _, _, _) in checks.iter_many_unique_mut(&*entities).matched() {
+        if let Some(edit) = check.edit.take() {
             commands.trigger(edit);
         }
     }

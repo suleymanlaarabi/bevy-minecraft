@@ -12,18 +12,10 @@ use crate::{
 };
 
 pub(super) fn cancel(mut actors: Query<(&mut UsingItem, &mut UseInput)>) {
-    for (mut using, mut input) in &mut actors {
-        using.0 = None;
-        input.0 = None;
+    for (using, input) in &mut actors {
+        using.map_unchanged(|using| &mut using.0).set_if_neq(None);
+        input.map_unchanged(|input| &mut input.0).set_if_neq(None);
     }
-}
-
-fn can_consume(stack: ItemStack, nutrition: &Nutrition) -> bool {
-    super::catalog::consumable(stack.item()).is_some_and(|profile| {
-        profile
-            .food
-            .is_none_or(|food| food.can_always_eat || nutrition.food < 20)
-    })
 }
 
 /// The interaction pass chooses the hand after giving usable blocks priority.
@@ -99,6 +91,11 @@ pub(super) fn tick(
         &mut Hazards,
     )>,
 ) {
+    let input_allowed = *state.get() == InventoryState::Closed
+        && mouse.pressed(MouseButton::Right)
+        && panel
+            .as_ref()
+            .is_none_or(|panel| *panel.get() == crate::devtools::DevPanelState::Closed);
     for (
         mut using,
         input,
@@ -114,27 +111,28 @@ pub(super) fn tick(
         mut hazards,
     ) in &mut actors
     {
-        let slot = input
+        let consumable = input
             .0
-            .filter(|&slot| slot == selection.0 || slot == OFFHAND_SLOT);
-        let stack = slot.and_then(|slot| inventory.slot(slot));
-        if !health.alive()
-            || *state.get() != InventoryState::Closed
-            || !mouse.pressed(MouseButton::Right)
-            || panel
-                .as_ref()
-                .is_some_and(|panel| *panel.get() != crate::devtools::DevPanelState::Closed)
-            || !world.collision_ready(motion.position.as_vec3())
-            || stack.is_none_or(|stack| !can_consume(stack, &nutrition))
-        {
+            .filter(|&slot| {
+                input_allowed
+                    && health.alive()
+                    && (slot == selection.0 || slot == OFFHAND_SLOT)
+                    && world.collision_ready(motion.position.as_vec3())
+            })
+            .and_then(|slot| {
+                let stack = inventory.slot(slot)?;
+                let profile = super::catalog::consumable(stack.item())?;
+                profile
+                    .food
+                    .is_none_or(|food| food.can_always_eat || nutrition.food < 20)
+                    .then_some((slot, stack, profile))
+            });
+        let Some((slot, stack, profile)) = consumable else {
             if using.0.is_some() {
                 using.0 = None;
             }
             continue;
-        }
-        let slot = slot.unwrap();
-        let stack = stack.unwrap();
-        let profile = super::catalog::consumable(stack.item()).unwrap();
+        };
         if using
             .0
             .is_none_or(|action| action.slot != slot || !action.stack.can_merge(stack))

@@ -159,7 +159,7 @@ impl CharacterMotion {
     }
 }
 
-#[derive(Component, Default, Debug, Clone, Copy)]
+#[derive(Component, Default, Debug, Clone, Copy, PartialEq)]
 pub struct CharacterMovement {
     pub direction: Vec3,
     pub look_direction: Vec3,

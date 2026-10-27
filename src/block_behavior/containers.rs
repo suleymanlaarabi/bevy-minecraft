@@ -499,10 +499,6 @@ pub(crate) struct ContainerTopology<'w, 's> {
     >,
 }
 impl ContainerTopology<'_, '_> {
-    pub fn entity(&self, position: IVec3) -> Option<Entity> {
-        let entity = self.lookup.entity(position)?;
-        self.blocks.contains(entity).then_some(entity)
-    }
     pub fn owners(&self, canonical: Entity, actor: Vec3) -> Option<[Option<Entity>; 2]> {
         let (_, state, pair, partners, available) = self.blocks.get(canonical).ok()?;
         if pair.is_some() || !available {
@@ -530,7 +526,7 @@ impl ContainerTopology<'_, '_> {
     }
     fn partner(&self, origin: IVec3, state: VoxelState) -> Option<Entity> {
         let position = chest_partner(origin, state)?;
-        let entity = self.entity(position)?;
+        let entity = self.lookup.entity(position)?;
         let (_, next, _, _, _) = self.blocks.get(entity).ok()?;
         (next.0.kind() == state.kind()
             && chest_partner(position, next.0) == Some(origin)
@@ -626,8 +622,8 @@ pub(crate) fn validate_sessions(
         }
     }
 }
-pub(crate) fn viewing_closed(
-    _: On<Remove<ViewingContainer>>,
+pub(crate) fn session_closed<T: Component>(
+    _: On<Remove<T>>,
     next: Option<ResMut<NextState<crate::inventory::InventoryState>>>,
     mut actions: ResMut<crate::inventory::access::InventoryActions>,
 ) {
@@ -636,12 +632,12 @@ pub(crate) fn viewing_closed(
     }
     actions.clear();
 }
-pub(crate) fn close_sessions(
+pub(crate) fn close_sessions<T: Component>(
     mut commands: Commands,
-    sessions: Query<Entity, With<ViewingContainer>>,
+    sessions: Query<Entity, With<T>>,
 ) {
     for entity in &sessions {
-        commands.entity(entity).remove::<ViewingContainer>();
+        commands.entity(entity).remove::<T>();
     }
 }
 pub(crate) fn track_inventory_changes(

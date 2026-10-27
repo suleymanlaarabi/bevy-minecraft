@@ -5,8 +5,9 @@ use super::{
     lighting::LitEdits,
     streaming::{ChunkIndex, PendingEdits, StoredChunks},
 };
-use bevy::prelude::*;
+use bevy::{ecs::system::SystemParam, platform::collections::HashSet, prelude::*};
 use hollow_worldgen::coordinates::{CHUNK_HEIGHT, CHUNK_SIZE, FULL_SKY, split_world_position};
+use std::collections::VecDeque;
 
 #[derive(Event, Clone, Copy, Debug)]
 pub struct SetVoxel {
@@ -37,23 +38,24 @@ impl SetVoxel {
 #[component(storage = "SparseSet")]
 pub(crate) struct EditedChunk;
 
-pub(crate) fn set_voxel(
-    event: On<SetVoxel>,
-    mut commands: Commands,
-    index: Res<ChunkIndex>,
-    mut stored: ResMut<StoredChunks>,
-    mut pending: ResMut<PendingEdits>,
-    mut chunks: Query<&mut ChunkVoxels>,
-) {
-    apply_voxel(
-        *event,
-        &mut commands,
-        &index,
-        &mut stored,
-        &mut pending,
-        &mut chunks,
-        true,
-    );
+/// One mutable voxel query serves validation, edits, and connection propagation.
+#[derive(SystemParam)]
+pub(crate) struct VoxelEditWorld<'w, 's> {
+    index: Res<'w, ChunkIndex>,
+    stored: ResMut<'w, StoredChunks>,
+    pending: ResMut<'w, PendingEdits>,
+    chunks: Query<'w, 's, &'static mut ChunkVoxels>,
+    connections: Local<'s, ConnectionWork>,
+}
+
+#[derive(Default)]
+struct ConnectionWork {
+    queue: VecDeque<IVec3>,
+    pending: HashSet<IVec3>,
+}
+
+pub(crate) fn set_voxel(event: On<SetVoxel>, mut commands: Commands, mut world: VoxelEditWorld) {
+    world.apply(*event, &mut commands, true);
 }
 
 #[derive(Event, Clone, Copy)]
@@ -90,10 +92,7 @@ pub(crate) struct MiningAction {
 pub(crate) fn edit_batch(
     event: On<EditBatch>,
     mut commands: Commands,
-    index: Res<ChunkIndex>,
-    mut stored: ResMut<StoredChunks>,
-    mut pending: ResMut<PendingEdits>,
-    mut chunks: Query<&mut ChunkVoxels>,
+    mut world: VoxelEditWorld,
     mut inventories: Query<(
         &mut crate::inventory::PlayerInventory,
         &crate::inventory::HotbarSelection,
@@ -110,9 +109,10 @@ pub(crate) fn edit_batch(
         if event.edits[..i]
             .iter()
             .any(|other| other.position == edit.position)
-            || index
+            || world
+                .index
                 .get(&chunk)
-                .and_then(|&entity| chunks.get(entity).ok())
+                .and_then(|&entity| world.chunks.get(entity).ok())
                 .and_then(|voxels| voxels.state(local))
                 != Some(edit.expected)
         {
@@ -212,24 +212,14 @@ pub(crate) fn edit_batch(
         });
     }
     for edit in &event.edits {
-        apply_voxel(
+        world.apply(
             SetVoxel::with_state(edit.position, edit.state),
             &mut commands,
-            &index,
-            &mut stored,
-            &mut pending,
-            &mut chunks,
             false,
         );
     }
     for edit in &event.edits {
-        refresh_connections(
-            edit.position,
-            &index,
-            &mut stored,
-            &mut chunks,
-            &mut commands,
-        );
+        world.refresh_connections(edit.position, &mut commands);
     }
     if let Some(harvest) = event.harvest
         && mining.is_none_or(|outcome| outcome.can_harvest)
@@ -252,119 +242,180 @@ pub(crate) fn edit_batch(
     }
 }
 
-fn apply_voxel(
-    edit: SetVoxel,
-    commands: &mut Commands,
-    index: &ChunkIndex,
-    stored: &mut StoredChunks,
-    pending: &mut PendingEdits,
-    chunks: &mut Query<&mut ChunkVoxels>,
-    refresh: bool,
-) {
-    let (chunk, local) = split_world_position(edit.world_position);
-    if !(0..CHUNK_HEIGHT).contains(&local.y) {
-        return;
+impl VoxelEditWorld<'_, '_> {
+    fn apply(&mut self, edit: SetVoxel, commands: &mut Commands, refresh: bool) {
+        let (chunk, local) = split_world_position(edit.world_position);
+        if !(0..CHUNK_HEIGHT).contains(&local.y) {
+            return;
+        }
+        // Read neighbors before borrowing the edited chunk mutably, using the same query.
+        // Only removal exposes a formerly opaque cell with stale (usually zero) light.
+        let estimate = if edit.kind == VoxelKind::Air
+            && let Some(entity) = self.index.get(&chunk)
+            && let Ok(voxels) = self.chunks.get(*entity)
+            && voxels.get(local).is_some_and(VoxelKind::is_opaque)
+        {
+            let (mut sky, mut block) = (0u8, 0u8);
+            for offset in [
+                IVec3::X,
+                IVec3::NEG_X,
+                IVec3::Y,
+                IVec3::NEG_Y,
+                IVec3::Z,
+                IVec3::NEG_Z,
+            ] {
+                let position = edit.world_position + offset;
+                let light = if position.y >= CHUNK_HEIGHT {
+                    FULL_SKY
+                } else {
+                    let (neighbor_chunk, neighbor_local) = split_world_position(position);
+                    let Some(entity) = self.index.get(&neighbor_chunk) else {
+                        continue;
+                    };
+                    let Ok(neighbor) = self.chunks.get(*entity) else {
+                        continue;
+                    };
+                    if neighbor
+                        .get(neighbor_local)
+                        .is_none_or(VoxelKind::is_opaque)
+                    {
+                        continue;
+                    }
+                    let Some(light) = neighbor.render_light_at(neighbor_local) else {
+                        continue;
+                    };
+                    light
+                };
+                let neighbor_sky = light >> 4;
+                sky = sky.max(if offset == IVec3::Y && neighbor_sky == 15 {
+                    15
+                } else {
+                    neighbor_sky.saturating_sub(1)
+                });
+                block = block.max((light & 15).saturating_sub(1));
+            }
+            Some((sky << 4) | block)
+        } else {
+            None
+        };
+        let old = self.state(edit.world_position);
+        let changed = if let Some(entity) = self.index.get(&chunk) {
+            let Ok(mut voxels) = self.chunks.get_mut(*entity) else {
+                return;
+            };
+            let changed = voxels
+                .bypass_change_detection()
+                .set_state(local, edit.state);
+            if changed {
+                if let Some(light) = estimate {
+                    voxels
+                        .bypass_change_detection()
+                        .estimate_light(local, light);
+                }
+                voxels.set_changed();
+                let mut entity = commands.entity(*entity);
+                entity.try_insert(EditedChunk);
+                if voxels.modified {
+                    entity.try_insert(LitEdits);
+                }
+            }
+            changed
+        } else if let Some(voxels) = self.stored.get_mut(&chunk) {
+            voxels.set_state(local, edit.state)
+        } else {
+            // Applied by `spawn_chunk` once the chunk streams in.
+            self.pending.entry(chunk).or_default().push(edit);
+            return;
+        };
+        if !changed {
+            return;
+        }
+        if let Some(old) = old {
+            commands.trigger(BlockChanged {
+                position: edit.world_position,
+                old,
+                new: edit.state,
+            });
+        }
+        if refresh {
+            self.refresh_connections(edit.world_position, commands);
+        }
+
+        invalidate_border(chunk, local, &self.index, &mut self.chunks, commands);
     }
-    // Read neighbors before borrowing the edited chunk mutably, using the same query.
-    // Only removal exposes a formerly opaque cell with stale (usually zero) light.
-    let estimate = if edit.kind == VoxelKind::Air
-        && let Some(entity) = index.get(&chunk)
-        && let Ok(voxels) = chunks.get(*entity)
-        && voxels.get(local).is_some_and(VoxelKind::is_opaque)
-    {
-        let (mut sky, mut block) = (0u8, 0u8);
-        for offset in [
+
+    fn state(&self, position: IVec3) -> Option<VoxelState> {
+        let (chunk, local) = split_world_position(position);
+        self.index
+            .get(&chunk)
+            .and_then(|&entity| self.chunks.get(entity).ok())
+            .or_else(|| self.stored.get(&chunk))
+            .and_then(|voxels| voxels.state(local))
+    }
+
+    fn refresh_connections(&mut self, position: IVec3, commands: &mut Commands) {
+        const SIDES: [IVec3; 6] = [
             IVec3::X,
             IVec3::NEG_X,
             IVec3::Y,
             IVec3::NEG_Y,
             IVec3::Z,
             IVec3::NEG_Z,
-        ] {
-            let position = edit.world_position + offset;
-            let light = if position.y >= CHUNK_HEIGHT {
-                FULL_SKY
-            } else {
-                let (neighbor_chunk, neighbor_local) = split_world_position(position);
-                let Some(entity) = index.get(&neighbor_chunk) else {
-                    continue;
-                };
-                let Ok(neighbor) = chunks.get(*entity) else {
-                    continue;
-                };
-                if neighbor
-                    .get(neighbor_local)
-                    .is_none_or(VoxelKind::is_opaque)
-                {
-                    continue;
-                }
-                let Some(light) = neighbor.render_light_at(neighbor_local) else {
-                    continue;
-                };
-                light
+        ];
+        self.connections.queue.clear();
+        self.connections.pending.clear();
+        for p in std::iter::once(position).chain(SIDES.map(|d| position + d)) {
+            self.connections.queue.push_back(p);
+            self.connections.pending.insert(p);
+        }
+        while let Some(position) = self.connections.queue.pop_front() {
+            self.connections.pending.remove(&position);
+            let Some(state) = self.state(position) else {
+                continue;
             };
-            let neighbor_sky = light >> 4;
-            sky = sky.max(if offset == IVec3::Y && neighbor_sky == 15 {
-                15
-            } else {
-                neighbor_sky.saturating_sub(1)
+            let next = super::rules::connected(position, state, |p| self.state(p));
+            if next == state {
+                continue;
+            }
+            let (chunk, local) = split_world_position(position);
+            if let Some(&entity) = self.index.get(&chunk) {
+                if let Ok(mut voxels) = self.chunks.get_mut(entity) {
+                    voxels.set_state(local, next);
+                    commands.entity(entity).try_insert((EditedChunk, LitEdits));
+                }
+            } else if let Some(voxels) = self.stored.get_mut(&chunk) {
+                voxels.set_state(local, next);
+            }
+            commands.trigger(BlockChanged {
+                position,
+                old: state,
+                new: next,
             });
-            block = block.max((light & 15).saturating_sub(1));
-        }
-        Some((sky << 4) | block)
-    } else {
-        None
-    };
-    let old = read_state(edit.world_position, index, stored, chunks);
-    let changed = if let Some(entity) = index.get(&chunk) {
-        let Ok(mut voxels) = chunks.get_mut(*entity) else {
-            return;
-        };
-        let changed = voxels
-            .bypass_change_detection()
-            .set_state(local, edit.state);
-        if changed {
-            if let Some(light) = estimate {
-                voxels
-                    .bypass_change_detection()
-                    .estimate_light(local, light);
-            }
-            voxels.set_changed();
-            let mut entity = commands.entity(*entity);
-            entity.try_insert(EditedChunk);
-            if voxels.modified {
-                entity.try_insert(LitEdits);
+            invalidate_border(chunk, local, &self.index, &mut self.chunks, commands);
+            for delta in SIDES {
+                let neighbor = position + delta;
+                if self.connections.pending.insert(neighbor) {
+                    self.connections.queue.push_back(neighbor);
+                }
             }
         }
-        changed
-    } else if let Some(voxels) = stored.get_mut(&chunk) {
-        voxels.set_state(local, edit.state)
-    } else {
-        // Applied by `spawn_chunk` once the chunk streams in.
-        pending.entry(chunk).or_default().push(edit);
-        return;
-    };
-    if !changed {
-        return;
     }
-    if let Some(old) = old {
-        commands.trigger(BlockChanged {
-            position: edit.world_position,
-            old,
-            new: edit.state,
-        });
-    }
-    if refresh {
-        refresh_connections(edit.world_position, index, stored, chunks, commands);
-    }
+}
 
+fn invalidate_border(
+    chunk: IVec2,
+    local: IVec3,
+    index: &ChunkIndex,
+    chunks: &mut Query<&mut ChunkVoxels>,
+    commands: &mut Commands,
+) {
     // Neighbors read this border directly; only their meshes need refreshing.
     for offset in border_neighbors(local) {
-        if let Some(entity) = index.get(&(chunk + offset))
-            && let Ok(mut voxels) = chunks.get_mut(*entity)
+        if let Some(&entity) = index.get(&(chunk + offset))
+            && let Ok(mut voxels) = chunks.get_mut(entity)
         {
             voxels.mark_sections(ChunkVoxels::sections_around(local.y));
-            commands.entity(*entity).try_insert(EditedChunk);
+            commands.entity(entity).try_insert(EditedChunk);
         }
     }
 }
@@ -386,82 +437,6 @@ pub(super) fn border_neighbors(local: IVec3) -> impl Iterator<Item = IVec2> {
     .flatten()
 }
 
-fn read_state(
-    position: IVec3,
-    index: &ChunkIndex,
-    stored: &StoredChunks,
-    chunks: &Query<&mut ChunkVoxels>,
-) -> Option<VoxelState> {
-    let (chunk, local) = split_world_position(position);
-    index
-        .get(&chunk)
-        .and_then(|&entity| chunks.get(entity).ok())
-        .or_else(|| stored.get(&chunk))
-        .and_then(|voxels| voxels.state(local))
-}
-fn refresh_connections(
-    position: IVec3,
-    index: &ChunkIndex,
-    stored: &mut StoredChunks,
-    chunks: &mut Query<&mut ChunkVoxels>,
-    commands: &mut Commands,
-) {
-    use std::collections::{HashSet, VecDeque};
-    const SIDES: [IVec3; 6] = [
-        IVec3::X,
-        IVec3::NEG_X,
-        IVec3::Y,
-        IVec3::NEG_Y,
-        IVec3::Z,
-        IVec3::NEG_Z,
-    ];
-    let mut queue = VecDeque::new();
-    let mut pending = HashSet::new();
-    for p in std::iter::once(position).chain(SIDES.map(|d| position + d)) {
-        queue.push_back(p);
-        pending.insert(p);
-    }
-    while let Some(position) = queue.pop_front() {
-        pending.remove(&position);
-        let Some(state) = read_state(position, index, stored, chunks) else {
-            continue;
-        };
-        let next =
-            super::rules::connected(position, state, |p| read_state(p, index, stored, chunks));
-        if next == state {
-            continue;
-        }
-        let (chunk, local) = split_world_position(position);
-        if let Some(&entity) = index.get(&chunk) {
-            if let Ok(mut voxels) = chunks.get_mut(entity) {
-                voxels.set_state(local, next);
-                commands.entity(entity).try_insert((EditedChunk, LitEdits));
-            }
-        } else if let Some(voxels) = stored.get_mut(&chunk) {
-            voxels.set_state(local, next);
-        }
-        commands.trigger(BlockChanged {
-            position,
-            old: state,
-            new: next,
-        });
-        for offset in border_neighbors(local) {
-            if let Some(&entity) = index.get(&(chunk + offset))
-                && let Ok(mut voxels) = chunks.get_mut(entity)
-            {
-                voxels.mark_sections(ChunkVoxels::sections_around(local.y));
-                commands.entity(entity).try_insert(EditedChunk);
-            }
-        }
-        for delta in SIDES {
-            let neighbor = position + delta;
-            if pending.insert(neighbor) {
-                queue.push_back(neighbor);
-            }
-        }
-    }
-}
-
 /// A loaded neighbor can restore a connection changed while it was absent.
 /// Pumpkin generates matching borders, so only edges shared with an edited
 /// chunk are inspected, and only in sections holding connection-bearing blocks.
@@ -469,18 +444,17 @@ pub(crate) fn refresh_connection_border(
     added: On<Add<super::VoxelChunk>>,
     mut commands: Commands,
     positions: Query<&super::VoxelChunk>,
-    index: Res<ChunkIndex>,
-    mut stored: ResMut<StoredChunks>,
-    mut chunks: Query<&mut ChunkVoxels>,
+    mut world: VoxelEditWorld,
+    mut seeds: Local<Vec<IVec3>>,
 ) {
     let Ok(&super::VoxelChunk { position }) = positions.get(added.entity) else {
         return;
     };
-    let Ok(own) = chunks.get(added.entity) else {
+    let Ok(own) = world.chunks.get(added.entity) else {
         return;
     };
     let own_modified = own.modified;
-    let mut seeds = Vec::new();
+    seeds.clear();
     // (neighbor offset, horizontal axis, own edge, neighbor edge)
     for (offset, axis, own_edge, neighbor_edge) in [
         (IVec2::NEG_X, 0, 0, CHUNK_SIZE - 1),
@@ -489,9 +463,10 @@ pub(crate) fn refresh_connection_border(
         (IVec2::Y, 2, CHUNK_SIZE - 1, 0),
     ] {
         let neighbor_position = position + offset;
-        let Some(neighbor) = index
+        let Some(neighbor) = world
+            .index
             .get(&neighbor_position)
-            .and_then(|&entity| chunks.get(entity).ok())
+            .and_then(|&entity| world.chunks.get(entity).ok())
         else {
             continue;
         };
@@ -505,8 +480,8 @@ pub(crate) fn refresh_connection_border(
             collect_border_connections(voxels, chunk, axis, edge, &mut seeds);
         }
     }
-    for seed in seeds {
-        refresh_connections(seed, &index, &mut stored, &mut chunks, &mut commands);
+    for seed in seeds.drain(..) {
+        world.refresh_connections(seed, &mut commands);
     }
 }
 

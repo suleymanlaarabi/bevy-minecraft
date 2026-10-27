@@ -26,16 +26,18 @@ fn recover_player(
         With<Player>,
     >,
 ) {
-    for (mut transform, mut checkpoint, state) in &mut players {
+    for (mut transform, checkpoint, state) in &mut players {
         if !transform.translation.is_finite() {
             if let Some(safe) = checkpoint.0 {
                 // The controller sees the jump as a teleport and drops its velocity.
                 transform.translation = safe;
             }
-        } else if world.collision_ready(transform.translation)
-            && (state.on_ground || checkpoint.0.is_none())
+        } else if (state.on_ground || checkpoint.0.is_none())
+            && world.collision_ready(transform.translation)
         {
-            checkpoint.0 = Some(transform.translation);
+            checkpoint
+                .map_unchanged(|checkpoint| &mut checkpoint.0)
+                .set_if_neq(Some(transform.translation));
         }
     }
 }

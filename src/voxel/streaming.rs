@@ -6,6 +6,7 @@ use super::{
 };
 use crate::game::GameState;
 use bevy::{
+    ecs::entity::EntityIndexSet,
     platform::collections::{HashMap, HashSet, hash_map::Entry},
     prelude::*,
     tasks::{IoTaskPool, Task, futures::check_ready},
@@ -375,7 +376,7 @@ pub(crate) fn release_ready_chunks(
     waiting: Query<(Entity, &VoxelChunk), With<AwaitingNeighbors>>,
     arrivals: Option<Res<ChunkArrivals>>,
     mut last_view: Local<Option<(IVec2, u32)>>,
-    mut candidates: Local<HashSet<Entity>>,
+    mut candidates: Local<EntityIndexSet>,
 ) {
     let Some(center) = state.center else {
         return;
@@ -389,18 +390,13 @@ pub(crate) fn release_ready_chunks(
     } else if let Some(arrivals) = arrivals {
         for &position in &arrivals.current {
             for offset in NEIGHBOR_OFFSETS.into_iter().chain([IVec2::ZERO]) {
-                if let Some(&entity) = index.get(&(position + offset))
-                    && waiting.contains(entity)
-                {
+                if let Some(&entity) = index.get(&(position + offset)) {
                     candidates.insert(entity);
                 }
             }
         }
     }
-    for &entity in candidates.iter() {
-        let Ok((_, chunk)) = waiting.get(entity) else {
-            continue;
-        };
+    for (entity, chunk) in waiting.iter_many_unique(&*candidates).matched() {
         if hollow_worldgen::coordinates::chunk_distance_squared(chunk.position, center)
             > render_squared
         {

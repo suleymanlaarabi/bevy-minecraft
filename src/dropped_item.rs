@@ -2,7 +2,7 @@ use std::{collections::HashMap, time::Duration};
 
 use bevy::{
     ecs::batching::BatchingStrategy, light::NotShadowCaster, math::DVec3, prelude::*,
-    utils::Parallel,
+    time::common_conditions::on_timer, utils::Parallel,
 };
 
 use crate::{
@@ -170,9 +170,11 @@ impl Plugin for DroppedItemPlugin {
             )
             .add_systems(
                 FixedUpdate,
-                (simulate_dropped_items, pickup_dropped_items)
+                (
+                    simulate_dropped_items,
+                    pickup_dropped_items.after(CharacterSystems),
+                )
                     .chain()
-                    .after(CharacterSystems)
                     .run_if(crate::world::playing)
                     .run_if(not(resource_exists::<SimulationPaused>)),
             )
@@ -183,7 +185,11 @@ impl Plugin for DroppedItemPlugin {
                     .run_if(crate::world::playing)
                     .run_if(not(resource_exists::<SimulationPaused>)),
             )
-            .add_systems(Update, cleanup_expired_drops.run_if(crate::world::playing));
+            .add_systems(
+                Update,
+                cleanup_expired_drops
+                    .run_if(crate::world::playing.and_then(on_timer(Duration::from_secs(1)))),
+            );
     }
 }
 
@@ -424,7 +430,7 @@ fn pickup_dropped_items(
     let (player, mut inventory) = player.into_inner();
     let now = time.elapsed();
     let half = DVec3::splat(DROP_COLLIDER_SIZE as f64 * 0.5);
-    for (entity, motion, mut drop) in &mut drops {
+    for (entity, motion, drop) in &mut drops {
         if now < drop.pickup_after {
             continue;
         }
@@ -442,7 +448,10 @@ fn pickup_dropped_items(
             None => {
                 commands.entity(entity).despawn();
             }
-            Some(remaining) => drop.stack = remaining,
+            Some(remaining) => {
+                drop.map_unchanged(|drop| &mut drop.stack)
+                    .set_if_neq(remaining);
+            }
         }
     }
 }
@@ -451,14 +460,7 @@ fn cleanup_expired_drops(
     time: Res<Time>,
     drops: Query<(Entity, &DroppedItem)>,
     mut commands: Commands,
-    mut timer: Local<Option<Timer>>,
 ) {
-    let timer =
-        timer.get_or_insert_with(|| Timer::new(Duration::from_secs(1), TimerMode::Repeating));
-    timer.tick(time.delta());
-    if !timer.just_finished() {
-        return;
-    }
     let now = time.elapsed();
     for (entity, drop) in &drops {
         if now >= drop.expires_at {

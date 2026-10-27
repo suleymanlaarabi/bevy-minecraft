@@ -9,6 +9,7 @@ use std::{
 
 /// Contiguous slots with immutable, copy-on-write save snapshots.
 #[derive(Component, Clone, Debug, PartialEq, Eq)]
+#[component(summary_tick)]
 pub struct ItemSlots<const N: usize>(Option<Arc<[Option<ItemStack>; N]>>);
 impl<const N: usize> Default for ItemSlots<N> {
     fn default() -> Self {
@@ -46,7 +47,9 @@ impl<const N: usize> ItemSlots<N> {
         true
     }
     pub fn is_empty(&self) -> bool {
-        self.iter().all(Option::is_none)
+        self.0
+            .as_ref()
+            .is_none_or(|slots| slots.iter().all(Option::is_none))
     }
 }
 
@@ -130,8 +133,9 @@ pub(crate) fn collect(slots: &mut impl Slots, cursor: &mut Option<ItemStack>) {
     let Some(mut held) = *cursor else {
         return;
     };
+    let capacity = held.max_stack_size();
     for index in 0..slots.len() {
-        if held.count() == held.max_stack_size() {
+        if held.count() == capacity {
             break;
         }
         if !slots.collectible(index) {
@@ -143,10 +147,7 @@ pub(crate) fn collect(slots: &mut impl Slots, cursor: &mut Option<ItemStack>) {
         if !held.can_merge(current) {
             continue;
         }
-        let count = (held.max_stack_size() - held.count()).min(current.count());
-        if count == 0 {
-            continue;
-        }
+        let count = (capacity - held.count()).min(current.count());
         slots.set(index, current.with_count(current.count() - count));
         held = held.with_count(held.count() + count).unwrap();
     }
@@ -179,7 +180,10 @@ pub(crate) fn distribute(
     }
     let mut remaining = held.count();
     for (index, &visit) in visited.iter().enumerate() {
-        if !visit || remaining == 0 || !compatible(slots, index) {
+        if remaining == 0 {
+            break;
+        }
+        if !visit || !compatible(slots, index) {
             continue;
         }
         let previous = slots.get(index).map_or(0, ItemStack::count);
@@ -236,11 +240,8 @@ pub(crate) fn insert(
             slots.set(target, held.with_count(previous + moved));
             left -= moved;
             if left == 0 {
-                break;
+                return None;
             }
-        }
-        if left == 0 {
-            break;
         }
     }
     held.with_count(left)

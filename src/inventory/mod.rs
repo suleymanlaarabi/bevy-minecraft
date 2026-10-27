@@ -11,10 +11,11 @@ pub(crate) use crafting::{CraftingGrid, CraftingResult};
 pub(crate) use model::ITEM_ID_LIMIT;
 pub(crate) use ui::{lock_cursor, unlock_cursor};
 
+use bevy::input::common_conditions::input_just_pressed;
 use bevy::prelude::*;
 use input::{handle_hotbar_scroll, handle_number_keys, handle_swap_offhand};
 
-use crate::{game::GameState, player::Player};
+use crate::game::GameState;
 
 pub use model::{
     ARMOR_START, BLOCK_STACK_SIZE, CRAFT_RESULT, CRAFT_START, ConsumableContents, DragMode,
@@ -93,15 +94,16 @@ impl Plugin for InventoryPlugin {
                     .run_if(crate::world::playing)
                     .run_if(crate::survival::player_alive)
                     .run_if(crate::devtools::panel_closed)
-                    // Nothing to open while the world is still loading.
-                    .run_if(any_with_component::<Player>),
+                    .run_if(input_just_pressed(KeyCode::KeyE)),
             )
             .add_systems(
                 Update,
                 (
                     handle_number_keys,
-                    handle_hotbar_scroll,
-                    handle_swap_offhand,
+                    handle_hotbar_scroll.run_if(in_state(InventoryState::Closed)),
+                    handle_swap_offhand
+                        .run_if(in_state(InventoryState::Closed))
+                        .run_if(input_just_pressed(KeyCode::KeyF)),
                 )
                     .chain()
                     .run_if(crate::devtools::panel_closed)
@@ -135,14 +137,9 @@ impl Plugin for InventoryPlugin {
 }
 
 fn toggle_inventory(
-    keyboard: Res<ButtonInput<KeyCode>>,
     state: Res<State<InventoryState>>,
     mut next_state: ResMut<NextState<InventoryState>>,
 ) {
-    if !keyboard.just_pressed(KeyCode::KeyE) {
-        return;
-    }
-
     next_state.set(match state.get() {
         InventoryState::Closed => InventoryState::Open,
         InventoryState::Open => InventoryState::Closed,

@@ -110,6 +110,7 @@ pub(super) fn tick(
         if !health.alive() || effects.0.is_empty() {
             continue;
         }
+        let mut expired = false;
         for effect in &mut effects.0 {
             let level = effect.amplifier + 1;
             let cadence = if effect.id == E::REGENERATION.id {
@@ -165,9 +166,10 @@ pub(super) fn tick(
                 }
             }
             effect.ticks -= 1;
+            expired |= effect.ticks == 0;
         }
         // Expiration must undo attribute contributions exactly once.
-        if effects.0.iter().any(|effect| effect.ticks == 0) {
+        if expired {
             remove(&mut health, &mut effects, |effect| effect.ticks != 0);
         }
     }

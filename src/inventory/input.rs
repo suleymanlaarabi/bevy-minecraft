@@ -28,7 +28,7 @@ pub(super) fn handle_number_keys(
     state: Res<State<InventoryState>>,
     cursor: Res<InventoryCursor>,
     mut actions: ResMut<InventoryActions>,
-    mut selection: Single<&mut crate::inventory::HotbarSelection, With<Player>>,
+    selection: Single<&mut crate::inventory::HotbarSelection, With<Player>>,
 ) {
     let Some(hotbar_index) = pressed_hotbar_key(&keyboard) else {
         return;
@@ -36,7 +36,10 @@ pub(super) fn handle_number_keys(
 
     match state.get() {
         InventoryState::Closed => {
-            selection.0 = hotbar_index;
+            selection
+                .into_inner()
+                .map_unchanged(|selection| &mut selection.0)
+                .set_if_neq(hotbar_index);
         }
         InventoryState::Open => {
             let Some(slot_index) = cursor.hovered_slot else {
@@ -50,13 +53,8 @@ pub(super) fn handle_number_keys(
 
 pub(super) fn handle_hotbar_scroll(
     scroll: Res<AccumulatedMouseScroll>,
-    state: Res<State<InventoryState>>,
     mut selection: Single<&mut crate::inventory::HotbarSelection, With<Player>>,
 ) {
-    if *state.get() != InventoryState::Closed {
-        return;
-    }
-
     if scroll.delta.y == 0.0 {
         return;
     }
@@ -73,14 +71,10 @@ pub(super) fn handle_hotbar_scroll(
 }
 
 pub(super) fn handle_swap_offhand(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    state: Res<State<InventoryState>>,
     mut inventory: Single<&mut PlayerInventory, With<Player>>,
     selection: Single<&crate::inventory::HotbarSelection, With<Player>>,
 ) {
-    if *state.get() == InventoryState::Closed && keyboard.just_pressed(KeyCode::KeyF) {
-        PlayerInventory::edit(&mut inventory, |inventory| {
-            inventory.swap_slots(selection.0, OFFHAND_SLOT)
-        });
-    }
+    PlayerInventory::edit(&mut inventory, |inventory| {
+        inventory.swap_slots(selection.0, OFFHAND_SLOT)
+    });
 }

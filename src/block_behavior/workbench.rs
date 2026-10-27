@@ -70,18 +70,3 @@ pub(crate) fn validate(
         }
     }
 }
-pub(crate) fn closed(
-    _: On<Remove<ViewingWorkbench>>,
-    next: Option<ResMut<NextState<InventoryState>>>,
-    mut actions: ResMut<crate::inventory::access::InventoryActions>,
-) {
-    if let Some(mut next) = next {
-        next.set(InventoryState::Closed);
-    }
-    actions.clear();
-}
-pub(crate) fn close(mut commands: Commands, sessions: Query<Entity, With<ViewingWorkbench>>) {
-    for entity in &sessions {
-        commands.entity(entity).remove::<ViewingWorkbench>();
-    }
-}

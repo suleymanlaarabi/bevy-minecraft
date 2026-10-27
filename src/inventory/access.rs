@@ -1,4 +1,4 @@
-//! Input is ordered before mutations; each action borrows its owners once.
+//! Input is ordered before mutations; each action batch borrows its owners once.
 use super::{
     CRAFT_RESULT, DragMode, DragState, INVENTORY_SIZE, InventoryCursor, ItemKind, ItemStack,
     PlayerInventory, SLOT_COUNT, slots::Slots,
@@ -55,45 +55,50 @@ pub(crate) fn apply_actions(
     mut cursor: ResMut<InventoryCursor>,
     workbenches: crate::block_behavior::workbench::WorkbenchAccess,
 ) {
-    for action in actions.drain(..) {
-        let Ok((mut inventory, mut grid, workbench, motion, viewing)) = players.single_mut() else {
-            continue;
+    if actions.is_empty() {
+        return;
+    }
+    // Dropping the drain also discards actions when their session is invalid.
+    let actions = actions.drain(..);
+    let Ok((mut inventory, mut grid, workbench, motion, viewing)) = players.single_mut() else {
+        return;
+    };
+    if let Some(session) = workbench
+        && !workbenches.valid(session.0, motion.position.as_vec3())
+    {
+        return;
+    }
+    if (workbench.is_some() && viewing.is_some())
+        || grid.side != if workbench.is_some() { 3 } else { 2 }
+    {
+        return;
+    }
+    let mut owners = if let Some(viewing) = viewing {
+        let Some(owners) = topology.owners(viewing.0, motion.position.as_vec3()) else {
+            return;
         };
-        if let Some(session) = workbench
-            && !workbenches.valid(session.0, motion.position.as_vec3())
-        {
-            continue;
-        }
-        if (workbench.is_some() && viewing.is_some())
-            || grid.side != if workbench.is_some() { 3 } else { 2 }
-        {
-            continue;
-        }
-        let owners = if let Some(viewing) = viewing {
-            let Some(owners) = topology.owners(viewing.0, motion.position.as_vec3()) else {
-                continue;
+        let first = owners[0].expect("Canonical owner");
+        if let Some(second) = owners[1] {
+            let Ok([first, second]) = containers.get_many_mut([first, second]) else {
+                return;
             };
-            let first = owners[0].expect("Canonical owner");
-            if let Some(second) = owners[1] {
-                let Ok([first, second]) = containers.get_many_mut([first, second]) else {
-                    continue;
-                };
-                [Some(first), Some(second)]
-            } else {
-                let Ok(first) = containers.get_mut(first) else {
-                    continue;
-                };
-                [Some(first), None]
-            }
+            [Some(first), Some(second)]
         } else {
-            [None, None]
-        };
+            let Ok(first) = containers.get_mut(first) else {
+                return;
+            };
+            [Some(first), None]
+        }
+    } else {
+        [None, None]
+    };
+    for action in actions {
         let before = *grid;
         PlayerInventory::edit(&mut inventory, |inventory| {
             let mut slots = ScreenSlots {
                 inventory,
                 grid: grid.bypass_change_detection(),
-                containers: owners,
+                containers: &mut owners,
             };
             match action {
                 InventoryAction::SwapHotbar(index, hotbar) => {
@@ -206,7 +211,7 @@ pub(crate) fn apply_actions(
 struct ScreenSlots<'a, 'w> {
     inventory: &'a mut PlayerInventory,
     grid: &'a mut super::CraftingGrid,
-    containers: [Option<Mut<'w, ContainerInventory>>; 2],
+    containers: &'a mut [Option<Mut<'w, ContainerInventory>>; 2],
 }
 impl ScreenSlots<'_, '_> {
     fn container_open(&self) -> bool {

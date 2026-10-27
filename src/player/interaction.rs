@@ -234,7 +234,7 @@ fn update_breaking(
             target.destroy,
         ));
     }
-    if progress.progress < 1.0 || voxel_world.state(target.destroy) != Some(state) {
+    if progress.progress < 1.0 {
         return;
     }
 

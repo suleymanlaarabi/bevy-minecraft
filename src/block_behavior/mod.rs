@@ -44,15 +44,20 @@ impl Plugin for BlockBehaviorPlugin {
             )
             .add_observer(containers::changed)
             .add_observer(containers::unload)
-            .add_observer(containers::viewing_closed)
+            .add_observer(containers::session_closed::<containers::ViewingContainer>)
             .add_observer(containers::pairing_removed)
             .add_observer(supports::changed)
             .add_observer(supports::arrived)
             .add_observer(interaction::open_chest)
             .add_observer(interaction::open_manual)
             .add_observer(workbench::open)
-            .add_observer(workbench::closed)
-            .add_systems(Update, supports::update.run_if(crate::world::playing))
+            .add_observer(containers::session_closed::<workbench::ViewingWorkbench>)
+            .add_systems(
+                Update,
+                supports::update
+                    .run_if(crate::world::playing)
+                    .run_if(|queue: Res<supports::SupportQueue>| !queue.is_empty()),
+            )
             .add_systems(
                 PostUpdate,
                 containers::update_topology
@@ -67,7 +72,10 @@ impl Plugin for BlockBehaviorPlugin {
             )
             .add_systems(
                 OnExit(crate::inventory::InventoryState::Open),
-                (containers::close_sessions, workbench::close),
+                (
+                    containers::close_sessions::<containers::ViewingContainer>,
+                    containers::close_sessions::<workbench::ViewingWorkbench>,
+                ),
             )
             .add_systems(OnExit(crate::game::GameState::Game), cleanup);
         visuals::register(app);
