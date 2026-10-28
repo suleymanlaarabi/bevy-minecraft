@@ -22,44 +22,49 @@ pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            OnEnter(GameState::Game),
-            start_spawn_search.after(crate::world::PrepareSession),
-        )
-        .add_systems(
-            Update,
-            (finish_spawn_search, finish_spawn_loading)
-                .chain()
-                .run_if(in_state(crate::world::WorldSessionPhase::Loading)),
-        )
-        .add_systems(
-            OnEnter(InventoryState::Open),
-            (
-                clear_player_input,
+        app.add_plugins(crate::survival::PlayerSurvivalPlugin)
+            .add_systems(
+                OnEnter(GameState::Game),
+                start_spawn_search.after(crate::world::PrepareSession),
+            )
+            .add_systems(
+                Update,
+                (finish_spawn_search, finish_spawn_loading)
+                    .chain()
+                    .run_if(in_state(crate::world::WorldSessionPhase::Loading)),
+            )
+            .add_systems(
+                OnEnter(InventoryState::Open),
+                (
+                    clear_player_input,
+                    crate::survival::cancel_use::<With<Player>>,
+                ),
+            )
+            .add_systems(
+                OnEnter(crate::devtools::DevPanelState::Open),
                 crate::survival::cancel_use::<With<Player>>,
-            ),
-        )
-        .add_systems(
-            OnEnter(crate::devtools::DevPanelState::Open),
-            crate::survival::cancel_use::<With<Player>>,
-        )
-        .add_systems(
-            RunFixedMainLoop,
-            (mouse_look, player_input)
-                .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
-                .run_if(crate::world::playing)
-                .run_if(crate::survival::player_alive)
-                .run_if(in_state(InventoryState::Closed))
-                .run_if(crate::devtools::panel_closed),
-        )
-        .add_systems(
-            PostUpdate,
-            follow_eye_height
-                .before(hollow_features::spatial::FollowSystems)
-                .run_if(crate::world::playing),
-        );
+            )
+            .add_systems(
+                RunFixedMainLoop,
+                (mouse_look, player_input)
+                    .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
+                    .run_if(crate::world::playing)
+                    .run_if(crate::player::alive)
+                    .run_if(in_state(InventoryState::Closed))
+                    .run_if(crate::devtools::panel_closed),
+            )
+            .add_systems(
+                PostUpdate,
+                follow_eye_height
+                    .before(hollow_features::spatial::FollowSystems)
+                    .run_if(crate::world::playing),
+            );
         skin::register(app);
         interaction::register(app);
         safety::register(app);
     }
+}
+
+pub(crate) fn alive(players: Query<&crate::survival::Health, With<Player>>) -> bool {
+    players.single().is_ok_and(crate::survival::Health::alive)
 }

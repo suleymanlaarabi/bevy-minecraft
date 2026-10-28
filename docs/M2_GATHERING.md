@@ -51,8 +51,10 @@ placement leaves ingredients, output, and remainders unchanged.
 ## Ownership and scheduling
 
 The terrain remains compact voxel data. Only interactive/capability-bearing
-blocks become ECS entities. A crafting table has a marker and viewer relationship;
-its temporary grid belongs to the player, not to the block or UI.
+blocks become ECS entities. A crafting table composes
+`InventoryStation::Crafting { side: 3 }` and the shared station-viewer relationship;
+its temporary grid belongs to the player, not to the block or UI. Chest and
+workbench sessions use the same opening, validation and closure systems.
 
 A workbench session is checked before inventory actions and closed if its block
 is removed, unloaded, or more than five blocks from the player. Closing returns

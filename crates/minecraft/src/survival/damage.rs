@@ -33,8 +33,10 @@ impl DamageRequest {
     }
 }
 
-#[derive(Message, Clone, Copy)]
+/// Accepted impacts react at the command boundary after the ordered damage batch.
+#[derive(EntityEvent, Clone, Copy)]
 pub struct DamageApplied {
+    #[event_target]
     pub target: Entity,
     pub attacker: Option<Entity>,
     pub source: &'static DamageType,
@@ -84,7 +86,7 @@ pub(super) fn advance_windows(
 #[allow(clippy::type_complexity)]
 pub(super) fn resolve(
     mut requests: MessageReader<DamageRequest>,
-    mut applied: MessageWriter<DamageApplied>,
+    mut commands: Commands,
     mut actors: Query<
         (
             &mut Health,
@@ -189,7 +191,7 @@ pub(super) fn resolve(
         } else {
             Vec3::ZERO
         };
-        applied.write(DamageApplied {
+        commands.trigger(DamageApplied {
             target: request.target,
             attacker: request.attacker,
             source,
@@ -197,5 +199,27 @@ pub(super) fn resolve(
             impulse,
             fatal: !health.alive(),
         });
+    }
+}
+
+/// The survival integration owns knockback; the controller has no damage dependency.
+pub(super) fn apply_knockback(
+    impact: On<DamageApplied>,
+    mut motion: Query<&mut crate::character::CharacterMotion>,
+    mut movement: Query<&mut crate::character::CharacterMovement>,
+) {
+    if let Ok(mut motion) = motion.get_mut(impact.target) {
+        if impact.fatal {
+            motion.velocity = bevy::math::DVec3::ZERO;
+        } else if impact.impulse != Vec3::ZERO {
+            motion.velocity.x *= 0.5;
+            motion.velocity.z *= 0.5;
+            motion.velocity += impact.impulse.as_dvec3();
+        }
+    }
+    if impact.fatal
+        && let Ok(mut movement) = movement.get_mut(impact.target)
+    {
+        movement.set_if_neq(crate::character::CharacterMovement::default());
     }
 }

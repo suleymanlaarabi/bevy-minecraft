@@ -10,6 +10,7 @@ use hollow_engine::{
 };
 use hollow_minecraft::{
     app::HollowPlugin,
+    inventory::InventoryStation,
     player::Player,
     voxel::{SetVoxel, VoxelState},
 };
@@ -94,6 +95,11 @@ impl Plugin for ResinPlugin {
                         translucent: false,
                     },
                 );
+                // This block composes the same crafting/session capability as a workbench.
+                // No block-specific interaction observer, validation, or UI system is needed.
+                world
+                    .resource_mut::<hollow_engine::blocks::BlockRegistrations>()
+                    .register_bundle::<InventoryStation>(solid, true);
                 let solid_state = content.blocks[solid.index()].default_state;
                 let cured_state = StateId(solid_state.0 + 1);
                 content.states[cured_state.index()].luminance = 4;

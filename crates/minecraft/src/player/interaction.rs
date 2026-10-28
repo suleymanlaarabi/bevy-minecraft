@@ -80,7 +80,7 @@ pub(super) fn register(app: &mut App) {
             .after(FollowSystems)
             .before(TransformSystems::Propagate)
             .run_if(crate::simulation::running)
-            .run_if(crate::survival::player_alive)
+            .run_if(crate::player::alive)
             .run_if(in_state(InventoryState::Closed))
             .run_if(crate::devtools::panel_closed),
     );

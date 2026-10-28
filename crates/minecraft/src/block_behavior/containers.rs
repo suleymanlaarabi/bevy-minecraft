@@ -1,5 +1,6 @@
 //! ECS owns gameplay data through unloads; transfer records are immutable snapshots.
 use super::catalog::{chest_partner, profile, state_behavior};
+use crate::inventory::{InventorySession, InventoryStation, StationViewers};
 use crate::{
     inventory::slots::ItemSlots,
     voxel::{ChunkVoxels, VoxelState, VoxelWorld},
@@ -20,7 +21,11 @@ pub(crate) const RETAINED_BLOCK_BYTES: usize =
 pub(crate) type ContainerInventory = ItemSlots<CONTAINER_SIZE>;
 
 #[derive(Component)]
-#[require(ContainerInventory, super::visuals::InstanceLight)]
+#[require(
+    ContainerInventory,
+    super::visuals::InstanceLight,
+    InventoryStation::Container
+)]
 pub(crate) struct Chest;
 #[derive(Component, Default)]
 pub(crate) struct ManualOpen;
@@ -39,6 +44,14 @@ pub struct BlockState(pub VoxelState);
 pub struct BlockEntity {
     pub position: IVec3,
 }
+impl BlockEntity {
+    /// Loaded identity and reach are the common precondition for block interactions.
+    pub(crate) fn accessible(&self, world: &VoxelWorld, state: VoxelState, actor: Vec3) -> bool {
+        world.state(self.position) == Some(state)
+            && actor.distance_squared(self.position.as_vec3() + Vec3::splat(0.5)) <= 25.0
+    }
+}
+
 #[derive(Component)]
 #[relationship(relationship_target = BlockEntities)]
 pub(crate) struct BlockOf(pub Entity);
@@ -53,12 +66,6 @@ pub(crate) struct LoadedColumn(pub Entity);
 #[relationship_target(relationship = LoadedColumn)]
 pub(crate) struct LoadedTerrain(Vec<Entity>);
 
-#[derive(Component)]
-#[relationship(relationship_target = ContainerViewers)]
-pub(crate) struct ViewingContainer(pub Entity);
-#[derive(Component, Default, Deref)]
-#[relationship_target(relationship = ViewingContainer)]
-pub(crate) struct ContainerViewers(Vec<Entity>);
 #[derive(Component)]
 #[relationship(relationship_target = ChestPartners)]
 pub(crate) struct PairedWith(pub Entity);
@@ -217,7 +224,7 @@ impl Plugin for ChestPlugin {
                         entity.insert((Chest, TopologyDirty, super::visuals::PrepareView));
                     },
                     detach: |entity| {
-                        entity.remove::<Chest>();
+                        entity.remove::<(Chest, InventoryStation)>();
                     },
                     interactive: true,
                     refresh_on_state_change: true,
@@ -225,24 +232,12 @@ impl Plugin for ChestPlugin {
             );
         }
         app.init_resource::<super::visuals::ChestMeshes>()
-            .add_observer(session_closed::<ViewingContainer>)
             .add_observer(pairing_removed)
-            .add_observer(super::interaction::open_chest)
             .add_systems(
                 PostUpdate,
                 update_topology
                     .in_set(super::GameplaySystems::Topology)
                     .run_if(crate::world::streaming),
-            )
-            .add_systems(
-                PostUpdate,
-                validate_sessions
-                    .in_set(super::GameplaySystems::Validation)
-                    .run_if(crate::world::playing),
-            )
-            .add_systems(
-                OnExit(crate::inventory::InventoryState::Open),
-                close_sessions::<ViewingContainer>,
             );
         super::visuals::register(app);
     }
@@ -564,8 +559,7 @@ impl ContainerTopology<'_, '_> {
                 let Ok((block, state, _, _, _)) = self.blocks.get(entity) else {
                     return false;
                 };
-                actor.distance_squared(block.position.as_vec3() + Vec3::splat(0.5)) <= 25.0
-                    && self.world.state(block.position) == Some(state.0)
+                block.accessible(&self.world, state.0, actor)
                     && top_clear(&self.world, block.position)
             })
             .then_some(owners)
@@ -592,7 +586,7 @@ pub(crate) fn update_topology(
         (Entity, &BlockEntity, &BlockState, Option<&PairedWith>),
         (With<Chest>, With<TopologyDirty>),
     >,
-    viewers: Query<&ContainerViewers>,
+    viewers: Query<&StationViewers>,
 ) {
     for (entity, block, state, previous) in &dirty {
         let partner = topology.partner(block.position, state.0);
@@ -606,7 +600,7 @@ pub(crate) fn update_topology(
             {
                 if let Ok(viewers) = viewers.get(owner) {
                     for viewer in viewers.iter() {
-                        commands.entity(viewer).remove::<ViewingContainer>();
+                        commands.entity(viewer).remove::<InventorySession>();
                     }
                 }
             }
@@ -638,54 +632,18 @@ pub(crate) fn update_topology(
 pub(crate) fn pairing_removed(
     event: On<Remove<PairedWith>>,
     pairs: Query<&PairedWith>,
-    viewers: Query<&ContainerViewers>,
+    viewers: Query<&StationViewers>,
     mut commands: Commands,
 ) {
     if let Ok(pair) = pairs.get(event.entity)
         && let Ok(viewers) = viewers.get(pair.0)
     {
         for viewer in viewers.iter() {
-            commands.entity(viewer).remove::<ViewingContainer>();
+            commands.entity(viewer).remove::<InventorySession>();
         }
     }
 }
 
-pub(crate) fn validate_sessions(
-    mut commands: Commands,
-    sessions: Query<(
-        Entity,
-        &ViewingContainer,
-        &hollow_features::motion::FixedPosition,
-    )>,
-    topology: ContainerTopology,
-) {
-    for (entity, viewing, motion) in &sessions {
-        if topology
-            .owners(viewing.0, motion.current.as_vec3())
-            .is_none()
-        {
-            commands.entity(entity).remove::<ViewingContainer>();
-        }
-    }
-}
-pub(crate) fn session_closed<T: Component>(
-    _: On<Remove<T>>,
-    next: Option<ResMut<NextState<crate::inventory::InventoryState>>>,
-    mut actions: ResMut<Messages<crate::inventory::access::InventoryAction>>,
-) {
-    if let Some(mut next) = next {
-        next.set(crate::inventory::InventoryState::Closed);
-    }
-    actions.clear();
-}
-pub(crate) fn close_sessions<T: Component>(
-    mut commands: Commands,
-    sessions: Query<Entity, With<T>>,
-) {
-    for entity in &sessions {
-        commands.entity(entity).remove::<T>();
-    }
-}
 pub(crate) fn track_inventory_changes(
     inventories: Query<&BlockOf, Changed<ContainerInventory>>,
     mut columns: Query<&mut GameplayColumn>,

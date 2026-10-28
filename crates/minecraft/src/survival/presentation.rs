@@ -1,3 +1,4 @@
+//! Optional local-player presentation and safe respawning over the living-entity simulation.
 use bevy::prelude::*;
 
 use super::{DamageApplied, Health, RespawnPoint, UsingItem};
@@ -8,72 +9,87 @@ use crate::{
     voxel::{VoxelLoading, VoxelViewer},
 };
 
-pub(super) fn play_audio(
-    mut commands: Commands,
-    player: Query<Entity, With<Player>>,
-    mut impacts: MessageReader<DamageApplied>,
-) {
+/// Installed by PlayerPlugin; living entities do not require a HUD or player camera.
+pub struct PlayerSurvivalPlugin;
+impl Plugin for PlayerSurvivalPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, super::hud::load_assets)
+            .add_systems(
+                OnEnter(crate::world::WorldSessionPhase::Playing),
+                (super::hud::spawn, super::hud::show).chain(),
+            )
+            .add_systems(
+                OnExit(crate::world::WorldSessionPhase::Playing),
+                super::hud::hide,
+            )
+            .add_systems(
+                Update,
+                (begin_respawn, finish_respawn)
+                    .chain()
+                    .run_if(crate::world::playing),
+            )
+            .add_systems(
+                PostUpdate,
+                super::hud::sync
+                    .run_if(crate::world::playing)
+                    .before(bevy::ui::UiSystems::Content),
+            )
+            .add_observer(play_audio);
+    }
+}
+
+fn play_audio(impact: On<DamageApplied>, mut commands: Commands, player: Query<(), With<Player>>) {
     use crate::audio::Sound;
     use pumpkin_data::damage::DamageType as D;
-    let local = player.single().ok();
-    for impact in impacts.read().filter(|impact| Some(impact.target) == local) {
-        let name = if impact.fatal {
-            crate::audio::SoundId::EntityPlayerDeath
-        } else if impact.source == &D::DROWN {
-            crate::audio::SoundId::EntityPlayerHurtDrown
-        } else if [
-            &D::ON_FIRE,
-            &D::IN_FIRE,
-            &D::LAVA,
-            &D::HOT_FLOOR,
-            &D::CAMPFIRE,
-        ]
-        .contains(&impact.source)
-        {
-            crate::audio::SoundId::EntityPlayerHurtOnFire
-        } else if impact.source == &D::FALL {
-            if impact.lost_health > 4.0 {
-                crate::audio::SoundId::EntityPlayerBigFall
-            } else {
-                crate::audio::SoundId::EntityPlayerSmallFall
-            }
-        } else {
-            crate::audio::SoundId::EntityPlayerHurt
-        };
-        commands.trigger(Sound::event(name));
+    if !player.contains(impact.target) {
+        return;
     }
+    let name = if impact.fatal {
+        crate::audio::SoundId::EntityPlayerDeath
+    } else if impact.source == &D::DROWN {
+        crate::audio::SoundId::EntityPlayerHurtDrown
+    } else if [
+        &D::ON_FIRE,
+        &D::IN_FIRE,
+        &D::LAVA,
+        &D::HOT_FLOOR,
+        &D::CAMPFIRE,
+    ]
+    .contains(&impact.source)
+    {
+        crate::audio::SoundId::EntityPlayerHurtOnFire
+    } else if impact.source == &D::FALL {
+        if impact.lost_health > 4.0 {
+            crate::audio::SoundId::EntityPlayerBigFall
+        } else {
+            crate::audio::SoundId::EntityPlayerSmallFall
+        }
+    } else {
+        crate::audio::SoundId::EntityPlayerHurt
+    };
+    commands.trigger(Sound::event(name));
 }
 
 #[derive(Component)]
 pub(super) struct RespawnLoader(Entity);
 
-pub(super) fn respawn_input(
-    players: Query<&Health, With<Player>>,
-    inventory: Res<State<InventoryState>>,
-    mut next_inventory: ResMut<NextState<InventoryState>>,
-) {
-    let Ok(health) = players.single() else {
-        return;
-    };
-    if !health.alive() {
-        if *inventory.get() == InventoryState::Open {
-            next_inventory.set(InventoryState::Closed);
-        }
-    }
-}
-
-pub(super) fn begin_respawn(
+fn begin_respawn(
     mut players: Query<(Entity, &Health, &RespawnPoint, &mut Transform), With<Player>>,
     loaders: Query<(), With<RespawnLoader>>,
+    inventory: Res<State<InventoryState>>,
+    mut next_inventory: ResMut<NextState<InventoryState>>,
     mut commands: Commands,
 ) {
-    if !loaders.is_empty() {
-        return;
-    }
     let Ok((entity, health, point, mut transform)) = players.single_mut() else {
         return;
     };
     if health.alive() {
+        return;
+    }
+    if *inventory.get() == InventoryState::Open {
+        next_inventory.set(InventoryState::Closed);
+    }
+    if !loaders.is_empty() {
         return;
     }
     // The player's existing camera remains the only streaming viewer. Moving the
@@ -88,7 +104,7 @@ pub(super) fn begin_respawn(
 }
 
 #[allow(clippy::type_complexity)]
-pub(super) fn finish_respawn(
+fn finish_respawn(
     loading: VoxelLoading,
     viewer: Single<&GlobalTransform, With<VoxelViewer>>,
     world: crate::voxel::VoxelWorld,

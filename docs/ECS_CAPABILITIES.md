@@ -60,6 +60,8 @@ completion record. The frequent query drops from 13 fields to seven, and mutatio
 of effects, nutrition and teleport state happen only on completion. No per-tick
 marker insertion, new effect archetype, string lookup or per-actor queue is added.
 Minecraft effect semantics and the inventory layout remain domain-owned.
+Accepted damage now uses targeted observers, as described in
+[ECS_STATIONS.md](ECS_STATIONS.md).
 
 ## Inventory actions use Bevy's buffer and one batch snapshot
 
@@ -82,7 +84,9 @@ with the old queue; the UI batches are small, and this buys maintained buffer an
 lifecycle handling rather than a claimed queue-speed improvement. Bevy's normal
 message retention now bounds unprocessed input; disabling the consumer for multiple frames does not retain an indefinite
 command backlog. Crafting, paired-chest ownership and persistence stay unchanged.
-This does not introduce a universal machine-screen schema.
+This does not introduce a universal machine-screen schema. The subsequent
+[station refactor](ECS_STATIONS.md) unifies chest and workbench sessions and
+separates stack-value binding from rendering.
 
 ## Modal roots compose cursor behavior
 
@@ -146,10 +150,10 @@ large pose/environment preparation remains domain-specific.
 | Consumption timer | One mutable actor query. Terrain reads only chunk storage/index data. Health and optional nutrition are read-only. |
 | Consumption consequences | Health/effects/nutrition and teleport queries access distinct component types. Terrain is read-only. The chain orders the message writer before its reader. |
 | Player input | One player query and one camera query; their accessed component types do not overlap mutably. Existing modal run conditions and cancellation remain. |
-| Inventory transaction | Player inventory/grid and container slot components are distinct types. Topology/workbench queries are read-only. The message buffer has one exclusive consumer. |
+| Inventory transaction | Player inventory/grid and container slot components are distinct types. Station/topology queries are read-only. The message buffer has one exclusive consumer. |
 | Cursor capture | Modal query accesses only the marker; the other query mutates cursor options. No other runtime cursor writer remains. |
 | Following | Target transforms use `Without<Follow>`; the mutable follower query requires `Follow`. These sets are disjoint. |
-| Character physics | The existing single actor query is unchanged; force selection introduces no ECS access. |
+| Character physics | One actor query; the current version reads `Locomotion.enabled` instead of health. Force selection introduces no additional ECS access. |
 | Save and respawn | Cursor queries were removed; save settlement still reads inventory state. Existing respawn loader/player transform disjointness is preserved. |
 
 No overlapping `Changed<T>`/`Added<T>` filter and mutable query was introduced.

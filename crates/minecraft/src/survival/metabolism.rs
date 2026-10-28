@@ -25,6 +25,7 @@ pub(super) fn locomotion(
         .par_iter_mut()
         .for_each(|(health, effects, nutrition, using, mut locomotion)| {
             let mut next = Locomotion {
+                enabled: health.alive(),
                 speed: (1.0 + 0.2 * effects.level(E::SPEED.id) as f64)
                     * (1.0 - 0.15 * effects.level(E::SLOWNESS.id) as f64).max(0.0),
                 jump_boost: effects.level(E::JUMP_BOOST.id) as f64 * 0.1,
@@ -265,13 +266,10 @@ pub(super) fn hazards(
 }
 
 /// Exhaustion follows accepted damage, independently of movement or inventory capabilities.
-pub(super) fn damage_response(
-    mut impacts: MessageReader<super::DamageApplied>,
-    mut actors: Query<&mut Nutrition>,
-) {
-    for impact in impacts.read() {
-        if let Ok(mut nutrition) = actors.get_mut(impact.target) {
-            nutrition.exhaust(impact.source.exhaustion);
-        }
+pub(super) fn damage_response(impact: On<super::DamageApplied>, mut actors: Query<&mut Nutrition>) {
+    if impact.source.exhaustion > 0.0
+        && let Ok(mut nutrition) = actors.get_mut(impact.target)
+    {
+        nutrition.exhaust(impact.source.exhaustion);
     }
 }

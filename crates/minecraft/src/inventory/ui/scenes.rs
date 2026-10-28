@@ -3,9 +3,8 @@ use super::interactions::{
     slot_over, slot_press,
 };
 use super::{
-    CursorStackCount, CursorStackView, EmptySlotLabel, HotbarHud, ICON_SIZE, InventoryOverlay,
-    InventorySlotView, PANEL_BG, SLOT_BG, SLOT_BORDER, SLOT_GAP, SLOT_SIZE, SlotCount, SlotIcon,
-    empty_slot_label,
+    CursorStackView, EmptySlotLabel, HotbarHud, ICON_SIZE, InventoryOverlay, InventorySlotView,
+    PANEL_BG, SLOT_BG, SLOT_BORDER, SLOT_GAP, SLOT_SIZE, SlotCount, SlotIcon, empty_slot_label,
 };
 use crate::{
     game::GameState,
@@ -50,13 +49,9 @@ fn slot(index: usize, interactive: bool) -> impl Scene {
             Node { position_type: PositionType::Absolute }
             Pickable::IGNORE
             --
-            Node { width: px(ICON_SIZE), height: px(ICON_SIZE) }
-            SlotIcon
-            ImageNode
-            Visibility::Hidden
-            Pickable::IGNORE
+            @{ stack_icon() }
             --
-            @{ count_text(bsn! { SlotCount }, 3.0, 1.0) }
+            @{ count_text(3.0, 1.0) }
             --
             Node { position_type: PositionType::Absolute, left: px(4), bottom: px(3), height: px(3), width: px(0) }
             super::SlotDurability
@@ -73,13 +68,23 @@ fn slot_list(range: core::ops::Range<usize>, interactive: bool) -> impl SceneLis
         .collect::<Vec<_>>()
 }
 
-fn count_text(marker: impl Scene, right: f32, bottom: f32) -> impl Scene {
+fn count_text(right: f32, bottom: f32) -> impl Scene {
     bsn! {
         Text("")
         TextFont { font_size: FontSize::Px(14.0) }
         TextColor(Color::WHITE)
         Node { position_type: PositionType::Absolute, right: px(right), bottom: px(bottom) }
-        @marker
+        SlotCount
+        Pickable::IGNORE
+    }
+}
+
+fn stack_icon() -> impl Scene {
+    bsn! {
+        Node { width: px(ICON_SIZE), height: px(ICON_SIZE) }
+        SlotIcon
+        ImageNode
+        Visibility::Hidden
         Pickable::IGNORE
     }
 }
@@ -89,10 +94,13 @@ fn cursor_stack_scene() -> impl Scene {
         Node { width: px(ICON_SIZE), height: px(ICON_SIZE), position_type: PositionType::Absolute }
         CursorStackView
         Visibility::Hidden
-        ImageNode
         Pickable::IGNORE
         GlobalZIndex(200)
-        Children [ @{ count_text(bsn! { CursorStackCount }, 1.0, 0.0) } ]
+        Children [
+            @{ stack_icon() }
+            --
+            @{ count_text(1.0, 0.0) }
+        ]
     }
 }
 
@@ -239,21 +247,28 @@ fn crafting_section(side: u16) -> impl Scene {
 pub(crate) fn spawn_inventory_overlay(
     mut commands: Commands,
     assets: Res<crate::player::skin::SkinAssets>,
-    partners: Query<&crate::block_behavior::containers::ChestPartners>,
-    workbenches: Query<(), With<crate::block_behavior::workbench::ViewingWorkbench>>,
-    sessions: Query<
-        &crate::block_behavior::containers::ViewingContainer,
+    access: crate::inventory::session::StationAccess,
+    player: Single<
+        (
+            Option<&crate::inventory::InventorySession>,
+            &hollow_features::motion::FixedPosition,
+        ),
         With<crate::player::Player>,
     >,
 ) {
-    if !workbenches.is_empty() {
+    let (session, position) = *player;
+    let Some(layout) = access.layout(session, position.current.as_vec3()) else {
+        return;
+    };
+    let count = layout.containers.iter().flatten().count()
+        * crate::block_behavior::containers::CONTAINER_SIZE;
+    if count > 0 {
+        commands.spawn_scene(container_overlay_scene(count));
+    } else if session.is_some() {
         commands.spawn_scene(overlay_scene(
             "Crafting Table",
-            bsn! { @{ crafting_section(3) } },
+            bsn! { @{ crafting_section(u16::from(layout.crafting_side)) } },
         ));
-    } else if let Ok(session) = sessions.single() {
-        let count = 27 * (1 + partners.get(session.0).map_or(0, |partners| partners.len()));
-        commands.spawn_scene(container_overlay_scene(count));
     } else {
         commands.spawn_scene(inventory_overlay_scene(assets.preview.clone()));
     }

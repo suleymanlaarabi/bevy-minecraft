@@ -5,6 +5,8 @@ pub(crate) mod icons;
 mod input;
 pub(crate) mod mining;
 mod model;
+pub(crate) mod session;
+pub use session::{InventorySession, InventoryStation, StationViewers};
 pub(crate) mod slots;
 mod ui;
 pub(crate) use crafting::{CraftingGrid, CraftingResult};
@@ -50,6 +52,7 @@ impl Plugin for InventoryPlugin {
     fn build(&self, app: &mut App) {
         app.add_sub_state::<InventoryState>()
             .init_resource::<InventoryCursor>()
+            .add_plugins(session::InventorySessionPlugin)
             .add_message::<access::InventoryAction>()
             .init_resource::<icons::BlockIcons>()
             .add_systems(PreStartup, catalog::initialize)
@@ -86,7 +89,7 @@ impl Plugin for InventoryPlugin {
                 Update,
                 toggle_inventory
                     .run_if(crate::world::playing)
-                    .run_if(crate::survival::player_alive)
+                    .run_if(crate::player::alive)
                     .run_if(crate::devtools::panel_closed)
                     .run_if(input_just_pressed(KeyCode::KeyE)),
             )
@@ -101,7 +104,7 @@ impl Plugin for InventoryPlugin {
                 )
                     .chain()
                     .run_if(crate::devtools::panel_closed)
-                    .run_if(crate::survival::player_alive)
+                    .run_if(crate::player::alive)
                     .run_if(crate::world::playing),
             )
             .add_systems(
@@ -122,6 +125,7 @@ impl Plugin for InventoryPlugin {
                     ui::bind_slots,
                     ui::refresh_slots,
                     ui::follow_cursor_stack.run_if(in_state(InventoryState::Open)),
+                    ui::sync_stack_views,
                 )
                     .chain()
                     .in_set(crate::block_behavior::GameplaySystems::Presentation)

@@ -166,7 +166,9 @@ pub(crate) struct CharacterActivity {
 }
 
 #[derive(Component, Clone, Copy, PartialEq)]
-pub(crate) struct Locomotion {
+pub struct Locomotion {
+    /// Controllers may suspend travel without removing the character composition.
+    pub enabled: bool,
     pub speed: f64,
     pub jump_boost: f64,
     pub sprint_allowed: bool,
@@ -176,6 +178,7 @@ pub(crate) struct Locomotion {
 impl Default for Locomotion {
     fn default() -> Self {
         Self {
+            enabled: true,
             speed: 1.0,
             jump_boost: 0.0,
             sprint_allowed: true,
@@ -219,35 +222,7 @@ impl Plugin for CharacterPlugin {
             character_physics
                 .in_set(CharacterSystems)
                 .run_if(crate::simulation::running),
-        )
-        .add_systems(
-            FixedUpdate,
-            damage_response.in_set(crate::survival::SurvivalSystems::Reactions),
         );
-    }
-}
-
-/// Controllers consume accepted impacts without participating in damage resolution.
-fn damage_response(
-    mut impacts: MessageReader<crate::survival::DamageApplied>,
-    mut motion: Query<&mut CharacterMotion>,
-    mut movement: Query<&mut CharacterMovement>,
-) {
-    for impact in impacts.read() {
-        if let Ok(mut motion) = motion.get_mut(impact.target) {
-            if impact.fatal {
-                motion.velocity = DVec3::ZERO;
-            } else if impact.impulse != Vec3::ZERO {
-                motion.velocity.x *= 0.5;
-                motion.velocity.z *= 0.5;
-                motion.velocity += impact.impulse.as_dvec3();
-            }
-        }
-        if impact.fatal
-            && let Ok(mut movement) = movement.get_mut(impact.target)
-        {
-            movement.set_if_neq(CharacterMovement::default());
-        }
     }
 }
 
@@ -578,7 +553,6 @@ fn character_physics(
             &Locomotion,
             &mut CharacterActivity,
             &mut FluidContactState,
-            Option<&crate::survival::Health>,
             Has<AutoJump>,
             Has<Flying>,
         ),
@@ -595,13 +569,12 @@ fn character_physics(
         locomotion,
         mut activity,
         mut fluid_contact,
-        health,
         auto_jump,
         flying,
     ) in &mut characters
     {
         *activity = CharacterActivity::default();
-        if health.is_some_and(|health| !health.alive()) {
+        if !locomotion.enabled {
             continue;
         }
         let position = transform.translation;

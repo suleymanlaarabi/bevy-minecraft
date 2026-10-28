@@ -31,10 +31,7 @@ impl Plugin for ItemUsePlugin {
                     .chain()
                     .in_set(super::SurvivalSystems::Consume),
             )
-            .add_systems(
-                FixedUpdate,
-                damage_response.in_set(super::SurvivalSystems::Reactions),
-            )
+            .add_observer(damage_response)
             .add_systems(
                 OnExit(crate::world::WorldSessionPhase::Playing),
                 cancel::<()>,
@@ -255,13 +252,10 @@ fn apply_consumption(
     }
 }
 
-pub(super) fn damage_response(
-    mut impacts: MessageReader<super::DamageApplied>,
-    mut actors: Query<&mut UsingItem>,
-) {
-    for impact in impacts.read().filter(|impact| impact.fatal) {
-        if let Ok(using) = actors.get_mut(impact.target) {
-            using.map_unchanged(|using| &mut using.0).set_if_neq(None);
-        }
+fn damage_response(impact: On<super::DamageApplied>, mut actors: Query<&mut UsingItem>) {
+    if impact.fatal
+        && let Ok(using) = actors.get_mut(impact.target)
+    {
+        using.map_unchanged(|using| &mut using.0).set_if_neq(None);
     }
 }

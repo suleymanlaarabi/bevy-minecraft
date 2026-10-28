@@ -2,10 +2,11 @@
 use super::{
     catalog::{profile, state_behavior},
     containers::{
-        BlockEntities, BlockEntity, BlockOf, BlockState, ContainerViewers, Dormant,
-        GameplayColumns, LoadedTerrain, PairedWith,
+        BlockEntities, BlockEntity, BlockOf, BlockState, Dormant, GameplayColumns, LoadedTerrain,
+        PairedWith,
     },
 };
+use crate::inventory::StationViewers;
 use crate::voxel::{
     VoxelState, VoxelWorld,
     render::{
@@ -372,8 +373,8 @@ fn update_open_lids(
         ),
         Without<Dormant>,
     >,
-    owners: Query<Ref<ContainerViewers>>,
-    mut removed_users: RemovedComponents<ContainerViewers>,
+    owners: Query<Ref<StationViewers>>,
+    mut removed_users: RemovedComponents<StationViewers>,
     mut removed_pairs: RemovedComponents<PairedWith>,
     mut removed: Local<EntityHashSet>,
     views: Query<&ChestView>,

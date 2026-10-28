@@ -1,10 +1,7 @@
 //! Targeted observers handle capabilities; voxel commits own consumption and drops.
 use super::{
     catalog::{SIDE_FACING, SIDES, state_behavior},
-    containers::{
-        BlockEntity, BlockLookup, BlockState, Chest, ContainerTopology, Door, Dormant, Gate,
-        ManualOpen, ViewingContainer,
-    },
+    containers::{BlockEntity, BlockLookup, BlockState, Door, Dormant, Gate, ManualOpen},
 };
 use crate::{
     character::{Aabb, CharacterBody, CharacterState, GameCharacter},
@@ -66,32 +63,6 @@ impl BlockCollisions<'_, '_> {
         })
     }
 }
-pub(crate) fn open_chest(
-    event: On<BlockUse>,
-    mut commands: Commands,
-    chests: Query<&BlockState, (With<Chest>, Without<Dormant>)>,
-    topology: ContainerTopology,
-    actors: Query<&FixedPosition>,
-    mut next: ResMut<NextState<crate::inventory::InventoryState>>,
-) {
-    if !chests
-        .get(event.entity)
-        .is_ok_and(|state| state.0 == event.state)
-    {
-        return;
-    }
-    let Ok(motion) = actors.get(event.actor) else {
-        return;
-    };
-    let Some(owner) = topology.canonical(event.entity) else {
-        return;
-    };
-    if topology.owners(owner, motion.current.as_vec3()).is_none() {
-        return;
-    }
-    commands.entity(event.actor).insert(ViewingContainer(owner));
-    next.set(crate::inventory::InventoryState::Open);
-}
 pub(crate) fn open_manual(
     event: On<BlockUse>,
     mut commands: Commands,
@@ -107,14 +78,9 @@ pub(crate) fn open_manual(
         return;
     };
     if state.0 != event.state
-        || world.state(block.position) != Some(state.0)
-        || !actors.get(event.actor).is_ok_and(|motion| {
-            motion
-                .current
-                .as_vec3()
-                .distance_squared(block.position.as_vec3() + Vec3::splat(0.5))
-                <= 25.0
-        })
+        || !actors
+            .get(event.actor)
+            .is_ok_and(|motion| block.accessible(&world, state.0, motion.current.as_vec3()))
     {
         return;
     }

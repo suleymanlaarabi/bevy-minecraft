@@ -5,9 +5,7 @@ use super::{
     PlayerInventory, SLOT_COUNT, slots::Slots,
 };
 use crate::{
-    block_behavior::containers::{
-        CONTAINER_SIZE, ContainerInventory, ContainerTopology, ViewingContainer,
-    },
+    block_behavior::containers::{CONTAINER_SIZE, ContainerInventory},
     player::Player,
 };
 use bevy::prelude::*;
@@ -42,16 +40,14 @@ pub(crate) fn apply_actions(
         (
             &mut PlayerInventory,
             &mut super::CraftingGrid,
-            Option<&crate::block_behavior::workbench::ViewingWorkbench>,
             &FixedPosition,
-            Option<&ViewingContainer>,
+            Option<&super::InventorySession>,
         ),
         With<Player>,
     >,
-    topology: ContainerTopology,
+    access: super::session::StationAccess,
     mut containers: Query<&mut ContainerInventory>,
     mut cursor: ResMut<InventoryCursor>,
-    workbenches: crate::block_behavior::workbench::WorkbenchAccess,
 ) {
     if actions.is_empty() {
         return;
@@ -59,23 +55,17 @@ pub(crate) fn apply_actions(
     // This is the sole transactional consumer. Draining retains buffer capacity and
     // discards the whole batch on an invalid session, without per-reader replay.
     let actions = actions.drain();
-    let Ok((mut inventory, mut grid, workbench, motion, viewing)) = players.single_mut() else {
+    let Ok((mut inventory, mut grid, motion, viewing)) = players.single_mut() else {
         return;
     };
-    if let Some(session) = workbench
-        && !workbenches.valid(session.0, motion.current.as_vec3())
-    {
+    let Some(layout) = access.layout(viewing, motion.current.as_vec3()) else {
+        return;
+    };
+    if grid.side != usize::from(layout.crafting_side) {
         return;
     }
-    if (workbench.is_some() && viewing.is_some())
-        || grid.side != if workbench.is_some() { 3 } else { 2 }
-    {
-        return;
-    }
-    let mut owners = if let Some(viewing) = viewing {
-        let Some(owners) = topology.owners(viewing.0, motion.current.as_vec3()) else {
-            return;
-        };
+    let mut owners = if layout.containers[0].is_some() {
+        let owners = layout.containers;
         let first = owners[0].expect("Canonical owner");
         if let Some(second) = owners[1] {
             let Ok([first, second]) = containers.get_many_mut([first, second]) else {

@@ -66,7 +66,7 @@ fn spawn_rig(commands: &mut Commands, assets: &SkinAssets, preview: bool, parent
 pub(super) fn spawn_preview(
     mut commands: Commands,
     assets: Res<SkinAssets>,
-    sessions: Query<(), With<crate::block_behavior::containers::ViewingContainer>>,
+    sessions: Query<(), With<crate::inventory::InventorySession>>,
 ) {
     if !sessions.is_empty() {
         return;

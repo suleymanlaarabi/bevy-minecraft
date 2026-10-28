@@ -9,7 +9,7 @@ use bevy::prelude::*;
 pub(crate) use interactions::return_cursor_stack;
 pub(crate) use scenes::{spawn_hotbar_hud, spawn_inventory_overlay};
 pub(crate) use sync::{
-    bind_slots, follow_cursor_stack, hide_game_hud, refresh_slots, show_game_hud,
+    bind_slots, follow_cursor_stack, hide_game_hud, refresh_slots, show_game_hud, sync_stack_views,
 };
 
 const SLOT_SIZE: f32 = 48.0;
@@ -29,13 +29,14 @@ pub(crate) struct HotbarHud;
 struct InventoryOverlay;
 
 #[derive(Component, Clone, Copy, Default)]
-#[require(SlotDisplay)]
+#[require(StackView)]
 pub(crate) struct InventorySlotView {
     index: usize,
 }
 
-#[derive(Component, Default)]
-pub(crate) struct SlotDisplay(Option<Option<crate::inventory::ItemStack>>);
+/// Presentation input shared by slot owners, recipe results, and the cursor.
+#[derive(Component, Default, Clone, Copy, PartialEq)]
+pub(crate) struct StackView(pub Option<crate::inventory::ItemStack>);
 
 #[derive(Component, Clone, Copy, Default)]
 pub(crate) struct SlotIcon;
@@ -62,11 +63,8 @@ fn empty_slot_label(index: usize) -> &'static str {
 }
 
 #[derive(Component, Clone, Default)]
-#[require(SlotDisplay)]
+#[require(StackView)]
 pub(crate) struct CursorStackView;
-
-#[derive(Component, Clone, Default)]
-pub(crate) struct CursorStackCount;
 
 /// A view addresses its ECS owner directly; no mirror inventory is kept in UI.
 #[derive(Component, Clone, Copy)]

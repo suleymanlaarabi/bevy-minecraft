@@ -19,6 +19,7 @@ pub use model::{
     RespawnPoint, SurvivalRules, SurvivalSnapshot, UsingItem,
 };
 use model::{ItemUse, SurvivalRandom};
+pub use presentation::PlayerSurvivalPlugin;
 
 pub struct SurvivalPlugin;
 
@@ -29,11 +30,6 @@ pub enum SurvivalSystems {
     Consume,
     Metabolism,
     Damage,
-    Reactions,
-}
-
-pub(crate) fn player_alive(players: Query<&Health, With<crate::player::Player>>) -> bool {
-    players.single().is_ok_and(Health::alive)
 }
 
 pub(crate) fn mining_speed(effects: &ActiveEffects) -> f32 {
@@ -54,8 +50,6 @@ impl Plugin for SurvivalPlugin {
         app.init_resource::<SurvivalRules>()
             .add_plugins(ItemUsePlugin)
             .add_message::<DamageRequest>()
-            .add_message::<DamageApplied>()
-            .add_systems(Startup, hud::load_assets)
             .configure_sets(
                 FixedUpdate,
                 (
@@ -64,7 +58,6 @@ impl Plugin for SurvivalPlugin {
                     SurvivalSystems::Consume.after(SurvivalSystems::Environment),
                     SurvivalSystems::Metabolism.after(SurvivalSystems::Consume),
                     SurvivalSystems::Damage.after(SurvivalSystems::Metabolism),
-                    SurvivalSystems::Reactions.after(SurvivalSystems::Damage),
                 )
                     .in_set(crate::simulation::SimulationSystems::Actors),
             )
@@ -82,31 +75,10 @@ impl Plugin for SurvivalPlugin {
                         .chain()
                         .in_set(SurvivalSystems::Metabolism),
                     damage::resolve.in_set(SurvivalSystems::Damage),
-                    metabolism::damage_response.in_set(SurvivalSystems::Reactions),
                 ),
             )
-            .add_systems(
-                OnEnter(crate::world::WorldSessionPhase::Playing),
-                (hud::spawn, hud::show).chain(),
-            )
-            .add_systems(OnExit(crate::world::WorldSessionPhase::Playing), hud::hide)
-            .add_systems(
-                Update,
-                (
-                    presentation::respawn_input,
-                    presentation::begin_respawn,
-                    presentation::finish_respawn,
-                    presentation::play_audio,
-                )
-                    .chain()
-                    .run_if(crate::world::playing),
-            )
-            .add_systems(
-                PostUpdate,
-                hud::sync
-                    .run_if(crate::world::playing)
-                    .before(bevy::ui::UiSystems::Content),
-            )
+            .add_observer(damage::apply_knockback)
+            .add_observer(metabolism::damage_response)
             .add_observer(exhaust);
     }
 }

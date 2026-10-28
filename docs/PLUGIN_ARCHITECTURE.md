@@ -9,7 +9,9 @@ positions and interpolation, separates damage reactions, and uses native hierarc
 and bulk cleanup APIs. Its scope, tradeoffs and code accounting are reported there.
 [Composable capabilities](ECS_CAPABILITIES.md) continues this work with item-use
 intents and completion messages, transactional inventory batches, shared following,
-and declarative modal cursor behavior.
+and declarative modal cursor behavior. [Station and presentation composition](ECS_STATIONS.md)
+unifies inventory sessions, renders stack values independently of ownership, and
+uses targeted damage observers with an optional player-survival presentation plugin.
 
 ## Implemented boundaries
 
@@ -129,7 +131,8 @@ model baker or multi-track animation API from the plan.
   a bulk-edit API would need a separate cost review.
 
 Remaining costs include native 32-to-16-bit state adaptation, several native
-metadata tables, scans of loaded chest views, the specialized inventory-screen routing. Fluid scheduling dispatch now uses numeric
+metadata tables and scans of loaded chest views. Inventory sessions now share one
+station protocol, while paired-container topology and screen layouts remain domain policies. Fluid scheduling dispatch now uses numeric
 profile IDs; the column work scheduler itself remains in the Minecraft adapter. No speedup or memory reduction
 has been measured or claimed.
 
@@ -180,9 +183,10 @@ refactor must not be reported as complete or as a demonstrated code reduction.
    Water, lava, fluid reactions and custom fluids already use the shared fluid API.
 3. Generalize scheduled/random/neighbor work categories and dispatch. The existing
    simulation budgets and persistent queues still belong to the Minecraft layer.
-4. Generalize slot ownership, screen sessions, recipe processing and persistence
-   registration. Generic slot operations alone do not make custom machine screens
-   and saved components automatically supported.
+4. Extend the shared station session protocol beyond crafting and paired chests
+   when actual machine-screen requirements exist. Recipe processing and persistence
+   registration still need separate generalization; generic slot operations alone
+   do not make saved custom components automatically supported.
 5. Expand actor, health, effect, audio and sky services beyond the shared position
    capability and separated damage reactions. Their content rules still belong to
    the Minecraft package.

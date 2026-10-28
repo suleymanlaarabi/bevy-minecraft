@@ -20,9 +20,10 @@ inventory changes. Independent locomotion updates and damage-window advancement
 use parallel queries. Environmental sampling stays within each character's bounds;
 teleport and respawn searches have explicit limits and use loaded voxel data.
 
-All damage enters through `DamageRequest`. The resolver handles invulnerability
-windows, stronger overlapping hits, armor/toughness, resistance, absorption, armor
-wear, exhaustion, velocity impulses, feedback, and death. Attackers can supply
+All damage enters through buffered `DamageRequest` messages. The resolver handles
+invulnerability windows, stronger overlapping hits, armor/toughness, resistance,
+absorption and armor wear. Targeted `DamageApplied` observers handle exhaustion,
+velocity impulses, fatal item-use cancellation and audio after the damage batch. Attackers can supply
 their entity and impulse; strength and weakness apply to direct attacks. Future
 mob/projectile systems should emit these requests rather than mutate health.
 
@@ -69,13 +70,12 @@ fallback for UI symbols. Both fonts and their OFL licenses are bundled. Health
 and food icons are textures. Damage camera motion and survival sound volume are
 exposed in settings.
 
-Death stops player actions and movement. Click Respawn or press Enter to return;
-inventory is retained. Respawn moves the dead player's existing camera toward
-the saved spawn, waits for loaded terrain and meshes, finds collision-free
-standing space, and then restores health/nutrition. The camera remains the single
-`VoxelViewer` required by the streaming pipeline. The button activates on press
-and displays `Loading spawn…` while waiting. Save/error screens hide survival
-overlays so their controls remain accessible.
+Death stops player actions and movement, closes inventory, and automatically starts
+respawn loading without a death screen. Inventory is retained. The existing player
+camera remains the only `VoxelViewer`. Respawn waits for terrain and meshes and a
+safe standing position before resetting statistics. `PlayerSurvivalPlugin`,
+installed by `PlayerPlugin`, owns the HUD, player audio and respawn systems;
+`SurvivalPlugin` owns the living-entity simulation.
 
 Saved data contains current statistics, effect durations, damage windows,
 environmental conditions, spawn coordinates, and consumable identities directly.

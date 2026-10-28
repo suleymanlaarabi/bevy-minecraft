@@ -62,11 +62,17 @@ damage windows, effects, armor and optional equipment, then publishes
 `DamageApplied` with the resolved impulse. It no longer borrows character motion,
 movement input, nutrition or item-use state.
 
-The character controller applies knockback and stops movement on fatal damage.
-Nutrition applies exhaustion. Item use cancels on fatal damage. Each consumer
-performs targeted entity lookups and runs in `SurvivalSystems::Reactions`, after
-resolution in the same fixed tick. Presentation independently reads the same
-message for audio. None of these reactions needs a new component or archetype.
+`DamageApplied` is a targeted entity event. Commands trigger it after the ordered
+resolution batch, at the deferred-command boundary in the same fixed tick.
+Independent observers apply knockback, exhaustion and fatal item-use cancellation;
+the player presentation plugin adds audio. Their order is deliberately irrelevant:
+they mutate distinct capabilities. There is no buffered completion-message queue
+or `Reactions` scheduling set. None of these reactions introduces an archetype.
+See [station and presentation composition](ECS_STATIONS.md) for the current flow.
+
+The survival integration owns the knockback observer. Character physics reads
+`Locomotion.enabled`, not health; survival prepares that existing modifier before
+travel. `CharacterPlugin` therefore has no dependency on survival types or sets.
 
 Equipment durability deliberately remains in the ordered damage transaction:
 breaking armor must affect the next request in that batch, including knockback
@@ -105,7 +111,7 @@ No additional relationship or parent index is maintained alongside `ChildOf`.
 | Character/drop simulation | One mutable actor query per controller; terrain queries read different components. Drop workers retain their collision buffers. |
 | Spatial ownership and snapshots | Positions are read-only; relationship changes are deferred. Column tracking mutates column metadata, not the position query's components. |
 | Damage resolution | One mutable actor query; attacker reads finish before target mutation. No second overlapping mutable actor query is introduced. |
-| Damage reactions | Independent message cursors; motion, input, nutrition and item-use queries mutate distinct component types. |
+| Damage reactions | Targeted observers; motion, input, nutrition and item-use queries mutate distinct component types. Trigger commands apply after damage resolution. |
 | Rig animation | Rig queries exclude skin parts and part queries exclude rigs. Both read the canonical hierarchy; their mutable transform sets remain disjoint. |
 | Respawn | Loader transforms are read through `With<RespawnLoader>`; mutable player transforms use `Without<RespawnLoader>`. |
 | Cleanup | Built-in commands perform hierarchy/bulk removal at command application; no competing component query is added. |
@@ -133,7 +139,8 @@ The reduction is small; most of the benefit is removal of controller-specific
 spatial dispatch, duplicated interpolation, broad damage access and manual
 relationship cleanup. Moving schemas or formatting is not counted as reduction.
 
-Column persistence still knows dropped-item records. Inventory-screen sessions,
+Column persistence still knows dropped-item records. Inventory-screen sessions
+now share the station protocol described in [ECS_STATIONS.md](ECS_STATIONS.md).
 Minecraft damage rules, effects, terrain work dispatch and sky/audio policies
 remain domain-specific. This change does not implement a universal actor engine,
 generic machine persistence or a scene-based gameplay interpreter. Those areas
