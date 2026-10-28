@@ -190,15 +190,17 @@ fn activate(
     index: Res<ChunkIndex>,
     mut region: ResMut<SimulationRegion>,
     terrain: Query<(&VoxelChunk, &LoadedColumn)>,
-    columns: Query<(
+    mut columns: Query<(
         &GameplayColumn,
         Option<&BlockEntities>,
         Option<&SimulatedEntities>,
         Has<Simulating>,
-        &ColumnSimulation,
+        &mut ColumnSimulation,
     )>,
     mut diagnostics: ResMut<SimulationDiagnostics>,
     mut waits: ResMut<BoundaryWaits>,
+    mut wake_owners: Local<Vec<(IVec2, Entity)>>,
+    mut ready_work: Local<Vec<BoundaryWork>>,
 ) {
     let center = player
         .single()
@@ -237,7 +239,7 @@ fn activate(
         }
         if ready {
             commands.entity(owner.0).insert(RandomEligibilityDirty);
-            waits.wake(chunk.position, &mut commands);
+            waits.wake(chunk.position, &mut wake_owners);
             for task in work.suspended.values() {
                 let dependency = IVec2::from_array(task.chunk);
                 if let Some(&terrain_entity) = index.get(&dependency)
@@ -246,9 +248,14 @@ fn activate(
                         .get(target.0)
                         .is_ok_and(|(_, _, _, active, _)| active)
                 {
-                    waits.wake(dependency, &mut commands);
+                    waits.wake(dependency, &mut wake_owners);
                 }
             }
+        }
+    }
+    for (chunk, owner) in wake_owners.drain(..) {
+        if let Ok((_, _, _, _, mut work)) = columns.get_mut(owner) {
+            work.wake(chunk, &mut ready_work);
         }
     }
     diagnostics.active_columns = active;

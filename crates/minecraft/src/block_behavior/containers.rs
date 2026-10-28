@@ -140,8 +140,7 @@ pub(crate) fn column(world: &mut World, position: IVec2) -> Entity {
         .insert(position, entity);
     entity
 }
-pub(crate) fn block(world: &mut World, position: IVec3) -> Entity {
-    let owner = column(world, crate::voxel::split_world_position(position).0);
+fn block(world: &mut World, owner: Entity, position: IVec3) -> Entity {
     if let Some(&entity) = world
         .get::<GameplayColumn>(owner)
         .expect("Gameplay column")
@@ -153,16 +152,6 @@ pub(crate) fn block(world: &mut World, position: IVec3) -> Entity {
     world
         .spawn((BlockOf(owner), BlockEntity { position }, Dormant))
         .id()
-}
-pub(crate) fn find_block(world: &World, position: IVec3) -> Option<Entity> {
-    let owner = *world
-        .resource::<GameplayColumns>()
-        .get(&crate::voxel::split_world_position(position).0)?;
-    world
-        .get::<GameplayColumn>(owner)?
-        .cells
-        .get(&local_index(position))
-        .copied()
 }
 #[derive(SystemParam)]
 pub(crate) struct BlockLookup<'w, 's> {
@@ -342,21 +331,23 @@ impl PreparedColumn {
     }
 }
 
-fn refresh_topology(world: &mut World, position: IVec2) {
-    for offset in [IVec2::ZERO, IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y] {
-        let Some(&owner) = world
-            .resource::<GameplayColumns>()
-            .get(&(position + offset))
-        else {
-            continue;
-        };
-        let blocks: Vec<_> = world
-            .get::<BlockEntities>(owner)
-            .map(|blocks| blocks.iter().collect())
-            .unwrap_or_default();
-        for entity in blocks {
-            if world.get::<Chest>(entity).is_some() {
-                world.entity_mut(entity).insert(TopologyDirty);
+#[derive(SystemParam)]
+pub(crate) struct TopologyUpdates<'w, 's> {
+    index: Res<'w, GameplayColumns>,
+    blocks: Query<'w, 's, &'static BlockEntities>,
+    chests: Query<'w, 's, (), With<Chest>>,
+}
+impl TopologyUpdates<'_, '_> {
+    fn neighbors(&self, position: IVec2, commands: &mut Commands) {
+        for offset in [IVec2::ZERO, IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y] {
+            if let Some(&owner) = self.index.get(&(position + offset))
+                && let Ok(blocks) = self.blocks.get(owner)
+            {
+                for entity in blocks.iter() {
+                    if self.chests.contains(entity) {
+                        commands.entity(entity).try_insert(TopologyDirty);
+                    }
+                }
             }
         }
     }
@@ -368,29 +359,23 @@ pub(crate) fn spawn_for_chunk(
     position: IVec2,
     prepared: PreparedColumn,
 ) {
+    // Identity creation and bundle factories share one immediate structural boundary.
     commands.queue(move |world: &mut World| {
-        let catalog = world
-            .resource::<hollow_engine::blocks::BlockCatalog>()
-            .clone();
         let owner = column(world, position);
-        let initialized = world
+        if !world
             .get::<GameplayColumn>(owner)
             .expect("Gameplay column")
-            .initialized;
-        if !initialized {
-            let simulation = prepared.simulation;
-            let suspended: Vec<_> = simulation.suspended.values().cloned().collect();
+            .initialized
+        {
+            let mut simulation = prepared.simulation;
+            simulation.dormant_drops = prepared.drops;
             world.entity_mut(owner).insert(simulation);
-            for task in suspended {
-                world
-                    .resource_mut::<crate::simulation::BoundaryWaits>()
-                    .register(IVec2::from_array(task.chunk), owner);
-            }
-            for drop in prepared.drops {
-                crate::dropped_item::restore_drop(&mut world.commands(), drop);
-            }
+            // A shared clone keeps the resource available to factory-triggered observers.
+            let catalog = world
+                .resource::<hollow_engine::blocks::BlockCatalog>()
+                .clone();
             for (position, state, inventory) in prepared.entries {
-                let entity = block(world, position);
+                let entity = block(world, owner, position);
                 classify(world, entity, state, &catalog);
                 if profile(state.kind()).chest {
                     world.entity_mut(entity).insert(inventory);
@@ -403,119 +388,135 @@ pub(crate) fn spawn_for_chunk(
             data.saved_revision = prepared.revision;
             data.initialized = true;
         }
-        let dormant = std::mem::take(
-            &mut world
-                .get_mut::<crate::simulation::ColumnSimulation>(owner)
-                .expect("Column simulation")
-                .dormant_drops,
-        );
-        for drop in dormant {
-            crate::dropped_item::restore_drop(&mut world.commands(), drop);
-        }
+        // The insert observers see fully restored blocks before queued terrain edits.
         world.entity_mut(terrain).insert(LoadedColumn(owner));
-        let entities: Vec<_> = world
-            .get::<BlockEntities>(owner)
-            .map(|blocks| blocks.iter().collect())
-            .unwrap_or_default();
-        for entity in entities {
-            world.entity_mut(entity).remove::<Dormant>();
-            if world.get::<Chest>(entity).is_some() {
-                world
-                    .entity_mut(entity)
-                    .insert((TopologyDirty, super::visuals::PrepareView));
-            }
-        }
-        refresh_topology(world, position);
-        super::visuals::invalidate_neighbors(world, position);
     });
 }
 
-pub(crate) fn changed(event: On<crate::voxel::edits::BlockChanged>, mut commands: Commands) {
-    let position = event.position;
-    let new = event.new;
-    let old = event.old;
-    commands.queue(move |world: &mut World| {
-        let coordinate = crate::voxel::split_world_position(position).0;
-        let catalog = world
-            .resource::<hollow_engine::blocks::BlockCatalog>()
-            .clone();
-        if catalog.materialized(hollow_core::BlockId(new.kind().index() as u32))
-            || catalog.materialized(hollow_core::BlockId(old.kind().index() as u32))
-        {
-            let entity = block(world, position);
-            if profile(old.kind()).chest != profile(new.kind()).chest {
-                if let Some(inventory) = world.get::<ContainerInventory>(entity).cloned() {
-                    use crate::dropped_item::DroppedItemCommandsExt;
-                    let mut drops = [None; CONTAINER_SIZE];
-                    for &stack in inventory.iter().flatten() {
-                        let remaining =
-                            crate::inventory::slots::insert(&mut drops, stack, 0..CONTAINER_SIZE);
-                        debug_assert!(
-                            remaining.is_none(),
-                            "Container drops fit their original slot count"
-                        );
-                    }
-                    for stack in drops.into_iter().flatten() {
-                        world.commands().spawn_dropped_item(
-                            stack,
-                            position.as_vec3() + Vec3::splat(0.5),
-                            Vec3::Y * 1.2,
-                        );
-                    }
-                }
-                world
-                    .entity_mut(entity)
-                    .remove::<(Chest, ContainerInventory)>();
-                let owner = world.get::<BlockOf>(entity).expect("Block owner").0;
-                world
-                    .get_mut::<GameplayColumn>(owner)
-                    .expect("Gameplay column")
-                    .revision += 1;
-            }
-            classify(world, entity, new, &catalog);
-            if world
-                .resource::<crate::voxel::streaming::ChunkIndex>()
-                .contains_key(&coordinate)
-            {
-                world.entity_mut(entity).remove::<Dormant>();
-            }
-            if !catalog.materialized(hollow_core::BlockId(new.kind().index() as u32)) {
-                world.despawn(entity);
+pub(crate) fn loaded(
+    event: On<Insert<LoadedColumn>>,
+    terrain: Query<(&crate::voxel::VoxelChunk, &LoadedColumn)>,
+    topology: TopologyUpdates,
+    mut simulations: Query<&mut crate::simulation::ColumnSimulation>,
+    mut waits: ResMut<crate::simulation::BoundaryWaits>,
+    mut light: super::visuals::LightInvalidation,
+    mut commands: Commands,
+) {
+    let Ok((chunk, owner)) = terrain.get(event.entity) else {
+        return;
+    };
+    if let Ok(mut work) = simulations.get_mut(owner.0) {
+        for task in work.suspended.values() {
+            waits.register(IVec2::from_array(task.chunk), owner.0);
+        }
+        if !work.dormant_drops.is_empty() {
+            for drop in work.dormant_drops.drain(..) {
+                crate::dropped_item::restore_drop(&mut commands, drop);
             }
         }
-        for offset in [
-            IVec3::ZERO,
-            IVec3::NEG_Y,
-            IVec3::X,
-            IVec3::NEG_X,
-            IVec3::Z,
-            IVec3::NEG_Z,
-        ] {
-            let p = position + offset;
-            if let Some(entity) = find_block(world, p)
-                && world.get::<Chest>(entity).is_some()
-            {
-                world.entity_mut(entity).insert(TopologyDirty);
+    }
+    if let Ok(blocks) = topology.blocks.get(owner.0) {
+        for entity in blocks.iter() {
+            commands.entity(entity).try_remove::<Dormant>();
+            if topology.chests.contains(entity) {
+                commands
+                    .entity(entity)
+                    .try_insert(super::visuals::PrepareView);
             }
+        }
+    }
+    topology.neighbors(chunk.position, &mut commands);
+    light.neighbors(chunk.position);
+}
+
+pub(crate) fn changed(
+    event: On<crate::voxel::edits::BlockChanged>,
+    catalog: Res<hollow_engine::blocks::BlockCatalog>,
+    lookup: BlockLookup,
+    chests: Query<(), With<Chest>>,
+    inventories: Query<&ContainerInventory>,
+    index: Res<crate::voxel::streaming::ChunkIndex>,
+    mut commands: Commands,
+) {
+    let position = event.position;
+    for offset in [
+        IVec3::ZERO,
+        IVec3::NEG_Y,
+        IVec3::X,
+        IVec3::NEG_X,
+        IVec3::Z,
+        IVec3::NEG_Z,
+    ] {
+        if let Some(entity) = lookup.entity(position + offset)
+            && chests.contains(entity)
+        {
+            commands.entity(entity).try_insert(TopologyDirty);
+        }
+    }
+    let new = event.new;
+    let materialized = catalog.materialized(hollow_core::BlockId(new.kind().index() as u32));
+    if !materialized && !catalog.materialized(hollow_core::BlockId(event.old.kind().index() as u32))
+    {
+        return;
+    }
+    let container_changed = profile(event.old.kind()).chest != profile(new.kind()).chest;
+    if container_changed
+        && let Some(entity) = lookup.entity(position)
+        && let Ok(inventory) = inventories.get(entity)
+    {
+        use crate::dropped_item::DroppedItemCommandsExt;
+        let mut drops = [None; CONTAINER_SIZE];
+        for &stack in inventory.iter().flatten() {
+            let remaining = crate::inventory::slots::insert(&mut drops, stack, 0..CONTAINER_SIZE);
+            debug_assert!(
+                remaining.is_none(),
+                "Container drops fit their original slot count"
+            );
+        }
+        for stack in drops.into_iter().flatten() {
+            commands.spawn_dropped_item(
+                stack,
+                position.as_vec3() + Vec3::splat(0.5),
+                Vec3::Y * 1.2,
+            );
+        }
+    }
+    let coordinate = crate::voxel::split_world_position(position).0;
+    let loaded = index.contains_key(&coordinate);
+    let catalog = catalog.clone();
+    commands.queue(move |world: &mut World| {
+        let owner = column(world, coordinate);
+        let entity = block(world, owner, position);
+        if container_changed {
+            world
+                .get_mut::<GameplayColumn>(owner)
+                .expect("Gameplay column")
+                .revision += 1;
+            world
+                .entity_mut(entity)
+                .remove::<(Chest, ContainerInventory)>();
+        }
+        classify(world, entity, new, &catalog);
+        if loaded {
+            world.entity_mut(entity).remove::<Dormant>();
+        }
+        if !materialized {
+            world.despawn(entity);
         }
     });
 }
 
 pub(crate) fn unload(
     event: On<Remove<crate::voxel::VoxelChunk>>,
-    terrain: Query<&LoadedColumn>,
-    blocks: Query<&BlockEntities>,
-    columns: Query<&GameplayColumn>,
+    terrain: Query<(&crate::voxel::VoxelChunk, &LoadedColumn)>,
+    topology: TopologyUpdates,
     mut commands: Commands,
 ) {
-    if let Ok(owner) = terrain.get(event.entity) {
-        if let Ok(data) = columns.get(owner.0) {
-            let position = data.position;
-            commands.queue(move |world: &mut World| refresh_topology(world, position));
-        }
-        if let Ok(blocks) = blocks.get(owner.0) {
+    if let Ok((chunk, owner)) = terrain.get(event.entity) {
+        topology.neighbors(chunk.position, &mut commands);
+        if let Ok(blocks) = topology.blocks.get(owner.0) {
             for entity in blocks.iter() {
-                commands.entity(entity).try_insert((Dormant, TopologyDirty));
+                commands.entity(entity).try_insert(Dormant);
             }
         }
     }

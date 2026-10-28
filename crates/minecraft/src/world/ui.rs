@@ -20,7 +20,7 @@ struct WorldRow(usize);
 #[derive(Component, Clone, Default)]
 struct DeleteWorld(usize);
 #[derive(Component, Clone, Default)]
-struct CancelDelete;
+pub(super) struct InitialFocus;
 #[derive(Component, Clone, Copy, Default)]
 pub(super) enum Field {
     #[default]
@@ -89,6 +89,7 @@ pub(super) fn world_list(mut commands: Commands, browser: Res<Browser>) {
 }
 
 pub(super) fn replace_world_list(commands: &mut Commands, browser: &Browser) {
+    // Include pages queued by an earlier rebuild in the same command flush.
     commands.despawn_all::<With<WorldPage>>();
     spawn_world_list(commands, browser);
 }
@@ -116,22 +117,11 @@ fn spawn_world_list(commands: &mut Commands, browser: &Browser) {
                 --
                 Node { flex_direction: FlexDirection::Row, column_gap: px(12) }
                 Children [
-                    @button("Cancel", ButtonVariant::Normal) @cancel_disabled CancelDelete on(cancel_delete)
+                    @button("Cancel", ButtonVariant::Normal) @cancel_disabled InitialFocus on(cancel_delete)
                     --
                     @button("Delete World", ButtonVariant::Primary) @delete_disabled on(confirm_delete)
                 ]
             ]
-        });
-        commands.queue(|world: &mut World| {
-            if let Some(entity) = world
-                .query_filtered::<Entity, With<CancelDelete>>()
-                .iter(world)
-                .next()
-            {
-                world
-                    .resource_mut::<InputFocus>()
-                    .set(entity, bevy::input_focus::FocusCause::Navigated);
-            }
         });
         return;
     }
@@ -248,7 +238,7 @@ pub(super) fn create_page(mut commands: Commands, mut browser: ResMut<Browser>) 
                 Text("World name") ThemedText
                 --
                 @FeathersTextInputContainer
-                Children [ @FeathersTextInput { @max_characters: {Some(64)} } Text("New World") Field::Name TabIndex(0) ]
+                Children [ @FeathersTextInput { @max_characters: {Some(64)} } Text("New World") Field::Name InitialFocus TabIndex(0) ]
                 --
                 Text("Seed (signed integer; leave empty for a random seed)") ThemedText
                 --
@@ -269,18 +259,10 @@ pub(super) fn create_page(mut commands: Commands, mut browser: ResMut<Browser>) 
             ]
         ]
     });
-    // Focus once the scene commands have materialized the input entities.
-    commands.queue(|world: &mut World| {
-        let entity = world
-            .query::<(Entity, &Field)>()
-            .iter(world)
-            .find_map(|(e, f)| matches!(f, Field::Name).then_some(e));
-        if let Some(entity) = entity {
-            world
-                .resource_mut::<InputFocus>()
-                .set(entity, bevy::input_focus::FocusCause::Navigated);
-        }
-    });
+}
+
+pub(super) fn focus_new_control(event: On<Add<InitialFocus>>, mut focus: ResMut<InputFocus>) {
+    focus.set(event.entity, bevy::input_focus::FocusCause::Navigated);
 }
 
 fn create_world(_: On<Activate>, browser: Res<Browser>, mut next: ResMut<NextState<GameState>>) {

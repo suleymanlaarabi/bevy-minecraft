@@ -69,13 +69,14 @@ enum Destination {
 }
 
 #[derive(Resource, Default)]
-struct SaveState {
+pub(crate) struct SaveState {
     in_flight_bytes: usize,
     task: Option<Task<io::Result<SaveAck>>>,
     elapsed: f32,
     destination: Destination,
     pub(super) error: Option<String>,
-    exit_requested: bool,
+    /// Freeze and save before leaving; direct GameState transitions would lose entities.
+    pub(crate) exit_requested: bool,
     /// Autosave on the next frame, even when nothing seems to have changed.
     force: bool,
     // Give inventory OnExit and deferred commands one complete frame to settle.
@@ -130,13 +131,16 @@ pub(crate) fn spawn_save_indicator(commands: &mut Commands) {
     ui::spawn_indicator(commands);
 }
 
-pub(crate) fn report_load_error(commands: &mut Commands, error: String) {
-    commands.queue(move |world: &mut World| {
-        world.resource_mut::<SaveState>().error = Some(error);
-        world
-            .resource_mut::<NextState<WorldSessionPhase>>()
-            .set(WorldSessionPhase::SaveError);
-    });
+#[derive(Event)]
+pub(crate) struct LoadError(pub String);
+
+fn load_error(
+    mut event: On<LoadError>,
+    mut save: ResMut<SaveState>,
+    mut next: ResMut<NextState<WorldSessionPhase>>,
+) {
+    save.error = Some(std::mem::take(&mut event.0));
+    next.set(WorldSessionPhase::SaveError);
 }
 
 pub struct WorldPlugin;
@@ -146,6 +150,8 @@ impl Plugin for WorldPlugin {
             .init_resource::<Browser>()
             .init_resource::<SaveState>()
             .add_observer(exit_application)
+            .add_observer(load_error)
+            .add_observer(ui::focus_new_control)
             .add_systems(
                 OnEnter(GameState::Game),
                 prepare_session.in_set(PrepareSession),
@@ -325,14 +331,6 @@ fn leave(destination: &Destination, game: &mut NextState<GameState>, commands: &
         Destination::Worlds => game.set(GameState::WorldSelect),
         Destination::Exit => quit(commands),
     }
-}
-
-/// Public navigation entrypoint; direct Game -> Menu transitions would lose unsaved entities.
-pub(crate) fn request_leave(mut commands: Commands) {
-    commands.queue(|world: &mut World| {
-        let mut save = world.resource_mut::<SaveState>();
-        save.exit_requested = true;
-    });
 }
 
 fn handle_window_close(mut events: MessageReader<WindowCloseRequested>, mut commands: Commands) {
@@ -797,26 +795,28 @@ fn poll_save(
     }
 }
 
-fn end_session(mut commands: Commands, mut virtual_time: ResMut<Time<Virtual>>) {
+fn end_session(
+    mut commands: Commands,
+    mut virtual_time: ResMut<Time<Virtual>>,
+    generator: Option<Res<WorldGenerator>>,
+) {
     virtual_time.unpause();
+    if let Some(generator) = generator {
+        generator.cancel_requests();
+    }
+    commands.remove_resource::<hollow_worldgen::GenerationSession>();
+    commands.remove_resource::<hollow_worldgen::GenerationSettings>();
+    // Taking ownership for asynchronous destruction requires structural access.
     commands.queue(|world: &mut World| {
-        world.remove_resource::<hollow_worldgen::GenerationSession>();
-        world.remove_resource::<hollow_worldgen::GenerationSettings>();
-        if let Some(generator) = world.remove_resource::<WorldGenerator>() {
-            generator.cancel_requests();
-            IoTaskPool::get()
-                .spawn(async move {
-                    drop(generator);
-                })
-                .detach();
-        }
-        if let Some(session) = world.remove_resource::<WorldSession>() {
-            IoTaskPool::get()
-                .spawn(async move {
-                    drop(session);
-                })
-                .detach();
-        }
+        let retired = (
+            world.remove_resource::<WorldGenerator>(),
+            world.remove_resource::<WorldSession>(),
+        );
+        IoTaskPool::get()
+            .spawn(async move {
+                drop(retired);
+            })
+            .detach();
     });
 }
 

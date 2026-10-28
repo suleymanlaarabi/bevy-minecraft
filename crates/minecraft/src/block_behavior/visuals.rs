@@ -15,7 +15,7 @@ use crate::voxel::{
         models::{self, ModelQuad},
     },
 };
-use bevy::ecs::entity::EntityHashSet;
+use bevy::ecs::{entity::EntityHashSet, system::SystemParam};
 use bevy::{mesh::MeshTag, prelude::*};
 use hollow_features::articulation::{
     Easing, JointAnimation, JointClip, JointMotion, SetJointTarget,
@@ -57,27 +57,41 @@ pub(crate) struct InstanceLight(u32);
 #[derive(Event)]
 pub(crate) struct ChunkLightChanged(pub Entity);
 
-pub(crate) fn invalidate_column(world: &mut World, column: Entity) {
-    if let Some(mut progress) = world.get_mut::<Relight>(column) {
-        progress.rerun = true;
-    } else if let Ok(mut entity) = world.get_entity_mut(column) {
-        entity.insert(Relight::default());
-    }
+#[derive(SystemParam)]
+pub(crate) struct LightInvalidation<'w, 's> {
+    columns: Res<'w, GameplayColumns>,
+    progress: Query<'w, 's, &'static mut Relight>,
+    commands: Commands<'w, 's>,
 }
-pub(crate) fn invalidate_neighbors(world: &mut World, position: IVec2) {
-    for offset in [IVec2::ZERO, IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y] {
-        if let Some(&entity) = world
-            .resource::<GameplayColumns>()
-            .get(&(position + offset))
-        {
-            invalidate_column(world, entity);
+impl LightInvalidation<'_, '_> {
+    fn column(&mut self, position: IVec2) {
+        let Some(&entity) = self.columns.get(&position) else {
+            return;
+        };
+        if let Ok(mut progress) = self.progress.get_mut(entity) {
+            if !progress.rerun {
+                progress.rerun = true;
+            }
+        } else {
+            // Repeated invalidations before a flush must not replace active progress.
+            self.commands
+                .entity(entity)
+                .try_insert_if_new(Relight::default());
+        }
+    }
+    pub(crate) fn neighbors(&mut self, position: IVec2) {
+        for offset in [IVec2::ZERO, IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y] {
+            self.column(position + offset);
         }
     }
 }
 pub(crate) fn register(app: &mut App) {
     app.init_resource::<ViewQueue>()
         .init_resource::<LightQueue>()
-        .add_systems(OnExit(crate::game::GameState::Game), clear_updates)
+        .add_systems(
+            OnExit(crate::game::GameState::Game),
+            clear_updates.after(crate::voxel::streaming::reset_voxel_world),
+        )
         .add_observer(render_requested)
         .add_observer(changed)
         .add_observer(light_changed)
@@ -96,35 +110,31 @@ pub(crate) fn register(app: &mut App) {
                 .run_if(crate::world::streaming),
         );
 }
-fn changed(event: On<crate::voxel::edits::BlockChanged>, mut commands: Commands) {
-    let position = event.position;
-    commands.queue(move |world: &mut World| {
-        for delta in [IVec3::ZERO, IVec3::X, IVec3::NEG_X, IVec3::Z, IVec3::NEG_Z] {
-            let coordinate = crate::voxel::split_world_position(position + delta).0;
-            if let Some(&owner) = world.resource::<GameplayColumns>().get(&coordinate) {
-                invalidate_column(world, owner);
-            }
+fn changed(event: On<crate::voxel::edits::BlockChanged>, mut invalidation: LightInvalidation) {
+    let positions = [IVec3::ZERO, IVec3::X, IVec3::NEG_X, IVec3::Z, IVec3::NEG_Z]
+        .map(|delta| crate::voxel::split_world_position(event.position + delta).0);
+    for (index, &position) in positions.iter().enumerate() {
+        if !positions[..index].contains(&position) {
+            invalidation.column(position);
         }
-    });
+    }
 }
 fn chunk_departed(
     event: On<Despawn<crate::voxel::VoxelChunk>>,
     chunks: Query<&crate::voxel::VoxelChunk>,
-    mut commands: Commands,
+    mut invalidation: LightInvalidation,
 ) {
     if let Ok(chunk) = chunks.get(event.entity) {
-        let position = chunk.position;
-        commands.queue(move |world: &mut World| invalidate_neighbors(world, position));
+        invalidation.neighbors(chunk.position);
     }
 }
 fn light_changed(
     event: On<ChunkLightChanged>,
     chunks: Query<&crate::voxel::VoxelChunk>,
-    mut commands: Commands,
+    mut invalidation: LightInvalidation,
 ) {
     if let Ok(chunk) = chunks.get(event.0) {
-        let position = chunk.position;
-        commands.queue(move |world: &mut World| invalidate_neighbors(world, position));
+        invalidation.neighbors(chunk.position);
     }
 }
 fn box_geometry(lo: Vec3, hi: Vec3, offset: Vec3) -> ModelGeometry {

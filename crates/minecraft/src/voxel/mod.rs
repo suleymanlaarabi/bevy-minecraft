@@ -143,7 +143,10 @@ impl Plugin for VoxelPlugin {
                 .after(update_camera_environment)
                 .before(bevy::transform::TransformSystems::Propagate),
         )
-        .add_systems(OnExit(GameState::Game), cleanup_voxel_world);
+        .add_systems(
+            OnExit(GameState::Game),
+            (cleanup_voxel_world, streaming::reset_voxel_world).chain(),
+        );
 
         #[cfg(feature = "dev")]
         diagnostics::register(app);

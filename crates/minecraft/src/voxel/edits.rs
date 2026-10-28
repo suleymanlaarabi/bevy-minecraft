@@ -12,9 +12,11 @@ pub(crate) type VoxelEditWorld<'w, 's> = hollow_engine::edits::VoxelEditWorld<'w
 pub(crate) use hollow_engine::edits::border_neighbors;
 
 /// Neighbor work belongs to the Minecraft simulation, after a terrain commit.
-pub(crate) fn enqueue_neighbors(event: On<BlockChanged>, mut commands: Commands) {
-    let position = event.position;
-    commands.queue(move |world: &mut World| crate::simulation::enqueue_neighbors(world, position));
+pub(crate) fn enqueue_neighbors(
+    event: On<BlockChanged>,
+    mut neighbors: crate::simulation::NeighborUpdates,
+) {
+    neighbors.enqueue(event.position);
 }
 
 /// Gameplay edits are validated together before any state or item is changed.
@@ -182,9 +184,10 @@ pub(crate) fn queue_connection_border(
 /// chunk are inspected, and only in sections holding connection-bearing blocks.
 pub(crate) fn refresh_connection_border(
     mut pending: ResMut<ConnectionBorders>,
-    mut commands: Commands,
+    mut neighbors: crate::simulation::NeighborUpdates,
     positions: Query<&super::VoxelChunk>,
-    world: VoxelEditWorld,
+    index: Res<super::streaming::ChunkIndex>,
+    chunks: Query<&ChunkVoxels>,
     mut seeds: Local<Vec<IVec3>>,
 ) {
     // Border discovery is preparation, outside observers. At most one arrival
@@ -195,7 +198,7 @@ pub(crate) fn refresh_connection_border(
     let Ok(&super::VoxelChunk { position }) = positions.get(entity) else {
         return;
     };
-    let Ok(own) = world.chunks.get(entity) else {
+    let Ok(own) = chunks.get(entity) else {
         return;
     };
     let own_modified = own.modified;
@@ -208,9 +211,9 @@ pub(crate) fn refresh_connection_border(
         (IVec2::Y, 2, CHUNK_SIZE - 1, 0),
     ] {
         let neighbor_position = position + offset;
-        let Some(neighbor) = world
-            .chunk_entity(neighbor_position)
-            .and_then(|entity| world.chunks.get(entity).ok())
+        let Some(neighbor) = index
+            .get(&neighbor_position)
+            .and_then(|&entity| chunks.get(entity).ok())
         else {
             continue;
         };
@@ -225,7 +228,7 @@ pub(crate) fn refresh_connection_border(
         }
     }
     for seed in seeds.drain(..) {
-        commands.queue(move |world: &mut World| crate::simulation::enqueue_neighbors(world, seed));
+        neighbors.enqueue(seed);
     }
 }
 

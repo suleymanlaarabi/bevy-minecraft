@@ -94,7 +94,7 @@ pub(super) fn finish_spawn_search(
         let position = match position {
             Ok(position) => position,
             Err(error) => {
-                crate::world::report_load_error(&mut commands, error.to_string());
+                commands.trigger(crate::world::LoadError(error.to_string()));
                 commands.entity(entity).despawn();
                 continue;
             }

@@ -114,7 +114,7 @@ pub(crate) fn handle_escape(
     keyboard_input: Res<ButtonInput<KeyCode>>,
     inventory_state: Res<State<InventoryState>>,
     mut next_inventory_state: ResMut<NextState<InventoryState>>,
-    mut commands: Commands,
+    mut save: ResMut<crate::world::SaveState>,
     phase: Res<State<crate::world::WorldSessionPhase>>,
 ) {
     if !keyboard_input.just_pressed(KeyCode::Escape) {
@@ -130,6 +130,6 @@ pub(crate) fn handle_escape(
     if *inventory_state.get() == InventoryState::Open {
         next_inventory_state.set(InventoryState::Closed);
     } else {
-        crate::world::request_leave(commands.reborrow());
+        save.exit_requested = true;
     }
 }

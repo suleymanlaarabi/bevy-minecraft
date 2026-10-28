@@ -132,10 +132,9 @@ fn finish_respawn(
         };
         let Some(safe_position) = super::placement::respawn(&world, position.translation, body)
         else {
-            crate::world::report_load_error(
-                &mut commands,
+            commands.trigger(crate::world::LoadError(
                 "No safe respawn position near the saved spawn point.".into(),
-            );
+            ));
             continue;
         };
         transform.translation = safe_position;

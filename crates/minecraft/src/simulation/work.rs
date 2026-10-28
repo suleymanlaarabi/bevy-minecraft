@@ -4,7 +4,7 @@ use crate::voxel::{
     VoxelState,
     edits::{CheckedEdit, VoxelEditWorld},
 };
-use bevy::platform::collections::HashMap;
+use bevy::{ecs::system::SystemParam, platform::collections::HashMap};
 use hollow_core::coordinates::{CHUNK_HEIGHT, cell_index};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -232,6 +232,21 @@ pub(crate) struct SimulationSnapshot {
     suspended: Vec<BoundaryWork>,
 }
 impl ColumnSimulation {
+    pub(crate) fn wake(&mut self, chunk: IVec2, ready: &mut Vec<BoundaryWork>) {
+        ready.extend(
+            self.suspended
+                .extract_if(.., |_, task| task.chunk == chunk.to_array())
+                .map(|(_, task)| task),
+        );
+        for task in ready.drain(..) {
+            if let Some(tick) = task.tick {
+                self.schedule(tick.cell, tick.channel, tick.expected, 1, tick.priority);
+            } else {
+                self.enqueue(task.cell, task.reasons);
+            }
+        }
+    }
+
     fn invalidate(&mut self, cell: u32, block: u32, fluid: u32) {
         for (channel, expected) in [(TickChannel::Block, block), (TickChannel::Fluid, fluid)] {
             if let Some(work) = self.scheduled.as_mut() {
@@ -445,32 +460,14 @@ impl BoundaryWaits {
             !owners.is_empty()
         });
     }
-    pub(crate) fn wake(&mut self, chunk: IVec2, commands: &mut Commands) {
-        let Some(owners) = self.0.remove(&chunk) else {
-            return;
-        };
-        for owner in owners {
-            commands.queue(move |world: &mut World| {
-                if let Some(mut work) = world.get_mut::<ColumnSimulation>(owner) {
-                    let mut ready = Vec::new();
-                    work.suspended.retain(|_, task| {
-                        if task.chunk == chunk.to_array() {
-                            ready.push(task.clone());
-                            false
-                        } else {
-                            true
-                        }
-                    });
-                    for task in ready {
-                        if let Some(tick) = task.tick {
-                            work.schedule(tick.cell, tick.channel, tick.expected, 1, tick.priority);
-                        } else {
-                            work.enqueue(task.cell, task.reasons);
-                        }
-                    }
-                }
-            });
-        }
+    pub(crate) fn wake(&mut self, chunk: IVec2, ready: &mut Vec<(IVec2, Entity)>) {
+        ready.extend(
+            self.0
+                .remove(&chunk)
+                .into_iter()
+                .flatten()
+                .map(|owner| (chunk, owner)),
+        );
     }
     pub(crate) fn register(&mut self, chunk: IVec2, owner: Entity) {
         let owners = self.0.entry(chunk).or_default();
@@ -479,51 +476,51 @@ impl BoundaryWaits {
         }
     }
 }
-pub(crate) fn enqueue_neighbors(world: &mut World, position: IVec3) {
-    for delta in [
-        IVec3::ZERO,
-        IVec3::X,
-        IVec3::NEG_X,
-        IVec3::Y,
-        IVec3::NEG_Y,
-        IVec3::Z,
-        IVec3::NEG_Z,
-    ] {
-        let position = position + delta;
-        let (chunk, local) = crate::voxel::split_world_position(position);
-        let Some(cell) = cell_index(local) else {
-            continue;
-        };
-        let identity = if delta == IVec3::ZERO {
-            world
-                .resource::<crate::voxel::streaming::ChunkIndex>()
-                .get(&chunk)
-                .and_then(|&entity| world.get::<crate::voxel::ChunkVoxels>(entity))
-                .and_then(|voxels| voxels.state(local))
-                .map(|state| {
-                    (
-                        state.kind().0,
-                        world
-                            .resource::<super::fluids::FluidCatalog>()
-                            .info(state)
-                            .family
-                            .0 as u32,
-                    )
-                })
-        } else {
-            None
-        };
-        let owner = world.resource::<GameplayColumns>().get(&chunk).copied();
-        if let Some(owner) = owner
-            && let Some(mut work) = world.get_mut::<ColumnSimulation>(owner)
-        {
-            if let Some((block, fluid)) = identity {
-                work.invalidate(cell as u32, block, fluid);
-            }
-            work.enqueue(cell as u32, NEIGHBOR_ALL);
+/// Neighbor scheduling borrows only the terrain and per-column work it touches.
+#[derive(SystemParam)]
+pub(crate) struct NeighborUpdates<'w, 's> {
+    terrain: crate::voxel::VoxelWorld<'w, 's>,
+    owners: Res<'w, GameplayColumns>,
+    work: Query<'w, 's, &'static mut ColumnSimulation>,
+    fluids: Res<'w, super::fluids::FluidCatalog>,
+}
+impl NeighborUpdates<'_, '_> {
+    pub(crate) fn enqueue(&mut self, position: IVec3) {
+        let center = crate::voxel::split_world_position(position).0;
+        let center_owner = self.owners.get(&center).copied();
+        for delta in [
+            IVec3::ZERO,
+            IVec3::X,
+            IVec3::NEG_X,
+            IVec3::Y,
+            IVec3::NEG_Y,
+            IVec3::Z,
+            IVec3::NEG_Z,
+        ] {
+            let target = position + delta;
+            let (chunk, local) = crate::voxel::split_world_position(target);
+            let Some(cell) = cell_index(local) else {
+                continue;
+            };
+            let owner = if chunk == center {
+                center_owner
+            } else {
+                self.owners.get(&chunk).copied()
+            };
+            let Some(mut work) = owner.and_then(|owner| self.work.get_mut(owner).ok()) else {
+                continue;
+            };
             if delta == IVec3::ZERO {
+                if let Some(state) = self.terrain.state(target) {
+                    work.invalidate(
+                        cell as u32,
+                        state.kind().0,
+                        u32::from(self.fluids.info(state).family.0),
+                    );
+                }
                 work.invalidate_random_sections(1 << (cell / 4096));
             }
+            work.enqueue(cell as u32, NEIGHBOR_ALL);
         }
     }
 }

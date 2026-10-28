@@ -618,31 +618,37 @@ pub(super) fn cleanup_voxel_world(
     if let Some(generator) = generator {
         generator.clear_view();
     }
-    // Despawn observers write back into these resources, so reset them afterwards.
-    commands.queue(|world: &mut World| {
-        world.resource_mut::<ChunkIndex>().clear();
-        world.resource_mut::<PendingChunks>().clear();
-        world.resource_mut::<PendingEdits>().clear();
-        world.resource_mut::<StoredChunks>().clear();
-        world
-            .resource_mut::<crate::block_behavior::containers::GameplayColumns>()
-            .clear();
-        // Dispose shared lighting buffers off the ECS thread.
-        if let Some(state) = world.remove_resource::<super::lighting::LightingState>() {
-            bevy::tasks::IoTaskPool::get()
-                .spawn(async move {
-                    drop(state);
-                })
-                .detach();
-        }
-        world.init_resource::<super::lighting::LightingState>();
-        *world.resource_mut::<super::lighting::BlockLightEdits>() = default();
-        *world.resource_mut::<StreamState>() = StreamState::default();
-        *world.resource_mut::<ChunkArrivals>() = ChunkArrivals::default();
-        world
-            .resource_mut::<super::edits::ConnectionBorders>()
-            .clear();
-    });
+}
+
+/// Run after unload commands and their observers have finished writing back.
+pub(crate) fn reset_voxel_world(
+    mut index: ResMut<ChunkIndex>,
+    mut pending: ResMut<PendingChunks>,
+    mut edits: ResMut<PendingEdits>,
+    mut stored: ResMut<StoredChunks>,
+    mut columns: ResMut<crate::block_behavior::containers::GameplayColumns>,
+    mut lighting: ResMut<super::lighting::LightingState>,
+    mut block_light: ResMut<super::lighting::BlockLightEdits>,
+    mut stream: ResMut<StreamState>,
+    mut arrivals: ResMut<ChunkArrivals>,
+    mut borders: ResMut<super::edits::ConnectionBorders>,
+) {
+    index.clear();
+    pending.clear();
+    edits.clear();
+    stored.clear();
+    columns.clear();
+    // Dispose shared lighting buffers off the ECS thread without removing the resource.
+    let retired = std::mem::take(&mut *lighting);
+    bevy::tasks::IoTaskPool::get()
+        .spawn(async move {
+            drop(retired);
+        })
+        .detach();
+    *block_light = default();
+    *stream = default();
+    *arrivals = default();
+    borders.clear();
 }
 
 /// Release presentation while the generation graph retains the procedural column.

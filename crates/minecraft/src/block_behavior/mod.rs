@@ -57,10 +57,7 @@ impl Plugin for BlockLifecyclePlugin {
                     .after(hollow_engine::blocks::FinalizeBlockContent),
             )
             .add_observer(containers::changed)
-            .add_observer(containers::unload)
-            .add_systems(OnExit(crate::game::GameState::Game), cleanup);
+            .add_observer(containers::loaded)
+            .add_observer(containers::unload);
     }
-}
-fn cleanup(mut columns: ResMut<containers::GameplayColumns>) {
-    columns.clear();
 }
