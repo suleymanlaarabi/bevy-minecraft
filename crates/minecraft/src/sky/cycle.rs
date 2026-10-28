@@ -17,7 +17,7 @@ const MOON_PHASES: u32 = 8;
 /// Lights only turn by whole steps: every turn re-rasterizes the shadow map along a
 /// rotated texel grid, so each edge re-aliases and visibly crawls. A step comes every
 /// ~3.3 s of a normal day and moves the shadow of a 10-block tree by about 9 cm.
-/// The visible sun (`celestial::SunMaterial`) still moves smoothly.
+/// The visible sun (`SkyPass::Sun`) still moves smoothly.
 const LIGHT_ANGLE_STEP: f32 = 0.5 * TAU / 360.0;
 
 /// Time of day of the current world. `fraction` runs over one day: 0 is midnight,

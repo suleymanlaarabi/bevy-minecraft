@@ -6,7 +6,8 @@ use bevy::{
     pbr::{DistanceFog, FogFalloff, Material, MaterialPipeline, MaterialPipelineKey},
     prelude::*,
     render::render_resource::{
-        AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+        AsBindGroup, CompareFunction, RenderPipelineDescriptor, ShaderType,
+        SpecializedMeshPipelineError,
     },
     render::storage::ShaderBuffer,
     shader::ShaderRef,
@@ -136,23 +137,79 @@ pub fn terrain_radius(settings: &EnvironmentSettings) -> f32 {
     settings.terrain_radius
 }
 
-/// Lower-sky haze and the opaque immersion dome share the sky palette.
+/// Every sky and environment effect, one or two entities each. A single material
+/// type keeps their per-frame material systems to one set in both worlds; the pass
+/// selects shader entry points, vertex inputs, blending and sort order.
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
-pub struct HorizonFogMaterial {
+#[bind_group_data(SkyPass)]
+pub struct SkyMaterial {
+    pub pass: SkyPass,
+    #[uniform(0)]
+    pub settings: SkySettings,
+    /// The shared [`super::fog::SkyPalette`].
     #[storage(11, read_only, visibility(fragment))]
-    fog: Handle<ShaderBuffer>,
+    pub palette: Handle<ShaderBuffer>,
 }
 
-impl Material for HorizonFogMaterial {
-    fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Blend
+impl From<&SkyMaterial> for SkyPass {
+    fn from(material: &SkyMaterial) -> Self {
+        material.pass
     }
-    fn depth_bias(&self) -> f32 {
-        // Draw behind all world translucency, despite being camera-centered.
-        -1_000_000.0
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SkyPass {
+    /// The sky gradient, depth-tested behind the terrain.
+    Background,
+    /// Point stars on a sphere at infinity, added over the gradient.
+    Stars,
+    /// The moon's disk with its phases and a faint halo, added over the sky.
+    Moon,
+    /// The sun's disk and glow, added over the sky.
+    Sun,
+    /// Opaque, flat-shaded cloud boxes lit like terrain.
+    Clouds,
+    /// Lower-sky haze and the opaque immersion dome.
+    Horizon,
+}
+
+/// Per-pass inputs; each field lists the passes that read it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, ShaderType)]
+pub struct SkySettings {
+    /// Sun and moon: unit vector toward the body in XYZ, angular radius of the disk in W.
+    pub direction: Vec4,
+    /// Sun: output-space color of the disk's center in RGB.
+    /// Moon: output-space color in RGB, opacity in A.
+    pub color: Vec4,
+    /// Moon: lit fraction of the disk in X, +1 waxing or -1 waning in Y.
+    /// Stars: brightness in X, from 0 by day to 1 at night.
+    /// Clouds: horizontal distances where the dithered fade starts and ends in XY.
+    pub params: Vec4,
+}
+
+impl Material for SkyMaterial {
+    fn vertex_shader() -> ShaderRef {
+        "embedded://hollow_render/shaders/sky.wesl".into()
     }
     fn fragment_shader() -> ShaderRef {
-        "embedded://hollow_render/shaders/horizon_fog.wesl".into()
+        Self::vertex_shader()
+    }
+    fn alpha_mode(&self) -> AlphaMode {
+        match self.pass {
+            SkyPass::Background | SkyPass::Clouds => AlphaMode::Opaque,
+            SkyPass::Stars | SkyPass::Moon | SkyPass::Sun => AlphaMode::Add,
+            SkyPass::Horizon => AlphaMode::Blend,
+        }
+    }
+    fn depth_bias(&self) -> f32 {
+        // Sort keys far behind every other transparent mesh: stars, then the sun and
+        // moon, draw first. The camera-centered haze draws behind all world translucency.
+        match self.pass {
+            SkyPass::Stars => -1.0e9,
+            SkyPass::Moon | SkyPass::Sun => -1.0e8,
+            SkyPass::Horizon => -1_000_000.0,
+            SkyPass::Background | SkyPass::Clouds => 0.0,
+        }
     }
     fn enable_prepass() -> bool {
         false
@@ -163,11 +220,45 @@ impl Material for HorizonFogMaterial {
     fn specialize(
         _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
-        _layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
+        layout: &MeshVertexBufferLayoutRef,
+        key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        // Seen from inside.
-        descriptor.primitive.cull_mode = None;
+        let pass = key.bind_group_data;
+        let position = Mesh::ATTRIBUTE_POSITION.at_shader_location(0);
+        descriptor.vertex.buffers = vec![match pass {
+            SkyPass::Stars => layout.0.get_layout(&[
+                position,
+                Mesh::ATTRIBUTE_UV_0.at_shader_location(1),
+                Mesh::ATTRIBUTE_COLOR.at_shader_location(2),
+            ]),
+            SkyPass::Clouds => layout
+                .0
+                .get_layout(&[position, Mesh::ATTRIBUTE_NORMAL.at_shader_location(1)]),
+            _ => layout.0.get_layout(&[position]),
+        }?];
+        let (vertex, fragment) = match pass {
+            SkyPass::Background => ("background_vertex", "background_fragment"),
+            SkyPass::Stars => ("stars_vertex", "stars_fragment"),
+            SkyPass::Moon => ("moon_vertex", "moon_fragment"),
+            SkyPass::Sun => ("sun_vertex", "sun_fragment"),
+            SkyPass::Clouds => ("clouds_vertex", "clouds_fragment"),
+            SkyPass::Horizon => ("horizon_vertex", "horizon_fragment"),
+        };
+        descriptor.vertex.entry_point = Some(vertex.into());
+        if let Some(stage) = &mut descriptor.fragment {
+            stage.entry_point = Some(fragment.into());
+        }
+        if matches!(pass, SkyPass::Background | SkyPass::Horizon) {
+            // A full-screen quad, and haze seen from inside.
+            descriptor.primitive.cull_mode = None;
+        }
+        if pass == SkyPass::Background
+            && let Some(depth) = &mut descriptor.depth_stencil
+        {
+            // Reverse-Z far depth: shade only background left by the terrain prepass.
+            depth.depth_compare = Some(CompareFunction::GreaterEqual);
+            depth.depth_write_enabled = Some(false);
+        }
         Ok(())
     }
 }
@@ -184,10 +275,14 @@ pub fn spawn_horizon_skirt(
     mut commands: Commands,
     session: Res<hollow_engine::session::ActiveSession>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<HorizonFogMaterial>>,
-    fog: Res<super::fog::SkyPalette>,
+    mut materials: ResMut<Assets<SkyMaterial>>,
+    palette: Res<super::fog::SkyPalette>,
 ) {
-    let material = MeshMaterial3d(materials.add(HorizonFogMaterial { fog: fog.0.clone() }));
+    let material = MeshMaterial3d(materials.add(SkyMaterial {
+        pass: SkyPass::Horizon,
+        settings: SkySettings::default(),
+        palette: palette.0.clone(),
+    }));
     let tube = Cylinder::new(1.0, 1.0)
         .mesh()
         .resolution(64)

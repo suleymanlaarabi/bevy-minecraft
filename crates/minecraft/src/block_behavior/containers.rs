@@ -335,7 +335,10 @@ pub(crate) fn spawn_for_chunk(
             data.initialized = true;
         }
         // The insert observers see fully restored blocks before queued terrain edits.
-        world.entity_mut(terrain).insert(LoadedColumn(owner));
+        world.entity_mut(terrain).insert((
+            LoadedColumn(owner),
+            hollow_worldgen::runtime::ChunkRetention,
+        ));
     });
 }
 
@@ -625,14 +628,24 @@ pub(crate) fn track_inventory_changes(
         }
     }
 }
+/// Only columns measured dormant, or changed outside change detection since that
+/// measurement, can qualify; the rest are not visited.
 pub(crate) fn cleanup_dormant(
     mut commands: Commands,
-    columns: Query<(Entity, &GameplayColumn, Option<&LoadedTerrain>)>,
+    columns: Query<(&GameplayColumn, Option<&LoadedTerrain>)>,
+    pressure: Res<crate::world::StoragePressure>,
     stored: Res<crate::voxel::streaming::StoredChunks>,
     pending: Res<crate::voxel::streaming::PendingChunks>,
     mut index: ResMut<GameplayColumns>,
+    mut candidates: Local<Vec<Entity>>,
 ) {
-    for (entity, data, terrain) in &columns {
+    candidates.extend(pressure.dormant.iter().chain(&pressure.touched));
+    candidates.sort_unstable();
+    candidates.dedup();
+    for entity in candidates.drain(..) {
+        let Ok((data, terrain)) = columns.get(entity) else {
+            continue;
+        };
         if terrain.is_none_or(|terrain| terrain.is_empty())
             && data.revision == data.saved_revision
             && !stored.contains_key(&data.position)

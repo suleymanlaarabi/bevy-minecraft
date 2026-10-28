@@ -1,4 +1,8 @@
 //! One admission queue for voxel CPU work. Pending futures never occupy a worker.
+//!
+//! Background work (autosave encoding) only fills spare capacity: at most a third
+//! of the workers, and one while foreground work is queued, so deferred saves
+//! neither delay terrain near the player nor saturate cores frame threads share.
 use bevy_app::{App, Plugin, PostUpdate};
 use bevy_diagnostic::{Diagnostic, DiagnosticPath, Diagnostics, RegisterDiagnostic};
 use bevy_ecs::prelude::*;
@@ -25,6 +29,13 @@ pub enum WorkClass {
     Encoding,
 }
 
+impl WorkClass {
+    /// Deferrable work nobody is waiting on.
+    fn is_background(self) -> bool {
+        self == Self::Encoding
+    }
+}
+
 struct Pending {
     class: WorkClass,
     distance: u32,
@@ -40,18 +51,40 @@ struct Queue {
 }
 
 impl Queue {
-    fn pop(&mut self) -> Option<Pending> {
+    /// The most urgent job, skipping background jobs once `background_running`
+    /// reaches the limit (one while any foreground job waits).
+    fn pop(&mut self, background_running: usize, background_limit: usize) -> Option<Pending> {
         let now = Instant::now();
-        let best = self
-            .pending
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, job)| {
-                // Promote one class every second; long-lived distant jobs eventually lead.
-                let age = now.duration_since(job.queued).as_secs().min(16) as i32;
-                (job.class as i32 - age, job.distance, job.sequence)
-            })
-            .map(|(i, _)| i)?;
+        let (mut foreground, mut background) = (None, None);
+        for (i, job) in self.pending.iter().enumerate() {
+            // Promote one class every second; long-lived distant jobs eventually lead.
+            let age = now.duration_since(job.queued).as_secs().min(16) as i32;
+            let key = (job.class as i32 - age, job.distance, job.sequence);
+            let best = if job.class.is_background() {
+                &mut background
+            } else {
+                &mut foreground
+            };
+            if best.is_none_or(|(_, best)| key < best) {
+                *best = Some((i, key));
+            }
+        }
+        let limit = if foreground.is_some() {
+            1
+        } else {
+            background_limit
+        };
+        let background = background.filter(|_| background_running < limit);
+        let (best, _) = match (foreground, background) {
+            (Some(foreground), Some(background)) => {
+                if background.1 < foreground.1 {
+                    background
+                } else {
+                    foreground
+                }
+            }
+            (foreground, background) => foreground.or(background)?,
+        };
         Some(self.pending.swap_remove(best))
     }
 }
@@ -61,6 +94,8 @@ impl Queue {
 pub struct VoxelTaskBudget {
     queue: Arc<Mutex<Queue>>,
     active: Arc<AtomicUsize>,
+    /// Running background jobs; only incremented under the queue lock.
+    background: Arc<AtomicUsize>,
     workers: usize,
 }
 
@@ -70,6 +105,7 @@ impl Default for VoxelTaskBudget {
         Self {
             queue: Arc::default(),
             active: Arc::default(),
+            background: Arc::default(),
             workers: AsyncComputeTaskPool::try_get()
                 .map_or((cores / 2).clamp(1, 10), |pool| pool.thread_num().max(1)),
         }
@@ -83,9 +119,23 @@ impl Drop for Slot {
     }
 }
 
+type Admitted = (Pin<Box<dyn Future<Output = ()> + Send>>, Option<Slot>);
+
 impl VoxelTaskBudget {
     pub fn worker_count(&self) -> usize {
         self.workers
+    }
+    /// Pops the next admissible job; a background job holds its slot until dropped.
+    fn admit(&self, queue: &mut Queue) -> Option<Admitted> {
+        // A third of the workers keeps idle-time saves progressing without
+        // occupying the cores that frame threads also need.
+        let limit = (self.workers / 3).max(1);
+        let job = queue.pop(self.background.load(Ordering::Relaxed), limit)?;
+        let slot = job.class.is_background().then(|| {
+            self.background.fetch_add(1, Ordering::Relaxed);
+            Slot(self.background.clone())
+        });
+        Some((job.work, slot))
     }
     pub fn spawn<T: Send + 'static>(
         &self,
@@ -150,7 +200,7 @@ fn dispatch(
     let until = Instant::now() + deadline.remaining;
     let mut queue = budget.queue.lock().unwrap();
     while budget.active.load(Ordering::Relaxed) < budget.workers && Instant::now() < until {
-        let Some(mut job) = queue.pop() else {
+        let Some(job) = budget.admit(&mut queue) else {
             break;
         };
         budget.active.fetch_add(1, Ordering::Relaxed);
@@ -159,16 +209,14 @@ fn dispatch(
         AsyncComputeTaskPool::get()
             .spawn(async move {
                 let _slot = slot;
-                loop {
-                    job.work.await;
+                let mut next = Some(job);
+                while let Some((work, background)) = next {
+                    work.await;
+                    drop(background);
                     bevy_tasks::futures_lite::future::yield_now().await;
-                    let next = budget.queue.lock().unwrap().pop();
-                    let Some(next) = next else {
-                        break;
-                    };
                     // Refill on completion rather than leaving this CPU slot idle
                     // until the main thread reaches the next frame's dispatcher.
-                    job = next;
+                    next = budget.admit(&mut budget.queue.lock().unwrap());
                 }
             })
             .detach();

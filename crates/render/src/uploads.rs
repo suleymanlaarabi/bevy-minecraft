@@ -12,12 +12,20 @@ use bevy::{
 };
 use std::sync::{Arc, Mutex};
 
-#[derive(Component)]
-pub struct PendingMesh(pub Handle<Mesh>);
+use super::{
+    model_mesh::SortData,
+    sort::{SortKey, SortState, SortVersion},
+};
 
-/// Sorting data must switch together with the matching vertex/index buffers.
+/// Replacement geometry of an existing section entity. Sorting data must switch
+/// together with the matching vertex/index buffers. Transient, so stored sparsely:
+/// adding and removing it never moves the entity's table row.
 #[derive(Component)]
-pub struct PendingSort(pub Option<(super::model_mesh::SortData, Option<super::sort::SortKey>)>);
+#[component(storage = "SparseSet")]
+pub struct PendingMesh {
+    pub mesh: Handle<Mesh>,
+    pub sort: Option<(SortData, Option<SortKey>)>,
+}
 
 #[derive(Resource, Clone, Default, ExtractResource)]
 #[extract_app(RenderApp)]
@@ -60,26 +68,39 @@ fn report_ready_meshes(uploads: Res<MeshUploads>, meshes: Res<RenderAssets<Rende
 fn commit_meshes(
     mut commands: Commands,
     mut uploads: ResMut<MeshUploads>,
-    mut meshes: Query<(Entity, &mut Mesh3d, &PendingMesh, Option<&mut PendingSort>)>,
+    mut version: ResMut<SortVersion>,
+    mut meshes: Query<(
+        Entity,
+        &mut Mesh3d,
+        &mut PendingMesh,
+        Option<(&mut SortData, &mut SortState)>,
+    )>,
 ) {
+    // An untouched resource is not extracted again.
+    if meshes.is_empty() && uploads.pending.is_empty() {
+        return;
+    }
     let ready = uploads.ready.clone();
     let ready = ready.lock().unwrap();
     uploads.pending.clear();
-    for (entity, mut current, pending, sort) in &mut meshes {
-        if !ready.contains(&pending.0.id()) {
-            uploads.pending.push(pending.0.id());
+    for (entity, mut current, mut pending, sort) in &mut meshes {
+        let id = pending.mesh.id();
+        if !ready.contains(&id) {
+            uploads.pending.push(id);
             continue;
         }
-        current.set_if_neq(Mesh3d(pending.0.clone()));
-        if let Some(mut sort) = sort
-            && let Some((data, key)) = sort.0.take()
-        {
-            commands
-                .entity(entity)
-                .insert((data, super::sort::SortState::new(key)));
+        current.set_if_neq(Mesh3d(pending.mesh.clone()));
+        if let Some((data, key)) = pending.sort.take() {
+            if let Some((mut current_data, mut state)) = sort {
+                // Replaced in place: no archetype move, and a fresh state drops
+                // any sort of the previous mesh.
+                *current_data = data;
+                *state = SortState::new(key);
+                version.0 = version.0.wrapping_add(1);
+            } else {
+                commands.entity(entity).insert((data, SortState::new(key)));
+            }
         }
-        commands
-            .entity(entity)
-            .remove::<(PendingMesh, PendingSort)>();
+        commands.entity(entity).remove::<PendingMesh>();
     }
 }

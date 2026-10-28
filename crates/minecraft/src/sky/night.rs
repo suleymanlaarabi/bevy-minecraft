@@ -1,5 +1,3 @@
-#![allow(clippy::needless_arbitrary_self_type)]
-
 use super::SkyState;
 use crate::game::GameState;
 use bevy::{
@@ -8,72 +6,26 @@ use bevy::{
     light::NotShadowCaster,
     mesh::{Indices, PrimitiveTopology},
     prelude::*,
-    render::render_resource::{AsBindGroup, ShaderType},
 };
+use hollow_render::environment::{SkyMaterial, SkyPass, SkySettings};
 
 const STAR_COUNT: u32 = 2600;
 /// A slightly larger companion to the sun, with room to see its surface and phases.
 const MOON_RADIUS: f32 = 0.035;
-/// Sort keys far behind every other transparent mesh: stars, then the moon, draw first.
-const STARS_SORT_BIAS: f32 = -1.0e9;
-const MOON_SORT_BIAS: f32 = -1.0e8;
 
 /// Point stars on a sphere at infinity, added over the sky gradient.
-#[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
-pub(crate) struct StarsMaterial {
-    /// Brightness in X, from 0 by day to 1 at night.
-    #[uniform(0)]
-    settings: Vec4,
-}
-
-sky_material!(
-    StarsMaterial,
-    "embedded://hollow_render/shaders/sky_stars.wesl",
-    AlphaMode::Add,
-    STARS_SORT_BIAS,
-    [
-        ATTRIBUTE_POSITION => 0,
-        ATTRIBUTE_UV_0 => 1,
-        ATTRIBUTE_COLOR => 2,
-    ]
-);
-
-#[derive(Clone, Copy, Debug, Default, ShaderType)]
-struct MoonSettings {
-    /// Unit vector toward the moon in XYZ, angular radius of the disk in W.
-    direction: Vec4,
-    /// Output-space color in RGB, opacity in A.
-    color: Vec4,
-    /// Lit fraction of the disk in X, +1 waxing or -1 waning in Y.
-    phase: Vec4,
-}
-
-/// The moon's disk with its phases and a faint halo, added over the sky.
-#[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
-pub(crate) struct MoonMaterial {
-    #[uniform(0)]
-    settings: MoonSettings,
-}
-
-sky_material!(
-    MoonMaterial,
-    "embedded://hollow_render/shaders/sky_moon.wesl",
-    AlphaMode::Add,
-    MOON_SORT_BIAS,
-    [ATTRIBUTE_POSITION => 0]
-);
-
 #[derive(Component)]
 pub(super) struct Stars;
 
+/// The moon's disk with its phases and a faint halo, added over the sky.
 #[derive(Component)]
 pub(super) struct MoonDisk;
 
 pub(super) fn spawn_night_sky(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut stars: ResMut<Assets<StarsMaterial>>,
-    mut moons: ResMut<Assets<MoonMaterial>>,
+    mut materials: ResMut<Assets<SkyMaterial>>,
+    palette: Res<hollow_render::fog::SkyPalette>,
     sky: Res<SkyState>,
 ) {
     // Both are placed at infinity by their vertex shaders: their transforms only
@@ -81,8 +33,10 @@ pub(super) fn spawn_night_sky(
     commands.spawn((
         Stars,
         Mesh3d(meshes.add(star_mesh())),
-        MeshMaterial3d(stars.add(StarsMaterial {
+        MeshMaterial3d(materials.add(SkyMaterial {
+            pass: SkyPass::Stars,
             settings: stars_settings(&sky),
+            palette: palette.0.clone(),
         })),
         Transform::from_rotation(sky.sky_rotation),
         NoFrustumCulling,
@@ -92,8 +46,10 @@ pub(super) fn spawn_night_sky(
     commands.spawn((
         MoonDisk,
         Mesh3d(meshes.add(Rectangle::new(2.0, 2.0))),
-        MeshMaterial3d(moons.add(MoonMaterial {
+        MeshMaterial3d(materials.add(SkyMaterial {
+            pass: SkyPass::Moon,
             settings: moon_settings(&sky),
+            palette: palette.0.clone(),
         })),
         Transform::default(),
         NoFrustumCulling,
@@ -108,13 +64,12 @@ pub(super) fn update_night_sky(
         (
             &mut Transform,
             &mut Visibility,
-            &MeshMaterial3d<StarsMaterial>,
+            &MeshMaterial3d<SkyMaterial>,
         ),
         (With<Stars>, Without<MoonDisk>),
     >,
-    mut moons: Query<(&mut Visibility, &MeshMaterial3d<MoonMaterial>), With<MoonDisk>>,
-    mut star_materials: ResMut<Assets<StarsMaterial>>,
-    mut moon_materials: ResMut<Assets<MoonMaterial>>,
+    mut moons: Query<(&mut Visibility, &MeshMaterial3d<SkyMaterial>), With<MoonDisk>>,
+    mut materials: ResMut<Assets<SkyMaterial>>,
 ) {
     if !sky.is_changed() {
         return;
@@ -129,10 +84,10 @@ pub(super) fn update_night_sky(
         transform.rotation = sky.sky_rotation;
         let settings = stars_settings(&sky);
         // Only re-upload while the brightness actually changes, at dusk and dawn.
-        if star_materials
+        if materials
             .get(&material.0)
             .is_some_and(|stars| stars.settings != settings)
-            && let Some(mut stars) = star_materials.get_mut(&material.0)
+            && let Some(mut stars) = materials.get_mut(&material.0)
         {
             stars.settings = settings;
         }
@@ -146,17 +101,20 @@ pub(super) fn update_night_sky(
         } else {
             Visibility::Hidden
         });
-        if shown && let Some(mut moon) = moon_materials.get_mut(&material.0) {
+        if shown && let Some(mut moon) = materials.get_mut(&material.0) {
             moon.settings = settings;
         }
     }
 }
 
-fn stars_settings(sky: &SkyState) -> Vec4 {
-    Vec4::new(sky.night, 0.0, 0.0, 0.0)
+fn stars_settings(sky: &SkyState) -> SkySettings {
+    SkySettings {
+        params: Vec4::new(sky.night, 0.0, 0.0, 0.0),
+        ..default()
+    }
 }
 
-fn moon_settings(sky: &SkyState) -> MoonSettings {
+fn moon_settings(sky: &SkyState) -> SkySettings {
     let direction = sky.moon_direction;
     // Dimmed and reddened by the long path through the air near the horizon,
     // and faint against the daylight sky.
@@ -164,10 +122,10 @@ fn moon_settings(sky: &SkyState) -> MoonSettings {
     let horizon = (altitude / 0.35).clamp(0.0, 1.0);
     let tint = Vec3::new(1.0, 0.62, 0.42).lerp(Vec3::new(0.96, 0.98, 1.0), horizon);
     let opacity = ((direction.y + 0.02) / 0.08).clamp(0.0, 1.0) * (0.2 + 0.8 * sky.night);
-    MoonSettings {
+    SkySettings {
         direction: direction.extend(MOON_RADIUS),
         color: (tint * 1.6).extend(opacity),
-        phase: Vec4::new(
+        params: Vec4::new(
             sky.moon_phase,
             if sky.moon_waxing { 1.0 } else { -1.0 },
             0.0,

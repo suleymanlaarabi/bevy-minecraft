@@ -152,9 +152,7 @@ impl hollow_engine::streaming::TerrainProvider for WorldGenerator {
         position: IVec2,
         attachment: Self::Attachment,
     ) {
-        commands
-            .entity(entity)
-            .insert(hollow_worldgen::runtime::ChunkRetention);
+        // Retention is inserted together with the column link: one archetype move.
         crate::block_behavior::containers::spawn_for_chunk(commands, entity, position, attachment);
     }
     fn release(&self, commands: &mut Commands, entity: Entity) {

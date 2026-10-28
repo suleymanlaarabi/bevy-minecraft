@@ -107,10 +107,44 @@ struct Column {
     reached: [u32; 6],
     sent: [u32; 6],
     visible: u32,
+    /// `visible` as last propagated to the publish marks of the surrounding hull.
+    seen: u32,
     published: u32,
     dirty: u32,
     deferred: u32,
     publish: u32,
+}
+
+/// Deduplicated set of ring slots.
+#[derive(Default)]
+struct Slots {
+    bits: Vec<u64>,
+    items: Vec<u32>,
+}
+
+impl Slots {
+    fn new(count: usize) -> Self {
+        Self {
+            bits: vec![0; count.div_ceil(64)],
+            items: Vec::with_capacity(count),
+        }
+    }
+    fn insert(&mut self, i: usize) {
+        let bit = 1 << (i % 64);
+        if self.bits[i / 64] & bit == 0 {
+            self.bits[i / 64] |= bit;
+            self.items.push(i as u32);
+        }
+    }
+    fn pop(&mut self) -> Option<usize> {
+        let i = self.items.pop()? as usize;
+        self.bits[i / 64] &= !(1 << (i % 64));
+        Some(i)
+    }
+    #[cfg(feature = "dev")]
+    fn len(&self) -> usize {
+        self.items.len()
+    }
 }
 
 /// Opaque incremental graph; producers only invalidate affected column sections.
@@ -125,8 +159,11 @@ pub struct VisibilityGraph {
     min_y: i32,
     eye: Option<(IVec3, bool)>,
     initialize: Option<usize>,
-    publish_cursor: usize,
-    publish_remaining: usize,
+    /// Columns whose `visible` mask may differ from `seen`.
+    touched: Slots,
+    /// Columns whose published layers may be stale. Publishing visits only these
+    /// instead of sweeping the whole ring after every change.
+    stale: Slots,
     repeat: bool,
     conservative: bool,
 }
@@ -163,9 +200,18 @@ impl VisibilityGraph {
             self.columns[i].dirty |= section_mask & self.mask;
             self.columns[i].publish |= section_mask & self.mask;
             self.enqueue(i);
-            self.publish_remaining = self.count();
+            self.stale.insert(i);
             self.conservative = true;
         }
+    }
+    /// The layer the next publish most likely assigns to a section, so new entities
+    /// can start there. Columns outside the initialized ring are shown.
+    pub fn likely_visible(&self, position: IVec2, section: usize, overhang: bool) -> bool {
+        self.columns.len() < self.count()
+            || self
+                .slot(position)
+                .is_none_or(|i| self.columns[i].position != Some(position))
+            || self.visible(position, overhang) & (1 << section) != 0
     }
     fn enter(&mut self, i: usize, face: usize, mask: u32) {
         let column = &mut self.columns[i];
@@ -173,15 +219,19 @@ impl VisibilityGraph {
             column.reached[face] |= mask;
             column.visible |= mask;
             self.enqueue(i);
-            self.publish_remaining = self.count();
+            self.touched.insert(i);
         }
     }
     fn begin(&mut self) {
         self.queue.clear();
         self.queued.fill(0);
         self.initialize = Some(0);
-        self.publish_remaining = self.count();
         self.repeat = false;
+    }
+    fn mark_all_stale(&mut self) {
+        for i in 0..self.count() {
+            self.stale.insert(i);
+        }
     }
     fn propagate(&mut self, i: usize) {
         let position = self.position(i);
@@ -331,6 +381,8 @@ fn update_visibility<C: RenderSource>(
             columns: Vec::with_capacity((side as usize).pow(2)),
             queued: vec![0; (side as usize).pow(2).div_ceil(64)],
             queue: VecDeque::with_capacity((side as usize).pow(2)),
+            touched: Slots::new((side as usize).pow(2)),
+            stale: Slots::new((side as usize).pow(2)),
             side,
             mask: layout.mask(),
             min_y: layout.min_y(),
@@ -339,12 +391,19 @@ fn update_visibility<C: RenderSource>(
         };
         g.conservative = true;
         g.begin();
+        g.mark_all_stale();
     } else if g.origin != origin {
+        // Slot positions and the ring boundary of every hull change.
         g.origin = origin;
         g.conservative = true;
         g.begin();
+        g.mark_all_stale();
     }
     if g.eye != Some((center, valid_eye)) {
+        // Validity switches every column between its graph mask and all sections.
+        if g.eye.is_none_or(|(_, valid)| valid != valid_eye) {
+            g.mark_all_stale();
+        }
         g.repeat |= g.eye.is_some();
         g.eye = Some((center, valid_eye));
         g.conservative = true;
@@ -356,8 +415,8 @@ fn update_visibility<C: RenderSource>(
             // prevent the active traversal from completing conservatively.
             g.columns[i].visible |= 1 << center.y;
             g.enqueue(i);
+            g.touched.insert(i);
         }
-        g.publish_remaining = g.count();
     }
     #[cfg(feature = "dev")]
     let mut processed = 0u64;
@@ -377,29 +436,46 @@ fn update_visibility<C: RenderSource>(
             let i = i as usize;
             g.queued[i / 64] &= !(1 << (i % 64));
             i
+        } else if let Some(k) = g.touched.pop() {
+            // Publishing reads the 3x3 hull of `visible`. Every touched column is
+            // resolved before any stale column is published.
+            let column = &mut g.columns[k];
+            if column.visible != column.seen {
+                column.seen = column.visible;
+                let position = g.position(k);
+                for z in -1..=1 {
+                    for x in -1..=1 {
+                        if let Some(j) = g.slot(position + IVec2::new(x, z)) {
+                            g.stale.insert(j);
+                        }
+                    }
+                }
+            }
+            continue;
         } else {
-            if g.publish_remaining == 0 {
+            let Some(cursor) = g.stale.pop() else {
                 g.conservative = false;
                 if g.repeat {
                     g.begin();
                     continue;
                 }
                 break;
-            }
-            let cursor = g.publish_cursor;
+            };
             let position = g.position(cursor);
             if let Some((_, Some(sections))) =
                 index.get(&position).and_then(|e| chunks.get(*e).ok())
             {
-                let plain = g.visible(position, false);
-                let hull = g.visible(position, true);
-                let visible = (plain & !sections.overhanging_sections)
-                    | (hull & sections.overhanging_sections);
+                let overhanging = sections.overhanging_sections;
+                let mut visible = g.visible(position, false) & !overhanging;
+                if overhanging != 0 {
+                    visible |= g.visible(position, true) & overhanging;
+                }
                 let column = &mut g.columns[cursor];
                 let mut changed = (visible ^ column.published) | column.publish;
                 let mut meshes = layers.p1();
                 while changed != 0 {
                     if started.elapsed() >= Duration::from_micros(500) {
+                        g.stale.insert(cursor);
                         break 'work;
                     }
                     let y = changed.trailing_zeros() as usize;
@@ -432,8 +508,6 @@ fn update_visibility<C: RenderSource>(
             {
                 processed += 1;
             }
-            g.publish_cursor = (cursor + 1) % g.columns.len();
-            g.publish_remaining -= 1;
             continue;
         };
         #[cfg(feature = "dev")]
@@ -449,6 +523,7 @@ fn update_visibility<C: RenderSource>(
                     publish: g.mask,
                     ..default()
                 };
+                g.stale.insert(i);
             }
             let c = &mut g.columns[i];
             c.reached = [0; 6];
@@ -456,6 +531,7 @@ fn update_visibility<C: RenderSource>(
             c.visible = if valid_eye { 0 } else { g.mask };
             c.dirty |= c.deferred;
             c.deferred = 0;
+            g.touched.insert(i);
         }
         let dirty = std::mem::take(&mut g.columns[i].dirty);
         if dirty != 0 {
@@ -538,7 +614,8 @@ fn update_visibility<C: RenderSource>(
         diagnostics.visibility_columns = processed;
         diagnostics.visibility_remaining = g.queue.len()
             + g.initialize.map_or(0, |i| g.count() - i)
-            + g.publish_remaining
+            + g.touched.len()
+            + g.stale.len()
             + if g.repeat { g.count() } else { 0 };
         diagnostics.visibility_conservative = g.conservative;
     }

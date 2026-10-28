@@ -1,5 +1,3 @@
-#![allow(clippy::needless_arbitrary_self_type)]
-
 use super::{
     SkyState,
     cycle::{MOON_LUX, SUN_LUX},
@@ -9,33 +7,25 @@ use bevy::{
     camera::visibility::{NoFrustumCulling, RenderLayers},
     light::{CascadeShadowConfigBuilder, NotShadowCaster, SunDisk},
     prelude::*,
-    render::render_resource::{AsBindGroup, ShaderType},
 };
+use hollow_render::environment::{SkyMaterial, SkyPass, SkySettings};
 
 /// Output-space radiance of the sun's disk at its center: far past white, so bloom
 /// gives it a halo.
 const SUN_DISK_RADIANCE: f32 = 40.0;
 /// A stylized disk large enough to read clearly at the player's wide field of view.
 const SUN_RADIUS: f32 = 0.025;
-/// Sort key far behind every other transparent mesh, with the moon's.
-const SUN_SORT_BIAS: f32 = -1.0e8;
 /// Sine of the elevation where astronomical twilight ends, 18° below the horizon:
 /// lower, a light no longer brightens the sky.
 const TWILIGHT_END: f32 = -0.309;
 
 /// A depth-tested background reads the same palette as terrain fog and water.
-#[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
-pub(crate) struct BackgroundMaterial {
-    #[storage(11, read_only, visibility(fragment))]
-    palette: Handle<bevy::render::storage::ShaderBuffer>,
-}
+#[derive(Component)]
+pub(super) struct SkyBackground;
 
 pub(super) fn update_background_bounds(
     camera: Single<&GlobalTransform, With<hollow_render::VoxelViewer>>,
-    mut backgrounds: Query<
-        &mut bevy::camera::primitives::Aabb,
-        With<MeshMaterial3d<BackgroundMaterial>>,
-    >,
+    mut backgrounds: Query<&mut bevy::camera::primitives::Aabb, With<SkyBackground>>,
 ) {
     let center = camera.translation().into();
     for mut bounds in &mut backgrounds {
@@ -47,41 +37,6 @@ pub(super) fn update_background_bounds(
     }
 }
 
-impl bevy::pbr::Material for BackgroundMaterial {
-    fn vertex_shader() -> bevy::shader::ShaderRef {
-        "embedded://hollow_render/shaders/sky_background.wesl".into()
-    }
-    fn fragment_shader() -> bevy::shader::ShaderRef {
-        Self::vertex_shader()
-    }
-    fn enable_prepass() -> bool {
-        false
-    }
-    fn enable_shadows() -> bool {
-        false
-    }
-    fn specialize(
-        _pipeline: &bevy::pbr::MaterialPipeline,
-        descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
-        layout: &bevy::mesh::MeshVertexBufferLayoutRef,
-        _key: bevy::pbr::MaterialPipelineKey<Self>,
-    ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
-        descriptor.vertex.buffers = vec![
-            layout
-                .0
-                .get_layout(&[Mesh::ATTRIBUTE_POSITION.at_shader_location(0)])?,
-        ];
-        descriptor.primitive.cull_mode = None;
-        if let Some(depth) = &mut descriptor.depth_stencil {
-            // Reverse-Z far depth: shade only background left by the terrain prepass.
-            depth.depth_compare =
-                Some(bevy::render::render_resource::CompareFunction::GreaterEqual);
-            depth.depth_write_enabled = Some(false);
-        }
-        Ok(())
-    }
-}
-
 #[derive(Component)]
 pub(super) struct Sun;
 
@@ -90,54 +45,35 @@ pub(super) struct Sun;
 #[derive(Component)]
 pub(super) struct SkyLight;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, ShaderType)]
-struct SunSettings {
-    /// Unit vector toward the sun in XYZ, angular radius of the disk in W.
-    direction: Vec4,
-    /// Output-space color of the disk's center in RGB.
-    color: Vec4,
-}
-
 /// The visible sun. It follows the smooth sun direction, while the light turns by
 /// steps to keep shadows still, so Bevy's own disk (drawn at the light) is off.
-#[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
-pub(crate) struct SunMaterial {
-    #[uniform(0)]
-    settings: SunSettings,
-}
-
-sky_material!(
-    SunMaterial,
-    "embedded://hollow_render/shaders/sky_sun.wesl",
-    AlphaMode::Add,
-    SUN_SORT_BIAS,
-    [ATTRIBUTE_POSITION => 0]
-);
-
 #[derive(Component)]
 pub(super) struct SunDiskMesh;
 
-fn sun_settings(sky: &SkyState) -> SunSettings {
+fn sun_settings(sky: &SkyState) -> SkySettings {
     let height = (sky.sun_direction.y * 5.0 + 0.2).clamp(0.0, 1.0);
-    SunSettings {
+    SkySettings {
         direction: sky.sun_direction.extend(SUN_RADIUS),
         color: (Vec3::new(1.0, 0.35 + 0.63 * height, 0.12 + 0.83 * height)
             * (SUN_DISK_RADIANCE * height))
             .extend(1.0),
+        params: Vec4::ZERO,
     }
 }
 
 pub(super) fn spawn_sky(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut suns: ResMut<Assets<SunMaterial>>,
+    mut materials: ResMut<Assets<SkyMaterial>>,
     palette: Res<hollow_render::fog::SkyPalette>,
-    mut backgrounds: ResMut<Assets<BackgroundMaterial>>,
     sky: Res<SkyState>,
 ) {
     commands.spawn((
+        SkyBackground,
         Mesh3d(meshes.add(Rectangle::new(2.0, 2.0))),
-        MeshMaterial3d(backgrounds.add(BackgroundMaterial {
+        MeshMaterial3d(materials.add(SkyMaterial {
+            pass: SkyPass::Background,
+            settings: SkySettings::default(),
             palette: palette.0.clone(),
         })),
         bevy::camera::primitives::Aabb {
@@ -171,7 +107,7 @@ pub(super) fn spawn_sky(
             ..default()
         },
         // Keeps the disk's size for the light fading out at the horizon, but draws
-        // nothing: `SunMaterial` draws the sun.
+        // nothing: `SkyPass::Sun` draws the sun.
         SunDisk {
             intensity: 0.0,
             ..SunDisk::EARTH
@@ -189,7 +125,7 @@ pub(super) fn spawn_sky(
             shadow_maps_enabled: false,
             ..default()
         },
-        // The moon's disk is drawn by `night::MoonMaterial`, with its phases.
+        // The moon's disk is drawn by `SkyPass::Moon`, with its phases.
         SunDisk::OFF,
         cascades,
         light_transform(sky.moon_light_direction),
@@ -200,8 +136,10 @@ pub(super) fn spawn_sky(
     commands.spawn((
         SunDiskMesh,
         Mesh3d(meshes.add(Rectangle::new(2.0, 2.0))),
-        MeshMaterial3d(suns.add(SunMaterial {
+        MeshMaterial3d(materials.add(SkyMaterial {
+            pass: SkyPass::Sun,
             settings: sun_settings(&sky),
+            palette: palette.0.clone(),
         })),
         Transform::default(),
         NoFrustumCulling,
@@ -214,8 +152,8 @@ pub(super) fn spawn_sky(
 /// when it is below the horizon.
 pub(super) fn update_sun_disk(
     sky: Res<SkyState>,
-    mut disks: Query<(&mut Visibility, &MeshMaterial3d<SunMaterial>), With<SunDiskMesh>>,
-    mut materials: ResMut<Assets<SunMaterial>>,
+    mut disks: Query<(&mut Visibility, &MeshMaterial3d<SkyMaterial>), With<SunDiskMesh>>,
+    mut materials: ResMut<Assets<SkyMaterial>>,
 ) {
     if !sky.is_changed() {
         return;

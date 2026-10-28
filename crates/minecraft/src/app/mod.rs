@@ -31,13 +31,16 @@ impl Plugin for HollowPlugin {
         let mut plugins = DefaultPlugins
             .set(TaskPoolPlugin {
                 task_pool_options: TaskPoolOptions {
-                    // All voxel CPU work shares this pool and its admission budget,
-                    // leaving CPU time for rendering and parallel ECS systems.
+                    // All voxel CPU work shares this pool and its admission budget.
+                    // About 30% of the hardware threads, at background OS priority,
+                    // leaves cores, SMT siblings and the shared CPU/iGPU power budget
+                    // to the main, render and compute threads; voxel workers still
+                    // absorb every idle cycle.
                     async_compute: bevy::app::TaskPoolThreadAssignmentPolicy {
                         min_threads: 1,
-                        max_threads: 10,
-                        percent: 0.50,
-                        on_thread_spawn: None,
+                        max_threads: 8,
+                        percent: 0.3,
+                        on_thread_spawn: Some(std::sync::Arc::new(background_priority)),
                         on_thread_destroy: None,
                     },
                     io: bevy::app::TaskPoolThreadAssignmentPolicy {
@@ -117,5 +120,17 @@ pub(crate) fn cpu_light_clustering(
 ) {
     if let Some(mut settings) = settings {
         settings.gpu_clustering = None;
+    }
+}
+
+/// Voxel workers run at nice 10: the scheduler preempts them whenever a frame
+/// thread wakes on their core, yet they keep every otherwise idle cycle.
+fn background_priority() {
+    // Linux nice values are per thread; elsewhere workers keep the default priority.
+    #[cfg(target_os = "linux")]
+    // SAFETY: `setpriority` only reads its scalar arguments. On Linux, who = 0 with
+    // PRIO_PROCESS targets the calling thread, not the whole process.
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, 10);
     }
 }

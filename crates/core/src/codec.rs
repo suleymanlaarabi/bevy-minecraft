@@ -21,24 +21,6 @@ fn take<'a>(bytes: &mut &'a [u8], count: usize) -> io::Result<&'a [u8]> {
     *bytes = &bytes[count..];
     Ok(head)
 }
-fn encode_section<T: Copy>(
-    section: &Section<T>,
-    bytes: &mut Vec<u8>,
-    encode: impl Fn(T, &mut Vec<u8>),
-) {
-    match section {
-        Section::Uniform(value) => {
-            bytes.push(0);
-            encode(*value, bytes);
-        }
-        Section::Dense(cells) => {
-            bytes.push(1);
-            for &cell in cells.iter() {
-                encode(cell, bytes);
-            }
-        }
-    }
-}
 fn decode_section<T: Copy>(
     bytes: &mut &[u8],
     decode: impl Fn(&mut &[u8]) -> io::Result<T>,
@@ -58,22 +40,45 @@ fn decode_section<T: Copy>(
 }
 
 impl<T: VoxelCell> TerrainRecord<T> {
-    pub fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(32 * 1024);
-        bytes.push(
-            u8::try_from(self.states.section_count())
-                .expect("Section count exceeds terrain storage"),
+    /// Appends the record of borrowed layers to `bytes`, reserving its exact size once
+    /// and copying dense cells in bulk.
+    pub fn encode(states: &Layer<T>, light: &Layer<u8>, modified: bool, bytes: &mut Vec<u8>) {
+        let count = states.section_count();
+        let section_bytes =
+            |dense: bool, cell: usize| 1 + if dense { SECTION_VOLUME * cell } else { cell };
+        bytes.reserve_exact(
+            2 + (0..count)
+                .map(|section| {
+                    section_bytes(states.section(section).uniform().is_none(), 4)
+                        + section_bytes(light.section(section).uniform().is_none(), 1)
+                })
+                .sum::<usize>(),
         );
-        for section in 0..self.states.section_count() {
-            encode_section(self.states.section(section), &mut bytes, |state, bytes| {
-                bytes.extend_from_slice(&state.id().to_le_bytes())
-            });
-            encode_section(self.light.section(section), &mut bytes, |light, bytes| {
-                bytes.push(light)
-            });
+        bytes.push(u8::try_from(count).expect("Section count exceeds terrain storage"));
+        for section in 0..count {
+            match states.section(section) {
+                Section::Uniform(state) => {
+                    bytes.push(0);
+                    bytes.extend_from_slice(&state.id().to_le_bytes());
+                }
+                Section::Dense(cells) => {
+                    bytes.push(1);
+                    let start = bytes.len();
+                    bytes.resize(start + 4 * SECTION_VOLUME, 0);
+                    for (out, cell) in bytes[start..].chunks_exact_mut(4).zip(cells.iter()) {
+                        out.copy_from_slice(&cell.id().to_le_bytes());
+                    }
+                }
+            }
+            match light.section(section) {
+                Section::Uniform(level) => bytes.extend_from_slice(&[0, *level]),
+                Section::Dense(cells) => {
+                    bytes.push(1);
+                    bytes.extend_from_slice(&cells[..]);
+                }
+            }
         }
-        bytes.push(u8::from(self.modified));
-        bytes
+        bytes.push(u8::from(modified));
     }
     pub fn decode(
         mut bytes: &[u8],

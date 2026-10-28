@@ -68,18 +68,23 @@ impl<T: VoxelCell> ChunkVoxels<T> {
     }
     /// Save workers retain authoritative data only, without presentation estimates.
     pub fn save_snapshot(&self) -> Self {
-        let mut snapshot = self.clone();
-        snapshot.render_light = None;
-        snapshot
+        Self {
+            states: self.states.clone(),
+            light: self.light.clone(),
+            render_light: None,
+            ..*self
+        }
     }
 
     pub fn encode_saved(&self) -> Vec<u8> {
-        hollow_core::codec::TerrainRecord {
-            states: self.states.clone(),
-            light: self.light.clone(),
-            modified: self.modified,
-        }
-        .encode()
+        let mut bytes = Vec::new();
+        hollow_core::codec::TerrainRecord::encode(
+            &self.states,
+            &self.light,
+            self.modified,
+            &mut bytes,
+        );
+        bytes
     }
     pub fn decode_saved(
         bytes: &[u8],

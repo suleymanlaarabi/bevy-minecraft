@@ -1,10 +1,13 @@
 use bevy::{
     anti_alias::fxaa::Fxaa,
-    core_pipeline::prepass::DepthPrepass,
+    core_pipeline::{core_3d::extract_camera_prepass_phase, prepass::DepthPrepass},
     light::DirectionalLightShadowMap,
     post_process::bloom::Bloom,
     prelude::*,
-    render::occlusion_culling::OcclusionCulling,
+    render::{
+        Extract, ExtractSchedule, RenderApp, occlusion_culling::OcclusionCulling,
+        sync_world::RenderEntity,
+    },
     window::{MonitorSelection, PresentMode, WindowMode},
 };
 
@@ -17,6 +20,27 @@ const WINDOWED_HEIGHT: f32 = 900.0;
 pub(super) fn register(app: &mut App) {
     app.add_observer(apply_graphics_settings)
         .add_observer(apply_settings_to_new_target);
+    if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+        render_app.add_systems(
+            ExtractSchedule,
+            skip_prepass_depth_copy.after(extract_camera_prepass_phase),
+        );
+    }
+}
+
+/// Bevy copies the depth prepass into a separate sampled texture after each prepass
+/// (twice per frame with occlusion culling), for materials reading
+/// `depth_prepass_texture`. Nothing samples it here: no Hollow shader does, and no
+/// Bevy feature that does (transmission, SSR, SSAO, decals, OIT, TAA) is used.
+/// The prepass phases, early depth and occlusion culling only need the main-world
+/// `DepthPrepass`, so the render-world marker is dropped to skip the copies.
+fn skip_prepass_depth_copy(
+    cameras: Extract<Query<RenderEntity, (With<PlayerCamera>, With<DepthPrepass>)>>,
+    mut commands: Commands,
+) {
+    for entity in &cameras {
+        commands.entity(entity).remove::<DepthPrepass>();
+    }
 }
 
 fn apply_graphics_settings(

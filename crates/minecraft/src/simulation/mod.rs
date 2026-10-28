@@ -155,7 +155,12 @@ fn update_mobile_owners<F: QueryFilter>(
 }
 
 fn track_work(
-    mut columns: Query<(&mut GameplayColumn, Ref<ColumnSimulation>)>,
+    // Sequential access: the filtered pass visits only changed work, then drops
+    // resolve their owners.
+    mut columns: ParamSet<(
+        Query<&mut GameplayColumn, Changed<ColumnSimulation>>,
+        Query<&mut GameplayColumn>,
+    )>,
     drops: Query<
         &SimulatedIn,
         (
@@ -167,13 +172,12 @@ fn track_work(
         ),
     >,
 ) {
-    for (mut column, work) in &mut columns {
-        if work.is_changed() {
-            column.revision += 1;
-        }
+    for mut column in &mut columns.p0() {
+        column.revision += 1;
     }
+    let mut columns = columns.p1();
     for owner in &drops {
-        if let Ok((mut column, _)) = columns.get_mut(owner.0) {
+        if let Ok(mut column) = columns.get_mut(owner.0) {
             column.revision += 1;
         }
     }

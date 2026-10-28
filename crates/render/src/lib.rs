@@ -45,15 +45,10 @@ impl<C: RenderSource> Plugin for VoxelRenderPlugin<C> {
         // load recursively. Keep the shared modules loaded for every material.
         bevy::shader::load_shader_library!(app, "shaders/voxel_lighting.wesl");
         bevy::shader::load_shader_library!(app, "shaders/voxel_vertex.wesl");
-        bevy::shader::load_shader_library!(app, "shaders/sky_stars.wesl");
-        bevy::shader::load_shader_library!(app, "shaders/sky_moon.wesl");
-        bevy::shader::load_shader_library!(app, "shaders/sky_clouds.wesl");
-        bevy::shader::load_shader_library!(app, "shaders/sky_sun.wesl");
-        bevy::shader::load_shader_library!(app, "shaders/sky_background.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/sky.wesl");
         bevy::shader::load_shader_library!(app, "shaders/model_shadow.wesl");
         bevy::shader::load_shader_library!(app, "shaders/model_vertex.wesl");
         bevy::shader::load_shader_library!(app, "shaders/voxel_prepass.wesl");
-        bevy::shader::load_shader_library!(app, "shaders/horizon_fog.wesl");
         bevy::shader::load_shader_library!(app, "shaders/surface_animation.wesl");
         bevy::shader::load_shader_library!(app, "shaders/block_lighting.wesl");
         bevy::shader::load_shader_library!(app, "shaders/sky_color.wesl");
@@ -65,6 +60,7 @@ impl<C: RenderSource> Plugin for VoxelRenderPlugin<C> {
             .init_resource::<environment::SkyLighting>()
             .init_resource::<environment::EnvironmentSettings>()
             .init_resource::<environment::ViewEffects>();
+        streaming::register_chunk_presentation(app);
         app.init_resource::<streaming::ChunkArrivals>()
             .add_observer(reset)
             .add_observer(streaming::track_chunk_arrival)
@@ -94,7 +90,7 @@ impl<C: RenderSource> Plugin for VoxelRenderPlugin<C> {
             MaterialPlugin::<material::VoxelMaterial>::default(),
             MaterialPlugin::<material::VoxelCutoutMaterial>::default(),
             MaterialPlugin::<material::ModelMaterial>::default(),
-            MaterialPlugin::<environment::HorizonFogMaterial>::default(),
+            MaterialPlugin::<environment::SkyMaterial>::default(),
         ))
         .add_systems(
             PostUpdate,

@@ -158,22 +158,27 @@ pub fn refresh_neighbors_of_spawned<C: RenderSource>(
     }
 }
 
+/// Presentation components arrive with `VoxelChunk` itself as required components,
+/// so a new column takes one archetype move; this only places it.
+pub fn register_chunk_presentation(app: &mut App) {
+    app.register_required_components::<VoxelChunk, Transform>()
+        .register_required_components::<VoxelChunk, Visibility>()
+        .register_required_components_with::<VoxelChunk, AwaitingNeighbors>(|| AwaitingNeighbors);
+}
+
 pub fn prepare_chunk(
     event: On<Add<VoxelChunk>>,
-    chunks: Query<&VoxelChunk>,
+    mut chunks: Query<(&VoxelChunk, &mut Transform, &mut Visibility)>,
     layout: Res<WorldLayout>,
-    mut commands: Commands,
 ) {
-    if let Ok(chunk) = chunks.get(event.entity) {
-        commands.entity(event.entity).insert((
-            Transform::from_xyz(
-                (chunk.position.x * 16) as f32,
-                layout.min_y() as f32,
-                (chunk.position.y * 16) as f32,
-            ),
-            Visibility::default(),
-            AwaitingNeighbors,
+    if let Ok((chunk, mut transform, mut visibility)) = chunks.get_mut(event.entity) {
+        // A provider entity keeps both components across unloads.
+        transform.set_if_neq(Transform::from_xyz(
+            (chunk.position.x * 16) as f32,
+            layout.min_y() as f32,
+            (chunk.position.y * 16) as f32,
         ));
+        visibility.set_if_neq(Visibility::default());
     }
 }
 pub fn remove_chunk(

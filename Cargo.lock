@@ -3118,6 +3118,7 @@ dependencies = [
  "hollow-features",
  "hollow-render",
  "hollow-worldgen",
+ "libc",
  "pumpkin-data",
  "pumpkin-util",
  "ron",

@@ -114,16 +114,10 @@ pub(crate) fn encode_generated(chunk: &crate::chunk_system::Chunk) -> io::Result
         fluid_ticks: snapshot.fluid_ticks.to_vec(),
     };
     let header = serde_json::to_vec(&header).map_err(io::Error::other)?;
-    let terrain = TerrainRecord {
-        states: snapshot.states,
-        light: snapshot.light,
-        modified: false,
-    }
-    .encode();
-    let mut bytes = Vec::with_capacity(4 + header.len() + terrain.len());
+    let mut bytes = Vec::with_capacity(4 + header.len());
     bytes.extend_from_slice(&(header.len() as u32).to_le_bytes());
     bytes.extend_from_slice(&header);
-    bytes.extend_from_slice(&terrain);
+    TerrainRecord::encode(&snapshot.states, &snapshot.light, false, &mut bytes);
     if bytes.len() > MAX_RECORD_BYTES {
         return Err(io::Error::other(
             "Generated chunk exceeds the record size limit.",

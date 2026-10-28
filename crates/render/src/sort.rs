@@ -181,7 +181,7 @@ fn sort_translucent(
     visibility_changes: Query<(), (With<SortState>, Changed<ViewVisibility>)>,
     mut updates: ResMut<IndexUpdates>,
     version: Res<SortVersion>,
-    mut previous: Local<Option<(Vec3, u64)>>,
+    mut previous: Local<Option<((IVec3, IVec3), u64)>>,
     mut active_hint: Local<usize>,
     mut candidates: Local<Vec<(u64, f32, Entity, SortKey, Vec3)>>,
     mut frame: Local<u64>,
@@ -192,7 +192,14 @@ fn sort_translucent(
         return;
     };
     let eye = camera.translation();
-    let view_key = (eye, version.0);
+    // Every section key is constant while the eye stays within one open
+    // quarter-block cell or on one grid point: positions are quantized to
+    // quarter or 16-block cells, and the near bounds lie on integer planes.
+    let quarter = eye * NEAR_POSITION_STEPS;
+    let view_key = (
+        (quarter.floor().as_ivec3(), quarter.ceil().as_ivec3()),
+        version.0,
+    );
     // Rotation cannot change a radial ordering. Bevy's visibility change ticks
     // identify newly exposed sections, including after projection changes.
     if *previous == Some(view_key) && visibility_changes.is_empty() && *active_hint == 0 {
@@ -206,13 +213,9 @@ fn sort_translucent(
     let mut applied = 0;
     candidates.clear();
     for (entity, mesh, transform, visible, _, mut state) in &mut sections {
-        // Section transforms are pure translations.
-        let origin = transform.translation();
-        let local_eye = eye - origin;
-        let key = sort_key(eye, local_eye);
-        if let Some(task) = &mut state.task
+        if state.task.is_some()
             && applied < MAX_SORTS
-            && let Some(output) = check_ready(task)
+            && let Some(output) = state.task.as_mut().and_then(check_ready)
         {
             state.task = None;
             if output.mesh == mesh.0.id() {
@@ -229,7 +232,14 @@ fn sort_translucent(
             active += 1;
             continue;
         }
-        if visible.get() && state.key != Some(key) {
+        if !visible.get() {
+            continue;
+        }
+        // Section transforms are pure translations.
+        let origin = transform.translation();
+        let local_eye = eye - origin;
+        let key = sort_key(eye, local_eye);
+        if state.key != Some(key) {
             candidates.push((
                 state.last_sorted,
                 (origin + SECTION_SIZE * 0.5).distance_squared(eye),

@@ -52,13 +52,65 @@ pub struct EditedChunk;
 pub struct LitEdits;
 
 /// Sparse world coordinates retain only loaded or explicitly retained columns.
-#[derive(Resource, Deref, DerefMut)]
-pub struct StoredChunks<T: VoxelCell>(HashMap<IVec2, ChunkVoxels<T>>);
+/// Mutation goes through methods so the retained total stays exact without a
+/// per-frame scan of every stored column's sections.
+#[derive(Resource, Deref)]
+pub struct StoredChunks<T: VoxelCell> {
+    #[deref]
+    chunks: HashMap<IVec2, ChunkVoxels<T>>,
+    retained_bytes: usize,
+}
 #[derive(Resource, Deref, DerefMut)]
 pub struct PendingEdits<T: VoxelCell>(HashMap<IVec2, Vec<SetVoxel<T>>>);
 impl<T: VoxelCell> Default for StoredChunks<T> {
     fn default() -> Self {
-        Self(HashMap::default())
+        Self {
+            chunks: HashMap::default(),
+            retained_bytes: 0,
+        }
+    }
+}
+impl<T: VoxelCell> StoredChunks<T> {
+    /// Sum of [`ChunkVoxels::retained_bytes`] over all stored columns.
+    pub fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+    pub fn insert(&mut self, position: IVec2, voxels: ChunkVoxels<T>) {
+        self.retained_bytes += voxels.retained_bytes();
+        if let Some(previous) = self.chunks.insert(position, voxels) {
+            self.retained_bytes -= previous.retained_bytes();
+        }
+    }
+    pub fn remove(&mut self, position: &IVec2) -> Option<ChunkVoxels<T>> {
+        let voxels = self.chunks.remove(position)?;
+        self.retained_bytes -= voxels.retained_bytes();
+        Some(voxels)
+    }
+    pub fn retain(&mut self, mut keep: impl FnMut(&IVec2, &ChunkVoxels<T>) -> bool) {
+        let retained = &mut self.retained_bytes;
+        self.chunks.retain(|position, voxels| {
+            let kept = keep(position, voxels);
+            if !kept {
+                *retained -= voxels.retained_bytes();
+            }
+            kept
+        });
+    }
+    pub fn clear(&mut self) {
+        self.chunks.clear();
+        self.retained_bytes = 0;
+    }
+    /// Mutates one stored column and re-measures only that column.
+    pub fn modify<R>(
+        &mut self,
+        position: &IVec2,
+        edit: impl FnOnce(&mut ChunkVoxels<T>) -> R,
+    ) -> Option<R> {
+        let voxels = self.chunks.get_mut(position)?;
+        let before = voxels.retained_bytes();
+        let result = edit(voxels);
+        self.retained_bytes = self.retained_bytes - before + voxels.retained_bytes();
+        Some(result)
     }
 }
 impl<T: VoxelCell> Default for PendingEdits<T> {
@@ -226,8 +278,11 @@ impl<T: VoxelCell> VoxelEditWorld<'_, '_, T> {
                 }
             }
             changed
-        } else if let Some(voxels) = self.stored.get_mut(&chunk) {
-            voxels.set_state(local, edit.state)
+        } else if let Some(changed) = self
+            .stored
+            .modify(&chunk, |voxels| voxels.set_state(local, edit.state))
+        {
+            changed
         } else {
             // Applied by `spawn_chunk` once the chunk streams in.
             self.pending.entry(chunk).or_default().push(edit);

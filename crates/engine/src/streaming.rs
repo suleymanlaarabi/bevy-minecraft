@@ -80,6 +80,8 @@ pub struct StreamState {
     // Two independently centered regions can be arbitrarily far apart; a sparse
     // set avoids a dense table covering the entire gap. Rebuilt only on demand changes.
     pub data: HashSet<IVec2>,
+    /// Advances whenever `data` is rebuilt, so dependents skip unchanged frames.
+    pub data_revision: u64,
     pub pending_despawns: Vec<Entity>,
     /// Positions in the loaded area with neither an entity nor a gameplay load in flight.
     pub missing: HashSet<IVec2>,
@@ -241,6 +243,7 @@ pub fn stream_chunks<P: TerrainProvider>(
                 }
             }
         }
+        state.data_revision = state.data_revision.wrapping_add(1);
         state.simulation_center = Some(simulation_center);
         state.simulation_radius = simulation_radius;
         state.pending_despawns.clear();
@@ -347,15 +350,15 @@ pub fn stream_chunks<P: TerrainProvider>(
                     elapsed: started.elapsed(),
                 }
             });
+            // The task records its session and is despawned on completion, a
+            // session mismatch or world cleanup. No `SessionMember` link: removing
+            // one scans the session's whole member list for every loaded column.
             let entity = commands
-                .spawn((
-                    ChunkGeneration::<P> {
-                        session: session.0,
-                        position,
-                        task,
-                    },
-                    SessionMember(session.0),
-                ))
+                .spawn(ChunkGeneration::<P> {
+                    session: session.0,
+                    position,
+                    task,
+                })
                 .id();
             pending.insert(position, entity);
         }
@@ -475,11 +478,11 @@ fn spawn_chunk<P: TerrainProvider>(
     };
     voxels.dirty_sections = hollow_core::coordinates::section_mask(voxels.states.section_count());
     let lit_edits = voxels.modified;
-    commands
-        .entity(chunk_entity)
-        .insert((VoxelChunk { position }, voxels, SessionMember(session)));
+    let chunk = (VoxelChunk { position }, voxels, SessionMember(session));
     if lit_edits {
-        commands.entity(chunk_entity).insert(LitEdits);
+        commands.entity(chunk_entity).insert((chunk, LitEdits));
+    } else {
+        commands.entity(chunk_entity).insert(chunk);
     }
     index_entry.insert(chunk_entity);
     provider.materialize(commands, chunk_entity, position, attachment);
@@ -556,11 +559,20 @@ impl<P: TerrainProvider> bevy_app::Plugin for StreamingPlugin<P> {
 
 fn reset_stream(
     _: On<crate::session::SessionClosed>,
+    mut commands: Commands,
     mut pending: ResMut<PendingChunks>,
     mut stream: ResMut<StreamState>,
     mut demand: ResMut<StreamDemand>,
 ) {
-    pending.clear();
-    *stream = Default::default();
+    // Generation tasks are not session members; the application may have
+    // despawned them already.
+    for (_, entity) in pending.drain() {
+        commands.entity(entity).try_despawn();
+    }
+    // The data revision stays monotonic across sessions.
+    *stream = StreamState {
+        data_revision: stream.data_revision.wrapping_add(1),
+        ..Default::default()
+    };
     *demand = Default::default();
 }

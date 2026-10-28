@@ -1,5 +1,3 @@
-#![allow(clippy::needless_arbitrary_self_type)]
-
 use super::{DAY_LENGTH_SECS, TimeOfDay, night::SplitMix};
 use crate::{game::GameState, player::PlayerCamera, settings::GraphicsSettings};
 use bevy::{
@@ -7,9 +5,9 @@ use bevy::{
     light::{NotShadowCaster, NotShadowReceiver},
     mesh::PrimitiveTopology,
     prelude::*,
-    render::render_resource::AsBindGroup,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
+use hollow_render::environment::{SkyMaterial, SkyPass, SkySettings};
 use std::sync::Arc;
 
 /// Cloud layer: 12×12 block cells, 4 blocks thick, at Y 384.
@@ -27,26 +25,6 @@ const MAX_RADIUS: f32 = 768.0;
 /// reaches this much past the fade, so its edge never shows.
 const REBUILD_MARGIN: i32 = 2;
 
-/// Opaque, flat-shaded cloud boxes lit like terrain by the sun, moon and sky.
-/// Their distance haze samples the same palette as the terrain.
-#[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
-pub(crate) struct CloudMaterial {
-    /// Horizontal distances where the dithered fade starts and ends in XY.
-    #[uniform(0)]
-    fade: Vec4,
-    #[storage(11, read_only, visibility(fragment))]
-    palette: Handle<bevy::render::storage::ShaderBuffer>,
-}
-
-sky_material!(
-    CloudMaterial,
-    "embedded://hollow_render/shaders/sky_clouds.wesl",
-    AlphaMode::Opaque,
-    0.0,
-    [ATTRIBUTE_POSITION => 0, ATTRIBUTE_NORMAL => 1],
-    cull = Some(bevy::render::render_resource::Face::Back)
-);
-
 /// Which cells hold a cloud, `PATTERN`² entries, generated once.
 #[derive(Resource, Clone)]
 pub(super) struct CloudPattern(Arc<[bool]>);
@@ -63,6 +41,9 @@ impl CloudPattern {
     }
 }
 
+/// Opaque, flat-shaded cloud boxes lit like terrain by the sun, moon and sky.
+/// Their distance haze samples the same palette as the terrain.
+///
 /// The mesh covers the cells within `radius` of `center`, in pattern cells.
 #[derive(Component, Default)]
 pub(super) struct CloudLayer {
@@ -73,13 +54,14 @@ pub(super) struct CloudLayer {
 
 pub(super) fn spawn_clouds(
     mut commands: Commands,
-    mut materials: ResMut<Assets<CloudMaterial>>,
+    mut materials: ResMut<Assets<SkyMaterial>>,
     palette: Res<hollow_render::fog::SkyPalette>,
 ) {
     commands.spawn((
         CloudLayer::default(),
-        MeshMaterial3d(materials.add(CloudMaterial {
-            fade: Vec4::ZERO,
+        MeshMaterial3d(materials.add(SkyMaterial {
+            pass: SkyPass::Clouds,
+            settings: SkySettings::default(),
             palette: palette.0.clone(),
         })),
         Transform::default(),
@@ -111,10 +93,10 @@ pub(super) fn update_clouds(
         &mut CloudLayer,
         &mut Transform,
         &mut Visibility,
-        &MeshMaterial3d<CloudMaterial>,
+        &MeshMaterial3d<SkyMaterial>,
     )>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<CloudMaterial>>,
+    mut materials: ResMut<Assets<SkyMaterial>>,
 ) {
     let Ok(camera) = camera.single() else {
         return;
@@ -148,7 +130,7 @@ pub(super) fn update_clouds(
             commands.entity(entity).insert(Mesh3d(meshes.add(mesh)));
             if let Some(mut material) = materials.get_mut(&material.0) {
                 let end = built_radius as f32 * CELL - REBUILD_MARGIN as f32 * CELL;
-                material.fade = Vec4::new(end * 0.7, end, 0.0, 0.0);
+                material.settings.params = Vec4::new(end * 0.7, end, 0.0, 0.0);
             }
         }
 

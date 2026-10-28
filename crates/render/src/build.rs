@@ -7,7 +7,10 @@ use super::{
 };
 use crate::{RenderSource, SHADOW_LAYER, VoxelViewer};
 use bevy::{
-    camera::visibility::{NoCpuCulling, RenderLayers},
+    camera::{
+        primitives::MeshAabb,
+        visibility::{NoCpuCulling, RenderLayers},
+    },
     light::NotShadowCaster,
     mesh::Indices,
     prelude::*,
@@ -110,7 +113,10 @@ struct BuildOutput {
     counts: (usize, usize),
 }
 
+/// Transient per build, so stored sparsely: starting and finishing a build never
+/// moves the chunk's table row.
 #[derive(Component)]
+#[component(storage = "SparseSet")]
 pub struct ChunkBuild {
     task: Task<BuildOutput>,
     ready: Option<BuildOutput>,
@@ -493,89 +499,103 @@ pub fn poll_builds<C: RenderSource>(
             applied_sections += 1;
             voxels.bypass_change_detection().dirty_sections &= !(1 << section.index);
             if let Some(assets) = assets.as_deref() {
-                let y = (section.index as i32 * SECTION_HEIGHT) as f32;
-                let terrain = section.terrain.map(|mesh| meshes.add(mesh));
-                let cutout = section.cutout.map(|mesh| meshes.add(mesh));
-                let shadow = section.shadow.map(|mesh| meshes.add(mesh));
-                let model_mesh = section.models.map(|mesh| meshes.add(mesh));
-                let model_cutout = section.models_cutout.map(|mesh| meshes.add(mesh));
-                let translucent = section
-                    .translucent
-                    .map(|(mesh, sort, key)| (meshes.add(mesh), sort, key));
+                let placement = (
+                    Transform::from_xyz(0.0, (section.index as i32 * SECTION_HEIGHT) as f32, 0.0),
+                    ChildOf(entity),
+                );
+                // New camera entities start in their likely layer, so an occluded
+                // section needs no later insert. The invalidation above keeps the
+                // camera conservative until visibility republishes this section.
+                let camera = RenderLayers::layer(
+                    if topology.as_deref().is_none_or(|graph| {
+                        graph.likely_visible(chunk.position, section.index, section.overhang)
+                    }) {
+                        0
+                    } else {
+                        super::visibility::OCCLUDED_LAYER
+                    },
+                );
+                let slots = &mut entities.sections[section.index];
                 update_section(
                     &mut commands,
-                    &mut entities.sections[section.index].models,
-                    model_mesh,
-                    entity,
-                    y,
-                    |mesh| {
+                    &mut meshes,
+                    &mut slots.models,
+                    section.models,
+                    None,
+                    |mesh, _| {
                         (
                             Mesh3d(mesh),
                             MeshMaterial3d(assets.models.clone()),
                             // Static like terrain: culled on GPU only.
                             NoCpuCulling,
+                            camera.clone(),
+                            placement.clone(),
                         )
                     },
                 );
                 update_section(
                     &mut commands,
-                    &mut entities.sections[section.index].models_cutout,
-                    model_cutout,
-                    entity,
-                    y,
-                    |mesh| {
+                    &mut meshes,
+                    &mut slots.models_cutout,
+                    section.models_cutout,
+                    None,
+                    |mesh, _| {
                         (
                             Mesh3d(mesh),
                             MeshMaterial3d(assets.models_cutout.clone()),
                             NoCpuCulling,
+                            camera.clone(),
+                            placement.clone(),
                         )
                     },
                 );
                 update_section(
                     &mut commands,
-                    &mut entities.sections[section.index].cutout,
-                    cutout,
-                    entity,
-                    y,
-                    |mesh| {
+                    &mut meshes,
+                    &mut slots.cutout,
+                    section.cutout,
+                    None,
+                    |mesh, _| {
                         (
                             Mesh3d(mesh),
                             MeshMaterial3d(assets.cutout.clone()),
                             // Casts its own alpha-tested shadow.
                             NoCpuCulling,
+                            camera.clone(),
+                            placement.clone(),
                         )
                     },
                 );
-                let transparent_mesh = translucent.as_ref().map(|(mesh, _, _)| mesh.clone());
+                let (translucent, sort) = section
+                    .translucent
+                    .map(|(mesh, sort, key)| (mesh, (sort, key)))
+                    .unzip();
                 update_section(
                     &mut commands,
-                    &mut entities.sections[section.index].translucent,
-                    transparent_mesh,
-                    entity,
-                    y,
-                    |mesh| {
+                    &mut meshes,
+                    &mut slots.translucent,
+                    translucent,
+                    sort,
+                    |mesh, sort| {
+                        let (sort, key) = sort.expect("translucent sort data");
                         (
                             Mesh3d(mesh),
                             MeshMaterial3d(assets.translucent.clone()),
                             NotShadowCaster,
+                            camera.clone(),
+                            placement.clone(),
+                            sort,
+                            super::sort::SortState::new(key),
                         )
                     },
                 );
-                if let (Some(entity), Some((_, sort, key))) =
-                    (entities.sections[section.index].translucent, translucent)
-                {
-                    // A fresh state also drops any sort of the replaced mesh.
-                    commands
-                        .entity(entity)
-                        .insert(super::uploads::PendingSort(Some((sort, key))));
-                }
                 update_section(
                     &mut commands,
-                    &mut entities.sections[section.index].terrain,
-                    terrain,
-                    entity,
-                    y,
-                    |mesh| {
+                    &mut meshes,
+                    &mut slots.terrain,
+                    section.terrain,
+                    None,
+                    |mesh, _| {
                         (
                             Mesh3d(mesh),
                             MeshMaterial3d(assets.terrain.clone()),
@@ -583,21 +603,24 @@ pub fn poll_builds<C: RenderSource>(
                             NotShadowCaster,
                             // Culled on GPU only: no per-frame CPU work for static terrain.
                             NoCpuCulling,
+                            camera.clone(),
+                            placement.clone(),
                         )
                     },
                 );
                 update_section(
                     &mut commands,
-                    &mut entities.sections[section.index].shadow,
-                    shadow,
-                    entity,
-                    y,
-                    |mesh| {
+                    &mut meshes,
+                    &mut slots.shadow,
+                    section.shadow,
+                    None,
+                    |mesh, _| {
                         (
                             Mesh3d(mesh),
                             MeshMaterial3d(assets.terrain.clone()),
                             RenderLayers::layer(SHADOW_LAYER),
                             NoCpuCulling,
+                            placement.clone(),
                         )
                     },
                 );
@@ -616,11 +639,12 @@ pub fn poll_builds<C: RenderSource>(
             commands.entity(entity).try_insert(sections);
         }
         if complete {
-            commands.entity(entity).remove::<ChunkBuild>();
             if voxels.dirty_sections == 0 {
                 commands
                     .entity(entity)
-                    .remove::<(NeedsChunkBuild, EditedChunk)>();
+                    .remove::<(ChunkBuild, NeedsChunkBuild, EditedChunk)>();
+            } else {
+                commands.entity(entity).remove::<ChunkBuild>();
             }
         }
         if applied_sections > 0
@@ -639,33 +663,36 @@ pub fn poll_builds<C: RenderSource>(
     }
 }
 
+type PendingSortData = (super::model_mesh::SortData, Option<super::sort::SortKey>);
+
 /// Swaps a section's mesh, spawning or despawning its entity as it gains or loses faces.
+/// A replacement waits in `PendingMesh` until uploaded; a new entity has no geometry
+/// to keep, so it is spawned once with its final components.
 fn update_section<B: Bundle>(
     commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
     slot: &mut Option<Entity>,
-    mesh: Option<Handle<Mesh>>,
-    chunk: Entity,
-    y: f32,
-    bundle: impl FnOnce(Handle<Mesh>) -> B,
+    mesh: Option<Mesh>,
+    sort: Option<PendingSortData>,
+    bundle: impl FnOnce(Handle<Mesh>, Option<PendingSortData>) -> B,
 ) {
     match (mesh, *slot) {
         (Some(mesh), Some(entity)) => {
             commands
                 .entity(entity)
-                .try_insert(super::uploads::PendingMesh(mesh));
+                .try_insert(super::uploads::PendingMesh {
+                    mesh: meshes.add(mesh),
+                    sort,
+                });
         }
         (Some(mesh), None) => {
-            let transform = Transform::from_xyz(0.0, y, 0.0);
-            *slot = Some(
-                commands
-                    .spawn((
-                        bundle(mesh.clone()),
-                        transform,
-                        ChildOf(chunk),
-                        super::uploads::PendingMesh(mesh),
-                    ))
-                    .id(),
-            );
+            // The bounds Bevy's `calculate_bounds` would otherwise insert a frame later.
+            let aabb = mesh.get_aabb();
+            let bundle = bundle(meshes.add(mesh), sort);
+            *slot = Some(match aabb {
+                Some(aabb) => commands.spawn((bundle, aabb)).id(),
+                None => commands.spawn(bundle).id(),
+            });
         }
         (None, Some(entity)) => {
             commands.entity(entity).try_despawn();
