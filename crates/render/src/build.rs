@@ -2,6 +2,7 @@
 
 use super::{
     assets::VoxelAssets,
+    environment::EnvironmentSettings,
     meshing::{ChunkNeighborhood, build_sections},
 };
 use crate::{RenderSource, SHADOW_LAYER, VoxelViewer};
@@ -115,6 +116,7 @@ pub struct ChunkBuild {
     ready: Option<BuildOutput>,
     content_revision: u64,
     revision: u64,
+    shadows_enabled: bool,
 }
 
 /// Concurrent mesh tasks: enough to fill the compute pool without hoarding stale work.
@@ -179,6 +181,30 @@ pub fn mark_changed_chunks<C: RenderSource>(
     }
 }
 
+pub fn update_shadow_geometry<C: RenderSource>(
+    mut commands: Commands,
+    settings: Res<EnvironmentSettings>,
+    mut previous: Local<Option<bool>>,
+    mut chunks: Query<(&mut ChunkVoxels<C::Cell>, &mut ChunkSections)>,
+) {
+    let enabled = settings.shadows_enabled;
+    if previous.replace(enabled) == Some(enabled) {
+        return;
+    }
+    for (mut voxels, mut sections) in &mut chunks {
+        if enabled {
+            voxels.mark_sections(sections.built_sections);
+        } else {
+            // Existing camera geometry remains valid; only discard the unused pass.
+            for section in &mut sections.sections {
+                if let Some(shadow) = section.shadow.take() {
+                    commands.entity(shadow).despawn();
+                }
+            }
+        }
+    }
+}
+
 pub fn start_changed_builds<C: RenderSource>(
     mut commands: Commands,
     index: Res<ChunkIndex>,
@@ -190,6 +216,7 @@ pub fn start_changed_builds<C: RenderSource>(
     all: Query<&ChunkVoxels<C::Cell>>,
     source: Res<C>,
     layout: Res<WorldLayout>,
+    settings: Res<EnvironmentSettings>,
     mut candidates: Local<Vec<((bool, DistanceKey), Entity)>>,
 ) {
     if chunks.is_empty() {
@@ -264,6 +291,7 @@ pub fn start_changed_builds<C: RenderSource>(
             neighborhood,
             voxels,
             eye,
+            settings.shadows_enabled,
         ));
     }
 }
@@ -275,13 +303,14 @@ fn spawn_chunk_build<C: RenderSource>(
     neighborhood: ChunkNeighborhood<C>,
     voxels: &ChunkVoxels<C::Cell>,
     eye: Option<Vec3>,
+    shadows_enabled: bool,
 ) -> ChunkBuild {
     let sections = voxels.dirty_sections;
     let revision = voxels.revision;
     let task = budget.spawn(class, distance, async move {
         #[cfg(feature = "dev")]
         let meshing_started = Instant::now();
-        let sections = build_sections(&neighborhood, sections);
+        let sections = build_sections(&neighborhood, sections, shadows_enabled);
         #[cfg(feature = "dev")]
         let counts = sections
             .iter()
@@ -362,6 +391,7 @@ fn spawn_chunk_build<C: RenderSource>(
         ready: None,
         revision,
         content_revision: voxels.content_revision,
+        shadows_enabled,
     }
 }
 
@@ -369,6 +399,7 @@ fn spawn_chunk_build<C: RenderSource>(
 pub fn poll_builds<C: RenderSource>(
     mut commands: Commands,
     assets: Option<Res<VoxelAssets>>,
+    settings: Res<EnvironmentSettings>,
     mut meshes: ResMut<Assets<Mesh>>,
     viewer: Option<Single<&Transform, With<VoxelViewer>>>,
     mut topology: Option<ResMut<super::visibility::VisibilityGraph>>,
@@ -402,7 +433,7 @@ pub fn poll_builds<C: RenderSource>(
         let Ok((_, chunk, mut voxels, mut build, sections, _)) = chunks.get_mut(entity) else {
             continue;
         };
-        if build.revision != voxels.revision {
+        if build.revision != voxels.revision || build.shadows_enabled != settings.shadows_enabled {
             // Cancel stale work before charging any upload budget.
             commands.entity(entity).remove::<ChunkBuild>();
             continue;

@@ -1,7 +1,8 @@
 # Project rules
 
 - Write code and project content in English.
-- Verify code changes only with `cargo check`. Never run the game, tests, benchmarks, or release builds. Review performance and Bevy access conflicts from source.
+- Verify code changes with development-profile `cargo check`. Never run tests or ordinary gameplay. Development benchmarks may run only when explicitly authorized by the user, as authorized for the current performance task.
+- Never compile, check, run or benchmark a release profile, including `--release`, `--profile release` or equivalent custom profiles. Performance investigations do not override this prohibition.
 - Use modern Bevy features, ECS, parallelism and data-oriented design. Performance is paramount.
 - This is an unreleased beta: saves and generated caches are disposable. Replace obsolete interfaces directly; never add legacy readers, compatibility shims, migrations, format-version fields or version checks.
 - Preserve concurrent user edits. Change only what the requested task requires.
@@ -30,7 +31,7 @@
 - For conditional code, check the default configuration and the affected feature configurations, including `dev`, `sqlite` or `content-ron` where relevant. Check the owning package independently when workspace feature unification could hide a missing feature or dependency.
 - Reserve `cargo check --workspace` for changes spanning the workspace or shared dependency configuration. Do not repeat a successful check unless a new change or unresolved failure requires it.
 - Check crate examples only when affected, using `cargo check -p <package> --example <name>` with the relevant features. Do not use `--all-targets`, which includes test and benchmark targets.
-- Documentation, instruction and Codex configuration changes need no Cargo check. Changed Cargo manifests require an appropriate targeted check. Never run tests, benchmarks, release builds or the application.
+- Documentation, instruction and Codex configuration changes need no Cargo check. Changed Cargo manifests require an appropriate targeted check. Never run tests, ordinary gameplay or release profiles; only explicitly authorized development benchmarks are exceptions to the application execution restriction.
 
 ## Targeted performance review
 

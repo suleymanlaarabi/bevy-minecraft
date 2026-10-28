@@ -85,6 +85,7 @@ pub fn sync_environment(
     let radius = terrain_radius(&settings);
     environment.set_if_neq(EnvironmentSettings {
         terrain_radius: radius,
+        shadows_enabled: settings.shadow_quality != crate::settings::ShadowQuality::Off,
         horizon_radius: if settings.clouds {
             crate::sky::cloud_reach(&settings)
         } else {

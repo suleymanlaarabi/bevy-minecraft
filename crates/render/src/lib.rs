@@ -108,6 +108,7 @@ impl<C: RenderSource> Plugin for VoxelRenderPlugin<C> {
         .add_systems(
             PostUpdate,
             (
+                build::update_shadow_geometry::<C>,
                 build::poll_builds::<C>,
                 build::mark_changed_chunks::<C>,
                 build::start_changed_builds::<C>,

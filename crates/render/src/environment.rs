@@ -262,12 +262,14 @@ pub fn follow_horizon_skirt(
 pub struct EnvironmentSettings {
     pub terrain_radius: f32,
     pub horizon_radius: f32,
+    pub shadows_enabled: bool,
 }
 impl Default for EnvironmentSettings {
     fn default() -> Self {
         Self {
             terrain_radius: 128.0,
             horizon_radius: 128.0,
+            shadows_enabled: true,
         }
     }
 }

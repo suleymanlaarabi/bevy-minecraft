@@ -543,47 +543,36 @@ impl EdgeVertices {
 /// Every face containing the point lies between two of the eight cells around it,
 /// and belongs to the section of its solid cell.
 fn shared_point(padded: &Padded, point: [u32; 3]) -> bool {
-    let point = point.map(|coordinate| coordinate as i32);
-    let cell_at = |corner: usize| {
-        std::array::from_fn::<_, 3, _>(|axis| point[axis] - 1 + (corner >> axis & 1) as i32)
-    };
-    // Corner bits follow X/Y/Z, while padded rows follow X/Z/Y. All eight
-    // cells share this base index, including points on a section boundary.
-    let base = (point[0] + PADDED_SIZE * (point[2] + PADDED_SIZE * point[1])) as usize;
-    let samples: [Sample; 8] = std::array::from_fn(|corner| {
-        padded.samples[base
-            + (corner & 1)
-            + ((corner >> 1) & 1) * (PADDED_SIZE * PADDED_SIZE) as usize
-            + ((corner >> 2) & 1) * PADDED_SIZE as usize]
-    });
-    let mut owner = None;
-    for corner in 0..8 {
-        let from = samples[corner];
-        if !from.has(cell::CUBE | cell::CUTOUT) {
-            continue;
-        }
-        let exposed = (0..3).any(|axis| !samples[corner ^ (1 << axis)].occludes());
-        if !exposed {
-            continue;
-        }
-        let position = cell_at(corner);
-        let section = (0..3).fold(0, |id, axis| {
-            let side = if position[axis] < 0 {
-                0
-            } else if position[axis] >= padded.dimensions[axis] {
-                2
-            } else {
-                1
-            };
-            id * 3 + side
-        });
-        match owner {
-            None => owner = Some(section),
-            Some(first) if first != section => return true,
-            Some(_) => {}
+    let mut solid = 0u8;
+    let mut occluders = 0u8;
+    // Each X-oriented row supplies two adjacent corners. The four Y/Z rows
+    // already encode exactly the cube/cutout/occlusion predicates used here.
+    for y in 0..2 {
+        for z in 0..2 {
+            let row = padded.rows
+                [2 * AXIS_ROWS + point[2] as usize + z + ROW_BITS * (point[1] as usize + y)];
+            let shift = 2 * y + 4 * z;
+            solid |= ((((row | (row >> ROW_BITS)) >> point[0]) & 3) as u8) << shift;
+            occluders |= (((row >> (2 * ROW_BITS + point[0] as usize)) & 3) as u8) << shift;
         }
     }
-    false
+    // Corner bits are X/Y/Z. Swapping each axis pairs every corner with its
+    // neighbor; only corners blocked along all three axes lack an exposed face.
+    let x = ((occluders & 0x55) << 1) | ((occluders & 0xaa) >> 1);
+    let y = ((occluders & 0x33) << 2) | ((occluders & 0xcc) >> 2);
+    let z = ((occluders & 0x0f) << 4) | ((occluders & 0xf0) >> 4);
+    let exposed = solid & !(x & y & z);
+    let first = exposed.trailing_zeros();
+    if first == 8 {
+        return false;
+    }
+    let mut owner = 0xffu8;
+    for (axis, low) in [0x55u8, 0x33, 0x0f].into_iter().enumerate() {
+        if point[axis] == 0 || point[axis] == padded.dimensions[axis] as u32 {
+            owner &= if first & (1 << axis) == 0 { low } else { !low };
+        }
+    }
+    exposed & !owner != 0
 }
 
 fn grid_position(vertex: [u32; 2]) -> [u32; 3] {
@@ -798,6 +787,7 @@ impl<I: TerrainIndex> TerrainGeometry<I> {
 pub fn build_sections<C: RenderSource>(
     neighborhood: &ChunkNeighborhood<C>,
     sections: u32,
+    shadows_enabled: bool,
 ) -> Vec<SectionMeshes> {
     SCRATCH.with_borrow_mut(|scratch| {
         let Scratch {
@@ -906,7 +896,9 @@ pub fn build_sections<C: RenderSource>(
                     translucent,
                     terrain,
                     cutout,
-                    shadow: (padded.summary.flags & cell::CUBE != 0 && casts_shadow)
+                    shadow: (shadows_enabled
+                        && padded.summary.flags & cell::CUBE != 0
+                        && casts_shadow)
                         .then(|| {
                             greedy_mesh::<u16>(
                                 padded,

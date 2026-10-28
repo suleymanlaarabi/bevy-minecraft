@@ -3,7 +3,7 @@
 use crate::{
     character::{CharacterMotion, Flying},
     player::{Player, PlayerCamera},
-    settings::{DisplayMode, GraphicsSettings},
+    settings::{AntiAliasingMode, DisplayMode, GraphicsSettings, ShadowQuality},
     voxel::{ChunkVoxels, VoxelChunk},
 };
 use bevy::{
@@ -150,12 +150,17 @@ fn start(
 ) {
     let mut settings = graphics.clone();
     benchmark.original_graphics = Some(settings.clone());
-    settings.view_distance = 12;
+    settings.view_distance = 16;
+    settings.anti_aliasing = AntiAliasingMode::Off;
+    settings.shadow_quality = ShadowQuality::Off;
+    settings.occlusion_culling = false;
+    settings.bloom = false;
+    settings.clouds = false;
     settings.vsync = false;
     if std::env::var_os("HOLLOW_FLIGHT_RESOLUTION").is_some() {
         settings.display_mode = DisplayMode::Windowed;
     }
-    info!("flight benchmark: seed=12 distance=12 target_frame_ms=4.167 graphics={settings:?}");
+    info!("flight benchmark: seed=12 distance=16 target_frame_ms=4.167 graphics={settings:?}");
     commands.insert_resource(settings);
     if std::env::var_os("HOLLOW_FLIGHT_NO_MOBS").is_some() {
         commands.insert_resource(crate::creatures::spawning::CreaturePopulationLimit(0));
@@ -178,6 +183,11 @@ fn resolution(mut windows: Query<&mut Window>) {
         .expect("HOLLOW_FLIGHT_RESOLUTION must be WIDTHxHEIGHT in physical pixels");
     for mut window in &mut windows {
         window.resolution = WindowResolution::new(width, height).with_scale_factor_override(1.0);
+        info!(
+            "flight benchmark: physical_resolution={}x{}",
+            window.physical_width(),
+            window.physical_height()
+        );
     }
 }
 
