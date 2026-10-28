@@ -28,12 +28,14 @@ const MAX_RADIUS: f32 = 768.0;
 const REBUILD_MARGIN: i32 = 2;
 
 /// Opaque, flat-shaded cloud boxes lit like terrain by the sun, moon and sky.
-/// Being opaque, they get the atmosphere's aerial perspective for free.
+/// Their distance haze samples the same palette as the terrain.
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
 pub(crate) struct CloudMaterial {
     /// Horizontal distances where the dithered fade starts and ends in XY.
     #[uniform(0)]
     fade: Vec4,
+    #[storage(11, read_only, visibility(fragment))]
+    palette: Handle<bevy::render::storage::ShaderBuffer>,
 }
 
 sky_material!(
@@ -69,10 +71,17 @@ pub(super) struct CloudLayer {
     building: Option<Task<(IVec2, i32, Mesh)>>,
 }
 
-pub(super) fn spawn_clouds(mut commands: Commands, mut materials: ResMut<Assets<CloudMaterial>>) {
+pub(super) fn spawn_clouds(
+    mut commands: Commands,
+    mut materials: ResMut<Assets<CloudMaterial>>,
+    palette: Res<hollow_render::fog::SkyPalette>,
+) {
     commands.spawn((
         CloudLayer::default(),
-        MeshMaterial3d(materials.add(CloudMaterial { fade: Vec4::ZERO })),
+        MeshMaterial3d(materials.add(CloudMaterial {
+            fade: Vec4::ZERO,
+            palette: palette.0.clone(),
+        })),
         Transform::default(),
         Visibility::Hidden,
         NotShadowCaster,

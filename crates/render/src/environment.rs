@@ -1,4 +1,3 @@
-use super::fog::FogMaterialKey;
 use crate::{RenderSource, VoxelViewer};
 use bevy::{
     camera::Exposure,
@@ -18,8 +17,8 @@ use hollow_engine::{
     world::{VoxelWorld, WorldLayout},
 };
 
-/// Forward scattering of the sun and moon in open-air fog (`voxel_fog.wesl`). Liquids
-/// have none, which also switches that shader to a spherical fog.
+/// Marks open-air fog and supplies directional scattering for standard materials.
+/// Liquids have none, which also switches voxel fog to a spherical falloff.
 pub const OPEN_AIR_SCATTERING: Color = Color::srgba(1.0, 0.9, 0.75, 0.3);
 
 /// The liquid the camera is in, if any.
@@ -137,24 +136,11 @@ pub fn terrain_radius(settings: &EnvironmentSettings) -> f32 {
     settings.terrain_radius
 }
 
-/// Draws lower-sky haze or the opaque immersion dome after the atmosphere pass.
+/// Lower-sky haze and the opaque immersion dome share the sky palette.
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
-#[bind_group_data(FogMaterialKey)]
 pub struct HorizonFogMaterial {
     #[storage(11, read_only, visibility(fragment))]
     fog: Handle<ShaderBuffer>,
-    #[texture(12, visibility(fragment))]
-    #[sampler(13, visibility(fragment))]
-    fog_sky: Option<Handle<Image>>,
-    #[texture(14, dimension = "3d", visibility(fragment))]
-    #[sampler(15, visibility(fragment))]
-    fog_aerial: Option<Handle<Image>>,
-}
-
-impl From<&HorizonFogMaterial> for super::fog::FogMaterialKey {
-    fn from(material: &HorizonFogMaterial) -> Self {
-        Self(material.fog_sky.is_some())
-    }
 }
 
 impl Material for HorizonFogMaterial {
@@ -178,9 +164,8 @@ impl Material for HorizonFogMaterial {
         _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &MeshVertexBufferLayoutRef,
-        key: MaterialPipelineKey<Self>,
+        _key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        super::fog::specialize_fog(descriptor, key.bind_group_data.0);
         // Seen from inside.
         descriptor.primitive.cull_mode = None;
         Ok(())
@@ -191,8 +176,7 @@ impl Material for HorizonFogMaterial {
 #[derive(Component)]
 pub struct HorizonSkirt;
 
-/// A fully fogged sphere just past the end of a liquid's fog: the atmosphere draws
-/// the sky over every background pixel, so nothing else would hide it underwater.
+/// A fully fogged sphere just past the end of a liquid's fog hides the sky underwater.
 #[derive(Component)]
 pub struct LiquidDome;
 
@@ -201,13 +185,9 @@ pub fn spawn_horizon_skirt(
     session: Res<hollow_engine::session::ActiveSession>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<HorizonFogMaterial>>,
-    fog: Res<super::fog::FogLut>,
+    fog: Res<super::fog::SkyPalette>,
 ) {
-    let material = MeshMaterial3d(materials.add(HorizonFogMaterial {
-        fog: fog.0.clone(),
-        fog_sky: fog.1.clone(),
-        fog_aerial: fog.2.clone(),
-    }));
+    let material = MeshMaterial3d(materials.add(HorizonFogMaterial { fog: fog.0.clone() }));
     let tube = Cylinder::new(1.0, 1.0)
         .mesh()
         .resolution(64)
@@ -291,13 +271,17 @@ impl Default for EnvironmentSettings {
         }
     }
 }
-#[derive(Resource, Clone, Copy, PartialEq)]
+#[derive(Resource, Clone, Copy, PartialEq, bevy::render::extract_resource::ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct SkyLighting {
     pub night: f32,
     pub ev100: f32,
     pub ambient_color: Color,
     pub ambient_brightness: f32,
     pub horizon_color: Color,
+    pub zenith_color: Color,
+    pub sun_direction: Vec3,
+    pub sunset_color: Color,
 }
 impl SkyLighting {
     fn exposure(&self) -> f32 {
@@ -312,6 +296,9 @@ impl Default for SkyLighting {
             ambient_color: Color::WHITE,
             ambient_brightness: 0.5,
             horizon_color: Color::srgb(0.6, 0.75, 0.9),
+            zenith_color: Color::srgb(0.35, 0.6, 1.0),
+            sun_direction: Vec3::Y,
+            sunset_color: Color::BLACK,
         }
     }
 }

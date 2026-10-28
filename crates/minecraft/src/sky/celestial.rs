@@ -7,10 +7,7 @@ use super::{
 use crate::{game::GameState, settings::GraphicsSettings};
 use bevy::{
     camera::visibility::{NoFrustumCulling, RenderLayers},
-    light::{
-        Atmosphere, CascadeShadowConfigBuilder, NotShadowCaster, SunDisk,
-        atmosphere::ScatteringMedium,
-    },
+    light::{CascadeShadowConfigBuilder, NotShadowCaster, SunDisk},
     prelude::*,
     render::render_resource::{AsBindGroup, ShaderType},
 };
@@ -25,6 +22,65 @@ const SUN_SORT_BIAS: f32 = -1.0e8;
 /// Sine of the elevation where astronomical twilight ends, 18° below the horizon:
 /// lower, a light no longer brightens the sky.
 const TWILIGHT_END: f32 = -0.309;
+
+/// A depth-tested background reads the same palette as terrain fog and water.
+#[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
+pub(crate) struct BackgroundMaterial {
+    #[storage(11, read_only, visibility(fragment))]
+    palette: Handle<bevy::render::storage::ShaderBuffer>,
+}
+
+pub(super) fn update_background_bounds(
+    camera: Single<&GlobalTransform, With<hollow_render::VoxelViewer>>,
+    mut backgrounds: Query<
+        &mut bevy::camera::primitives::Aabb,
+        With<MeshMaterial3d<BackgroundMaterial>>,
+    >,
+) {
+    let center = camera.translation().into();
+    for mut bounds in &mut backgrounds {
+        // The vertex shader covers the whole view. Keeping the camera inside its
+        // bounds prevents GPU occlusion from treating it as a quad at the origin.
+        if bounds.center != center {
+            bounds.center = center;
+        }
+    }
+}
+
+impl bevy::pbr::Material for BackgroundMaterial {
+    fn vertex_shader() -> bevy::shader::ShaderRef {
+        "embedded://hollow_render/shaders/sky_background.wesl".into()
+    }
+    fn fragment_shader() -> bevy::shader::ShaderRef {
+        Self::vertex_shader()
+    }
+    fn enable_prepass() -> bool {
+        false
+    }
+    fn enable_shadows() -> bool {
+        false
+    }
+    fn specialize(
+        _pipeline: &bevy::pbr::MaterialPipeline,
+        descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+        layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+        _key: bevy::pbr::MaterialPipelineKey<Self>,
+    ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        descriptor.vertex.buffers = vec![
+            layout
+                .0
+                .get_layout(&[Mesh::ATTRIBUTE_POSITION.at_shader_location(0)])?,
+        ];
+        descriptor.primitive.cull_mode = None;
+        if let Some(depth) = &mut descriptor.depth_stencil {
+            // Reverse-Z far depth: shade only background left by the terrain prepass.
+            depth.depth_compare =
+                Some(bevy::render::render_resource::CompareFunction::GreaterEqual);
+            depth.depth_write_enabled = Some(false);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Component)]
 pub(super) struct Sun;
@@ -62,23 +118,35 @@ sky_material!(
 pub(super) struct SunDiskMesh;
 
 fn sun_settings(sky: &SkyState) -> SunSettings {
+    let height = (sky.sun_direction.y * 5.0 + 0.2).clamp(0.0, 1.0);
     SunSettings {
         direction: sky.sun_direction.extend(SUN_RADIUS),
-        color: (Vec3::new(1.0, 0.98, 0.95) * SUN_DISK_RADIANCE).extend(1.0),
+        color: (Vec3::new(1.0, 0.35 + 0.63 * height, 0.12 + 0.83 * height)
+            * (SUN_DISK_RADIANCE * height))
+            .extend(1.0),
     }
 }
 
 pub(super) fn spawn_sky(
     mut commands: Commands,
-    mut media: ResMut<Assets<ScatteringMedium>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut suns: ResMut<Assets<SunMaterial>>,
+    palette: Res<hollow_render::fog::SkyPalette>,
+    mut backgrounds: ResMut<Assets<BackgroundMaterial>>,
     sky: Res<SkyState>,
 ) {
-    // Earth's planet sits below the origin: world Y is the altitude in meters,
-    // one block being one meter.
     commands.spawn((
-        Atmosphere::earth(media.add(ScatteringMedium::default())),
+        Mesh3d(meshes.add(Rectangle::new(2.0, 2.0))),
+        MeshMaterial3d(backgrounds.add(BackgroundMaterial {
+            palette: palette.0.clone(),
+        })),
+        bevy::camera::primitives::Aabb {
+            center: bevy::math::Vec3A::ZERO,
+            half_extents: bevy::math::Vec3A::ONE,
+        },
+        Transform::default(),
+        NoFrustumCulling,
+        NotShadowCaster,
         DespawnOnExit(GameState::Game),
     ));
 
@@ -143,7 +211,7 @@ pub(super) fn spawn_sky(
 }
 
 /// Moves the visible sun every frame the sky changes, and hides it below the horizon
-/// where the atmosphere blocks it entirely.
+/// when it is below the horizon.
 pub(super) fn update_sun_disk(
     sky: Res<SkyState>,
     mut disks: Query<(&mut Visibility, &MeshMaterial3d<SunMaterial>), With<SunDiskMesh>>,
@@ -202,6 +270,19 @@ pub(super) fn update_lights(
         } else {
             Visibility::Inherited
         });
+        let height = (direction.y * 5.0 + 0.2).clamp(0.0, 1.0);
+        let color = if is_sun {
+            Color::srgb(1.0, 0.35 + 0.63 * height, 0.12 + 0.83 * height)
+        } else {
+            Color::srgb(0.62, 0.72, 1.0)
+        };
+        let illuminance = if is_sun { SUN_LUX } else { MOON_LUX } * (0.75 * height);
+        if light.color != color {
+            light.color = color;
+        }
+        if light.illuminance != illuminance {
+            light.illuminance = illuminance;
+        }
         let shadow_maps_enabled = shadows && casts;
         if light.shadow_maps_enabled != shadow_maps_enabled {
             light.shadow_maps_enabled = shadow_maps_enabled;

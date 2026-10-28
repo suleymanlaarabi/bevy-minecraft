@@ -1,3 +1,4 @@
+import super::sky_color::sample_sky;
 import super::block_lighting::celestial_irradiance;
 import bevy_pbr::render::{
     forward_io::FragmentOutput,
@@ -43,8 +44,7 @@ fn dither(pixel: vec2<f32>) -> f32 {
 
 @fragment
 fn fragment(in: CloudVaryings) -> FragmentOutput {
-    // Opaque clouds dissolve toward the edge of the layer instead of blending, so
-    // the atmosphere still applies its aerial perspective to them afterwards.
+    // Opaque clouds dissolve toward the edge of the layer.
     let distance = length(in.world_position.xz - view_bindings::view.world_position.xz);
     if 1.0 - smoothstep(fade.x, fade.y, distance) <= dither(in.position.xy) {
         discard;
@@ -57,7 +57,11 @@ fn fragment(in: CloudVaryings) -> FragmentOutput {
         + celestial_irradiance(n, in.world_position, in.position.xy, false);
     var out: FragmentOutput;
     out.color = vec4<f32>(
-        vec3<f32>(0.96) * face * irradiance * view_bindings::view.exposure,
+        mix(
+            vec3<f32>(0.96) * face * irradiance * view_bindings::view.exposure,
+            sample_sky(normalize(in.world_position.xyz - view_bindings::view.world_position.xyz)),
+            0.65 * smoothstep(0.0, fade.y, distance),
+        ),
         1.0,
     );
     return out;

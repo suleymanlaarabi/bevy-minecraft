@@ -2,7 +2,7 @@
 use crate::{
     RenderSource,
     assets::VoxelAssets,
-    fog::FogLut,
+    fog::SkyPalette,
     material::{ModelBlend, ModelMaterial, VoxelCutoutMaterial, VoxelMaterial, WaterMaterial},
     models::{CellInfo, ModelQuad, cell},
 };
@@ -45,7 +45,7 @@ impl CatalogRenderSource {
         fluids: FluidCatalog,
         textures: RenderTextures<impl ExactSizeIterator<Item = io::Result<(ResourceId, Image)>>>,
         stores: &mut RenderAssetStores,
-        fog: &FogLut,
+        fog: &SkyPalette,
     ) -> io::Result<(Self, VoxelAssets)> {
         let count = textures.0.len();
         let mut textures = textures.0.peekable();
@@ -231,16 +231,12 @@ impl CatalogRenderSource {
             faces: faces.clone(),
             animations: animations.clone(),
             fog: fog.0.clone(),
-            fog_sky: fog.1.clone(),
-            fog_aerial: fog.2.clone(),
         });
         let terrain = stores.terrain.add(VoxelMaterial {
             blocks,
             faces,
             animations,
             fog: fog.0.clone(),
-            fog_sky: fog.1.clone(),
-            fog_aerial: fog.2.clone(),
         });
         let entity_blocks = vec![false; content.block_count()].into_boxed_slice();
         Ok((

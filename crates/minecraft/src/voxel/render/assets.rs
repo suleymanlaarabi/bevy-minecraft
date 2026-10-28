@@ -10,7 +10,7 @@ pub(crate) fn prepare_assets(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     settings: Option<Res<crate::settings::GraphicsSettings>>,
-    fog: Res<hollow_render::fog::FogLut>,
+    fog: Res<hollow_render::fog::SkyPalette>,
     mut voxel_materials: ResMut<Assets<VoxelMaterial>>,
     mut cutout_materials: ResMut<Assets<VoxelCutoutMaterial>>,
     mut model_materials: ResMut<Assets<ModelMaterial>>,
@@ -51,16 +51,12 @@ pub(crate) fn prepare_assets(
             faces: faces.clone(),
             animations: animations.clone(),
             fog: fog.0.clone(),
-            fog_sky: fog.1.clone(),
-            fog_aerial: fog.2.clone(),
         }),
         terrain: voxel_materials.add(VoxelMaterial {
             blocks,
             faces,
             animations,
             fog: fog.0.clone(),
-            fog_sky: fog.1.clone(),
-            fog_aerial: fog.2.clone(),
         }),
     });
 }
@@ -68,7 +64,7 @@ pub(crate) fn prepare_assets(
 pub(crate) fn apply_texture_pack(
     _insert: On<Insert<crate::settings::GraphicsSettings>>,
     settings: Res<crate::settings::GraphicsSettings>,
-    fog: Res<hollow_render::fog::FogLut>,
+    fog: Res<hollow_render::fog::SkyPalette>,
     asset_server: Res<AssetServer>,
     mut texture_pack: Option<ResMut<TexturePack>>,
     voxel_assets: Option<Res<VoxelAssets>>,
@@ -130,7 +126,7 @@ fn opaque_blend(vanilla_models: bool) -> ModelBlend {
 fn prepare_water(
     asset_server: &AssetServer,
     surface: bool,
-    fog: &hollow_render::fog::FogLut,
+    fog: &hollow_render::fog::SkyPalette,
 ) -> WaterMaterial {
     let path = "voxel/packs/vanilla/water_still.png";
     let texture = (!surface && crate::asset_directory().join(path).is_file())

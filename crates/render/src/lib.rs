@@ -49,14 +49,14 @@ impl<C: RenderSource> Plugin for VoxelRenderPlugin<C> {
         bevy::shader::load_shader_library!(app, "shaders/sky_moon.wesl");
         bevy::shader::load_shader_library!(app, "shaders/sky_clouds.wesl");
         bevy::shader::load_shader_library!(app, "shaders/sky_sun.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/sky_background.wesl");
         bevy::shader::load_shader_library!(app, "shaders/model_shadow.wesl");
         bevy::shader::load_shader_library!(app, "shaders/model_vertex.wesl");
         bevy::shader::load_shader_library!(app, "shaders/voxel_prepass.wesl");
         bevy::shader::load_shader_library!(app, "shaders/horizon_fog.wesl");
         bevy::shader::load_shader_library!(app, "shaders/surface_animation.wesl");
         bevy::shader::load_shader_library!(app, "shaders/block_lighting.wesl");
-        bevy::shader::load_shader_library!(app, "shaders/fog_lut.wesl");
-        bevy::shader::load_shader_library!(app, "shaders/prepare_fog.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/sky_color.wesl");
         bevy::shader::load_shader_library!(app, "shaders/voxel_fog.wesl");
         bevy::shader::load_shader_library!(app, "shaders/voxel_material.wesl");
         bevy::shader::load_shader_library!(app, "shaders/water_material.wesl");

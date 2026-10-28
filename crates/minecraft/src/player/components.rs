@@ -8,7 +8,7 @@ use crate::{
 use bevy::{
     camera::Exposure,
     core_pipeline::tonemapping::Tonemapping,
-    pbr::{AtmosphereSettings, DistanceFog, FogFalloff},
+    pbr::{DistanceFog, FogFalloff},
     prelude::*,
 };
 
@@ -56,12 +56,7 @@ pub struct Player;
         },
         ..default()
     },
-    // Physical sky and aerial perspective. Terrain ends within a few hundred
-    // meters, so the aerial-view slices only need to cover the clouds' reach.
-    AtmosphereSettings {
-        aerial_view_lut_max_distance: 2_000.0,
-        ..default()
-    },
+    bevy::camera::Hdr,
     Tonemapping::AgX,
     Projection::from(PerspectiveProjection {
         fov: 85.0_f32.to_radians(),

@@ -1,4 +1,3 @@
-import super::block_lighting::atmosphere_transmittance;
 import bevy_pbr::render::mesh_view_bindings::view;
 
 struct SunSettings {
@@ -50,13 +49,7 @@ fn fragment(in: SunVaryings) -> @location(0) vec4<f32> {
     let outside = max(r - 1.0, 0.0);
     let halo = (0.018 * exp(-3.0 * outside) + 0.003 * exp(-outside * outside))
         * (1.0 - smoothstep(2.0, EXTENT, r));
-    // Reddened near the horizon, zero below it. Fragment stage only: the atmosphere
-    // buffer is not bound for vertex shaders.
-    let color = sun.color.rgb * atmosphere_transmittance(
-        view.world_position.xyz,
-        sun.direction.xyz,
-        2.0 * sun.direction.w,
-    );
+    let color = sun.color.rgb;
     // Additive: premultiplied color with zero alpha.
     return vec4<f32>(color * (disk + vec3<f32>(1.0, 0.57, 0.20) * halo), 0.0);
 }

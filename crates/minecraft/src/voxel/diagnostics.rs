@@ -352,13 +352,14 @@ fn run_voxel_benchmark(
 fn report_voxel_diagnostics(
     time: Res<Time<Real>>,
     mut diagnostics: ResMut<VoxelDiagnostics>,
-    chunks: Query<&ChunkVoxels, With<VoxelChunk>>,
+    chunks: Query<(&ChunkVoxels, Has<hollow_render::streaming::RenderRequested>), With<VoxelChunk>>,
     builds: Query<(), With<ChunkBuild>>,
     sections: Query<&ChunkSections>,
     pending: Res<PendingChunks>,
     simulation: Res<crate::simulation::SimulationDiagnostics>,
     creatures: Query<Has<crate::simulation::Simulating>, With<crate::creatures::Creature>>,
-    paths: Res<crate::creatures::PathPool>,
+    windows: Query<&Window>,
+    settings: Res<crate::settings::GraphicsSettings>,
 ) {
     diagnostics.elapsed += time.delta_secs_f64();
     if diagnostics.elapsed < 5.0 {
@@ -366,15 +367,25 @@ fn report_voxel_diagnostics(
     }
     diagnostics.elapsed = 0.0;
 
+    for window in &windows {
+        info!(
+            "graphics: physical={}x{} scale={} settings={:?}",
+            window.physical_width(),
+            window.physical_height(),
+            window.scale_factor(),
+            *settings
+        );
+    }
     let loaded = chunks.iter().count();
+    let rendered = chunks.iter().filter(|(_, rendered)| *rendered).count();
     let building = builds.iter().count();
-    let modified = chunks.iter().filter(|chunk| chunk.modified).count();
+    let modified = chunks.iter().filter(|(chunk, _)| chunk.modified).count();
     let dirty_chunks = chunks
         .iter()
-        .filter(|chunk| chunk.dirty_sections != 0)
+        .filter(|(chunk, rendered)| *rendered && chunk.dirty_sections != 0)
         .count();
     let queued = dirty_chunks.saturating_sub(building);
-    let ready = loaded.saturating_sub(dirty_chunks);
+    let ready = rendered.saturating_sub(dirty_chunks);
     let frames: Vec<_> = diagnostics.frames_ms.iter().copied().collect();
     let average_vertices = diagnostics
         .built_vertices
@@ -422,9 +433,8 @@ fn report_voxel_diagnostics(
         .fold((0usize, 0usize), |(total, active), simulating| {
             (total + 1, active + usize::from(simulating))
         });
-    let path_bytes = paths.retained_bytes();
     info!(
-        "creatures: total={creature_count} active={active_creatures} path_capacity_bytes={path_bytes} paths_pending={} oldest_wait_ticks={} queue_bytes={} search_table_bytes={} expansions={} probes={}/32768 spawn_refusals[cap,terrain,space,occupied,biome,light,distance]={:?}",
+        "creatures: total={creature_count} active={active_creatures} paths_pending={} oldest_wait_ticks={} queue_bytes={} search_table_bytes={} expansions={} probes={}/32768 spawn_refusals[cap,terrain,space,occupied,biome,light,distance]={:?}",
         simulation.navigation_pending,
         simulation.navigation_oldest_wait,
         simulation.navigation_queue_bytes,

@@ -18,7 +18,7 @@ const MOON_RADIUS: f32 = 0.035;
 const STARS_SORT_BIAS: f32 = -1.0e9;
 const MOON_SORT_BIAS: f32 = -1.0e8;
 
-/// Point stars on a sphere at infinity, added over the atmosphere's sky.
+/// Point stars on a sphere at infinity, added over the sky gradient.
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
 pub(crate) struct StarsMaterial {
     /// Brightness in X, from 0 by day to 1 at night.

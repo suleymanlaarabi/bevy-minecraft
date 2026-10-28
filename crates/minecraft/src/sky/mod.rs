@@ -1,4 +1,4 @@
-//! Day and night: a physical sky from Bevy's atmosphere, a moving sun and moon that
+//! Day and night: a shared sky gradient, a moving sun and moon that
 //! light the terrain and hand its single shadow map to each other, stars, the moon's
 //! phases and vanilla-style clouds.
 //!
@@ -83,6 +83,7 @@ impl Plugin for SkyPlugin {
             MaterialPlugin::<night::StarsMaterial>::default(),
             MaterialPlugin::<night::MoonMaterial>::default(),
             MaterialPlugin::<celestial::SunMaterial>::default(),
+            MaterialPlugin::<celestial::BackgroundMaterial>::default(),
             MaterialPlugin::<clouds::CloudMaterial>::default(),
         ))
         .init_resource::<TimeOfDay>()
@@ -111,6 +112,13 @@ impl Plugin for SkyPlugin {
             cycle::advance_time.in_set(crate::simulation::SimulationSystems::Activation),
         )
         .add_systems(Update, cycle::update_sky_state.in_set(SkySystems::Advance))
+        .add_systems(
+            PostUpdate,
+            celestial::update_background_bounds
+                .after(bevy::transform::TransformSystems::Propagate)
+                .before(bevy::camera::visibility::VisibilitySystems::CheckVisibility)
+                .run_if(in_state(GameState::Game)),
+        )
         .add_systems(
             Update,
             (

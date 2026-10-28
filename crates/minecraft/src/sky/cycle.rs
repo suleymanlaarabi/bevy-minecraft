@@ -2,8 +2,7 @@ use super::{DAY_LENGTH_SECS, ORBIT_TILT};
 use bevy::{light::light_consts::lux, math::FloatPow, prelude::*};
 use std::f32::consts::TAU;
 
-/// Illuminance of the sun outside the atmosphere. The atmosphere reddens and dims it
-/// on its way down, both for the sky and for terrain lighting.
+/// Daylight illuminance; horizon attenuation is applied once to the light.
 pub(super) const SUN_LUX: f32 = lux::RAW_SUNLIGHT;
 /// Far brighter than a real full moon (0.05 lux): night must stay playable.
 pub(super) const MOON_LUX: f32 = 400.0;
@@ -80,8 +79,10 @@ pub(crate) struct SkyState {
     /// `AmbientLight` for terrain open to the sky.
     pub ambient_color: Color,
     pub ambient_brightness: f32,
-    /// Fallback horizon color in output space while atmosphere LUTs are unavailable.
+    /// Horizon and zenith colors in output space.
     pub horizon_color: Color,
+    pub zenith_color: Color,
+    pub sunset_color: Color,
     /// Lit fraction of the moon's disk, from 0 (new) to 1 (full), and whether it waxes.
     pub moon_phase: f32,
     pub moon_waxing: bool,
@@ -133,6 +134,8 @@ impl SkyState {
             ambient_color,
             ambient_brightness,
             horizon_color,
+            zenith_color: Color::srgb(0.012, 0.018, 0.045).mix(&Color::srgb(0.38, 0.62, 1.0), day),
+            sunset_color: Color::linear_rgb(0.65 * twilight, 0.15 * twilight, 0.025 * twilight),
             moon_phase: 0.5 + 0.5 * (cycle * TAU).cos(),
             moon_waxing: cycle >= 0.5,
         }

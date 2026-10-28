@@ -1,9 +1,10 @@
 import super::voxel_fog::apply_voxel_fog;
-import super::fog_lut::horizon_haze;
+import super::sky_color::horizon_haze;
 import bevy_pbr::render::{forward_io::VertexOutput, mesh_view_bindings as view_bindings};
 
-// Transparent, after Bevy's atmosphere: fade the lower background into the real
-// horizon without writing a depth edge across the sky or hiding celestial disks.
+// Fade the lower background into the sky gradient at the same horizon color.
+// Keep the rim transparent
+// without writing a depth edge across the sky or hiding celestial disks.
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 @if(DISTANCE_FOG) {

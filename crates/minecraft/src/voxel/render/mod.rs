@@ -97,6 +97,9 @@ pub fn sync_environment(
         ambient_color: sky.ambient_color,
         ambient_brightness: sky.ambient_brightness,
         horizon_color: sky.horizon_color,
+        zenith_color: sky.zenith_color,
+        sun_direction: sky.sun_direction,
+        sunset_color: sky.sunset_color,
     });
     let effects = effects.single().ok();
     vision.set_if_neq(ViewEffects {
