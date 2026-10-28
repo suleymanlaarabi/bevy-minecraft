@@ -25,7 +25,7 @@ pub const ATTRIBUTE_VOXEL: MeshVertexAttribute =
     MeshVertexAttribute::new("Voxel", 0x766f_7865_6c5f_7631, VertexFormat::Uint32x2);
 
 const _: () = assert!(
-    SECTION_HEIGHT <= 16,
+    CHUNK_SIZE <= 16 && SECTION_HEIGHT <= 16,
     "section coordinates must fit in 5 bits"
 );
 
@@ -271,6 +271,8 @@ impl<C: RenderSource> ChunkNeighborhood<C> {
 
 /// Cells of a padded section row: one border cell on each side.
 const PADDED_SIZE: i32 = CHUNK_SIZE + 2;
+const ROW_BITS: usize = PADDED_SIZE as usize;
+const AXIS_ROWS: usize = ROW_BITS * ROW_BITS;
 
 struct SectionSummary {
     flags: u8,
@@ -298,6 +300,9 @@ pub struct Padded {
     dimensions: [i32; 3],
     samples: Vec<Sample>,
     summary: SectionSummary,
+    // Three orientations, with cube/cutout/occluder bits packed in each row.
+    // Shared by terrain and shadow meshing; retained in the thread's scratch buffer.
+    rows: Vec<u64>,
     /// Includes the halo: a neighboring partial block can cover a fluid face.
     pub fluid_occluders: bool,
 }
@@ -368,6 +373,30 @@ impl Padded {
         self.summary = summary;
     }
 
+    /// Build only for sections with exposed cube geometry; enclosed and model-only
+    /// sections keep the cheap fill path. All material/shadow passes reuse these rows.
+    fn prepare_rows(&mut self) {
+        self.rows.resize(3 * AXIS_ROWS, 0);
+        self.rows.fill(0);
+        for (index, row) in self.samples.chunks_exact(ROW_BITS).enumerate() {
+            let (py, pz) = (index / ROW_BITS, index % ROW_BITS);
+            let mut row_bits = 0;
+            for (x, sample) in row.iter().enumerate() {
+                // Row bits run along u=(axis+1)%3; row indices are normal+v*18.
+                // Each 18-bit lane includes both border cells.
+                let flags = u64::from(sample.cube())
+                    | (u64::from(sample.has(cell::CUTOUT)) << ROW_BITS)
+                    | (u64::from(sample.occludes()) << (2 * ROW_BITS));
+                if flags != 0 {
+                    self.rows[x + ROW_BITS * pz] |= flags << py;
+                    self.rows[AXIS_ROWS + py + ROW_BITS * x] |= flags << pz;
+                    row_bits |= flags << x;
+                }
+            }
+            self.rows[2 * AXIS_ROWS + pz + ROW_BITS * py] = row_bits;
+        }
+    }
+
     #[inline]
     pub fn get(&self, local: IVec3) -> Sample {
         self.samples
@@ -379,7 +408,6 @@ impl Padded {
 struct Scratch {
     padded: Padded,
     faces: Vec<Option<LitFace>>,
-    shadow: Vec<Option<bool>>,
     water: Vec<Option<(LitFace, bool)>>,
     depths: Vec<u8>,
     model_depths: Vec<u8>,
@@ -392,7 +420,6 @@ impl Default for Scratch {
         Self {
             padded: default(),
             faces: Vec::new(),
-            shadow: Vec::new(),
             water: Vec::new(),
             depths: Vec::new(),
             model_depths: Vec::new(),
@@ -776,7 +803,6 @@ pub fn build_sections<C: RenderSource>(
         let Scratch {
             padded,
             faces,
-            shadow,
             water: water_faces,
             depths,
             model_depths,
@@ -847,11 +873,14 @@ pub fn build_sections<C: RenderSource>(
                         .get_or_insert_default()
                         .append_ocean(water, &neighborhood.source);
                 }
+                if padded.summary.flags & (cell::CUBE | cell::CUTOUT) != 0 {
+                    padded.prepare_rows();
+                }
                 let mut terrain = (padded.summary.flags & cell::CUBE != 0)
-                    .then(|| greedy_mesh::<u16>(padded, true, cell::CUBE, faces))
+                    .then(|| greedy_mesh::<u16>(padded, cell::CUBE, None, faces))
                     .filter(|geometry| !geometry.is_empty());
                 let mut cutout = (padded.summary.flags & cell::CUTOUT != 0)
-                    .then(|| greedy_mesh::<u32>(padded, true, cell::CUTOUT, faces))
+                    .then(|| greedy_mesh::<u32>(padded, cell::CUTOUT, None, faces))
                     .filter(|geometry| !geometry.is_empty());
                 if terrain.is_some() || cutout.is_some() {
                     // Share endpoints across material boundaries as well as faces
@@ -879,7 +908,12 @@ pub fn build_sections<C: RenderSource>(
                     cutout,
                     shadow: (padded.summary.flags & cell::CUBE != 0 && casts_shadow)
                         .then(|| {
-                            shadow_mesh(padded, shadow, neighborhood.source.shadow_directions())
+                            greedy_mesh::<u16>(
+                                padded,
+                                cell::CUBE,
+                                Some(neighborhood.source.shadow_directions()),
+                                faces,
+                            )
                         })
                         .filter(|geometry| !geometry.is_empty()),
                 }
@@ -888,79 +922,83 @@ pub fn build_sections<C: RenderSource>(
     })
 }
 
-/// Whether `from` (of greedy `class`) shows its face toward `to`. Cutout cubes
-/// keep faces against each other, as vanilla fancy leaves do: the holes of a
-/// single-sided hull would otherwise show the sky instead of inner leaves.
-#[inline]
-fn greedy_face(class: u8, from: Sample, to: Sample) -> bool {
-    from.has(class) && !to.occludes()
-}
-
+/// Cull whole padded rows before reading materials or calculating corner light.
+/// Shadows reuse cube occupancy, but ignore material/light and backlit faces.
 fn greedy_mesh<I: TerrainIndex>(
     padded: &Padded,
-    lit: bool,
     class: u8,
+    shadow: Option<[bool; 3]>,
     mask: &mut Vec<Option<LitFace>>,
 ) -> TerrainGeometry<I> {
     let dimensions = padded.dimensions;
     let mut geometry = TerrainGeometry::default();
-    let largest = dimensions[0].max(dimensions[1]).max(dimensions[2]) as usize;
-    // Opaque cubes hide each other, so a plane holds at most one face per cell.
-    // Two adjacent cutouts both show theirs: one scan fills a mask per orientation.
-    let planes = if class == cell::CUTOUT { 2 } else { 1 };
-    mask.clear();
-    mask.resize(largest * largest * planes, None);
-    let light = |cell: [i32; 3], axis: usize| {
-        if lit {
-            face_light(padded, cell, axis)
-        } else {
-            [60; 4]
-        }
-    };
+    mask.resize((CHUNK_SIZE * CHUNK_SIZE) as usize, None);
+    let class_shift = if class == cell::CUTOUT { ROW_BITS } else { 0 };
+    // Cutouts retain both faces between neighbors; only occluders hide terrain.
+    // The shadow hull instead follows cube occupancy, as in the depth-only pass.
+    let blocker_shift = if shadow.is_some() { 0 } else { 2 * ROW_BITS };
     for axis in 0..3 {
         let u = (axis + 1) % 3;
         let v = (axis + 2) % 3;
         let (width, height) = (dimensions[u] as usize, dimensions[v] as usize);
-        let area = width * height;
-        // Negative faces share the positive mask when the two never overlap.
-        let negative_offset = if planes == 2 { area } else { 0 };
-
-        for layer in -1..dimensions[axis] {
-            for j in 0..height {
-                for i in 0..width {
-                    let index = i + j * width;
-                    let mut cell = [0; 3];
-                    cell[axis] = layer;
-                    cell[u] = i as i32;
-                    cell[v] = j as i32;
-                    let sa = padded.get(IVec3::from_array(cell));
-                    cell[axis] += 1;
-                    let sb = padded.get(IVec3::from_array(cell));
-                    mask[index] = None;
-                    mask[negative_offset + index] = None;
-                    if layer >= 0 && greedy_face(class, sa, sb) {
-                        let face = Face(sa.info.appearance, true, light(cell, axis));
-                        mask[index] = Some(LitFace::new(face, index, false));
-                    }
-                    if layer + 1 < dimensions[axis] && greedy_face(class, sb, sa) {
-                        cell[axis] -= 1;
-                        let face = Face(sb.info.appearance, false, light(cell, axis));
-                        mask[negative_offset + index] = Some(LitFace::new(face, index, false));
+        let width_mask = (1u32 << width) - 1;
+        for layer in 0..dimensions[axis] {
+            for positive in [true, false] {
+                // Two-sided shadow rasterization can omit backlit hull faces:
+                // an opposing face of the closed surface supplies the same depth.
+                if shadow.is_some_and(|excluded| !positive && excluded[axis]) {
+                    continue;
+                }
+                let mut rows = [0u32; CHUNK_SIZE as usize];
+                for (j, row) in rows[..height].iter_mut().enumerate() {
+                    let index = axis * AXIS_ROWS + layer as usize + 1 + ROW_BITS * (j + 1);
+                    let neighbor = if positive { index + 1 } else { index - 1 };
+                    *row = (((padded.rows[index] >> class_shift)
+                        & !(padded.rows[neighbor] >> blocker_shift))
+                        >> 1) as u32
+                        & width_mask;
+                    if shadow.is_none() {
+                        let mut pending = *row;
+                        while pending != 0 {
+                            let i = pending.trailing_zeros() as usize;
+                            pending &= pending - 1;
+                            let mut outside = [0; 3];
+                            outside[axis] = layer + if positive { 1 } else { -1 };
+                            outside[u] = i as i32;
+                            outside[v] = j as i32;
+                            let mut cell = outside;
+                            cell[axis] = layer;
+                            let appearance = padded.get(IVec3::from_array(cell)).info.appearance;
+                            let face =
+                                Face(appearance, positive, face_light(padded, outside, axis));
+                            let index = i + j * width;
+                            mask[index] = Some(LitFace::new(face, index, false));
+                        }
                     }
                 }
-            }
-
-            for plane in mask[..area * planes].chunks_exact_mut(area) {
-                consume_mask(
-                    plane,
-                    width,
-                    height,
-                    |i, j, quad_width, quad_height, face| {
-                        let (corner, du, dv) = quad(axis, layer, i, j, quad_width, quad_height);
-                        let Face(appearance, positive, light) = face.face;
-                        geometry.push_quad(corner, du, dv, axis, positive, appearance, light);
-                    },
-                );
+                let emit = |i, j, w, h, face: LitFace| {
+                    let (corner, du, dv) = quad(axis, layer - i32::from(!positive), i, j, w, h);
+                    let Face(appearance, positive, light) = face.face;
+                    geometry.push_quad(corner, du, dv, axis, positive, appearance, light);
+                };
+                if shadow.is_some() {
+                    consume_binary_mask(
+                        &mut rows[..height],
+                        width,
+                        |_| LitFace {
+                            face: Face(0, positive, [0; 4]),
+                            cell: None,
+                        },
+                        emit,
+                    );
+                } else {
+                    consume_binary_mask(
+                        &mut rows[..height],
+                        width,
+                        |index| mask[index].unwrap(),
+                        emit,
+                    );
+                }
             }
         }
     }
@@ -986,72 +1024,6 @@ fn quad(
     du[u] = width as i32;
     dv[v] = height as i32;
     (corner, du, dv)
-}
-
-/// Whether the shadow maps need faces of this orientation.
-///
-/// The shadow pass rasterizes both sides, but a face turned away from the light always
-/// lies behind a lit face of the same closed opaque surface: dropping it leaves the
-/// depth seen from the light unchanged. The shadow-casting sun or moon is always above
-/// the horizon and on the +Z side of the sky (the configured excluded light directions), so
-/// only -Y and -Z faces can go, whatever the time of day.
-fn faces_sun(axis: usize, positive: bool, excluded: [bool; 3]) -> bool {
-    positive || !excluded[axis]
-}
-
-/// Depth-only terrain: faces merge regardless of block, texture or light, and only
-/// those facing the sun are kept.
-fn shadow_mesh(
-    padded: &Padded,
-    mask: &mut Vec<Option<bool>>,
-    excluded: [bool; 3],
-) -> TerrainGeometry {
-    let dimensions = padded.dimensions;
-    let mut geometry = TerrainGeometry::default();
-    let largest = dimensions[0].max(dimensions[1]).max(dimensions[2]);
-    mask.clear();
-    mask.resize((largest * largest) as usize, None);
-    for axis in 0..3 {
-        let u = (axis + 1) % 3;
-        let v = (axis + 2) % 3;
-        let (width, height) = (dimensions[u] as usize, dimensions[v] as usize);
-        let (keep_positive, keep_negative) = (
-            faces_sun(axis, true, excluded),
-            faces_sun(axis, false, excluded),
-        );
-
-        for layer in -1..dimensions[axis] {
-            for j in 0..height {
-                for i in 0..width {
-                    let mut cell = [0; 3];
-                    cell[axis] = layer;
-                    cell[u] = i as i32;
-                    cell[v] = j as i32;
-                    let a = padded.get(IVec3::from_array(cell)).cube();
-                    cell[axis] += 1;
-                    let b = padded.get(IVec3::from_array(cell)).cube();
-                    mask[i + j * width] = match (a, b) {
-                        (true, false) if keep_positive && layer >= 0 => Some(true),
-                        (false, true) if keep_negative && layer + 1 < dimensions[axis] => {
-                            Some(false)
-                        }
-                        _ => None,
-                    };
-                }
-            }
-
-            consume_mask(
-                &mut mask[..width * height],
-                width,
-                height,
-                |i, j, quad_width, quad_height, positive| {
-                    let (corner, du, dv) = quad(axis, layer, i, j, quad_width, quad_height);
-                    geometry.push_quad(corner, du, dv, axis, positive, 0, [0; 4]);
-                },
-            );
-        }
-    }
-    geometry
 }
 
 /// Water columns deeper than this read as fully deep in the shader.
@@ -1109,6 +1081,7 @@ fn ocean_mesh<C: RenderSource>(
         for layer in -1..dimensions[axis] {
             // Column depths of this layer, computed once and only if it has a surface.
             depths.clear();
+            let mut rows = [0u32; CHUNK_SIZE as usize];
             for j in 0..height {
                 for i in 0..width {
                     let mut cell = [0; 3];
@@ -1133,16 +1106,12 @@ fn ocean_mesh<C: RenderSource>(
                                 outside[axis] -= 1;
                                 (false, cell, outside)
                             }
-                            _ => {
-                                mask[i + j * width] = None;
-                                continue;
-                            }
+                            _ => continue,
                         };
                     let water_cell = IVec3::from_array(water_cell);
                     // Uneven surfaces use the shared explicit fluid builder. Broad
                     // flat oceans retain greedy merging and compact water vertices.
                     if super::fluids::explicit_surface(padded, &neighborhood.source, water_cell) {
-                        mask[i + j * width] = None;
                         continue;
                     }
                     let mut values = face_light(padded, outside, axis);
@@ -1174,64 +1143,63 @@ fn ocean_mesh<C: RenderSource>(
                     // even uniform neighbors keep their own depth keys.
                     mask[i + j * width] =
                         Some((LitFace::new(face, i + j * width, interleaved), lowered));
+                    rows[j] |= 1 << i;
                 }
             }
-            consume_mask(mask, width, height, |i, j, w, h, (face, lowered)| {
-                let (corner, du, dv) = quad(axis, layer, i, j, w, h);
-                let Face(appearance, positive, values) = face.face;
-                geometry.push_quad(corner, du, dv, axis, positive, appearance, values);
-                if lowered {
-                    // A lowered side never merges vertically: the cell above it is
-                    // not water, so the next cell up has no side face to join.
-                    let top = (corner[1] + du[1] + dv[1]) as u32;
-                    let start = geometry.vertices.len() - 4;
-                    for vertex in &mut geometry.vertices[start..] {
-                        if TerrainGeometry::position(*vertex).y as u32 == top {
-                            vertex[1] |= WATER_LOWERED;
+            consume_binary_mask(
+                &mut rows[..height],
+                width,
+                |index| mask[index].unwrap(),
+                |i, j, w, h, (face, lowered)| {
+                    let (corner, du, dv) = quad(axis, layer, i, j, w, h);
+                    let Face(appearance, positive, values) = face.face;
+                    geometry.push_quad(corner, du, dv, axis, positive, appearance, values);
+                    if lowered {
+                        // A lowered side never merges vertically: the cell above it is
+                        // not water, so the next cell up has no side face to join.
+                        let top = (corner[1] + du[1] + dv[1]) as u32;
+                        let start = geometry.vertices.len() - 4;
+                        for vertex in &mut geometry.vertices[start..] {
+                            if TerrainGeometry::position(*vertex).y as u32 == top {
+                                vertex[1] |= WATER_LOWERED;
+                            }
                         }
                     }
-                }
-            });
+                },
+            );
         }
     }
     (!geometry.is_empty()).then_some(geometry)
 }
 
-fn consume_mask<T: Copy + Eq>(
-    mask: &mut [Option<T>],
+/// Row bits skip empty cells and clear merged rectangles without revisiting cells.
+fn consume_binary_mask<T: Copy + Eq>(
+    rows: &mut [u32],
     width: usize,
-    height: usize,
+    value_at: impl Fn(usize) -> T,
     mut emit: impl FnMut(usize, usize, usize, usize, T),
 ) {
-    let mut y = 0;
-    while y < height {
-        let mut x = 0;
-        while x < width {
-            let Some(value) = mask[x + y * width] else {
-                x += 1;
-                continue;
-            };
+    for y in 0..rows.len() {
+        while rows[y] != 0 {
+            let x = rows[y].trailing_zeros() as usize;
+            let value = value_at(x + y * width);
+            let run = (rows[y] >> x).trailing_ones() as usize;
             let mut quad_width = 1;
-            while x + quad_width < width && mask[x + quad_width + y * width] == Some(value) {
+            while quad_width < run && value_at(x + quad_width + y * width) == value {
                 quad_width += 1;
             }
+            let span = ((1u32 << quad_width) - 1) << x;
             let mut quad_height = 1;
-            'grow: while y + quad_height < height {
-                for offset in 0..quad_width {
-                    if mask[x + offset + (y + quad_height) * width] != Some(value) {
-                        break 'grow;
-                    }
-                }
+            while y + quad_height < rows.len()
+                && rows[y + quad_height] & span == span
+                && (0..quad_width).all(|dx| value_at(x + dx + (y + quad_height) * width) == value)
+            {
                 quad_height += 1;
             }
-            emit(x, y, quad_width, quad_height, value);
-            for row in 0..quad_height {
-                for column in 0..quad_width {
-                    mask[x + column + (y + row) * width] = None;
-                }
+            for row in &mut rows[y..y + quad_height] {
+                *row &= !span;
             }
-            x += quad_width;
+            emit(x, y, quad_width, quad_height, value);
         }
-        y += 1;
     }
 }
