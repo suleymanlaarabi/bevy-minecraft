@@ -608,6 +608,12 @@ pub fn poll_builds<C: RenderSource>(
             break;
         }
     }
+    #[cfg(feature = "dev")]
+    if let Some(diagnostics) = diagnostics.as_deref_mut() {
+        diagnostics.mesh_apply_seconds += started.elapsed().as_secs_f64();
+        diagnostics.uploaded_bytes += uploaded as u64;
+        diagnostics.uploaded_meshes += meshes_applied as u64;
+    }
 }
 
 /// Swaps a section's mesh, spawning or despawning its entity as it gains or loses faces.

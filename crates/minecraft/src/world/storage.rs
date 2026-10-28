@@ -15,6 +15,10 @@ fn err(e: impl std::fmt::Display) -> io::Error {
 }
 
 pub(super) fn root() -> io::Result<PathBuf> {
+    #[cfg(feature = "dev")]
+    if std::env::var_os("HOLLOW_FLIGHT_BENCH").is_some() {
+        return Ok(std::env::temp_dir().join("hollow-flight-worlds"));
+    }
     if let Some(path) = std::env::var_os("HOLLOW_WORLDS_DIR") {
         return Ok(path.into());
     }

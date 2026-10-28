@@ -176,6 +176,7 @@ fn update_visibility<C: RenderSource>(
     mut layers: Query<Option<&mut RenderLayers>, With<Mesh3d>>,
     mut graph: ResMut<SectionGraph>,
     mut sort_version: ResMut<super::sort::SortVersion>,
+    #[cfg(feature = "dev")] diagnostics: Option<ResMut<crate::diagnostics::VoxelDiagnostics>>,
 ) {
     let (Some(camera), Some(stream_center)) = (camera, stream.center) else {
         return;
@@ -208,6 +209,8 @@ fn update_visibility<C: RenderSource>(
     if !rebuild && changed.is_empty() {
         return;
     }
+    #[cfg(feature = "dev")]
+    let started = std::time::Instant::now();
     let radius = offsets.radius as i32;
     let side = (radius * 2 + 1) as usize;
     let plane = side * side;
@@ -348,6 +351,10 @@ fn update_visibility<C: RenderSource>(
                 }
             }
         }
+    }
+    #[cfg(feature = "dev")]
+    if let Some(mut diagnostics) = diagnostics {
+        diagnostics.visibility_seconds += started.elapsed().as_secs_f64();
     }
 }
 

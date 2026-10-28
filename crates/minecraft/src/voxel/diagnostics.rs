@@ -54,7 +54,8 @@ enum BenchmarkPhase {
 }
 
 pub(crate) fn register(app: &mut App) {
-    let report = std::env::var_os("HOLLOW_DIAGNOSTICS").is_some();
+    let report = std::env::var_os("HOLLOW_DIAGNOSTICS").is_some()
+        || std::env::var_os("HOLLOW_FLIGHT_BENCH").is_some();
     let benchmark = std::env::var_os("HOLLOW_VOXEL_BENCH").is_some();
     if report || benchmark {
         app.init_resource::<VoxelDiagnostics>().add_systems(

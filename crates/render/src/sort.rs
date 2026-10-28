@@ -185,6 +185,7 @@ fn sort_translucent(
     mut active_hint: Local<usize>,
     mut candidates: Local<Vec<(u64, f32, Entity, SortKey, Vec3)>>,
     mut frame: Local<u64>,
+    #[cfg(feature = "dev")] diagnostics: Option<ResMut<crate::diagnostics::VoxelDiagnostics>>,
 ) {
     updates.0.clear();
     let Some(camera) = camera else {
@@ -197,6 +198,8 @@ fn sort_translucent(
     if *previous == Some(view_key) && visibility_changes.is_empty() && *active_hint == 0 {
         return;
     }
+    #[cfg(feature = "dev")]
+    let started = std::time::Instant::now();
     *previous = Some(view_key);
     *frame += 1;
     let mut active = 0;
@@ -270,6 +273,10 @@ fn sort_translucent(
                 Output { indices, key, mesh }
             },
         ));
+    }
+    #[cfg(feature = "dev")]
+    if let Some(mut diagnostics) = diagnostics {
+        diagnostics.translucent_sort_seconds += started.elapsed().as_secs_f64();
     }
 }
 

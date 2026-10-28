@@ -275,6 +275,21 @@ fn open_world(
     }));
 }
 
+#[cfg(feature = "dev")]
+pub(crate) fn register_flight_benchmark(app: &mut App) {
+    app.add_systems(
+        Startup,
+        |mut browser: ResMut<Browser>, blocks: Res<hollow_engine::blocks::BlockCatalog>| {
+            open_world(
+                &mut browser,
+                None,
+                Some(("Flight benchmark".into(), 12, WorldQuality::Fast)),
+                blocks.clone(),
+            );
+        },
+    );
+}
+
 fn poll_browser(
     mut commands: Commands,
     mut browser: ResMut<Browser>,

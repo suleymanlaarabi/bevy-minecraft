@@ -19,6 +19,9 @@ pub(super) struct DevelopmentPlugin;
 
 impl Plugin for DevelopmentPlugin {
     fn build(&self, app: &mut App) {
+        if std::env::var_os("HOLLOW_FLIGHT_BENCH").is_some() {
+            app.add_plugins(super::flight_benchmark::FlightBenchmarkPlugin);
+        }
         app.add_plugins(FpsOverlayPlugin {
             config: FpsOverlayConfig {
                 text_config: TextFont {
@@ -48,7 +51,9 @@ impl Plugin for DevelopmentPlugin {
                 },
             ));
         }
-        if std::env::var_os("HOLLOW_DIAGNOSTICS_AUTOPLAY").is_some() {
+        if std::env::var_os("HOLLOW_DIAGNOSTICS_AUTOPLAY").is_some()
+            && std::env::var_os("HOLLOW_FLIGHT_BENCH").is_none()
+        {
             app.add_systems(Startup, dev_diagnostics_autoplay);
         }
     }

@@ -3,6 +3,8 @@
 mod assets;
 #[cfg(feature = "dev")]
 mod dev;
+#[cfg(feature = "dev")]
+mod flight_benchmark;
 mod fonts;
 #[cfg(not(feature = "dev"))]
 mod fps;
