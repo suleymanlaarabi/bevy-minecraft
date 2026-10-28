@@ -19,10 +19,10 @@ pub enum Easing {
     CubicOut,
 }
 
-/// Elementary joints need one channel, avoiding a per-instance animation graph.
+/// Shared channels avoid a per-instance animation graph.
 #[derive(Asset, TypePath)]
 pub struct JointClip {
-    pub motion: JointMotion,
+    pub motions: Box<[JointMotion]>,
     pub duration_seconds: f32,
     pub easing: Easing,
 }
@@ -31,6 +31,7 @@ pub struct JointAnimation {
     pub clip: Handle<JointClip>,
     pub progress: f32,
     pub target: f32,
+    pub looping: bool,
 }
 impl JointAnimation {
     pub fn new(clip: Handle<JointClip>) -> Self {
@@ -38,6 +39,7 @@ impl JointAnimation {
             clip,
             progress: 0.0,
             target: 0.0,
+            looping: false,
         }
     }
 }
@@ -78,7 +80,8 @@ fn set_target(
     }
     if let Ok(mut joint) = joints.get_mut(event.entity) {
         let target = event.target.clamp(0.0, 1.0);
-        if joint.target != target {
+        if joint.target != target || joint.looping {
+            joint.looping = false;
             joint.target = target;
             commands.entity(event.entity).insert(AnimatingJoint);
         }
@@ -101,21 +104,29 @@ fn animate(
             } else {
                 1.0
             };
-            joint.progress = joint.progress.move_towards(joint.target, step);
+            joint.progress = if joint.looping {
+                (joint.progress + step).fract()
+            } else {
+                joint.progress.move_towards(joint.target, step)
+            };
             let progress = match clip.easing {
                 Easing::Linear => joint.progress,
                 Easing::CubicOut => 1.0 - (1.0 - joint.progress).powi(3),
             };
-            match clip.motion {
-                JointMotion::Rotation { axis, radians } => {
-                    transform.rotation = Quat::from_axis_angle(*axis, progress * radians)
+            for &motion in clip.motions.iter() {
+                match motion {
+                    JointMotion::Rotation { axis, radians } => {
+                        transform.rotation = Quat::from_axis_angle(*axis, progress * radians)
+                    }
+                    JointMotion::Translation { start, end } => {
+                        transform.translation = start.lerp(end, progress)
+                    }
+                    JointMotion::Scale { start, end } => {
+                        transform.scale = start.lerp(end, progress)
+                    }
                 }
-                JointMotion::Translation { start, end } => {
-                    transform.translation = start.lerp(end, progress)
-                }
-                JointMotion::Scale { start, end } => transform.scale = start.lerp(end, progress),
             }
-            if joint.progress == joint.target {
+            if !joint.looping && joint.progress == joint.target {
                 commands.command_scope(|mut commands| {
                     commands.entity(entity).remove::<AnimatingJoint>();
                 });

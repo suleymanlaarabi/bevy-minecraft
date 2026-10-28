@@ -226,6 +226,7 @@ fn spawn_dropped_item(
     mut assets: ResMut<DroppedItemAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     voxel_assets: Res<VoxelAssets>,
+    render_source: Res<crate::voxel::render::MinecraftRenderSource>,
     icons: Res<crate::inventory::icons::BlockIcons>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -238,7 +239,12 @@ fn spawn_dropped_item(
         .meshes
         .get_or_insert_with(stack.item(), || {
             meshes.add(match stack.item().block_kind() {
-                Some(kind) => crate::voxel::render::model_mesh::item_geometry(kind).into_mesh(),
+                Some(kind) => hollow_render::model_mesh::state_geometry(
+                    &*render_source,
+                    hollow_core::StateId(kind.default_state().id()),
+                    IVec3::ZERO,
+                )
+                .into_mesh(),
                 None => {
                     let mut mesh = Rectangle::new(1.0, 1.0).mesh().build();
                     if let Some((offset, scale)) = icons.item_uv(stack.item())
@@ -449,7 +455,7 @@ fn collect_dropped_items(
 }
 
 fn sync_drop_visibility(
-    rendered: Query<(), With<crate::voxel::streaming::RenderRequested>>,
+    rendered: Query<(), With<hollow_render::streaming::RenderRequested>>,
     mut drops: Query<(&crate::simulation::SimulatedIn, &mut Visibility), With<DroppedItem>>,
 ) {
     for (owner, mut visibility) in &mut drops {

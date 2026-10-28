@@ -460,8 +460,16 @@ fn poll_storage_errors(
     mut save: ResMut<SaveState>,
     phase: Res<State<WorldSessionPhase>>,
     mut next: ResMut<NextState<WorldSessionPhase>>,
+    session: Res<hollow_engine::session::ActiveSession>,
+    mut terrain_errors: MessageReader<hollow_engine::streaming::TerrainFailure>,
 ) {
-    let errors = generator.take_errors();
+    let mut errors = generator.take_errors();
+    errors.extend(
+        terrain_errors
+            .read()
+            .filter(|event| event.session == session.0)
+            .map(|event| format!("Cannot load column {:?}: {}", event.position, event.reason)),
+    );
     if errors.is_empty() {
         return;
     }
@@ -479,7 +487,7 @@ fn checkpoint(
     session: Option<Res<WorldSession>>,
     generation: (
         Res<WorldGenerator>,
-        Res<hollow_worldgen::tasks::VoxelTaskBudget>,
+        Res<hollow_engine::tasks::VoxelTaskBudget>,
     ),
     players: Query<
         (
@@ -585,7 +593,7 @@ fn checkpoint(
         .chain(chunks.iter().map(|(p, v)| (p.position, v)))
     {
         if voxels.save_revision != voxels.saved_revision {
-            snapshots.insert(position, voxels.clone());
+            snapshots.insert(position, voxels.save_snapshot());
         }
     }
     let candidates = gameplay.candidates();
@@ -594,8 +602,7 @@ fn checkpoint(
         .map(|&(position, codec, _)| (position, codec))
         .collect();
     for (&position, voxels) in &snapshots {
-        *reservations.entry(position).or_default() +=
-            crate::simulation::terrain_bytes(voxels) * 8 + 4096;
+        *reservations.entry(position).or_default() += voxels.retained_bytes() * 8 + 4096;
     }
     let snapshot_bytes = candidates.iter().map(|(_, _, bytes)| bytes).sum::<usize>()
         + snapshots.len() * std::mem::size_of::<ChunkVoxels>();
@@ -662,8 +669,8 @@ fn checkpoint(
             .map(|(p, (terrain, gameplay, _))| ((p.x, p.y), terrain.is_some(), gameplay.is_some()))
             .collect();
         let (prepared, checkpoint, metadata) = budget
-            .spawn(hollow_worldgen::tasks::WorkClass::Encoding, 0, async move {
-                storage::PreparedCheckpoint::encode(&metadata, &checkpoint, positions)
+            .spawn(hollow_engine::tasks::WorkClass::Encoding, 0, async move {
+                prepare_checkpoint(&metadata, &checkpoint, positions)
                     .map(|prepared| (prepared, checkpoint, metadata))
             })
             .await?;
@@ -687,7 +694,7 @@ fn checkpoint(
             // waits on the shared compute budget; no extra writer thread/channel
             // or whole-world vector of compressed records is retained.
             Some(bevy::tasks::block_on(budget.spawn(
-                hollow_worldgen::tasks::WorkClass::Encoding,
+                hollow_engine::tasks::WorkClass::Encoding,
                 0,
                 async move {
                     batch
@@ -710,7 +717,7 @@ fn checkpoint(
                             Ok(storage::EncodedColumn {
                                 position: (position.x, position.y),
                                 terrain,
-                                gameplay,
+                                application: gameplay,
                             })
                         })
                         .collect::<io::Result<Vec<_>>>()
@@ -834,7 +841,7 @@ fn storage_pressure(
 ) {
     let mut bytes = stored
         .values()
-        .map(crate::simulation::terrain_bytes)
+        .map(ChunkVoxels::retained_bytes)
         .sum::<usize>();
     let (mut ready, mut suspended) = (0, 0);
     let mut oversized_retirement = false;
@@ -862,4 +869,16 @@ fn storage_pressure(
     if oversized_retirement || bytes >= crate::simulation::MAX_RETIRED_BYTES / 2 {
         save.force = true;
     }
+}
+
+fn prepare_checkpoint(
+    metadata: &WorldMetadata,
+    checkpoint: &Checkpoint,
+    positions: Vec<((i32, i32), bool, bool)>,
+) -> std::io::Result<storage::PreparedCheckpoint> {
+    Ok(storage::PreparedCheckpoint::new(
+        serde_json::to_vec(metadata)?,
+        serde_json::to_vec(checkpoint)?,
+        positions,
+    ))
 }

@@ -3,6 +3,11 @@ name = "hollow-engine"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+sqlite = ["dep:rusqlite"]
+content-ron = ["dep:ron"]
+
 [dependencies]
 hollow-core = { path = "../core" }
 bevy_app = "0.20"
@@ -10,3 +15,11 @@ bevy_ecs = "0.20"
 bevy_derive = "0.20"
 bevy_math = "0.20"
 bevy_platform = "0.20"
+bevy_tasks = "0.20"
+bevy_diagnostic = "0.20"
+async-channel = "2"
+lz4_flex = "0.13"
+crc32fast = "1"
+rusqlite = { version = "0.38", features = ["bundled"], optional = true }
+serde = { version = "1", features = ["derive"] }
+ron = { version = "0.12", optional = true }

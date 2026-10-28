@@ -1,37 +1,51 @@
-- Always write code and project content in **English**, including identifiers, comments, UI text.
-- Never compile the project in **release** mode.
-- Verify changes using only `cargo check`. Do not run the project.
-- Do not validate performance optimizations with benchmarks or tests. Code inspection and reasoning are sufficient.
-- Make full use of **Bevy** and its modern features.
-- Favor **ECS**, **parallelism**, and **data-oriented design** wherever possible.
-- Performance is paramount.
-- This is an unreleased beta. Saved data and generated caches are disposable and are deleted for each update. Never retain legacy code, backward compatibility, compatibility shims, migrations, format-version fields, or version checks for saves or imported assets. Replace obsolete interfaces and formats directly. Do not write code to preserve or manage old data.
+# Project rules
 
-## Mandatory performance design and review
+- Write code and project content in English.
+- Verify code changes only with `cargo check`. Never run the game, tests, benchmarks, or release builds. Review performance and Bevy access conflicts from source.
+- Use modern Bevy features, ECS, parallelism and data-oriented design. Performance is paramount.
+- This is an unreleased beta: saves and generated caches are disposable. Replace obsolete interfaces directly; never add legacy readers, compatibility shims, migrations, format-version fields or version checks.
+- Preserve concurrent user edits. Change only what the requested task requires.
 
-- Before implementing or modifying a feature, inspect its execution frequency, CPU work, allocation behavior, memory footprint, data locality, and lookup complexity. Choose the least costly representation and algorithm that satisfy the actual requirements. Do not default to convenient dynamic structures without evaluating their cost.
-- Represent internal identities with compact, typed numeric IDs and closed sets with enums. Reuse existing registry IDs and Bevy handles instead of introducing parallel identity systems. Resolve external names once at import or initialization boundaries; carry IDs through runtime processing.
-- For dense, bounded ID domains, prefer arrays, slices, directly indexed vectors, and bitsets over `HashMap` or `HashSet`. Choose integer widths from the valid domain without truncation or overflow. Account for domain sparsity and total storage before allocating a direct-index table.
-- Do not introduce or retain avoidable string identities, name lookups, string construction, repeated allocations, cloning, or hashing in frequent gameplay, per-entity, per-voxel, meshing, or rendering loops. Precompute shared lookup tables and resolve invariant data outside these paths. Reuse buffers when this reduces allocation without retaining excessive memory.
-- Store immutable definitions and profiles once in shared catalogs. Keep only IDs and necessary instance state in entities, cells, and items. Favor contiguous storage and avoid duplicated derived data or per-instance heap allocations when shared indexed data suffices.
-- Use Bevy queries, change detection, and targeted work scheduling to avoid redundant scans and recomputation. Use parallel iteration and task execution when workload size and data dependencies justify their scheduling and synchronization costs. Review component access conflicts before changing systems.
-- Every retained or newly introduced costly structure must have a concrete justification when a lighter representation is plausible. This includes numeric-keyed hash maps, reference counting, and indirection, not only strings. User-visible text, import data, and genuinely sparse keys can justify such choices; document the reason near non-obvious decisions and summarize material tradeoffs in the change report. Replacing `String` with `&str`, or changing a hash function, does not replace this analysis.
-- Fix avoidable costs in the code being changed. Report adjacent performance problems outside the task's scope instead of silently expanding the task. Do not add speculative caches, duplicate state, or custom infrastructure without identifying the work they eliminate and their memory and maintenance costs.
-- Before completing a change, review the affected data flow for repeated conversions, allocations, hashing, scans, and duplicated storage. Report which costs were removed and which tradeoffs remain. Distinguish expected improvements from measured results; never claim an unmeasured speedup or memory reduction as demonstrated. Follow the existing validation restrictions: code inspection and reasoning for performance, `cargo check` for code verification, no benchmarks, tests, release builds, or game launches.
+## Find the relevant code
 
-## Bevy systems and query conflicts
+| Area | Start here |
+| --- | --- |
+| IDs, catalogs, cells, coordinates, sections, terrain encoding | `crates/core/src` |
+| Shared voxel access, edits, streaming, lighting, simulation, storage | `crates/engine/src` |
+| Meshing, materials, embedded shaders, visibility, uploads | `crates/render/src` |
+| Shared slots, motion, articulation, following, cursor | `crates/features/src` |
+| Gameplay, player, inventory/UI, Minecraft adapters, sky, audio | `crates/minecraft/src` |
+| Terrain generation and native data adapters | `crates/worldgen/src` |
+| Application composition | `src/main.rs`, `examples/voxel_sandbox/src` |
 
-- Before adding or modifying a system, review the accesses of **all** its `Query` parameters and resources. Queries that may match the same entities must not simultaneously read and mutate the same component (`B0001`).
-- `Changed<T>` and `Added<T>` filters also access `T`: such a query can conflict with another query containing `&mut T`, even when `T` is absent from the first query's data.
-- Prefer a single query with `Mut<T>::is_changed()` / `is_added()` for change detection. When multiple queries are necessary, use a `ParamSet` with sequential access; use `With` / `Without` only when the entity sets are genuinely disjoint.
-- `cargo check` does not detect ECS access conflicts. Explicitly review the parameters of every affected system without running the game to bypass the verification rules above.
+- Locate files with `rg --files <area>` and symbols with scoped `rg -n`. Read relevant sections, then follow callers and dependencies only as needed for correctness. Stop expanding once the affected behavior and constraints are understood.
+- For cross-project exploration, exclude bulk data: `rg -n -g '*.rs' -g '!**/generated/**' <pattern> src crates examples`. Use `rg -l` when only filenames are needed. Narrow an overflowing search instead of repeatedly reading truncated output.
+- Generated registry sources in `crates/worldgen/crates/pumpkin-data/src/generated` are very large. Consult exact symbols there only for native definitions or generation changes; do not read whole generated files. Search shaders separately in `crates/render/src/shaders`.
+- Read `docs/PLUGIN_ARCHITECTURE.md` for cross-crate boundaries, the relevant content/ECS document for its API, and `crates/worldgen/README.md` for generator work. Read `ROADMAP.md` only for planning. No documentation sweep is required before ordinary edits; current code determines implemented behavior.
 
-## Refactoring metrics
+## Targeted performance review
 
-Formatting and naming changes are not code reduction.
+- Review the changed path and relevant dependencies: execution frequency, CPU work, allocations, footprint, locality and lookup complexity. Fix avoidable costs there; report material adjacent issues without expanding scope.
+- Carry existing compact typed IDs, enums and Bevy handles at runtime. Resolve external names at import/initialization. Keep immutable definitions in shared catalogs and only IDs plus necessary state in instances.
+- Prefer arrays, slices, indexed vectors and bitsets for dense bounded domains; account for sparsity and total storage. Choose integer widths without truncation or overflow.
+- Avoid repeated strings, conversions, allocations, cloning, hashing and scans in hot loops. Use change detection and targeted scheduling; reuse buffers when their retained memory is justified.
+- Justify non-obvious maps, reference counting, indirection or caches against lighter representations. Do not add speculative caches or duplicate state. Comment only material non-obvious tradeoffs near the decision.
+- Before finishing, review affected data flow once for redundant work and storage. Describe expected improvements as unmeasured unless measured evidence exists.
 
-Refactors must reduce total production code; report missed targets.
+## Bevy access safety
 
-Format before refactoring; record production lines excluding blank/comment-only lines. Measure results the same way.
+- Review every affected system's queries and resources for overlapping component reads/writes (`B0001`). `Changed<T>` and `Added<T>` also access `T` and may conflict with another query's `&mut T`.
+- Prefer one query with `Mut<T>::is_changed()` / `is_added()`. Otherwise use sequential `ParamSet` access; use `With` / `Without` only for genuinely disjoint entities.
+- `cargo check` does not detect runtime query conflicts or establish visual correctness; do not launch the game to bypass the validation restriction.
 
-Never reduce lines by removing useful comments/spacing, shortening names, merging statements/declarations, removing braces, or inlining schemas/conditions. Eliminate duplication, branches, dead plumbing, or replace custom code with maintained framework/library features.
+## Refactor accounting
+
+- For actual production-code refactors, format the affected Rust files before the baseline and count production lines excluding blank/comment-only lines. Measure the same scope afterward, including added code. Refactors must reduce total production code; report missed targets.
+- Formatting, naming, moves, removed useful comments/spacing, shorter names, merged statements, missing braces or inlined schemas/conditions are not reductions. Remove duplication, branches or dead plumbing, or use maintained library/framework features.
+- Do not apply refactor accounting to ordinary fixes, feature additions or instruction/configuration edits.
+
+## Work and output
+
+- Use one agent by default; delegate only when explicitly requested. Use native tools and compaction rather than compression wrappers or mandatory context files.
+- Stay within the request. Do not add unsolicited examples, documentation, files, extra features or offers of further work.
+- Keep progress updates brief. Finish with the requested result, verification and material limitations or tradeoffs, without a lengthy recap. Expand only when the user requests an audit, plan or explanation.

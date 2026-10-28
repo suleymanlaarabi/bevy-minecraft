@@ -53,7 +53,7 @@ struct BreakingOverlay;
 #[derive(Resource)]
 struct BreakingAssets {
     mesh: Handle<Mesh>,
-    materials: [Handle<crate::voxel::render::ModelMaterial>; 10],
+    materials: [Handle<hollow_render::material::ModelMaterial>; 10],
 }
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -90,7 +90,7 @@ fn prepare_breaking_assets(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<crate::voxel::render::ModelMaterial>>,
+    mut materials: ResMut<Assets<hollow_render::material::ModelMaterial>>,
     voxel_assets: Res<crate::voxel::VoxelAssets>,
 ) {
     // Keep a single reusable overlay; changing stages only swaps its material handle.
@@ -378,13 +378,14 @@ fn sync_breaking_overlay(
         (
             &mut Transform,
             &mut Visibility,
-            &mut MeshMaterial3d<crate::voxel::render::ModelMaterial>,
+            &mut MeshMaterial3d<hollow_render::material::ModelMaterial>,
             &mut Mesh3d,
         ),
         With<BreakingOverlay>,
     >,
     assets: Res<BreakingAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
+    render_source: Res<crate::voxel::render::MinecraftRenderSource>,
     mut previous: Local<Option<(IVec3, VoxelState)>>,
 ) {
     let (mut transform, mut visibility, mut material, mut mesh) = overlay.into_inner();
@@ -395,9 +396,12 @@ fn sync_breaking_overlay(
     visibility.set_if_neq(Visibility::Visible);
     let key = (progress.position, progress.state);
     if *previous != Some(key) {
-        let geometry =
-            crate::voxel::render::model_mesh::state_geometry(progress.state, progress.position)
-                .into_mesh();
+        let geometry = hollow_render::model_mesh::state_geometry(
+            &*render_source,
+            hollow_core::StateId(progress.state.id()),
+            progress.position,
+        )
+        .into_mesh();
         if let Some(mut target) = meshes.get_mut(&mesh.0) {
             *target = geometry;
         } else {

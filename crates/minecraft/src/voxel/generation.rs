@@ -1,6 +1,6 @@
 use super::{ChunkVoxels, VoxelKind};
 use bevy::prelude::*;
-use hollow_core::coordinates::CHUNK_HEIGHT;
+use hollow_worldgen::coordinates::CHUNK_HEIGHT;
 use hollow_worldgen::{Dimension, GenerationSession};
 use std::sync::Arc;
 pub(crate) const MIN_Y: i32 = -64;
@@ -11,21 +11,15 @@ const HEIGHT: usize = CHUNK_HEIGHT as usize;
 pub(crate) struct WorldGenerator {
     pub(crate) runtime: GenerationSession,
     storage: Option<Arc<crate::world::storage::Database>>,
-    errors: Arc<std::sync::Mutex<Vec<String>>>,
     blocks: hollow_engine::blocks::BlockCatalog,
 }
 fn index(x: usize, y: usize, z: usize) -> usize {
     x + 16 * (z + 16 * y)
 }
-pub(crate) enum ChunkLoad {
-    Ready {
-        voxels: ChunkVoxels,
-        containers: crate::block_behavior::containers::PreparedColumn,
-        revision: u64,
-    },
-    Retry,
-    Missing,
-}
+pub(crate) type ChunkLoad = hollow_engine::streaming::ChunkLoad<
+    super::VoxelState,
+    crate::block_behavior::containers::PreparedColumn,
+>;
 impl WorldGenerator {
     pub(crate) fn new(seed: i64, blocks: hollow_engine::blocks::BlockCatalog) -> Self {
         Self {
@@ -36,7 +30,6 @@ impl WorldGenerator {
                 None,
             ),
             storage: None,
-            errors: Arc::default(),
             blocks,
         }
     }
@@ -55,14 +48,11 @@ impl WorldGenerator {
                 Some(storage.clone()),
             ),
             storage: Some(storage),
-            errors: Arc::default(),
             blocks,
         }
     }
     pub(crate) fn take_errors(&self) -> Vec<String> {
-        let mut errors = std::mem::take(&mut *self.errors.lock().unwrap());
-        errors.extend(self.runtime.take_errors());
-        errors
+        self.runtime.take_errors()
     }
     pub(crate) async fn flush(&self) -> std::io::Result<()> {
         self.runtime.flush().await
@@ -88,16 +78,16 @@ impl WorldGenerator {
     pub(crate) async fn loaded_gameplay_chunk(
         &self,
         position: IVec2,
-        budget: hollow_worldgen::tasks::VoxelTaskBudget,
+        budget: hollow_engine::tasks::VoxelTaskBudget,
     ) -> ChunkLoad {
         let result = async {
             if self.runtime.is_cancelled() {
                 return Ok(ChunkLoad::Missing);
             }
             let column = if let Some(storage) = &self.storage {
-                storage.gameplay_column(position.x, position.y)?
+                storage.load_column(position.x, position.y)?
             } else {
-                Some(crate::world::storage::GameplayColumn::default())
+                Some(hollow_engine::storage::sqlite::StoredColumn::default())
             };
             let Some(column) = column else {
                 return Ok(ChunkLoad::Retry);
@@ -107,7 +97,7 @@ impl WorldGenerator {
             }
             let generator = self.clone();
             budget
-                .spawn(hollow_worldgen::tasks::WorkClass::Loading, 0, async move {
+                .spawn(hollow_engine::tasks::WorkClass::Loading, 0, async move {
                     if generator.runtime.is_cancelled() {
                         return Ok(ChunkLoad::Missing);
                     }
@@ -118,7 +108,11 @@ impl WorldGenerator {
                         .snapshot(position)
                         .map(|snapshot| (snapshot.min_y, snapshot.fluid_ticks));
                     let voxels = if let Some(bytes) = edited {
-                        ChunkVoxels::decode_saved(&bytes)?
+                        ChunkVoxels::decode_saved(
+                            &bytes,
+                            hollow_worldgen::coordinates::SECTION_COUNT,
+                            hollow_worldgen::content::catalog(),
+                        )?
                     } else {
                         let Some(generated) = generator.runtime.snapshot(position) else {
                             return Ok(ChunkLoad::Missing);
@@ -142,7 +136,10 @@ impl WorldGenerator {
                                 native.y - min_y,
                                 native.z.rem_euclid(16),
                             );
-                            if let Some(cell) = hollow_core::coordinates::cell_index(local) {
+                            if let Some(cell) = hollow_core::coordinates::column_cell_index(
+                                local,
+                                hollow_worldgen::coordinates::SECTION_COUNT,
+                            ) {
                                 let family = if pumpkin_data::fluid::Fluid::same_fluid_type(
                                     tick.fluid,
                                     pumpkin_data::fluid::Fluid::WATER.id,
@@ -163,7 +160,7 @@ impl WorldGenerator {
                     }
                     Ok::<_, std::io::Error>(ChunkLoad::Ready {
                         voxels,
-                        containers,
+                        attachment: containers,
                         revision,
                     })
                 })
@@ -172,22 +169,13 @@ impl WorldGenerator {
         .await;
         match result {
             Ok(value) => value,
-            Err(error) => {
-                self.errors
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(format!(
-                        "Cannot load gameplay column ({}, {}): {error}",
-                        position.x, position.y
-                    ));
-                ChunkLoad::Missing
-            }
+            Err(error) => ChunkLoad::Failed(error.to_string()),
         }
     }
 
     pub(crate) async fn try_spawn_position(
         &self,
-        budget: hollow_worldgen::tasks::VoxelTaskBudget,
+        budget: hollow_engine::tasks::VoxelTaskBudget,
     ) -> std::io::Result<Vec3> {
         self.runtime.ready().await?;
         // Prefer dry ground near the origin, which can be ocean.
@@ -208,7 +196,7 @@ impl WorldGenerator {
                     }
                     let runtime = self.runtime.clone();
                     let terrain = budget
-                        .spawn(hollow_worldgen::tasks::WorkClass::Loading, 0, async move {
+                        .spawn(hollow_engine::tasks::WorkClass::Loading, 0, async move {
                             runtime.probe_terrain(IVec2::new(dx, dz))
                         })
                         .await;

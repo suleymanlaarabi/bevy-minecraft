@@ -3076,12 +3076,20 @@ dependencies = [
 name = "hollow-engine"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "bevy_app",
  "bevy_derive",
+ "bevy_diagnostic",
  "bevy_ecs",
  "bevy_math",
  "bevy_platform",
+ "bevy_tasks",
+ "crc32fast",
  "hollow-core",
+ "lz4_flex",
+ "ron",
+ "rusqlite",
+ "serde",
 ]
 
 [[package]]
@@ -3108,6 +3116,7 @@ dependencies = [
  "hollow-core",
  "hollow-engine",
  "hollow-features",
+ "hollow-render",
  "hollow-worldgen",
  "pumpkin-data",
  "pumpkin-util",
@@ -3119,20 +3128,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "hollow-render"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bytemuck",
+ "hollow-core",
+ "hollow-engine",
+ "hollow-features",
+ "ron",
+ "serde",
+]
+
+[[package]]
 name = "hollow-worldgen"
 version = "0.1.0"
 dependencies = [
  "async-channel",
  "bevy_app",
- "bevy_diagnostic",
  "bevy_ecs",
  "bevy_math",
  "bevy_tasks",
  "bitflags 2.13.2",
- "crc32fast",
  "dashmap",
  "hollow-core",
- "lz4_flex",
+ "hollow-engine",
  "pumpkin-data",
  "pumpkin-nbt",
  "pumpkin-util",

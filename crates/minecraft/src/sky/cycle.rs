@@ -1,5 +1,5 @@
 use super::{DAY_LENGTH_SECS, ORBIT_TILT};
-use bevy::{camera::Exposure, light::light_consts::lux, math::FloatPow, prelude::*};
+use bevy::{light::light_consts::lux, math::FloatPow, prelude::*};
 use std::f32::consts::TAU;
 
 /// Illuminance of the sun outside the atmosphere. The atmosphere reddens and dims it
@@ -136,11 +136,6 @@ impl SkyState {
             moon_phase: 0.5 + 0.5 * (cycle * TAU).cos(),
             moon_waxing: cycle >= 0.5,
         }
-    }
-
-    /// The camera exposure multiplier for [`Self::ev100`].
-    pub(crate) fn exposure(&self) -> f32 {
-        Exposure { ev100: self.ev100 }.exposure()
     }
 
     /// Whether the sun, not the moon, lights the terrain and casts its shadows.

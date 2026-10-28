@@ -1,0 +1,17 @@
+[package]
+name = "hollow-render"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+dev = []
+
+[dependencies]
+hollow-core = { path = "../core" }
+hollow-engine = { path = "../engine" }
+bevy = { version = "0.20", default-features = false, features = ["std", "async_executor", "multi_threaded", "bevy_asset", "bevy_log", "bevy_pbr", "png"] }
+serde = { version = "1", features = ["derive"] }
+bytemuck = "1"
+hollow-features = { path = "../features" }
+ron = "0.12"

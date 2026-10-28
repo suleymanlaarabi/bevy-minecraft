@@ -28,7 +28,7 @@ pub(crate) struct StarsMaterial {
 
 sky_material!(
     StarsMaterial,
-    "shaders/sky_stars.wesl",
+    "embedded://hollow_render/shaders/sky_stars.wesl",
     AlphaMode::Add,
     STARS_SORT_BIAS,
     [
@@ -57,7 +57,7 @@ pub(crate) struct MoonMaterial {
 
 sky_material!(
     MoonMaterial,
-    "shaders/sky_moon.wesl",
+    "embedded://hollow_render/shaders/sky_moon.wesl",
     AlphaMode::Add,
     MOON_SORT_BIAS,
     [ATTRIBUTE_POSITION => 0]

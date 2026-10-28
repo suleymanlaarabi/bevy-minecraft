@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 default = []
-dev = ["bevy/bevy_dev_tools", "bevy/render_dev_tools", "bevy/sysinfo_plugin"]
+dev = ["hollow-render/dev", "bevy/bevy_dev_tools", "bevy/render_dev_tools", "bevy/sysinfo_plugin"]
 
 [dependencies]
 bevy = { version = "0.20", default-features = false, features = [
@@ -37,8 +37,9 @@ bevy = { version = "0.20", default-features = false, features = [
     "default_font",
     "ui_picking",
 ] }
+hollow-render = { path = "../render" }
 hollow-features = { path = "../features" }
-hollow-engine = { path = "../engine" }
+hollow-engine = { path = "../engine", features = ["sqlite"] }
 hollow-core = { path = "../core" }
 hollow-worldgen = { path = "../worldgen" }
 pumpkin-data = { path = "../worldgen/crates/pumpkin-data" }

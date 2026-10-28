@@ -3,8 +3,6 @@ pub mod storage;
 
 pub use engine::LightEngine;
 
-pub(crate) mod snapshots;
-
 use serde::{Deserialize, Serialize};
 
 /// Lighting engine calculation mode.

@@ -5,12 +5,12 @@ use crate::{
     chunk_system::generation_cache::SurfaceBiomeNeighborhood,
     chunk_system::{Cache, Chunk, ChunkPos, StagedChunkEnum as Stage},
     generation::generator::VanillaGenerator,
-    tasks::{GenerationSystems, SchedulingDeadline, VoxelTaskBudget, WorkClass},
 };
 use bevy_app::{App, Plugin, PostUpdate};
 use bevy_ecs::prelude::*;
 use bevy_math::IVec2;
 use bevy_tasks::{IoTaskPool, Task, futures::check_ready};
+use hollow_engine::tasks::{SchedulingDeadline, VoxelTaskBudget, VoxelTasks, WorkClass};
 use pumpkin_util::world_seed::Seed;
 use std::{
     cmp::Reverse,
@@ -402,12 +402,14 @@ pub struct GenerationTask {
 pub struct WorldGenerationPlugin;
 impl Plugin for WorldGenerationPlugin {
     fn build(&self, app: &mut App) {
-        crate::tasks::configure(app);
+        if !app.is_plugin_added::<hollow_engine::tasks::VoxelTaskPlugin>() {
+            app.add_plugins(hollow_engine::tasks::VoxelTaskPlugin);
+        }
         app.init_resource::<GenerationGraph>()
             .add_message::<ChunkAvailable>()
-            .add_systems(PostUpdate, collect.in_set(GenerationSystems::Collect))
-            .add_systems(PostUpdate, update_demands.in_set(GenerationSystems::Demand))
-            .add_systems(PostUpdate, schedule.in_set(GenerationSystems::Requests));
+            .add_systems(PostUpdate, collect.in_set(VoxelTasks::Collect))
+            .add_systems(PostUpdate, update_demands.in_set(VoxelTasks::Demand))
+            .add_systems(PostUpdate, schedule.in_set(VoxelTasks::Requests));
     }
 }
 
@@ -707,7 +709,9 @@ fn collect(
         if graph.0[i].session.is_cancelled() && graph.0[i].active == 0 {
             let runtime = graph.0.swap_remove(i);
             for entry in runtime.entries.values() {
-                commands.entity(entry.entity).despawn();
+                // Published terrain is also owned by the application session,
+                // which may already have despawned it while generation drained.
+                commands.entity(entry.entity).try_despawn();
             }
             for reply in runtime.session.0.flush.lock().unwrap().drain(..) {
                 let _ = reply.try_send(Err("World request cancelled".into()));

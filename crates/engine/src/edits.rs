@@ -1,12 +1,15 @@
 //! Validated terrain mutations with no inventory, loot or game-specific callbacks.
-use crate::{chunk::ChunkVoxels, world::ChunkIndex};
+use crate::{
+    chunk::ChunkVoxels,
+    world::{ChunkIndex, WorldLayout},
+};
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{prelude::*, system::SystemParam};
 use bevy_math::prelude::*;
 use bevy_platform::collections::HashMap;
 use hollow_core::{
     VoxelCell,
-    coordinates::{CHUNK_HEIGHT, CHUNK_SIZE, FULL_SKY, split_world_position},
+    coordinates::{CHUNK_SIZE, FULL_SKY},
 };
 
 #[derive(Event, Clone, Copy, Debug)]
@@ -21,8 +24,12 @@ impl<T: VoxelCell> SetVoxel<T> {
             state,
         }
     }
-    pub fn new(world_position: IVec3, kind: T::Kind) -> Self {
-        Self::with_state(world_position, T::default_state(kind))
+    pub fn new(
+        world_position: IVec3,
+        kind: T::Kind,
+        content: &hollow_core::content::ContentCatalog,
+    ) -> Self {
+        Self::with_state(world_position, T::default_state(kind, content))
     }
 }
 #[derive(Event, Clone, Copy, Debug)]
@@ -62,6 +69,8 @@ impl<T: VoxelCell> Default for PendingEdits<T> {
 
 #[derive(SystemParam)]
 pub struct VoxelEditWorld<'w, 's, T: VoxelCell> {
+    content: Res<'w, crate::content::RegisteredContent>,
+    layout: Res<'w, WorldLayout>,
     index: Res<'w, ChunkIndex>,
     stored: ResMut<'w, StoredChunks<T>>,
     pending: ResMut<'w, PendingEdits<T>>,
@@ -80,20 +89,28 @@ pub enum EditRejection {
     Unavailable,
     PreconditionFailed,
     DuplicateCell,
+    InvalidState,
 }
 
 impl<T: VoxelCell> VoxelEditWorld<'_, '_, T> {
+    pub fn layout(&self) -> hollow_core::coordinates::ColumnLayout {
+        self.layout.0
+    }
+
     pub fn validate(&self, edits: &[CheckedEdit<T>]) -> Result<(), EditRejection> {
         // Placement and flow batches contain only a few cells. Pairwise checks
         // avoid allocating or hashing a coordinate set for each transaction.
         for (index, edit) in edits.iter().enumerate() {
+            if T::from_id(edit.state.id(), &self.content).is_none() {
+                return Err(EditRejection::InvalidState);
+            }
             if edits[..index]
                 .iter()
                 .any(|other| other.position == edit.position)
             {
                 return Err(EditRejection::DuplicateCell);
             }
-            let (chunk, local) = split_world_position(edit.position);
+            let (chunk, local) = self.layout.split(edit.position);
             let current = self
                 .index
                 .get(&chunk)
@@ -120,21 +137,29 @@ impl<T: VoxelCell> VoxelEditWorld<'_, '_, T> {
     // commands run between that validation and these terrain writes.
     pub fn commit_validated(&mut self, edits: &[CheckedEdit<T>], commands: &mut Commands) {
         for edit in edits {
-            self.apply(SetVoxel::with_state(edit.position, edit.state), commands);
+            self.apply_validated(SetVoxel::with_state(edit.position, edit.state), commands);
         }
     }
 
     pub fn apply(&mut self, edit: SetVoxel<T>, commands: &mut Commands) {
-        let (chunk, local) = split_world_position(edit.world_position);
-        if !(0..CHUNK_HEIGHT).contains(&local.y) {
+        if T::from_id(edit.state.id(), &self.content).is_none() {
+            return;
+        }
+        self.apply_validated(edit, commands);
+    }
+    fn apply_validated(&mut self, edit: SetVoxel<T>, commands: &mut Commands) {
+        let (chunk, local) = self.layout.split(edit.world_position);
+        if !self.layout.contains(edit.world_position.y) {
             return;
         }
         // Read neighbors before borrowing the edited chunk mutably, using the same query.
         // Only removal exposes a formerly opaque cell with stale (usually zero) light.
-        let estimate = if edit.state.is_air()
+        let estimate = if edit.state.is_air(&self.content)
             && let Some(entity) = self.index.get(&chunk)
             && let Ok(voxels) = self.chunks.get(*entity)
-            && voxels.state(local).is_some_and(T::is_opaque)
+            && voxels
+                .state(local)
+                .is_some_and(|state| state.is_opaque(&self.content))
         {
             let (mut sky, mut block) = (0u8, 0u8);
             for offset in [
@@ -146,17 +171,20 @@ impl<T: VoxelCell> VoxelEditWorld<'_, '_, T> {
                 IVec3::NEG_Z,
             ] {
                 let position = edit.world_position + offset;
-                let light = if position.y >= CHUNK_HEIGHT {
+                let light = if position.y >= self.layout.max_y() {
                     FULL_SKY
                 } else {
-                    let (neighbor_chunk, neighbor_local) = split_world_position(position);
+                    let (neighbor_chunk, neighbor_local) = self.layout.split(position);
                     let Some(entity) = self.index.get(&neighbor_chunk) else {
                         continue;
                     };
                     let Ok(neighbor) = self.chunks.get(*entity) else {
                         continue;
                     };
-                    if neighbor.state(neighbor_local).is_none_or(T::is_opaque) {
+                    if neighbor
+                        .state(neighbor_local)
+                        .is_none_or(|state| state.is_opaque(&self.content))
+                    {
                         continue;
                     }
                     let Some(light) = neighbor.render_light_at(neighbor_local) else {
@@ -225,7 +253,7 @@ impl<T: VoxelCell> VoxelEditWorld<'_, '_, T> {
         self.chunks.get(entity).ok()?.state(local)
     }
     pub fn state(&self, position: IVec3) -> Option<T> {
-        let (chunk, local) = split_world_position(position);
+        let (chunk, local) = self.layout.split(position);
         self.index
             .get(&chunk)
             .and_then(|&entity| self.chunks.get(entity).ok())

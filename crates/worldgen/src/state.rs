@@ -161,29 +161,33 @@ pub fn block_box(bounds: pumpkin_util::math::boundingbox::BoundingBox) -> BlockB
 }
 
 impl hollow_core::VoxelCell for VoxelState {
+    fn shape_offset(self, position: IVec3) -> Option<Vec3> {
+        self.shape_depends_on_position()
+            .then(|| VoxelState::shape_offset(self, position))
+    }
     type Kind = VoxelKind;
     fn id(self) -> u32 {
         self.id()
     }
-    fn from_id(id: u32) -> Option<Self> {
+    fn from_id(id: u32, _content: &hollow_core::content::ContentCatalog) -> Option<Self> {
         Self::from_id(id)
     }
-    fn kind(self) -> VoxelKind {
+    fn kind(self, _content: &hollow_core::content::ContentCatalog) -> VoxelKind {
         self.kind()
     }
-    fn default_state(kind: VoxelKind) -> Self {
+    fn default_state(kind: VoxelKind, _content: &hollow_core::content::ContentCatalog) -> Self {
         kind.default_state()
     }
     fn air() -> Self {
         VoxelKind::Air.default_state()
     }
-    fn is_liquid(self) -> bool {
+    fn is_liquid(self, _content: &hollow_core::content::ContentCatalog) -> bool {
         self.is_liquid()
     }
-    fn is_air(self) -> bool {
+    fn is_air(self, _content: &hollow_core::content::ContentCatalog) -> bool {
         self.is_air()
     }
-    fn is_opaque(self) -> bool {
+    fn is_opaque(self, _content: &hollow_core::content::ContentCatalog) -> bool {
         self.is_opaque_cube()
     }
 }

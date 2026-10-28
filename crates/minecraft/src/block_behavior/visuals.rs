@@ -7,19 +7,13 @@ use super::{
     },
 };
 use crate::inventory::StationViewers;
-use crate::voxel::{
-    VoxelState, VoxelWorld,
-    render::{
-        ModelMaterial,
-        model_mesh::ModelGeometry,
-        models::{self, ModelQuad},
-    },
-};
+use crate::voxel::{VoxelState, VoxelWorld, render::models};
 use bevy::ecs::{entity::EntityHashSet, system::SystemParam};
 use bevy::{mesh::MeshTag, prelude::*};
 use hollow_features::articulation::{
     Easing, JointAnimation, JointClip, JointMotion, SetJointTarget,
 };
+use hollow_render::{material::ModelMaterial, model_mesh::ModelGeometry, models::ModelQuad};
 
 const VIEW_BUDGET: usize = 64;
 const LIGHT_BUDGET: usize = 256;
@@ -54,8 +48,6 @@ type ViewQueue = hollow_engine::work::EntityWork<PrepareView>;
 type LightQueue = hollow_engine::work::EntityWork<Relight>;
 #[derive(Component, Default)]
 pub(crate) struct InstanceLight(u32);
-#[derive(Event)]
-pub(crate) struct ChunkLightChanged(pub Entity);
 
 #[derive(SystemParam)]
 pub(crate) struct LightInvalidation<'w, 's> {
@@ -129,7 +121,7 @@ fn chunk_departed(
     }
 }
 fn light_changed(
-    event: On<ChunkLightChanged>,
+    event: On<hollow_engine::lighting::ChunkLightChanged>,
     chunks: Query<&crate::voxel::VoxelChunk>,
     mut invalidation: LightInvalidation,
 ) {
@@ -180,10 +172,10 @@ impl ChestMeshes {
         material.instance_light = true;
         self.material = materials.add(material);
         self.opening = clips.add(JointClip {
-            motion: JointMotion::Rotation {
+            motions: Box::new([JointMotion::Rotation {
                 axis: Dir3::X,
                 radians: -std::f32::consts::FRAC_PI_2,
-            },
+            }]),
             duration_seconds: 0.25,
             easing: Easing::CubicOut,
         });
@@ -236,7 +228,7 @@ fn prepare_views(
         (With<PrepareView>, Without<Dormant>),
     >,
     columns: Query<&LoadedTerrain>,
-    rendered: Query<(), With<crate::voxel::streaming::RenderRequested>>,
+    rendered: Query<(), With<hollow_render::streaming::RenderRequested>>,
     views: Query<&ChestView>,
     world: VoxelWorld,
     mut cache: ResMut<ChestMeshes>,
@@ -438,7 +430,7 @@ fn clear_updates(mut views: ResMut<ViewQueue>, mut lights: ResMut<LightQueue>) {
 }
 
 fn render_requested(
-    event: On<Add<crate::voxel::streaming::RenderRequested>>,
+    event: On<Add<hollow_render::streaming::RenderRequested>>,
     terrain: Query<&super::containers::LoadedColumn>,
     blocks: Query<&BlockEntities>,
     chests: Query<(), With<super::containers::Chest>>,

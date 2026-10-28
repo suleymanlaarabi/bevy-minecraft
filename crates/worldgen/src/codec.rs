@@ -172,7 +172,11 @@ pub(crate) fn decode_generated(
     }) {
         return Err(invalid());
     }
-    let terrain = TerrainRecord::<VoxelState>::decode(bytes, dim.height as usize / 16)?;
+    let terrain = TerrainRecord::<VoxelState>::decode(
+        bytes,
+        dim.height as usize / 16,
+        crate::content::catalog(),
+    )?;
     if terrain.modified {
         return Err(invalid());
     }
@@ -345,21 +349,4 @@ fn working_light(layer: &Layer<u8>) -> crate::chunk::ChunkLight {
 }
 
 pub const MAX_RECORD_BYTES: usize = 8 * 1024 * 1024;
-pub fn compress_record(bytes: &[u8]) -> Vec<u8> {
-    let mut record = crc32fast::hash(bytes).to_le_bytes().to_vec();
-    record.extend_from_slice(&lz4_flex::compress_prepend_size(bytes));
-    record
-}
-pub fn decompress_record(bytes: &[u8]) -> io::Result<Vec<u8>> {
-    let checksum = bytes.get(..4).ok_or_else(invalid)?;
-    let compressed = &bytes[4..];
-    let size = compressed.get(..4).ok_or_else(invalid)?;
-    if u32::from_le_bytes(size.try_into().unwrap()) as usize > MAX_RECORD_BYTES {
-        return Err(invalid());
-    }
-    let record = lz4_flex::decompress_size_prepended(compressed).map_err(io::Error::other)?;
-    if crc32fast::hash(&record) != u32::from_le_bytes(checksum.try_into().unwrap()) {
-        return Err(invalid());
-    }
-    Ok(record)
-}
+pub use hollow_engine::storage::{compress_record, decompress_record};

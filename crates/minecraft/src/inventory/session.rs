@@ -72,7 +72,7 @@ impl StationAccess<'_, '_> {
         let (station, block, state) = self.stations.get(session.0).ok()?;
         match *station {
             InventoryStation::Crafting { side } => ((1..=3).contains(&side)
-                && block.accessible(&self.world, state.0, actor))
+                && block.accessible(&self.world, state.0, actor, 5.0))
             .then_some(InventoryLayout {
                 crafting_side: side,
                 containers: [None; 2],

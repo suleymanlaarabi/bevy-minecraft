@@ -6,7 +6,6 @@ mod chunk;
 mod diagnostics;
 pub(crate) mod edits;
 pub(crate) mod generation;
-mod lighting;
 mod loading;
 pub(crate) mod render;
 pub(crate) mod rules;
@@ -22,26 +21,22 @@ pub(crate) use chunk::{ChunkVoxels, VoxelChunk};
 pub use edits::SetVoxel;
 pub use hollow_core::coordinates::chunk_at;
 pub(crate) use hollow_core::coordinates::{CHUNK_SIZE, split_world_position};
+pub(crate) use hollow_engine::streaming::VoxelPipeline;
+use hollow_render::VoxelRenderSystems;
+pub(crate) use hollow_render::assets::VoxelAssets;
+use hollow_render::environment::{
+    follow_horizon_skirt, spawn_horizon_skirt, update_camera_environment,
+};
+pub(crate) use hollow_render::{environment::OPEN_AIR_SCATTERING, material::VoxelMaterial};
 pub use hollow_worldgen::VoxelKind;
 pub(crate) use loading::VoxelLoading;
+use render::MinecraftRenderSource;
 pub use render::TexturePackId;
-pub(crate) use render::assets::VoxelAssets;
 use render::assets::apply_texture_pack;
 pub(crate) use render::assets::prepare_assets;
-use render::build::{mark_changed_chunks, poll_builds, start_changed_builds};
-pub(crate) use render::{OPEN_AIR_SCATTERING, TexturePack, VoxelMaterial, terrain_radius};
-use render::{follow_horizon_skirt, spawn_horizon_skirt, update_camera_environment};
+pub(crate) use render::{TexturePack, terrain_radius};
 pub use settings::VoxelSettings;
-use streaming::{
-    PendingChunks, StreamOffsets, StreamState, cleanup_removed_chunk, cleanup_voxel_world,
-    poll_chunk_generations, refresh_neighbors_of_spawned, release_ready_chunks, stream_chunks,
-};
-
-/// Render layer of depth-only terrain: drawn into the sun's shadow maps, never by cameras.
-pub(crate) const SHADOW_LAYER: usize = 1;
-
-#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct VoxelPipeline;
+use streaming::{StreamOffsets, StreamState, cleanup_voxel_world};
 
 pub struct VoxelPlugin {
     settings: VoxelSettings,
@@ -69,21 +64,17 @@ impl Plugin for VoxelPlugin {
         app.add_plugins((
             hollow_engine::VoxelWorldPlugin::<VoxelState>::default(),
             hollow_worldgen::WorldGenerationPlugin,
-            render::VoxelRenderPlugin,
+            hollow_engine::streaming::StreamingPlugin::<generation::WorldGenerator>::default(),
+            hollow_engine::lighting::VoxelLightingPlugin::<VoxelState>::default(),
+            hollow_render::VoxelRenderPlugin::<MinecraftRenderSource>::default(),
         ))
         .insert_resource(self.settings.clone())
+        .insert_resource(hollow_engine::streaming::StreamSettings {
+            spawn_budget_per_frame: self.settings.spawn_budget_per_frame,
+            despawn_budget_per_frame: self.settings.despawn_budget_per_frame,
+        })
         .insert_resource(StreamOffsets::new(view_distance))
-        .init_resource::<streaming::ChunkArrivals>()
-        .add_observer(streaming::track_chunk_arrival)
-        .init_resource::<PendingChunks>()
-        .init_resource::<StreamState>()
         .init_resource::<edits::ConnectionBorders>()
-        .init_resource::<lighting::LightingState>()
-        .init_resource::<lighting::LightingVersion>()
-        .init_resource::<lighting::BlockLightEdits>()
-        .add_observer(lighting::edited_lighting)
-        .add_observer(lighting::added_lighting)
-        .add_observer(lighting::removed_lighting)
         .add_observer(apply_view_distance)
         .add_observer(apply_texture_pack)
         .add_observer(edits::enqueue_neighbors)
@@ -96,56 +87,62 @@ impl Plugin for VoxelPlugin {
                 .before(crate::block_behavior::GameplaySystems::Topology)
                 .run_if(crate::world::streaming),
         )
-        .add_observer(cleanup_removed_chunk)
         .add_systems(
             PreStartup,
-            prepare_assets.after(hollow_engine::blocks::FinalizeBlockContent),
+            (validate_layout, render::initialize_source, prepare_assets)
+                .chain()
+                .after(hollow_engine::blocks::FinalizeBlockContent)
+                .after(hollow_render::PrepareVoxelAssets),
         )
-        .add_systems(Update, stream_chunks.run_if(crate::world::streaming))
         .add_systems(
             Update,
-            render::mipmaps::generate_block_mipmaps.run_if(
-                on_message::<AssetEvent<Image>>
-                    .or_else(on_message::<AssetEvent<VoxelMaterial>>)
-                    .or_else(resource_exists::<render::mipmaps::MipmapJob>),
-            ),
+            (streaming::update_demand, streaming::publish_available)
+                .chain()
+                .before(hollow_engine::streaming::VoxelStreamSystems::Demand)
+                .run_if(crate::world::streaming),
+        )
+        .configure_sets(
+            Update,
+            hollow_engine::streaming::VoxelStreamSystems::Demand.run_if(crate::world::streaming),
+        )
+        .configure_sets(
+            PostUpdate,
+            VoxelPipeline
+                .after(crate::player::PlayerInteraction)
+                .before(hollow_engine::tasks::VoxelTasks::Requests)
+                .run_if(crate::world::streaming),
+        )
+        .configure_sets(
+            PostUpdate,
+            VoxelRenderSystems::Build.run_if(crate::world::streaming),
         )
         .add_systems(
             PostUpdate,
             (
-                poll_chunk_generations,
-                refresh_neighbors_of_spawned,
-                release_ready_chunks,
-                lighting::update_block_light,
-                lighting::update_lighting,
-                // Release completed/stale task slots before scheduling their
-                // replacements, avoiding an idle frame at every completion.
-                poll_builds,
-                mark_changed_chunks,
-                start_changed_builds,
+                render::sync_environment,
+                update_camera_environment::<MinecraftRenderSource>,
             )
                 .chain()
-                .in_set(VoxelPipeline)
-                .after(hollow_worldgen::tasks::GenerationSystems::Publish)
-                .before(hollow_worldgen::tasks::GenerationSystems::Requests)
-                .after(crate::player::PlayerInteraction)
-                .before(bevy::transform::TransformSystems::Propagate)
                 .run_if(crate::world::streaming),
         )
         .add_systems(
-            PostUpdate,
-            update_camera_environment.run_if(crate::world::streaming),
+            OnEnter(GameState::Game),
+            (hollow_engine::session::open_session, spawn_horizon_skirt).chain(),
         )
-        .add_systems(OnEnter(GameState::Game), spawn_horizon_skirt)
         .add_systems(
             PostUpdate,
             follow_horizon_skirt
-                .after(update_camera_environment)
+                .after(update_camera_environment::<MinecraftRenderSource>)
                 .before(bevy::transform::TransformSystems::Propagate),
         )
         .add_systems(
             OnExit(GameState::Game),
-            (cleanup_voxel_world, streaming::reset_voxel_world).chain(),
+            (
+                cleanup_voxel_world,
+                streaming::reset_voxel_world,
+                hollow_engine::session::close_session,
+            )
+                .chain(),
         );
 
         #[cfg(feature = "dev")]
@@ -165,4 +162,12 @@ fn apply_view_distance(
     }
     *offsets = StreamOffsets::new(view_distance);
     state.center = None;
+}
+
+fn validate_layout(layout: Res<hollow_engine::world::WorldLayout>) {
+    assert_eq!(
+        layout.0,
+        hollow_core::coordinates::ColumnLayout::default(),
+        "Minecraft generation requires its native 384-block column layout"
+    );
 }

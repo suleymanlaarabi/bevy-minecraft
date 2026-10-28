@@ -3,10 +3,7 @@ use super::*;
 use crate::{
     inventory::{ItemKind, PlayerInventory, icons::BlockIcons},
     player::Player,
-    voxel::{
-        VoxelAssets,
-        render::{ModelMaterial, model_mesh, models},
-    },
+    voxel::{VoxelAssets, render::models},
 };
 use bevy::{
     asset::{AssetLoadFailedEvent, AssetLoader, LoadContext, RenderAssetUsages, io::Reader},
@@ -15,6 +12,7 @@ use bevy::{
     light::{NotShadowCaster, NotShadowReceiver},
     render::render_resource::PrimitiveTopology,
 };
+use hollow_render::{material::ModelMaterial, model_mesh};
 use serde::Deserialize;
 use std::{collections::HashMap, f32::consts::PI};
 
@@ -277,6 +275,7 @@ pub(super) fn build_visual(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     voxel_assets: Res<VoxelAssets>,
+    render_source: Res<crate::voxel::render::MinecraftRenderSource>,
     icons: Res<BlockIcons>,
 ) {
     for (root, mut desired, mut held) in &mut held {
@@ -300,6 +299,7 @@ pub(super) fn build_visual(
                 &mut meshes,
                 &mut materials,
                 &voxel_assets,
+                &render_source,
                 &icons,
             ) else {
                 commands.entity(root).insert(WaitingForVisual);
@@ -355,6 +355,7 @@ impl HeldItemAssets {
         meshes: &mut Assets<Mesh>,
         materials: &mut Assets<StandardMaterial>,
         voxel_assets: &VoxelAssets,
+        render_source: &crate::voxel::render::MinecraftRenderSource,
         icons: &BlockIcons,
     ) -> Option<ItemVisual> {
         let cached = self.items.get_or_insert_with(item, CachedItem::default);
@@ -371,7 +372,14 @@ impl HeldItemAssets {
                 translucent |= quad.translucent
             });
             ItemVisual {
-                mesh: meshes.add(model_mesh::item_geometry(kind).into_mesh()),
+                mesh: meshes.add(
+                    model_mesh::state_geometry(
+                        render_source,
+                        hollow_core::StateId(kind.default_state().id()),
+                        IVec3::ZERO,
+                    )
+                    .into_mesh(),
+                ),
                 material: ItemMaterial::Block(if translucent {
                     voxel_assets.translucent.clone()
                 } else {

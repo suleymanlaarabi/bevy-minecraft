@@ -9,7 +9,6 @@ pub type SetVoxel = hollow_engine::edits::SetVoxel<VoxelState>;
 pub type BlockChanged = hollow_engine::edits::BlockChanged<VoxelState>;
 pub type CheckedEdit = hollow_engine::edits::CheckedEdit<VoxelState>;
 pub(crate) type VoxelEditWorld<'w, 's> = hollow_engine::edits::VoxelEditWorld<'w, 's, VoxelState>;
-pub(crate) use hollow_engine::edits::border_neighbors;
 
 /// Neighbor work belongs to the Minecraft simulation, after a terrain commit.
 pub(crate) fn enqueue_neighbors(
@@ -240,7 +239,7 @@ fn collect_border_connections(
     seeds: &mut Vec<IVec3>,
 ) {
     let origin = IVec3::new(chunk.x * CHUNK_SIZE, 0, chunk.y * CHUNK_SIZE);
-    for section in 0..hollow_core::coordinates::SECTION_COUNT {
+    for section in 0..hollow_worldgen::coordinates::SECTION_COUNT {
         if !voxels
             .states
             .section(section)
@@ -253,7 +252,11 @@ fn collect_border_connections(
             for along in 0..CHUNK_SIZE {
                 let mut local = IVec3::new(along, y, along);
                 local[axis] = edge;
-                if voxels.get(local).is_some_and(super::rules::has_connections) {
+                if voxels
+                    .state(local)
+                    .map(|state| state.kind())
+                    .is_some_and(super::rules::has_connections)
+                {
                     seeds.push(origin + local);
                 }
             }

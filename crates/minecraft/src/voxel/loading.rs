@@ -1,8 +1,8 @@
 //! Readiness of the streamed spawn area before the player enters the world.
+use hollow_render::build::{ChunkBuild, ChunkSections, NeedsChunkBuild};
 
 use super::{
     ChunkVoxels,
-    render::build::{ChunkBuild, ChunkSections, NeedsChunkBuild},
     streaming::{AwaitingNeighbors, ChunkIndex, StreamOffsets},
 };
 use bevy::{ecs::system::SystemParam, prelude::*};

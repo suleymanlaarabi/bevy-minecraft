@@ -4,7 +4,7 @@ use super::{
     SkyState,
     cycle::{MOON_LUX, SUN_LUX},
 };
-use crate::{game::GameState, settings::GraphicsSettings, voxel::SHADOW_LAYER};
+use crate::{game::GameState, settings::GraphicsSettings};
 use bevy::{
     camera::visibility::{NoFrustumCulling, RenderLayers},
     light::{
@@ -52,7 +52,7 @@ pub(crate) struct SunMaterial {
 
 sky_material!(
     SunMaterial,
-    "shaders/sky_sun.wesl",
+    "embedded://hollow_render/shaders/sky_sun.wesl",
     AlphaMode::Add,
     SUN_SORT_BIAS,
     [ATTRIBUTE_POSITION => 0]
@@ -91,11 +91,7 @@ pub(super) fn spawn_sky(
         ..default()
     }
     .build();
-    let layers = RenderLayers::from_layers(&[
-        0,
-        SHADOW_LAYER,
-        crate::voxel::render::visibility::OCCLUDED_LAYER,
-    ]);
+    let layers = RenderLayers::from_layers(&[0, hollow_render::visibility::OCCLUDED_LAYER]);
     commands.spawn((
         Sun,
         SkyLight,

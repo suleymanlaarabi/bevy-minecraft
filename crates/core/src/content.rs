@@ -205,6 +205,14 @@ impl ContentCatalog {
             .as_ref()
             .and_then(|visuals| visuals[block.index()])
     }
+    /// Import-time lookup; runtime consumers carry the returned numeric resource ID.
+    pub fn resolve_resource(&self, path: &str) -> Option<ResourceId> {
+        self.0
+            .resources
+            .iter()
+            .position(|resource| resource == path)
+            .map(|index| ResourceId(index as u32))
+    }
     pub fn resource_count(&self) -> usize {
         self.0.resources.len()
     }

@@ -10,7 +10,6 @@ use bevy_math::prelude::*;
 use hollow_core::{
     BlockId, FluidId, ResourceId, StateId, VoxelCell,
     content::{ContentCatalog, StateDefinition},
-    coordinates::CHUNK_HEIGHT,
     shape::BlockBox,
 };
 use std::sync::Arc;
@@ -288,11 +287,14 @@ impl FluidCatalog {
             return T::air();
         }
         let profile = self.profile(family);
-        T::from_id(if falling {
-            profile.falling[amount as usize].0
-        } else {
-            profile.standing[amount as usize].0
-        })
+        T::from_id(
+            if falling {
+                profile.falling[amount as usize].0
+            } else {
+                profile.standing[amount as usize].0
+            },
+            self.content(),
+        )
         .expect("Registered fluid state")
     }
     fn holds<T: VoxelCell>(&self, state: T, family: FluidId) -> bool {
@@ -314,7 +316,7 @@ impl FluidCatalog {
             .content
             .container(StateId(state.id()), family)
             .map_or(fluid, |c| {
-                T::from_id(c.filled.0).expect("Registered filled state")
+                T::from_id(c.filled.0, self.content()).expect("Registered filled state")
             })
     }
 }
@@ -588,9 +590,7 @@ where
 pub trait FluidWorld {
     type Cell: VoxelCell;
     fn read(&self, position: IVec3) -> Result<Self::Cell, IVec2>;
-    fn vertical_bounds(&self) -> std::ops::Range<i32> {
-        0..CHUNK_HEIGHT
-    }
+    fn vertical_bounds(&self) -> std::ops::Range<i32>;
     fn writable(&self, position: IVec3) -> Result<(), IVec2>;
     /// Some(offset) marks position-dependent collision geometry, including a zero
     /// offset at this position. Those states bypass the state-pair passage cache.
@@ -919,7 +919,8 @@ impl<W: FluidWorld> FlowContext<'_, W> {
                 } else {
                     rule.flowing_product
                 };
-                let product = W::Cell::from_id(product.0).expect("Registered reaction product");
+                let product = W::Cell::from_id(product.0, self.catalog.content())
+                    .expect("Registered reaction product");
                 if target_state != product {
                     self.write(target, product, scratch)?;
                     changed = true;
@@ -991,7 +992,8 @@ impl<W: FluidWorld> FluidAccess for HookAccess<'_, '_, W> {
     fn write(&mut self, position: IVec3, state: StateId) -> Result<(), IVec2> {
         self.context.write(
             position,
-            W::Cell::from_id(state.0).expect("Registered hook state"),
+            W::Cell::from_id(state.0, self.context.catalog.content())
+                .expect("Registered hook state"),
             self.scratch,
         )
     }

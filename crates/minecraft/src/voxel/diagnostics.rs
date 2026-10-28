@@ -1,12 +1,11 @@
 use super::{
     ChunkVoxels, VoxelChunk, VoxelCommandsExt, VoxelKind, VoxelWorld,
-    render::build::{ChunkBuild, ChunkSections},
     streaming::{AwaitingNeighbors, PendingChunks},
 };
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::window::{MonitorSelection, PresentMode, WindowMode};
-use std::{collections::VecDeque, time::Duration};
+use hollow_render::build::{ChunkBuild, ChunkSections};
 
 use crate::{
     character::CharacterMovement,
@@ -18,45 +17,7 @@ use super::{StreamOffsets, StreamState};
 
 const MAX_FRAME_SAMPLES: usize = 3_600;
 
-#[derive(Resource, Default)]
-pub(crate) struct VoxelDiagnostics {
-    frames_ms: VecDeque<f64>,
-    generation_ms: Vec<f64>,
-    meshing_ms: Vec<f64>,
-    generated_chunks: u64,
-    built_chunks: u64,
-    built_vertices: u64,
-    built_triangles: u64,
-    elapsed: f64,
-}
-
-impl VoxelDiagnostics {
-    pub(crate) fn record_generation(&mut self, elapsed: Duration) {
-        self.generated_chunks += 1;
-        self.generation_ms.push(elapsed.as_secs_f64() * 1_000.0);
-    }
-
-    pub(crate) fn record_build(&mut self, meshing: Duration, vertices: usize, triangles: usize) {
-        self.built_chunks += 1;
-        self.built_vertices += vertices as u64;
-        self.built_triangles += triangles as u64;
-        self.meshing_ms.push(meshing.as_secs_f64() * 1_000.0);
-    }
-
-    fn reset_frames(&mut self) {
-        self.frames_ms.clear();
-    }
-
-    fn frame_percentiles(&self) -> (f64, f64, f64) {
-        let frames: Vec<_> = self.frames_ms.iter().copied().collect();
-        (
-            percentile(&frames, 0.50),
-            percentile(&frames, 0.95),
-            percentile(&frames, 0.99),
-        )
-    }
-}
-
+pub(crate) use hollow_render::diagnostics::VoxelDiagnostics;
 #[derive(Resource, Default)]
 struct VoxelBenchmark {
     simplified: bool,
@@ -96,8 +57,10 @@ pub(crate) fn register(app: &mut App) {
     let report = std::env::var_os("HOLLOW_DIAGNOSTICS").is_some();
     let benchmark = std::env::var_os("HOLLOW_VOXEL_BENCH").is_some();
     if report || benchmark {
-        app.init_resource::<VoxelDiagnostics>()
-            .add_systems(Update, record_voxel_frame.run_if(in_state(GameState::Game)));
+        app.init_resource::<VoxelDiagnostics>().add_systems(
+            Update,
+            (record_voxel_frame, record_generation).run_if(in_state(GameState::Game)),
+        );
     }
     if report {
         app.add_systems(
@@ -464,4 +427,13 @@ fn percentile(samples: &[f64], percentile: f64) -> f64 {
     sorted.sort_unstable_by(f64::total_cmp);
     let index = ((sorted.len() - 1) as f64 * percentile).round() as usize;
     sorted[index]
+}
+
+fn record_generation(
+    mut events: MessageReader<hollow_engine::streaming::TerrainPublished>,
+    mut diagnostics: ResMut<VoxelDiagnostics>,
+) {
+    for event in events.read() {
+        diagnostics.record_generation(event.elapsed);
+    }
 }

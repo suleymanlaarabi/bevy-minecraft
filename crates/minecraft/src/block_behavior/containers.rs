@@ -5,11 +5,7 @@ use crate::{
     inventory::slots::ItemSlots,
     voxel::{ChunkVoxels, VoxelState, VoxelWorld},
 };
-use bevy::{
-    ecs::{lifecycle::HookContext, system::SystemParam, world::DeferredWorld},
-    platform::collections::HashMap,
-    prelude::*,
-};
+use bevy::{ecs::system::SystemParam, prelude::*};
 use hollow_features::motion::FixedPosition;
 use std::io;
 
@@ -33,39 +29,10 @@ pub(crate) struct ManualOpen;
 pub(crate) struct Door;
 #[derive(Component, Default)]
 pub(crate) struct Gate;
-#[derive(Component)]
-#[component(storage = "SparseSet")]
-pub(crate) struct Dormant;
-#[derive(Component, Clone, Copy)]
-pub struct BlockState(pub VoxelState);
-
-#[derive(Component, Clone, Copy)]
-#[component(immutable, on_add = index_block, on_remove = unindex_block)]
-pub struct BlockEntity {
-    pub position: IVec3,
-}
-impl BlockEntity {
-    /// Loaded identity and reach are the common precondition for block interactions.
-    pub(crate) fn accessible(&self, world: &VoxelWorld, state: VoxelState, actor: Vec3) -> bool {
-        world.state(self.position) == Some(state)
-            && actor.distance_squared(self.position.as_vec3() + Vec3::splat(0.5)) <= 25.0
-    }
-}
-
-#[derive(Component)]
-#[relationship(relationship_target = BlockEntities)]
-pub(crate) struct BlockOf(pub Entity);
-#[derive(Component, Default, Deref)]
-#[relationship_target(relationship = BlockOf, linked_spawn)]
-pub(crate) struct BlockEntities(Vec<Entity>);
-
-#[derive(Component)]
-#[relationship(relationship_target = LoadedTerrain)]
-pub(crate) struct LoadedColumn(pub Entity);
-#[derive(Component, Default, Deref)]
-#[relationship_target(relationship = LoadedColumn)]
-pub(crate) struct LoadedTerrain(Vec<Entity>);
-
+pub use hollow_engine::blocks::{
+    BlockEntities, BlockEntity, BlockLookup, BlockOf, Dormant, LoadedColumn, LoadedTerrain,
+};
+pub type BlockState = hollow_engine::blocks::BlockState<VoxelState>;
 #[derive(Component)]
 #[relationship(relationship_target = ChestPartners)]
 pub(crate) struct PairedWith(pub Entity);
@@ -79,122 +46,21 @@ pub(crate) struct TopologyDirty;
 #[component(storage = "SparseSet")]
 pub(crate) struct AvailableContainer;
 
-#[derive(Resource, Default, Deref, DerefMut)]
-pub(crate) struct GameplayColumns(HashMap<IVec2, Entity>);
-#[derive(Component)]
-#[require(crate::simulation::ColumnSimulation)]
-pub(crate) struct GameplayColumn {
-    pub position: IVec2,
-    // Only stateful blocks are indexed; a direct table would reserve 98,304
-    // entity slots per column for a typically tiny subset of cells.
-    pub cells: HashMap<u32, Entity>,
-    pub revision: u64,
-    pub saved_revision: u64,
-    pub initialized: bool,
-}
-pub(crate) fn local_index(position: IVec3) -> u32 {
-    hollow_core::coordinates::cell_index(crate::voxel::split_world_position(position).1)
-        .expect("Block entity position is inside the world") as u32
-}
-fn index_block(mut world: DeferredWorld, context: HookContext) {
-    let block = world
-        .get::<BlockEntity>(context.entity)
-        .expect("Block address")
-        .position;
-    let owner = world.get::<BlockOf>(context.entity).expect("Block owner").0;
-    world
-        .get_mut::<GameplayColumn>(owner)
-        .expect("Gameplay column")
-        .cells
-        .insert(local_index(block), context.entity);
-}
-fn unindex_block(mut world: DeferredWorld, context: HookContext) {
-    let position = world
-        .get::<BlockEntity>(context.entity)
-        .expect("Block address")
-        .position;
-    if let Some(owner) = world.get::<BlockOf>(context.entity).map(|owner| owner.0)
-        && let Some(mut column) = world.get_mut::<GameplayColumn>(owner)
-    {
-        column.cells.remove(&local_index(position));
-    }
-}
+pub use hollow_engine::blocks::ColumnOwners as GameplayColumns;
+pub type GameplayColumn = hollow_engine::simulation::ColumnData<Vec<crate::world::SavedDrop>>;
 pub(crate) fn column(world: &mut World, position: IVec2) -> Entity {
-    if let Some(&entity) = world.resource::<GameplayColumns>().get(&position) {
-        return entity;
+    let entity = hollow_engine::blocks::column(world, position);
+    if world.get::<GameplayColumn>(entity).is_none() {
+        world.entity_mut(entity).insert(GameplayColumn {
+            position,
+            revision: 0,
+            saved_revision: 0,
+            initialized: false,
+            application: Vec::new(),
+        });
     }
-    let entity = world
-        .spawn((
-            GameplayColumn {
-                position,
-                cells: default(),
-                revision: 0,
-                saved_revision: 0,
-                initialized: false,
-            },
-            DespawnOnExit(crate::game::GameState::Game),
-        ))
-        .id();
-    world
-        .resource_mut::<GameplayColumns>()
-        .insert(position, entity);
     entity
 }
-fn block(world: &mut World, owner: Entity, position: IVec3) -> Entity {
-    if let Some(&entity) = world
-        .get::<GameplayColumn>(owner)
-        .expect("Gameplay column")
-        .cells
-        .get(&local_index(position))
-    {
-        return entity;
-    }
-    world
-        .spawn((BlockOf(owner), BlockEntity { position }, Dormant))
-        .id()
-}
-#[derive(SystemParam)]
-pub(crate) struct BlockLookup<'w, 's> {
-    columns: Res<'w, GameplayColumns>,
-    data: Query<'w, 's, &'static GameplayColumn>,
-}
-impl BlockLookup<'_, '_> {
-    pub fn entity(&self, position: IVec3) -> Option<Entity> {
-        let owner = *self
-            .columns
-            .get(&crate::voxel::split_world_position(position).0)?;
-        self.data
-            .get(owner)
-            .ok()?
-            .cells
-            .get(&local_index(position))
-            .copied()
-    }
-}
-fn classify(
-    world: &mut World,
-    entity: Entity,
-    state: VoxelState,
-    catalog: &hollow_engine::blocks::BlockCatalog,
-) {
-    let kind = state.kind();
-    let previous = world
-        .get::<BlockState>(entity)
-        .map(|previous| previous.0.kind());
-    let kind_changed = previous != Some(kind);
-    let mut entity = world.entity_mut(entity);
-    if kind_changed && let Some(previous) = previous {
-        catalog.detach(hollow_core::BlockId(previous.index() as u32), &mut entity);
-    }
-    entity.insert(BlockState(state));
-    catalog.attach(
-        hollow_core::BlockId(kind.index() as u32),
-        &mut entity,
-        hollow_core::StateId(state.id()),
-        kind_changed,
-    );
-}
-
 /// Chest-specific topology, inventory and presentation are installed together.
 pub struct ChestPlugin;
 impl Plugin for ChestPlugin {
@@ -233,7 +99,7 @@ impl Plugin for ChestPlugin {
 }
 
 pub(crate) fn top_clear(world: &VoxelWorld, position: IVec3) -> bool {
-    position.y + 1 >= hollow_core::coordinates::CHUNK_HEIGHT
+    position.y + 1 >= hollow_worldgen::coordinates::CHUNK_HEIGHT
         || world
             .state(position + IVec3::Y)
             .is_some_and(|state| !state.is_side_solid(pumpkin_data::BlockDirection::Down))
@@ -260,7 +126,8 @@ impl PreparedColumn {
         chunk: IVec2,
         catalog: &hollow_engine::blocks::BlockCatalog,
     ) -> Self {
-        use hollow_core::coordinates::{CHUNK_SIZE, SECTION_COUNT, SECTION_HEIGHT};
+        use hollow_core::coordinates::{CHUNK_SIZE, SECTION_HEIGHT};
+        use hollow_worldgen::coordinates::SECTION_COUNT;
         let mut result = Self::default();
         let origin = IVec3::new(chunk.x * CHUNK_SIZE, 0, chunk.y * CHUNK_SIZE);
         for section in 0..SECTION_COUNT {
@@ -273,9 +140,13 @@ impl PreparedColumn {
                 for z in 0..CHUNK_SIZE {
                     for x in 0..CHUNK_SIZE {
                         let local = IVec3::new(x, y, z);
-                        if voxels.get(local).is_some_and(|kind| {
-                            catalog.materialized(hollow_core::BlockId(kind.index() as u32))
-                        }) {
+                        if voxels
+                            .state(local)
+                            .map(|state| state.kind())
+                            .is_some_and(|kind| {
+                                catalog.materialized(hollow_core::BlockId(kind.index() as u32))
+                            })
+                        {
                             result.entries.push((
                                 origin + local,
                                 voxels.state(local).expect("Discovered state"),
@@ -291,7 +162,10 @@ impl PreparedColumn {
 
     pub fn restore(&mut self, bytes: &[u8], chunk: IVec2) -> io::Result<()> {
         let record: ColumnRecord = serde_json::from_slice(bytes).map_err(io::Error::other)?;
-        self.simulation = crate::simulation::ColumnSimulation::restore(record.simulation)?;
+        self.simulation = crate::simulation::ColumnSimulation::restore(
+            record.simulation,
+            hollow_worldgen::coordinates::SECTION_COUNT,
+        )?;
         for drop in &record.drops {
             drop.validate()?;
             if crate::voxel::chunk_at(Vec3::from_array(drop.position)) != chunk {
@@ -367,16 +241,18 @@ pub(crate) fn spawn_for_chunk(
             .expect("Gameplay column")
             .initialized
         {
-            let mut simulation = prepared.simulation;
-            simulation.dormant_drops = prepared.drops;
-            world.entity_mut(owner).insert(simulation);
+            world
+                .get_mut::<GameplayColumn>(owner)
+                .expect("Gameplay column")
+                .application = prepared.drops;
+            world.entity_mut(owner).insert(prepared.simulation);
             // A shared clone keeps the resource available to factory-triggered observers.
             let catalog = world
                 .resource::<hollow_engine::blocks::BlockCatalog>()
                 .clone();
             for (position, state, inventory) in prepared.entries {
-                let entity = block(world, owner, position);
-                classify(world, entity, state, &catalog);
+                let entity = hollow_engine::blocks::materialized_block(world, owner, position);
+                hollow_engine::blocks::classify(world, entity, state, &catalog);
                 if profile(state.kind()).chest {
                     world.entity_mut(entity).insert(inventory);
                 }
@@ -397,7 +273,8 @@ pub(crate) fn loaded(
     event: On<Insert<LoadedColumn>>,
     terrain: Query<(&crate::voxel::VoxelChunk, &LoadedColumn)>,
     topology: TopologyUpdates,
-    mut simulations: Query<&mut crate::simulation::ColumnSimulation>,
+    simulations: Query<&crate::simulation::ColumnSimulation>,
+    mut columns: Query<&mut GameplayColumn>,
     mut waits: ResMut<crate::simulation::BoundaryWaits>,
     mut light: super::visuals::LightInvalidation,
     mut commands: Commands,
@@ -405,14 +282,14 @@ pub(crate) fn loaded(
     let Ok((chunk, owner)) = terrain.get(event.entity) else {
         return;
     };
-    if let Ok(mut work) = simulations.get_mut(owner.0) {
+    if let Ok(work) = simulations.get(owner.0) {
         for task in work.suspended.values() {
             waits.register(IVec2::from_array(task.chunk), owner.0);
         }
-        if !work.dormant_drops.is_empty() {
-            for drop in work.dormant_drops.drain(..) {
-                crate::dropped_item::restore_drop(&mut commands, drop);
-            }
+    }
+    if let Ok(mut column) = columns.get_mut(owner.0) {
+        for drop in column.application.drain(..) {
+            crate::dropped_item::restore_drop(&mut commands, drop);
         }
     }
     if let Ok(blocks) = topology.blocks.get(owner.0) {
@@ -486,7 +363,7 @@ pub(crate) fn changed(
     let catalog = catalog.clone();
     commands.queue(move |world: &mut World| {
         let owner = column(world, coordinate);
-        let entity = block(world, owner, position);
+        let entity = hollow_engine::blocks::materialized_block(world, owner, position);
         if container_changed {
             world
                 .get_mut::<GameplayColumn>(owner)
@@ -496,7 +373,7 @@ pub(crate) fn changed(
                 .entity_mut(entity)
                 .remove::<(Chest, ContainerInventory)>();
         }
-        classify(world, entity, new, &catalog);
+        hollow_engine::blocks::classify(world, entity, new, &catalog);
         if loaded {
             world.entity_mut(entity).remove::<Dormant>();
         }
@@ -560,7 +437,7 @@ impl ContainerTopology<'_, '_> {
                 let Ok((block, state, _, _, _)) = self.blocks.get(entity) else {
                     return false;
                 };
-                block.accessible(&self.world, state.0, actor)
+                block.accessible(&self.world, state.0, actor, 5.0)
                     && top_clear(&self.world, block.position)
             })
             .then_some(owners)
@@ -736,7 +613,7 @@ impl ColumnSnapshots<'_, '_> {
                     .filter_map(|entity| self.inventories.get(entity).ok())
                     .filter(|(_, inventory)| !inventory.is_empty())
                     .count();
-                let drops = work.dormant_drops.len()
+                let drops = data.application.len()
                     + mobiles
                         .into_iter()
                         .flat_map(|entities| entities.iter())
@@ -775,8 +652,8 @@ impl ColumnSnapshots<'_, '_> {
                             .collect(),
                         revision: data.revision,
                         simulation: simulation.capture(),
-                        drops: simulation
-                            .dormant_drops
+                        drops: data
+                            .application
                             .iter()
                             .cloned()
                             .chain(

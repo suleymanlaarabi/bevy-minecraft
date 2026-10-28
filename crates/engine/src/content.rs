@@ -31,3 +31,6 @@ fn freeze(mut commands: Commands, mut registrations: ResMut<ContentRegistrations
     let builder = registrations.0.take().expect("Content already frozen");
     commands.insert_resource(RegisteredContent(builder.freeze()));
 }
+
+#[cfg(feature = "content-ron")]
+pub mod import;

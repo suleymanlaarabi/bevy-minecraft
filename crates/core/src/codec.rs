@@ -75,16 +75,23 @@ impl<T: VoxelCell> TerrainRecord<T> {
         bytes.push(u8::from(self.modified));
         bytes
     }
-    pub fn decode(mut bytes: &[u8], section_count: usize) -> io::Result<Self> {
-        if take(&mut bytes, 1)?[0] as usize != section_count {
+    pub fn decode(
+        mut bytes: &[u8],
+        section_count: usize,
+        content: &crate::content::ContentCatalog,
+    ) -> io::Result<Self> {
+        if !(1..=32).contains(&section_count) || take(&mut bytes, 1)?[0] as usize != section_count {
             return Err(invalid());
         }
         let mut states = Vec::with_capacity(section_count);
         let mut light = Vec::with_capacity(section_count);
         for _ in 0..section_count {
             states.push(decode_section(&mut bytes, |bytes| {
-                T::from_id(u32::from_le_bytes(take(bytes, 4)?.try_into().unwrap()))
-                    .ok_or_else(invalid)
+                T::from_id(
+                    u32::from_le_bytes(take(bytes, 4)?.try_into().unwrap()),
+                    content,
+                )
+                .ok_or_else(invalid)
             })?);
             light.push(decode_section(&mut bytes, |bytes| Ok(take(bytes, 1)?[0]))?);
         }

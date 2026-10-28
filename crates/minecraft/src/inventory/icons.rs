@@ -183,7 +183,7 @@ pub(crate) fn render_block_icons(
     server: Res<AssetServer>,
     voxel_assets: Res<VoxelAssets>,
     materials: Res<Assets<VoxelMaterial>>,
-    model_materials: Res<Assets<crate::voxel::render::ModelMaterial>>,
+    model_materials: Res<Assets<hollow_render::material::ModelMaterial>>,
     texture_pack: Res<TexturePack>,
     mut images: ResMut<Assets<Image>>,
 ) {
@@ -357,7 +357,7 @@ fn render_icon(
     let scale = (max - min).max_element().max(1.0);
     let eye = Vec3::ONE.normalize();
     quads.sort_unstable_by(|a, b| {
-        let depth = |q: &models::ModelQuad| {
+        let depth = |q: &hollow_render::models::ModelQuad| {
             q.positions
                 .iter()
                 .map(|&p| Vec3::from_array(p).dot(eye))

@@ -17,14 +17,15 @@ mod embedding;
 pub use embedding::*;
 pub mod block_relations;
 pub mod blocks;
-pub use hollow_core::{coordinates, sections};
+pub use hollow_core::sections;
+pub mod coordinates;
 pub mod state;
 pub use blocks::VoxelKind;
 pub use state::VoxelState;
 pub mod codec;
-pub mod reconcile;
+
 pub mod runtime;
-pub mod tasks;
+
 pub use runtime::{GenerationSession, GenerationSettings, WorldGenerationPlugin};
 
 pub mod content;

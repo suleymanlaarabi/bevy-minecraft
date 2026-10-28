@@ -38,7 +38,7 @@ pub(crate) struct CloudMaterial {
 
 sky_material!(
     CloudMaterial,
-    "shaders/sky_clouds.wesl",
+    "embedded://hollow_render/shaders/sky_clouds.wesl",
     AlphaMode::Opaque,
     0.0,
     [ATTRIBUTE_POSITION => 0, ATTRIBUTE_NORMAL => 1],
@@ -257,7 +257,7 @@ fn cloud_mesh(pattern: &[bool], center: IVec2, radius: i32) -> Mesh {
             }
         }
     }
-    let indices = crate::voxel::render::model_mesh::compact_indices(indices, positions.len());
+    let indices = hollow_render::model_mesh::compact_indices(indices, positions.len());
     Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD,

@@ -1,6 +1,5 @@
 //! Fixed gameplay time, spatial activation and shared per-frame work limits.
 use hollow_features::motion::FixedPosition;
-mod fluids;
 mod work;
 pub(crate) use work::*;
 
@@ -8,73 +7,12 @@ use crate::{
     block_behavior::containers::{BlockEntities, GameplayColumn, GameplayColumns, LoadedColumn},
     player::Player,
     settings::SimulationSettings,
-    voxel::{VoxelChunk, chunk_at, streaming::ChunkIndex},
+    voxel::{VoxelChunk, chunk_at},
 };
 use bevy::prelude::*;
 use std::time::Duration;
 
-#[derive(Resource, Default, Clone, Copy)]
-pub struct GameplayClock(pub u64);
-
-/// Suspend fixed gameplay while leaving terrain streaming and loading operational.
-#[derive(Resource)]
-pub(crate) struct SimulationPaused;
-
-#[derive(Component)]
-#[component(storage = "SparseSet")]
-pub struct Simulating;
-
-#[derive(Component)]
-#[relationship(relationship_target = SimulatedEntities)]
-pub struct SimulatedIn(pub Entity);
-#[derive(Component, Default, Deref)]
-#[relationship_target(relationship = SimulatedIn)]
-pub struct SimulatedEntities(Vec<Entity>);
-
-#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SimulationSystems {
-    Activation,
-    Neighbors,
-    Scheduled,
-    Random,
-    Machines,
-    Actors,
-    Finalize,
-}
-
-#[derive(Resource, Default)]
-pub(crate) struct SimulationRegion {
-    pub center: Option<IVec2>,
-    pub radius: u32,
-}
-impl SimulationRegion {
-    pub fn contains(&self, position: IVec2) -> bool {
-        self.center.is_some_and(|center| {
-            hollow_core::coordinates::chunk_distance_squared(position, center)
-                <= (self.radius * self.radius) as i32
-        })
-    }
-}
-
-#[derive(Resource, Default)]
-pub struct SimulationDiagnostics {
-    pub active_columns: usize,
-    pub neighbor_cells: usize,
-    pub scheduled_ticks: usize,
-    pub modified_cells: usize,
-    pub random_attempts: usize,
-    pub ready_work: usize,
-    pub suspended_work: usize,
-    pub pending_write_bytes: usize,
-    pub maximum_lateness: u64,
-}
-#[derive(Resource, Default)]
-pub(crate) struct SimulationBudget {
-    pub neighbors: usize,
-    pub scheduled: usize,
-    pub mutations: usize,
-    pub random: usize,
-}
+pub use hollow_engine::simulation::*;
 pub(crate) const MAX_PENDING_WRITE_BYTES: usize = 16 * 1024 * 1024;
 // Retired owners retain half; capture/codec buffers reserve six MiB, leaving
 // two MiB for bounded candidate/index bookkeeping and serialization headers.
@@ -85,13 +23,9 @@ pub(crate) const MAX_CAPTURE_BYTES: usize = MAX_PENDING_WRITE_BYTES / 2 - 2 * 10
 pub struct GameplaySimulationPlugin;
 impl Plugin for GameplaySimulationPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(Time::<Fixed>::from_hz(20.0))
-            .init_resource::<GameplayClock>()
-            .init_resource::<SimulationRegion>()
-            .init_resource::<SimulationBudget>()
-            .init_resource::<SimulationDiagnostics>()
-            .init_resource::<BoundaryWaits>()
-            .init_resource::<RandomTickRegistry>()
+        app.add_plugins(hollow_engine::simulation::runtime::VoxelSimulationPlugin::<MinecraftRules>::default())
+            .insert_resource(MinecraftRules)
+            .insert_resource(Time::<Fixed>::from_hz(20.0))
             .configure_sets(
                 FixedUpdate,
                 (
@@ -111,32 +45,19 @@ impl Plugin for GameplaySimulationPlugin {
                 OnEnter(crate::game::GameState::Game),
                 restore_clock.after(crate::world::PrepareSession),
             )
-            .add_systems(OnExit(crate::game::GameState::Game), clear)
-            .add_systems(
-                RunFixedMainLoop,
-                reset_budget.in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
-            )
             .add_systems(
                 FixedUpdate,
-                (update_mobile_owners, activate, advance_clock)
+                (sync_region, update_mobile_owners)
                     .chain()
-                    .in_set(SimulationSystems::Activation),
+                    .in_set(SimulationSystems::Activation)
+                    .before(hollow_engine::simulation::runtime::activate::<Vec<crate::world::SavedDrop>>),
             )
-            .add_systems(
-                FixedUpdate,
-                process_neighbors.in_set(SimulationSystems::Neighbors),
-            )
-            .add_systems(
-                FixedUpdate,
-                fluids::process_scheduled.in_set(SimulationSystems::Scheduled),
-            )
-            .add_systems(FixedUpdate, random_ticks.in_set(SimulationSystems::Random))
             .add_systems(
                 FixedUpdate,
                 update_mobile_owners.in_set(SimulationSystems::Finalize),
             )
+            .add_observer(displaced)
             .add_observer(unload)
-            .add_observer(remove_work)
             .add_systems(Last, track_work.before(crate::world::WorldSaveCapture));
     }
 }
@@ -155,154 +76,21 @@ fn restore_clock(
 ) {
     clock.0 = session.map_or(0, |session| session.resume.gameplay_tick);
 }
-fn clear(
-    mut region: ResMut<SimulationRegion>,
-    mut waits: ResMut<BoundaryWaits>,
-    mut diagnostics: ResMut<SimulationDiagnostics>,
-    mut commands: Commands,
-) {
-    *region = default();
-    *waits = default();
-    *diagnostics = default();
-    commands.remove_resource::<crate::simulation::SimulationPaused>();
-}
-fn reset_budget(
-    mut budget: ResMut<SimulationBudget>,
-    mut diagnostics: ResMut<SimulationDiagnostics>,
-) {
-    *budget = SimulationBudget {
-        neighbors: 4096,
-        scheduled: 2048,
-        mutations: 4096,
-        random: 8192,
-    };
-    diagnostics.neighbor_cells = 0;
-    diagnostics.scheduled_ticks = 0;
-    diagnostics.modified_cells = 0;
-    diagnostics.random_attempts = 0;
-}
-
-// Readiness is re-evaluated only after membership, terrain or ownership changes.
-fn activate(
-    mut commands: Commands,
+fn sync_region(
     player: Query<&FixedPosition, With<Player>>,
     settings: Res<SimulationSettings>,
-    index: Res<ChunkIndex>,
+    voxel: Res<crate::voxel::VoxelSettings>,
     mut region: ResMut<SimulationRegion>,
-    terrain: Query<(&VoxelChunk, &LoadedColumn)>,
-    mut columns: Query<(
-        &GameplayColumn,
-        Option<&BlockEntities>,
-        Option<&SimulatedEntities>,
-        Has<Simulating>,
-        &mut ColumnSimulation,
-    )>,
-    mut diagnostics: ResMut<SimulationDiagnostics>,
-    mut waits: ResMut<BoundaryWaits>,
-    mut wake_owners: Local<Vec<(IVec2, Entity)>>,
-    mut ready_work: Local<Vec<BoundaryWork>>,
+    mut seed: ResMut<hollow_engine::simulation::SimulationSeed>,
 ) {
-    let center = player
-        .single()
-        .ok()
-        .map(|motion| chunk_at(motion.current.as_vec3()));
-    let radius = settings.effective_distance();
-    let changed = region.center != center || region.radius != radius;
-    region.center = center;
-    region.radius = radius;
-    if !changed && !index.is_changed() {
-        return;
-    }
-    let mut active = 0;
-    for (chunk, owner) in &terrain {
-        let Ok((column, blocks, mobiles, was_active, work)) = columns.get(owner.0) else {
-            continue;
-        };
-        let ready = column.initialized
-            && region.contains(chunk.position)
-            && (-1..=1).all(|x| {
-                (-1..=1).all(|z| index.contains_key(&(chunk.position + IVec2::new(x, z))))
-            });
-        active += usize::from(ready);
-        if was_active == ready {
-            continue;
-        }
-        for entity in std::iter::once(owner.0)
-            .chain(blocks.into_iter().flat_map(|entities| entities.iter()))
-            .chain(mobiles.into_iter().flat_map(|entities| entities.iter()))
-        {
-            if ready {
-                commands.entity(entity).insert(Simulating);
-            } else {
-                commands.entity(entity).remove::<Simulating>();
-            }
-        }
-        if ready {
-            commands.entity(owner.0).insert(RandomEligibilityDirty);
-            waits.wake(chunk.position, &mut wake_owners);
-            for task in work.suspended.values() {
-                let dependency = IVec2::from_array(task.chunk);
-                if let Some(&terrain_entity) = index.get(&dependency)
-                    && let Ok((_, target)) = terrain.get(terrain_entity)
-                    && columns
-                        .get(target.0)
-                        .is_ok_and(|(_, _, _, active, _)| active)
-                {
-                    waits.wake(dependency, &mut wake_owners);
-                }
-            }
-        }
-    }
-    for (chunk, owner) in wake_owners.drain(..) {
-        if let Ok((_, _, _, _, mut work)) = columns.get_mut(owner) {
-            work.wake(chunk, &mut ready_work);
-        }
-    }
-    diagnostics.active_columns = active;
-}
-#[derive(Component)]
-#[component(storage = "SparseSet")]
-pub(crate) struct ReadyTicks;
-#[derive(Component)]
-#[component(storage = "SparseSet")]
-pub(crate) struct ReadyNeighbors;
-#[derive(Component)]
-#[component(storage = "SparseSet")]
-pub(crate) struct RandomEligibilityDirty;
-fn advance_clock(
-    mut commands: Commands,
-    mut clock: ResMut<GameplayClock>,
-    mut columns: Query<
-        (
-            Entity,
-            &mut ColumnSimulation,
-            Has<ReadyTicks>,
-            Has<ReadyNeighbors>,
-        ),
-        With<Simulating>,
-    >,
-) {
-    clock.0 = clock.0.checked_add(1).expect("Gameplay clock exhausted");
-    for (entity, mut column, ticks, neighbors) in &mut columns {
-        column.local_tick = column
-            .local_tick
-            .checked_add(1)
-            .expect("Column clock exhausted");
-        if column.has_due() != ticks {
-            if ticks {
-                commands.entity(entity).remove::<ReadyTicks>();
-            } else {
-                commands.entity(entity).insert(ReadyTicks);
-            }
-        }
-        if column.has_neighbors() != neighbors {
-            if neighbors {
-                commands.entity(entity).remove::<ReadyNeighbors>();
-            } else {
-                commands.entity(entity).insert(ReadyNeighbors);
-            }
-        }
-    }
+    region.set_if_neq(SimulationRegion {
+        center: player
+            .single()
+            .ok()
+            .map(|motion| chunk_at(motion.current.as_vec3())),
+        radius: settings.effective_distance(),
+    });
+    seed.0 = voxel.seed;
 }
 
 fn update_mobile_owners(
@@ -377,7 +165,7 @@ fn unload(
     event: On<Remove<VoxelChunk>>,
     terrain: Query<&LoadedColumn>,
     mut columns: Query<(
-        &mut ColumnSimulation,
+        &mut GameplayColumn,
         Option<&SimulatedEntities>,
         Option<&BlockEntities>,
     )>,
@@ -393,7 +181,7 @@ fn unload(
     };
     commands
         .entity(owner.0)
-        .remove::<(Simulating, crate::voxel::streaming::RenderRequested)>();
+        .remove::<(Simulating, hollow_render::streaming::RenderRequested)>();
     let Ok((mut work, mobiles, blocks)) = columns.get_mut(owner.0) else {
         return;
     };
@@ -405,7 +193,7 @@ fn unload(
     if let Some(mobiles) = mobiles {
         for entity in mobiles.iter() {
             if let Ok((drop, motion, position)) = drops.get(entity) {
-                work.dormant_drops.push(drop.capture(motion, position));
+                work.application.push(drop.capture(motion, position));
                 commands.entity(entity).despawn();
             } else {
                 commands
@@ -414,32 +202,4 @@ fn unload(
             }
         }
     }
-}
-fn remove_work(event: On<Remove<ColumnSimulation>>, mut waits: ResMut<BoundaryWaits>) {
-    waits.remove_owner(event.entity);
-}
-
-/// Conservative retained bytes, counting complete shared section allocations.
-pub(crate) fn terrain_bytes(voxels: &crate::voxel::ChunkVoxels) -> usize {
-    use hollow_core::sections::Section;
-    let headers = std::mem::size_of::<crate::voxel::ChunkVoxels>()
-        + hollow_core::coordinates::SECTION_COUNT
-            * (std::mem::size_of::<Section<crate::voxel::VoxelState>>()
-                + 2 * std::mem::size_of::<Section<u8>>())
-        + 48;
-    headers
-        + (0..hollow_core::coordinates::SECTION_COUNT)
-            .map(|section| {
-                let states = match voxels.states.section(section) {
-                    Section::Uniform(_) => 0,
-                    Section::Dense(_) => 4096 * std::mem::size_of::<crate::voxel::VoxelState>(),
-                };
-                // Also reserve a possible rendering-light estimate layer.
-                let light = match voxels.light.section(section) {
-                    Section::Uniform(_) => 0,
-                    Section::Dense(_) => 4096 * 2,
-                };
-                states + light
-            })
-            .sum::<usize>()
 }

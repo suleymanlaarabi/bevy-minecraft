@@ -30,7 +30,7 @@ pub(super) struct LoadingMessage;
 pub(super) fn start_spawn_search(
     mut commands: Commands,
     voxel_settings: Option<Res<VoxelSettings>>,
-    budget: Res<hollow_worldgen::tasks::VoxelTaskBudget>,
+    budget: Res<hollow_engine::tasks::VoxelTaskBudget>,
     generator: Option<Res<crate::voxel::generation::WorldGenerator>>,
     session: Option<Res<crate::world::WorldSession>>,
 ) {

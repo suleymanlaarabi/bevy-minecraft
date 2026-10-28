@@ -25,7 +25,7 @@ pub(crate) fn evaluate(
     let info = state_behavior(state);
 
     let mut sample = |p: IVec3| {
-        if !(0..hollow_core::coordinates::CHUNK_HEIGHT).contains(&p.y) {
+        if !(0..hollow_worldgen::coordinates::CHUNK_HEIGHT).contains(&p.y) {
             return Some(VoxelKind::Air.default_state());
         }
         let value = read(p);

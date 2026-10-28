@@ -80,7 +80,7 @@ pub(crate) fn open_manual(
     if state.0 != event.state
         || !actors
             .get(event.actor)
-            .is_ok_and(|motion| block.accessible(&world, state.0, motion.current.as_vec3()))
+            .is_ok_and(|motion| block.accessible(&world, state.0, motion.current.as_vec3(), 5.0))
     {
         return;
     }

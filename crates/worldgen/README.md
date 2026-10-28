@@ -28,17 +28,15 @@ the block-only generation pipeline. Gameplay containers use their own storage.
 The spatial graph, shared voxel task budget, cancellation, and checkpoint flow
 are retained.
 
-Current persistence identities:
+Generation records use the shared terrain codec and the engine SQLite backend.
+The generator stores its typed stage alongside the payload; Minecraft owns its
+application metadata and checkpoints. Saves are disposable: there are no format
+versions, compatibility readers or migrations. See the current package boundaries
+in [Voxel engine architecture](../../docs/PLUGIN_ARCHITECTURE.md).
 
-- Generator: `hollow-bevy-2`.
-- Terrain payload: `HTRN` version 2.
-- Generated chunk payload: `HGEN` version 3.
-- Game world format: 5.
+## Historical refactor measurements
 
-Previous identities are rejected explicitly. There are no compatibility readers
-or migrations. Block and item registry identifiers are unchanged.
-
-## Refactor measurements
+The counts below describe the earlier generator refactor, not the current workspace.
 
 The baseline was recorded after `cargo fmt --all`. Both measurements use the
 same lexical line counter over production Rust in `src` and `crates/worldgen`,
@@ -67,9 +65,10 @@ modules, rather than only disabling their compilation.
 
 ## Memory reduction
 
-The memory pass keeps direct `u16` state access and enforces a maximum of 63,000
-states at compile time. Revisions still guard asynchronous meshes, lighting, and
-save acknowledgements; they are unrelated to reading older formats.
+The measurements below describe that earlier memory pass. Current `VoxelState`
+wraps the shared 32-bit `StateId`; native Minecraft lookup converts to its 16-bit
+registry ID at the adapter boundary. Revisions guard asynchronous meshes, lighting
+and save acknowledgements; they are unrelated to reading older formats.
 
 Allocation sizes below come from source inspection, not runtime measurements.
 

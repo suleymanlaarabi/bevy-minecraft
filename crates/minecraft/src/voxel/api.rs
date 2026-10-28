@@ -14,7 +14,7 @@ impl VoxelCommandsExt for Commands<'_, '_> {
         self
     }
     fn set_voxel(&mut self, world_position: IVec3, kind: VoxelKind) -> &mut Self {
-        self.trigger(SetVoxel::new(world_position, kind));
+        self.trigger(SetVoxel::with_state(world_position, kind.default_state()));
         self
     }
 }

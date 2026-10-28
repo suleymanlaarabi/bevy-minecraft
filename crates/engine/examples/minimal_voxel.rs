@@ -2,7 +2,7 @@
 use bevy_app::{App, Startup, TaskPoolPlugin, Update};
 use bevy_ecs::prelude::*;
 use bevy_math::prelude::*;
-use hollow_core::{BlockId, VoxelCell, coordinates::SECTION_COUNT, sections::Layer};
+use hollow_core::{BlockId, VoxelCell, coordinates::ColumnLayout, sections::Layer};
 use hollow_engine::{
     VoxelWorldPlugin,
     chunk::{ChunkVoxels, VoxelChunk},
@@ -17,13 +17,13 @@ impl VoxelCell for Cell {
     fn id(self) -> u32 {
         self.0
     }
-    fn from_id(id: u32) -> Option<Self> {
+    fn from_id(id: u32, _content: &hollow_core::content::ContentCatalog) -> Option<Self> {
         matches!(id, 0 | 70_000 | 70_001).then_some(Self(id))
     }
-    fn kind(self) -> BlockId {
+    fn kind(self, _content: &hollow_core::content::ContentCatalog) -> BlockId {
         BlockId(u32::from(self.0 != 0))
     }
-    fn default_state(kind: BlockId) -> Self {
+    fn default_state(kind: BlockId, _content: &hollow_core::content::ContentCatalog) -> Self {
         match kind.0 {
             0 => Self(0),
             1 => Self(70_000),
@@ -33,13 +33,13 @@ impl VoxelCell for Cell {
     fn air() -> Self {
         Self(0)
     }
-    fn is_liquid(self) -> bool {
+    fn is_liquid(self, _content: &hollow_core::content::ContentCatalog) -> bool {
         false
     }
-    fn is_air(self) -> bool {
+    fn is_air(self, _content: &hollow_core::content::ContentCatalog) -> bool {
         self.0 == 0
     }
-    fn is_opaque(self) -> bool {
+    fn is_opaque(self, _content: &hollow_core::content::ContentCatalog) -> bool {
         self.0 != 0
     }
 }
@@ -60,8 +60,8 @@ fn create_column(mut commands: Commands, mut index: ResMut<ChunkIndex>) {
                 position: IVec2::ZERO,
             },
             ChunkVoxels::from_layers(
-                Layer::filled(Cell(70_000), SECTION_COUNT),
-                Layer::filled(0xf0, SECTION_COUNT),
+                Layer::filled(Cell(70_000), ColumnLayout::default().section_count()),
+                Layer::filled(0xf0, ColumnLayout::default().section_count()),
             ),
         ))
         .id();

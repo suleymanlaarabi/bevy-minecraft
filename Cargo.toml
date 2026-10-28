@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/core", "crates/minecraft", "crates/engine", "crates/features", "crates/worldgen", "crates/worldgen/crates/*"]
+members = [".", "crates/core", "crates/minecraft", "crates/engine", "crates/render", "crates/features", "crates/worldgen", "crates/worldgen/crates/*"]
 resolver = "3"
 
 [package]
