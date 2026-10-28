@@ -5,13 +5,9 @@ use crate::{game::GameState, player::PlayerCamera, settings::GraphicsSettings};
 use bevy::{
     asset::RenderAssetUsages,
     light::{NotShadowCaster, NotShadowReceiver},
-    mesh::{MeshVertexBufferLayoutRef, PrimitiveTopology},
-    pbr::{Material, MaterialPipeline, MaterialPipelineKey},
+    mesh::PrimitiveTopology,
     prelude::*,
-    render::render_resource::{
-        AsBindGroup, Face, RenderPipelineDescriptor, SpecializedMeshPipelineError,
-    },
-    shader::ShaderRef,
+    render::render_resource::AsBindGroup,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
 use std::sync::Arc;
@@ -40,33 +36,14 @@ pub(crate) struct CloudMaterial {
     fade: Vec4,
 }
 
-impl Material for CloudMaterial {
-    fn vertex_shader() -> ShaderRef {
-        "shaders/sky_clouds.wesl".into()
-    }
-    fn fragment_shader() -> ShaderRef {
-        "shaders/sky_clouds.wesl".into()
-    }
-    fn enable_prepass() -> bool {
-        false
-    }
-    fn enable_shadows() -> bool {
-        false
-    }
-    fn specialize(
-        _pipeline: &MaterialPipeline,
-        descriptor: &mut RenderPipelineDescriptor,
-        layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
-    ) -> Result<(), SpecializedMeshPipelineError> {
-        descriptor.vertex.buffers = vec![layout.0.get_layout(&[
-            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
-            Mesh::ATTRIBUTE_NORMAL.at_shader_location(1),
-        ])?];
-        descriptor.primitive.cull_mode = Some(Face::Back);
-        Ok(())
-    }
-}
+sky_material!(
+    CloudMaterial,
+    "shaders/sky_clouds.wesl",
+    AlphaMode::Opaque,
+    0.0,
+    [ATTRIBUTE_POSITION => 0, ATTRIBUTE_NORMAL => 1],
+    cull = Some(bevy::render::render_resource::Face::Back)
+);
 
 /// Which cells hold a cloud, `PATTERN`² entries, generated once.
 #[derive(Resource, Clone)]

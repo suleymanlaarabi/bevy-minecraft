@@ -11,13 +11,8 @@ use bevy::{
         Atmosphere, CascadeShadowConfigBuilder, NotShadowCaster, SunDisk,
         atmosphere::ScatteringMedium,
     },
-    mesh::MeshVertexBufferLayoutRef,
-    pbr::{Material, MaterialPipeline, MaterialPipelineKey},
     prelude::*,
-    render::render_resource::{
-        AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
-    },
-    shader::ShaderRef,
+    render::render_resource::{AsBindGroup, ShaderType},
 };
 
 /// Output-space radiance of the sun's disk at its center: far past white, so bloom
@@ -55,39 +50,13 @@ pub(crate) struct SunMaterial {
     settings: SunSettings,
 }
 
-impl Material for SunMaterial {
-    fn vertex_shader() -> ShaderRef {
-        "shaders/sky_sun.wesl".into()
-    }
-    fn fragment_shader() -> ShaderRef {
-        "shaders/sky_sun.wesl".into()
-    }
-    fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Add
-    }
-    fn depth_bias(&self) -> f32 {
-        SUN_SORT_BIAS
-    }
-    fn enable_prepass() -> bool {
-        false
-    }
-    fn enable_shadows() -> bool {
-        false
-    }
-    fn specialize(
-        _pipeline: &MaterialPipeline,
-        descriptor: &mut RenderPipelineDescriptor,
-        layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
-    ) -> Result<(), SpecializedMeshPipelineError> {
-        descriptor.vertex.buffers = vec![
-            layout
-                .0
-                .get_layout(&[Mesh::ATTRIBUTE_POSITION.at_shader_location(0)])?,
-        ];
-        Ok(())
-    }
-}
+sky_material!(
+    SunMaterial,
+    "shaders/sky_sun.wesl",
+    AlphaMode::Add,
+    SUN_SORT_BIAS,
+    [ATTRIBUTE_POSITION => 0]
+);
 
 #[derive(Component)]
 pub(super) struct SunDiskMesh;

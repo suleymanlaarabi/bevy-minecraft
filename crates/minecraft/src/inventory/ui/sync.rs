@@ -1,38 +1,12 @@
 use super::{
-    CursorStackView, EmptySlotLabel, HotbarHud, ICON_SIZE, InventorySlotView, SELECTED_BORDER,
-    SLOT_BORDER, SlotCount, SlotIcon, empty_slot_label,
+    CursorStackView, EmptySlotLabel, ICON_SIZE, InventorySlotView, SELECTED_BORDER, SLOT_BORDER,
+    SlotCount, SlotIcon, empty_slot_label,
 };
 use crate::{
     inventory::{HOTBAR_SIZE, InventoryCursor, ItemKind, PlayerInventory, icons::BlockIcons},
-    player::{Crosshair, Player},
+    player::Player,
 };
 use bevy::{prelude::*, window::PrimaryWindow};
-
-pub(crate) fn hide_game_hud(
-    mut hotbar: Query<&mut Visibility, With<HotbarHud>>,
-    mut crosshair: Query<&mut Visibility, (With<Crosshair>, Without<HotbarHud>)>,
-) {
-    for mut visibility in &mut hotbar {
-        *visibility = Visibility::Hidden;
-    }
-
-    for mut visibility in &mut crosshair {
-        *visibility = Visibility::Hidden;
-    }
-}
-
-pub(crate) fn show_game_hud(
-    mut hotbar: Query<&mut Visibility, With<HotbarHud>>,
-    mut crosshair: Query<&mut Visibility, (With<Crosshair>, Without<HotbarHud>)>,
-) {
-    for mut visibility in &mut hotbar {
-        *visibility = Visibility::Inherited;
-    }
-
-    for mut visibility in &mut crosshair {
-        *visibility = Visibility::Inherited;
-    }
-}
 
 /// Points `node` at the icon of `item`, leaving it untouched when already shown.
 fn show_icon(node: &mut Mut<ImageNode>, icons: &BlockIcons, item: ItemKind) {

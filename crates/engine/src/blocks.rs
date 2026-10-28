@@ -24,6 +24,7 @@ impl Default for BlockRegistrations {
 }
 impl BlockRegistrations {
     /// Compose ordinary components without writing structural callback plumbing.
+    /// Multiple interactive capabilities can observe the same block use.
     pub fn register_bundle<B: Bundle + Default>(&mut self, block: BlockId, interactive: bool) {
         self.register(
             block,
@@ -45,10 +46,6 @@ impl BlockRegistrations {
             .as_mut()
             .expect("Block registrations are already frozen");
         entries.resize_with((block.index() + 1).max(entries.len()), Vec::new);
-        assert!(
-            !factory.interactive || !entries[block.index()].iter().any(|entry| entry.interactive),
-            "A block can only register one interaction owner"
-        );
         entries[block.index()].push(factory);
     }
 }

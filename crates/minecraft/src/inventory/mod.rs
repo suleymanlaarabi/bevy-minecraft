@@ -77,14 +77,8 @@ impl Plugin for InventoryPlugin {
                 ui::return_cursor_stack,
             )
             .add_systems(OnEnter(GameState::Game), ui::spawn_hotbar_hud)
-            .add_systems(
-                OnEnter(InventoryState::Open),
-                (ui::hide_game_hud, ui::spawn_inventory_overlay).chain(),
-            )
-            .add_systems(
-                OnExit(InventoryState::Open),
-                (ui::return_cursor_stack, ui::show_game_hud).chain(),
-            )
+            .add_systems(OnEnter(InventoryState::Open), ui::spawn_inventory_overlay)
+            .add_systems(OnExit(InventoryState::Open), ui::return_cursor_stack)
             .add_systems(
                 Update,
                 toggle_inventory

@@ -10,6 +10,7 @@ use hollow_engine::{
 };
 use hollow_minecraft::{
     app::HollowPlugin,
+    block_behavior::BlockUse,
     inventory::InventoryStation,
     player::Player,
     voxel::{SetVoxel, VoxelState},
@@ -20,6 +21,9 @@ struct ResinSource {
     fluid: StateId,
     block: StateId,
 }
+#[derive(Component, Default)]
+struct ResinInteraction;
+
 struct ResinPlugin;
 impl Plugin for ResinPlugin {
     fn build(&self, app: &mut App) {
@@ -100,6 +104,11 @@ impl Plugin for ResinPlugin {
                 world
                     .resource_mut::<hollow_engine::blocks::BlockRegistrations>()
                     .register_bundle::<InventoryStation>(solid, true);
+                // A second capability can react to the same use without changing
+                // the crafting station or its observer.
+                world
+                    .resource_mut::<hollow_engine::blocks::BlockRegistrations>()
+                    .register_bundle::<ResinInteraction>(solid, true);
                 let solid_state = content.blocks[solid.index()].default_state;
                 let cured_state = StateId(solid_state.0 + 1);
                 content.states[cured_state.index()].luminance = 4;
@@ -124,9 +133,17 @@ impl Plugin for ResinPlugin {
                 }
             },
         );
-        app.insert_resource(source).add_systems(Update, place_resin);
+        app.insert_resource(source)
+            .add_observer(resin_used)
+            .add_systems(Update, place_resin);
     }
 }
+fn resin_used(event: On<BlockUse>, resin: Query<(), With<ResinInteraction>>) {
+    if resin.contains(event.entity) {
+        info!("Resin station used by {:?}", event.actor);
+    }
+}
+
 fn place_resin(
     keys: Res<ButtonInput<KeyCode>>,
     source: Res<ResinSource>,

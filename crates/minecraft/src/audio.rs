@@ -24,6 +24,7 @@ impl Plugin for GameAudioPlugin {
         app.add_systems(Startup, load_bank)
             .add_observer(play_sound)
             .add_observer(button_audio)
+            .add_observer(item_collected_audio)
             .add_systems(Update, equipment_audio.run_if(crate::world::playing))
             .add_systems(
                 FixedUpdate,
@@ -390,6 +391,16 @@ fn movement_audio(
         if let Some((position, block)) = contact {
             commands.trigger(Sound::block(block.kind(), BlockSound::Step, position));
         }
+    }
+}
+
+fn item_collected_audio(
+    event: On<crate::dropped_item::ItemCollected>,
+    players: Query<(), With<Player>>,
+    mut commands: Commands,
+) {
+    if players.contains(event.entity) {
+        commands.trigger(Sound::event(SoundId::EntityItemPickup));
     }
 }
 

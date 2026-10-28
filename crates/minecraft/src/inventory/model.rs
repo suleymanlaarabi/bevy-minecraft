@@ -223,6 +223,11 @@ impl Default for PlayerInventory {
 }
 
 impl PlayerInventory {
+    /// Empty actor inventory, without the local player's initial items.
+    pub fn empty() -> Self {
+        Self { slots: default() }
+    }
+
     pub(crate) fn from_saved(slots: [Option<ItemStack>; SLOT_COUNT]) -> Self {
         Self {
             slots: slots.into(),

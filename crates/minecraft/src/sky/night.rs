@@ -6,13 +6,9 @@ use bevy::{
     asset::RenderAssetUsages,
     camera::visibility::NoFrustumCulling,
     light::NotShadowCaster,
-    mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology},
-    pbr::{Material, MaterialPipeline, MaterialPipelineKey},
+    mesh::{Indices, PrimitiveTopology},
     prelude::*,
-    render::render_resource::{
-        AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
-    },
-    shader::ShaderRef,
+    render::render_resource::{AsBindGroup, ShaderType},
 };
 
 const STAR_COUNT: u32 = 2600;
@@ -30,39 +26,17 @@ pub(crate) struct StarsMaterial {
     settings: Vec4,
 }
 
-impl Material for StarsMaterial {
-    fn vertex_shader() -> ShaderRef {
-        "shaders/sky_stars.wesl".into()
-    }
-    fn fragment_shader() -> ShaderRef {
-        "shaders/sky_stars.wesl".into()
-    }
-    fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Add
-    }
-    fn depth_bias(&self) -> f32 {
-        STARS_SORT_BIAS
-    }
-    fn enable_prepass() -> bool {
-        false
-    }
-    fn enable_shadows() -> bool {
-        false
-    }
-    fn specialize(
-        _pipeline: &MaterialPipeline,
-        descriptor: &mut RenderPipelineDescriptor,
-        layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
-    ) -> Result<(), SpecializedMeshPipelineError> {
-        descriptor.vertex.buffers = vec![layout.0.get_layout(&[
-            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
-            Mesh::ATTRIBUTE_UV_0.at_shader_location(1),
-            Mesh::ATTRIBUTE_COLOR.at_shader_location(2),
-        ])?];
-        Ok(())
-    }
-}
+sky_material!(
+    StarsMaterial,
+    "shaders/sky_stars.wesl",
+    AlphaMode::Add,
+    STARS_SORT_BIAS,
+    [
+        ATTRIBUTE_POSITION => 0,
+        ATTRIBUTE_UV_0 => 1,
+        ATTRIBUTE_COLOR => 2,
+    ]
+);
 
 #[derive(Clone, Copy, Debug, Default, ShaderType)]
 struct MoonSettings {
@@ -81,39 +55,13 @@ pub(crate) struct MoonMaterial {
     settings: MoonSettings,
 }
 
-impl Material for MoonMaterial {
-    fn vertex_shader() -> ShaderRef {
-        "shaders/sky_moon.wesl".into()
-    }
-    fn fragment_shader() -> ShaderRef {
-        "shaders/sky_moon.wesl".into()
-    }
-    fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Add
-    }
-    fn depth_bias(&self) -> f32 {
-        MOON_SORT_BIAS
-    }
-    fn enable_prepass() -> bool {
-        false
-    }
-    fn enable_shadows() -> bool {
-        false
-    }
-    fn specialize(
-        _pipeline: &MaterialPipeline,
-        descriptor: &mut RenderPipelineDescriptor,
-        layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
-    ) -> Result<(), SpecializedMeshPipelineError> {
-        descriptor.vertex.buffers = vec![
-            layout
-                .0
-                .get_layout(&[Mesh::ATTRIBUTE_POSITION.at_shader_location(0)])?,
-        ];
-        Ok(())
-    }
-}
+sky_material!(
+    MoonMaterial,
+    "shaders/sky_moon.wesl",
+    AlphaMode::Add,
+    MOON_SORT_BIAS,
+    [ATTRIBUTE_POSITION => 0]
+);
 
 #[derive(Component)]
 pub(super) struct Stars;

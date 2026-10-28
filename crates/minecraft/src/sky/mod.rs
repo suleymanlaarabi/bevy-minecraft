@@ -5,6 +5,45 @@
 //! [`TimeOfDay`] advances with virtual time; [`SkyState`] derives every color and light
 //! level from it once per frame and is the only source the rest of the game reads.
 
+// Sky passes share their pipeline contract; each material declares only its inputs.
+macro_rules! sky_material {
+    ($material:ty, $shader:literal, $alpha:expr, $bias:expr,
+     [$($attribute:ident => $location:literal),+ $(,)?] $(, cull = $cull:expr)?) => {
+        impl bevy::pbr::Material for $material {
+            fn vertex_shader() -> bevy::shader::ShaderRef {
+                $shader.into()
+            }
+            fn fragment_shader() -> bevy::shader::ShaderRef {
+                $shader.into()
+            }
+            fn alpha_mode(&self) -> bevy::prelude::AlphaMode {
+                $alpha
+            }
+            fn depth_bias(&self) -> f32 {
+                $bias
+            }
+            fn enable_prepass() -> bool {
+                false
+            }
+            fn enable_shadows() -> bool {
+                false
+            }
+            fn specialize(
+                _pipeline: &bevy::pbr::MaterialPipeline,
+                descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+                layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+                _key: bevy::pbr::MaterialPipelineKey<Self>,
+            ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+                descriptor.vertex.buffers = vec![layout.0.get_layout(&[
+                    $(bevy::prelude::Mesh::$attribute.at_shader_location($location)),+
+                ])?];
+                $(descriptor.primitive.cull_mode = $cull;)?
+                Ok(())
+            }
+        }
+    };
+}
+
 mod celestial;
 mod clouds;
 mod cycle;

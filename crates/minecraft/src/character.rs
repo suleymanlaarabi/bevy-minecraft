@@ -3,7 +3,7 @@
 //! there are no internal-edge contacts between neighboring voxels or chunks.
 #![allow(clippy::type_complexity)]
 
-use bevy::{math::DVec3, prelude::*};
+use bevy::{ecs::query::QueryData, math::DVec3, prelude::*};
 
 use crate::voxel::{VoxelState, VoxelWorld};
 use hollow_engine::fluids::FluidContactState;
@@ -538,44 +538,66 @@ fn ground_block(world: &VoxelWorld, body: &Aabb) -> (f64, f64, f64) {
     )
 }
 
-/// Advances every character by one vanilla tick using Bevy's fixed schedule.
+/// One reusable borrow of a character's simulation state, with no extra ECS storage.
+#[derive(QueryData)]
+#[query_data(mutable)]
+struct CharacterPhysics {
+    transform: &'static Transform,
+    motion: &'static mut CharacterMotion,
+    fixed_position: &'static mut FixedPosition,
+    state: &'static mut CharacterState,
+    body: &'static CharacterBody,
+    movement: &'static CharacterMovement,
+    locomotion: &'static Locomotion,
+    activity: &'static mut CharacterActivity,
+    fluid_contact: &'static mut FluidContactState,
+    auto_jump: Has<AutoJump>,
+    flying: Has<Flying>,
+}
+
+/// Advance each character with one reusable collision scratch buffer.
 fn character_physics(
     world: VoxelWorld,
     mut terrain: Local<Terrain>,
-    mut characters: Query<
-        (
-            &Transform,
-            &mut CharacterMotion,
-            &mut FixedPosition,
-            &mut CharacterState,
-            &CharacterBody,
-            &CharacterMovement,
-            &Locomotion,
-            &mut CharacterActivity,
-            &mut FluidContactState,
-            Has<AutoJump>,
-            Has<Flying>,
-        ),
-        With<crate::simulation::Simulating>,
-    >,
+    mut characters: Query<CharacterPhysics, With<crate::simulation::Simulating>>,
 ) {
-    for (
-        transform,
-        mut motion,
-        mut fixed_position,
-        mut state,
-        body,
-        movement,
-        locomotion,
-        mut activity,
-        mut fluid_contact,
-        auto_jump,
-        flying,
-    ) in &mut characters
-    {
-        *activity = CharacterActivity::default();
+    for mut character in &mut characters {
+        character.step(&world, &mut terrain);
+    }
+}
+
+/// Derived once per tick and kept on the stack, avoiding transient ECS changes.
+#[derive(Clone, Copy)]
+struct TravelFrame {
+    velocity: DVec3,
+    bounds: Aabb,
+    input: DVec3,
+    medium: Option<hollow_core::FluidId>,
+    eye_fluid: hollow_core::FluidId,
+    fluid_depth: f64,
+    sneaking: bool,
+    sprinting: bool,
+    climbing: bool,
+    slipperiness: f64,
+    speed_factor: f64,
+}
+
+impl CharacterPhysicsItem<'_, '_> {
+    fn step(&mut self, world: &VoxelWorld, terrain: &mut Terrain) {
+        let Self {
+            transform,
+            motion,
+            fixed_position,
+            state,
+            body,
+            locomotion,
+            activity,
+            fluid_contact,
+            ..
+        } = self;
+        **activity = CharacterActivity::default();
         if !locomotion.enabled {
-            continue;
+            return;
         }
         let position = transform.translation;
         // Spawns, respawns and developer tools write the transform directly.
@@ -616,291 +638,349 @@ fn character_physics(
             motion.velocity = DVec3::ZERO;
             fluid_contact.set_if_neq(FluidContactState::default());
             fixed_position.acknowledge(transform);
-            continue;
+            return;
         }
-        let contact = tick(
-            &world,
-            &mut terrain,
-            &mut motion,
-            &mut fixed_position,
-            &mut state,
+        let contact = self.travel(world, terrain);
+        self.fluid_contact.set_if_neq(contact);
+        self.fixed_position.acknowledge(self.transform);
+    }
+
+    /// One vanilla tick: sample the environment, apply intent, then integrate travel.
+    fn travel(&mut self, world: &VoxelWorld, terrain: &mut Terrain) -> FluidContactState {
+        let mut frame = self.prepare_travel(world, terrain);
+        self.integrate_travel(terrain, &mut frame);
+        self.finish_travel(frame)
+    }
+
+    fn prepare_travel(&mut self, world: &VoxelWorld, terrain: &mut Terrain) -> TravelFrame {
+        let Self {
+            motion,
+            fixed_position,
+            state,
             body,
             movement,
+            locomotion,
+            activity,
             auto_jump,
             flying,
-            locomotion,
-            &mut activity,
+            ..
+        } = self;
+        let (auto_jump, flying) = (*auto_jump, *flying);
+        let mut velocity = motion.velocity;
+        // AbstractClientPlayer.updateBob runs before travel, at 20 Hz.
+        motion.previous_bob = motion.bob;
+        let target_bob = if state.on_ground && !flying && state.pose != Pose::Swimming {
+            (velocity.xz().length() as f32).min(0.1)
+        } else {
+            0.0
+        };
+        motion.bob += (target_bob - motion.bob) * 0.4;
+        let mut aabb = body.aabb(fixed_position.current, state.pose);
+
+        // Everything this tick can touch: the move, a step, a ledge probe, a jump,
+        // and a standing box whatever the current pose.
+        let reach = velocity.abs() + DVec3::new(0.6, 0.0, 0.6);
+        let feet = aabb.min.y;
+        let region = Aabb {
+            min: aabb.min - reach - DVec3::Y * (STEP_HEIGHT + 0.1),
+            max: (aabb.max + reach)
+                .with_y(feet + reach.y + Pose::Standing.height() as f64 + AUTO_JUMP_HEIGHT + 0.5),
+        };
+        terrain.gather(world, region);
+
+        let (medium, fluid_depth) = terrain.fluid_environment(&aabb);
+        state.in_fluid = medium.is_some();
+        state.in_swimmable_fluid = medium.is_some_and(|id| {
+            crate::content::fluid_catalog()
+                .profile(id)
+                .contact
+                .swimmable
+        });
+        let eyes = DVec3::new(
+            fixed_position.current.x,
+            feet + state.pose.eye_height() as f64,
+            fixed_position.current.z,
         );
-        fluid_contact.set_if_neq(contact);
-        fixed_position.acknowledge(transform);
-    }
-}
+        let eye_fluid = terrain.fluid_at(eyes);
+        state.eyes_in_swimmable_fluid = eye_fluid != hollow_core::FluidId::NONE
+            && crate::content::fluid_catalog()
+                .profile(eye_fluid)
+                .contact
+                .swimmable;
 
-/// One vanilla tick: `LivingEntity.aiStep` then `travel`.
-#[allow(clippy::too_many_arguments)]
-fn tick(
-    world: &VoxelWorld,
-    terrain: &mut Terrain,
-    motion: &mut CharacterMotion,
-    fixed_position: &mut FixedPosition,
-    state: &mut CharacterState,
-    body: &CharacterBody,
-    movement: &CharacterMovement,
-    auto_jump: bool,
-    flying: bool,
-    locomotion: &Locomotion,
-    activity: &mut CharacterActivity,
-) -> FluidContactState {
-    let mut velocity = motion.velocity;
-    // AbstractClientPlayer.updateBob runs before travel, at 20 Hz.
-    motion.previous_bob = motion.bob;
-    let target_bob = if state.on_ground && !flying && state.pose != Pose::Swimming {
-        (velocity.xz().length() as f32).min(0.1)
-    } else {
-        0.0
-    };
-    motion.bob += (target_bob - motion.bob) * 0.4;
-    let mut aabb = body.aabb(fixed_position.current, state.pose);
+        velocity = DVec3::select(
+            velocity.abs().cmplt(DVec3::splat(MIN_VELOCITY)),
+            DVec3::ZERO,
+            velocity,
+        );
 
-    // Everything this tick can touch: the move, a step, a ledge probe, a jump,
-    // and a standing box whatever the current pose.
-    let reach = velocity.abs() + DVec3::new(0.6, 0.0, 0.6);
-    let feet = aabb.min.y;
-    let region = Aabb {
-        min: aabb.min - reach - DVec3::Y * (STEP_HEIGHT + 0.1),
-        max: (aabb.max + reach)
-            .with_y(feet + reach.y + Pose::Standing.height() as f64 + AUTO_JUMP_HEIGHT + 0.5),
-    };
-    terrain.gather(world, region);
+        let wish = Vec3::new(movement.direction.x, 0.0, movement.direction.z)
+            .normalize_or_zero()
+            .as_dvec3();
+        // Sneaking while flying only descends.
+        let sneaking = movement.sneak && !flying;
+        // Vanilla `updateSwimming`: start with the eyes under water, keep swimming
+        // while sprinting in water.
+        let wants_sprint =
+            movement.sprint && locomotion.sprint_allowed && !sneaking && wish != DVec3::ZERO;
+        state.swimming = wants_sprint
+            && !flying
+            && state.in_swimmable_fluid
+            && (state.swimming || state.eyes_in_swimmable_fluid);
+        let desired = if state.swimming {
+            Pose::Swimming
+        } else if sneaking {
+            Pose::Crouching
+        } else {
+            Pose::Standing
+        };
+        state.pose = choose_pose(terrain, body, fixed_position.current, desired);
+        aabb = body.aabb(fixed_position.current, state.pose);
+        let target_eye = body.eye_offset(state.pose);
+        motion.eye += (target_eye - motion.eye) * 0.5;
 
-    let (medium, fluid_depth) = terrain.fluid_environment(&aabb);
-    state.in_fluid = medium.is_some();
-    state.in_swimmable_fluid = medium.is_some_and(|id| {
-        crate::content::fluid_catalog()
-            .profile(id)
-            .contact
-            .swimmable
-    });
-    let eyes = DVec3::new(
-        fixed_position.current.x,
-        feet + state.pose.eye_height() as f64,
-        fixed_position.current.z,
-    );
-    let eye_fluid = terrain.fluid_at(eyes);
-    state.eyes_in_swimmable_fluid = eye_fluid != hollow_core::FluidId::NONE
-        && crate::content::fluid_catalog()
-            .profile(eye_fluid)
-            .contact
-            .swimmable;
+        // Crouching and crawling move at 30 % and cannot sprint.
+        let slow = state.pose == Pose::Crouching
+            || (state.pose == Pose::Swimming && !state.in_swimmable_fluid);
+        let sprinting = wants_sprint && !slow;
+        let input = wish * INPUT_SCALE * locomotion.speed * if slow { SNEAK_FACTOR } else { 1.0 };
+        let (slipperiness, speed_factor, jump_factor) = ground_block(world, &aabb);
 
-    velocity = DVec3::select(
-        velocity.abs().cmplt(DVec3::splat(MIN_VELOCITY)),
-        DVec3::ZERO,
-        velocity,
-    );
-
-    let wish = Vec3::new(movement.direction.x, 0.0, movement.direction.z)
-        .normalize_or_zero()
-        .as_dvec3();
-    // Sneaking while flying only descends.
-    let sneaking = movement.sneak && !flying;
-    // Vanilla `updateSwimming`: start with the eyes under water, keep swimming
-    // while sprinting in water.
-    let wants_sprint =
-        movement.sprint && locomotion.sprint_allowed && !sneaking && wish != DVec3::ZERO;
-    state.swimming = wants_sprint
-        && !flying
-        && state.in_swimmable_fluid
-        && (state.swimming || state.eyes_in_swimmable_fluid);
-    let desired = if state.swimming {
-        Pose::Swimming
-    } else if sneaking {
-        Pose::Crouching
-    } else {
-        Pose::Standing
-    };
-    state.pose = choose_pose(terrain, body, fixed_position.current, desired);
-    aabb = body.aabb(fixed_position.current, state.pose);
-    let target_eye = body.eye_offset(state.pose);
-    motion.eye += (target_eye - motion.eye) * 0.5;
-
-    // Crouching and crawling move at 30 % and cannot sprint.
-    let slow = state.pose == Pose::Crouching
-        || (state.pose == Pose::Swimming && !state.in_swimmable_fluid);
-    let sprinting = wants_sprint && !slow;
-    let input = wish * INPUT_SCALE * locomotion.speed * if slow { SNEAK_FACTOR } else { 1.0 };
-    let (slipperiness, speed_factor, jump_factor) = ground_block(world, &aabb);
-
-    if flying {
-        velocity.y += FLY_VERTICAL * (movement.jump as i32 as f64 - movement.sneak as i32 as f64);
-    } else if movement.jump {
-        let depth = fluid_depth;
-        if state.in_fluid && (!state.on_ground || depth > FLUID_JUMP_THRESHOLD) {
-            velocity.y += FLUID_SWIM_UP;
-        } else if state.on_ground {
+        if flying {
+            velocity.y +=
+                FLY_VERTICAL * (movement.jump as i32 as f64 - movement.sneak as i32 as f64);
+        } else if movement.jump {
+            let depth = fluid_depth;
+            if state.in_fluid && (!state.on_ground || depth > FLUID_JUMP_THRESHOLD) {
+                velocity.y += FLUID_SWIM_UP;
+            } else if state.on_ground {
+                velocity.y = JUMP_VELOCITY * jump_factor + locomotion.jump_boost;
+                activity.jumped = true;
+                if sprinting {
+                    let facing =
+                        Vec3::new(movement.look_direction.x, 0.0, movement.look_direction.z)
+                            .normalize_or_zero()
+                            .as_dvec3();
+                    velocity += facing * SPRINT_JUMP_BOOST;
+                }
+            }
+        } else if auto_jump
+            && state.on_ground
+            && !sneaking
+            && !state.in_fluid
+            && wish != DVec3::ZERO
+            && should_auto_jump(terrain, aabb, wish)
+        {
             velocity.y = JUMP_VELOCITY * jump_factor + locomotion.jump_boost;
             activity.jumped = true;
-            if sprinting {
-                let facing = Vec3::new(movement.look_direction.x, 0.0, movement.look_direction.z)
-                    .normalize_or_zero()
-                    .as_dvec3();
-                velocity += facing * SPRINT_JUMP_BOOST;
+        }
+        if sneaking && state.in_fluid {
+            velocity.y -= FLUID_SWIM_UP;
+        }
+
+        let climbing = if flying {
+            false
+        } else {
+            let feet = Aabb {
+                min: aabb.min + DVec3::splat(CONTACT_EPSILON),
+                max: aabb.max.with_y(aabb.min.y + 0.1) - DVec3::splat(CONTACT_EPSILON),
+            };
+            terrain.climbables.iter().any(|cell| feet.intersects(cell))
+        };
+        if climbing {
+            // Establish vertical intent before the fluid branch samples falling.
+            velocity.y = velocity.y.max(if sneaking { 0.0 } else { -CLIMB_SPEED });
+            if movement.jump {
+                velocity.y = CLIMB_RISE;
             }
         }
-    } else if auto_jump
-        && state.on_ground
-        && !sneaking
-        && !state.in_fluid
-        && wish != DVec3::ZERO
-        && should_auto_jump(terrain, aabb, wish)
-    {
-        velocity.y = JUMP_VELOCITY * jump_factor + locomotion.jump_boost;
-        activity.jumped = true;
-    }
-    if sneaking && state.in_fluid {
-        velocity.y -= FLUID_SWIM_UP;
+        TravelFrame {
+            velocity,
+            bounds: aabb,
+            input,
+            medium,
+            eye_fluid,
+            fluid_depth,
+            sneaking,
+            sprinting,
+            climbing,
+            slipperiness,
+            speed_factor,
+        }
     }
 
-    let climbing = if flying {
-        false
-    } else {
-        let feet = Aabb {
-            min: aabb.min + DVec3::splat(CONTACT_EPSILON),
-            max: aabb.max.with_y(aabb.min.y + 0.1) - DVec3::splat(CONTACT_EPSILON),
+    fn integrate_travel(&mut self, terrain: &Terrain, frame: &mut TravelFrame) {
+        let Self {
+            fixed_position,
+            state,
+            movement,
+            locomotion,
+            flying,
+            ..
+        } = self;
+        let flying = *flying;
+        let TravelFrame {
+            mut velocity,
+            bounds: mut aabb,
+            input,
+            medium,
+            fluid_depth,
+            sneaking,
+            sprinting,
+            climbing,
+            slipperiness,
+            speed_factor,
+            ..
+        } = *frame;
+        let start_y = aabb.min.y;
+        let falling = velocity.y <= 0.0;
+        let fluid_movement = if flying {
+            None
+        } else {
+            medium.map(|fluid| &crate::content::fluid_catalog().profile(fluid).movement)
         };
-        terrain.climbables.iter().any(|cell| feet.intersects(cell))
-    };
-    if climbing {
-        // Establish vertical intent before the fluid branch samples falling.
-        velocity.y = velocity.y.max(if sneaking { 0.0 } else { -CLIMB_SPEED });
-        if movement.jump {
+        // Force selection is content-specific; acceleration, collision and drag share one path.
+        // These coefficients are tick-local, so changing medium never changes an archetype.
+        let (acceleration, drag, gravity) = if flying {
+            (
+                FLY_SPEED * if sprinting { 2.0 } else { 1.0 },
+                DVec3::new(AIR_DRAG, FLY_VERTICAL_DRAG, AIR_DRAG),
+                0.0,
+            )
+        } else if let Some(movement_profile) = fluid_movement {
+            if state.swimming {
+                // Swimming follows the camera pitch.
+                let look = movement.look_direction.normalize_or_zero().y as f64;
+                let rate = if look < -0.2 { 0.085 } else { 0.06 };
+                let head = DVec3::new(
+                    fixed_position.current.x,
+                    aabb.min.y + 0.9,
+                    fixed_position.current.z,
+                );
+                if look <= 0.0 || movement.jump || terrain.swimmable_at(head) {
+                    velocity.y += (look - velocity.y) * rate;
+                }
+            }
+            let horizontal = if sprinting {
+                movement_profile.sprint_drag
+            } else {
+                movement_profile.horizontal_drag
+            };
+            let vertical = if fluid_depth <= FLUID_JUMP_THRESHOLD {
+                movement_profile.vertical_drag
+            } else {
+                movement_profile.deep_vertical_drag
+            };
+            (
+                movement_profile.acceleration,
+                DVec3::new(horizontal, vertical, horizontal),
+                0.0,
+            )
+        } else {
+            let (friction, speed) = if state.on_ground {
+                let speed = WALK_SPEED * if sprinting { SPRINT_FACTOR } else { 1.0 };
+                (
+                    slipperiness * AIR_DRAG,
+                    speed * (0.216 / slipperiness.powi(3)),
+                )
+            } else {
+                (
+                    AIR_DRAG,
+                    if sprinting {
+                        AIR_SPRINT_SPEED
+                    } else {
+                        AIR_SPEED
+                    },
+                )
+            };
+            let gravity = if locomotion.slow_falling && falling {
+                0.01
+            } else {
+                GRAVITY
+            };
+            (
+                speed,
+                DVec3::new(friction, VERTICAL_DRAG, friction),
+                gravity,
+            )
+        };
+        velocity += input * acceleration;
+        clamp_climbing(&mut velocity, climbing, sneaking);
+        move_body(
+            terrain,
+            &mut aabb,
+            &mut velocity,
+            state,
+            sneaking,
+            speed_factor,
+        );
+        velocity.y -= gravity;
+        velocity *= drag;
+        if let Some(movement_profile) = fluid_movement {
+            // Fluid gravity is applied after drag; air gravity is applied before it.
+            if !sprinting || !movement_profile.sprint_cancels_gravity {
+                velocity.y = if falling
+                    && (velocity.y - 0.005).abs() >= MIN_VELOCITY
+                    && (velocity.y - movement_profile.gravity).abs() < MIN_VELOCITY
+                {
+                    -MIN_VELOCITY
+                } else {
+                    velocity.y - movement_profile.gravity
+                };
+            }
+            climb_out_of_fluid(terrain, aabb, &mut velocity, state, start_y);
+        }
+
+        if climbing && !sneaking && (state.horizontal_collision || movement.jump) {
             velocity.y = CLIMB_RISE;
         }
-    }
-    let start_y = aabb.min.y;
-    let falling = velocity.y <= 0.0;
-    let fluid_movement = if flying {
-        None
-    } else {
-        medium.map(|fluid| &crate::content::fluid_catalog().profile(fluid).movement)
-    };
-    // Force selection is content-specific; acceleration, collision and drag share one path.
-    // These coefficients are tick-local, so changing medium never changes an archetype.
-    let (acceleration, drag, gravity) = if flying {
-        (
-            FLY_SPEED * if sprinting { 2.0 } else { 1.0 },
-            DVec3::new(AIR_DRAG, FLY_VERTICAL_DRAG, AIR_DRAG),
-            0.0,
-        )
-    } else if let Some(movement_profile) = fluid_movement {
-        if state.swimming {
-            // Swimming follows the camera pitch.
-            let look = movement.look_direction.normalize_or_zero().y as f64;
-            let rate = if look < -0.2 { 0.085 } else { 0.06 };
-            let head = DVec3::new(
-                fixed_position.current.x,
-                aabb.min.y + 0.9,
-                fixed_position.current.z,
-            );
-            if look <= 0.0 || movement.jump || terrain.swimmable_at(head) {
-                velocity.y += (look - velocity.y) * rate;
-            }
+        if climbing && sneaking {
+            velocity.y = velocity.y.max(0.0);
         }
-        let horizontal = if sprinting {
-            movement_profile.sprint_drag
-        } else {
-            movement_profile.horizontal_drag
-        };
-        let vertical = if fluid_depth <= FLUID_JUMP_THRESHOLD {
-            movement_profile.vertical_drag
-        } else {
-            movement_profile.deep_vertical_drag
-        };
-        (
-            movement_profile.acceleration,
-            DVec3::new(horizontal, vertical, horizontal),
-            0.0,
-        )
-    } else {
-        let (friction, speed) = if state.on_ground {
-            let speed = WALK_SPEED * if sprinting { SPRINT_FACTOR } else { 1.0 };
-            (
-                slipperiness * AIR_DRAG,
-                speed * (0.216 / slipperiness.powi(3)),
-            )
-        } else {
-            (
-                AIR_DRAG,
-                if sprinting {
-                    AIR_SPRINT_SPEED
-                } else {
-                    AIR_SPEED
-                },
-            )
-        };
-        let gravity = if locomotion.slow_falling && falling {
-            0.01
-        } else {
-            GRAVITY
-        };
-        (
-            speed,
-            DVec3::new(friction, VERTICAL_DRAG, friction),
-            gravity,
-        )
-    };
-    velocity += input * acceleration;
-    clamp_climbing(&mut velocity, climbing, sneaking);
-    move_body(
-        terrain,
-        &mut aabb,
-        &mut velocity,
-        state,
-        sneaking,
-        speed_factor,
-    );
-    velocity.y -= gravity;
-    velocity *= drag;
-    if let Some(movement_profile) = fluid_movement {
-        // Fluid gravity is applied after drag; air gravity is applied before it.
-        if !sprinting || !movement_profile.sprint_cancels_gravity {
-            velocity.y = if falling
-                && (velocity.y - 0.005).abs() >= MIN_VELOCITY
-                && (velocity.y - movement_profile.gravity).abs() < MIN_VELOCITY
-            {
-                -MIN_VELOCITY
-            } else {
-                velocity.y - movement_profile.gravity
-            };
-        }
-        climb_out_of_fluid(terrain, aabb, &mut velocity, state, start_y);
+        frame.bounds = aabb;
+        frame.velocity = velocity;
     }
 
-    if climbing && !sneaking && (state.horizontal_collision || movement.jump) {
-        velocity.y = CLIMB_RISE;
-    }
-    if climbing && sneaking {
-        velocity.y = velocity.y.max(0.0);
-    }
-    fixed_position.current = DVec3::new(
-        (aabb.min.x + aabb.max.x) * 0.5,
-        aabb.min.y + body.origin_height as f64,
-        (aabb.min.z + aabb.max.z) * 0.5,
-    );
-    motion.velocity = velocity;
-    let displacement = fixed_position.current - fixed_position.previous;
-    activity.distance = displacement.xz().length() as f32;
-    activity.vertical = displacement.y as f32;
-    activity.sprinting = sprinting;
-    activity.climbing = climbing;
-    activity.simulated = !flying;
-    motion.walk_delta = activity.distance * 0.6;
-    // Only the phase matters; wrapping preserves precision during long sessions.
-    motion.walk_distance = (motion.walk_distance + motion.walk_delta).rem_euclid(2.0);
-    FluidContactState {
-        fluid: medium.unwrap_or(hollow_core::FluidId::NONE),
-        eyes: eye_fluid,
-        depth: fluid_depth as f32,
+    fn finish_travel(&mut self, frame: TravelFrame) -> FluidContactState {
+        let Self {
+            motion,
+            fixed_position,
+            body,
+            activity,
+            flying,
+            ..
+        } = self;
+        let TravelFrame {
+            velocity,
+            bounds: aabb,
+            medium,
+            eye_fluid,
+            fluid_depth,
+            sprinting,
+            climbing,
+            ..
+        } = frame;
+        let flying = *flying;
+        fixed_position.current = DVec3::new(
+            (aabb.min.x + aabb.max.x) * 0.5,
+            aabb.min.y + body.origin_height as f64,
+            (aabb.min.z + aabb.max.z) * 0.5,
+        );
+        motion.velocity = velocity;
+        let displacement = fixed_position.current - fixed_position.previous;
+        activity.distance = displacement.xz().length() as f32;
+        activity.vertical = displacement.y as f32;
+        activity.sprinting = sprinting;
+        activity.climbing = climbing;
+        activity.simulated = !flying;
+        motion.walk_delta = activity.distance * 0.6;
+        // Only the phase matters; wrapping preserves precision during long sessions.
+        motion.walk_distance = (motion.walk_distance + motion.walk_delta).rem_euclid(2.0);
+        FluidContactState {
+            fluid: medium.unwrap_or(hollow_core::FluidId::NONE),
+            eyes: eye_fluid,
+            depth: fluid_depth as f32,
+        }
     }
 }
 

@@ -3,8 +3,8 @@ use super::interactions::{
     slot_over, slot_press,
 };
 use super::{
-    CursorStackView, EmptySlotLabel, HotbarHud, ICON_SIZE, InventoryOverlay, InventorySlotView,
-    PANEL_BG, SLOT_BG, SLOT_BORDER, SLOT_GAP, SLOT_SIZE, SlotCount, SlotIcon, empty_slot_label,
+    CursorStackView, EmptySlotLabel, ICON_SIZE, InventoryOverlay, InventorySlotView, PANEL_BG,
+    SLOT_BG, SLOT_BORDER, SLOT_GAP, SLOT_SIZE, SlotCount, SlotIcon, empty_slot_label,
 };
 use crate::{
     game::GameState,
@@ -128,7 +128,7 @@ fn hotbar_hud_scene() -> impl Scene {
                 bottom: px(24),
             },
         }
-        HotbarHud
+        crate::game::GameplayHud { hide_with_inventory: true }
         Pickable::IGNORE
         DespawnOnExit::<GameState>(GameState::Game)
         Children [

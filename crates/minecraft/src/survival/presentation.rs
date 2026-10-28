@@ -16,11 +16,7 @@ impl Plugin for PlayerSurvivalPlugin {
         app.add_systems(Startup, super::hud::load_assets)
             .add_systems(
                 OnEnter(crate::world::WorldSessionPhase::Playing),
-                (super::hud::spawn, super::hud::show).chain(),
-            )
-            .add_systems(
-                OnExit(crate::world::WorldSessionPhase::Playing),
-                super::hud::hide,
+                super::hud::spawn,
             )
             .add_systems(
                 Update,

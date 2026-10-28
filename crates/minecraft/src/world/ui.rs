@@ -89,15 +89,7 @@ pub(super) fn world_list(mut commands: Commands, browser: Res<Browser>) {
 }
 
 pub(super) fn replace_world_list(commands: &mut Commands, browser: &Browser) {
-    commands.queue(|world: &mut World| {
-        let entities: Vec<_> = world
-            .query_filtered::<Entity, With<WorldPage>>()
-            .iter(world)
-            .collect();
-        for entity in entities {
-            world.despawn(entity);
-        }
-    });
+    commands.despawn_all::<With<WorldPage>>();
     spawn_world_list(commands, browser);
 }
 

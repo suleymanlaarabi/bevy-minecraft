@@ -15,6 +15,7 @@ use bevy::{
 #[derive(Component, Default, Debug, Clone)]
 #[require(
     PlayerInventory,
+    crate::dropped_item::ItemCollector,
     crate::audio::MovementAudio,
     crate::audio::EquipmentAudio,
     crate::inventory::HotbarSelection,
@@ -90,6 +91,3 @@ impl Default for CameraSensitivity {
         Self(Vec2::new(0.0025, 0.002))
     }
 }
-
-#[derive(Component, Clone, Default)]
-pub(crate) struct Crosshair;

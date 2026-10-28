@@ -16,27 +16,12 @@ use crate::{
 const HUD_WIDTH: f32 = 472.0;
 
 #[derive(Component, Clone, Default)]
-#[require(Pickable::IGNORE, DespawnOnExit::<GameState>(GameState::Game))]
+#[require(
+    Pickable::IGNORE,
+    DespawnOnExit::<GameState>(GameState::Game),
+    crate::game::GameplayHud
+)]
 pub(super) struct HudRoot;
-
-pub(super) fn hide(mut roots: Query<&mut Visibility, With<HudRoot>>) {
-    for mut visibility in &mut roots {
-        visibility.set_if_neq(Visibility::Hidden);
-    }
-}
-
-pub(super) fn show(
-    state: Res<State<InventoryState>>,
-    mut roots: Query<(Has<crate::player::Crosshair>, &mut Visibility), With<HudRoot>>,
-) {
-    for (crosshair, mut visibility) in &mut roots {
-        visibility.set_if_neq(if crosshair && *state.get() == InventoryState::Open {
-            Visibility::Hidden
-        } else {
-            Visibility::Inherited
-        });
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HeartKind {
@@ -253,7 +238,7 @@ pub(super) fn spawn(
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
         }
-        crate::player::Crosshair
+        crate::game::GameplayHud { hide_with_inventory: true }
         HudRoot
         Children [
             Node {

@@ -13,13 +13,11 @@ use crate::{
     character::{Aabb, CharacterSystems, Terrain},
     game::GameState,
     inventory::{ItemKind, ItemStack, PlayerInventory},
-    player::Player,
     voxel::{VoxelAssets, VoxelWorld, chunk_at, render::models},
 };
 
 const PICKUP_DELAY: Duration = Duration::from_millis(350);
 const LIFETIME: Duration = Duration::from_secs(5 * 60);
-const PICKUP_RADIUS: f32 = 1.25;
 const DROP_VISUAL_SIZE: f32 = 0.28;
 const DROP_COLLIDER_SIZE: f32 = 0.22;
 
@@ -53,6 +51,25 @@ impl DroppedItemCommandsExt for Commands<'_, '_> {
         });
         self
     }
+}
+
+/// Any actor with this capability can collect drops; controllers need no pickup logic.
+#[derive(Component)]
+#[require(FixedPosition, PlayerInventory = PlayerInventory::empty())]
+pub struct ItemCollector {
+    pub radius: f32,
+}
+impl Default for ItemCollector {
+    fn default() -> Self {
+        Self { radius: 1.25 }
+    }
+}
+
+/// React after the inventory transaction; presentation does not own collection rules.
+#[derive(EntityEvent)]
+pub struct ItemCollected {
+    pub entity: Entity,
+    pub stack: ItemStack,
 }
 
 #[derive(Component)]
@@ -185,10 +202,8 @@ impl Plugin for DroppedItemPlugin {
             .add_systems(
                 FixedUpdate,
                 (
-                    advance_drop_timers,
                     simulate_dropped_items,
-                    pickup_dropped_items.after(CharacterSystems),
-                    cleanup_expired_drops,
+                    collect_dropped_items.after(CharacterSystems),
                 )
                     .chain()
                     .in_set(crate::simulation::SimulationSystems::Actors)
@@ -381,57 +396,55 @@ fn simulate_dropped_items(
     }
 }
 
-fn pickup_dropped_items(
-    player: Single<(&FixedPosition, &mut PlayerInventory), With<Player>>,
+/// Timers, collection and expiry share one pass over active drop state.
+fn collect_dropped_items(
+    time: Res<Time<Fixed>>,
+    mut collectors: Query<(Entity, &FixedPosition, &ItemCollector, &mut PlayerInventory)>,
     mut drops: Query<
         (Entity, &FixedPosition, &mut DroppedItem),
         With<crate::simulation::Simulating>,
     >,
     mut commands: Commands,
 ) {
-    let (player, mut inventory) = player.into_inner();
     let half = DVec3::splat(DROP_COLLIDER_SIZE as f64 * 0.5);
-    for (entity, motion, drop) in &mut drops {
-        if !drop.pickup_remaining.is_zero() {
-            continue;
-        }
-        // Sphere/box overlap, matching the pickup volume without a spatial-query engine.
-        let distance = (player.current - motion.current).abs() - half;
-        if distance.max(DVec3::ZERO).length_squared() > (PICKUP_RADIUS * PICKUP_RADIUS) as f64 {
-            continue;
-        }
-        let remaining =
-            PlayerInventory::edit(&mut inventory, |inventory| inventory.insert(drop.stack));
-        if remaining != Some(drop.stack) {
-            commands.trigger(crate::audio::Sound::event(
-                crate::audio::SoundId::EntityItemPickup,
-            ));
-        }
-        match remaining {
-            None => {
-                commands.entity(entity).despawn();
-            }
-            Some(remaining) => {
-                drop.map_unchanged(|drop| &mut drop.stack)
-                    .set_if_neq(remaining);
-            }
-        }
-    }
-}
-
-fn cleanup_expired_drops(mut commands: Commands) {
-    commands.despawn_all_where::<&DroppedItem, With<crate::simulation::Simulating>>(|drop| {
-        drop.remaining.is_zero()
-    });
-}
-
-fn advance_drop_timers(
-    time: Res<Time<Fixed>>,
-    mut drops: Query<&mut DroppedItem, With<crate::simulation::Simulating>>,
-) {
-    for mut drop in &mut drops {
+    for (entity, position, mut drop) in &mut drops {
         drop.remaining = drop.remaining.saturating_sub(time.delta());
         drop.pickup_remaining = drop.pickup_remaining.saturating_sub(time.delta());
+        if drop.pickup_remaining.is_zero() {
+            // Collector counts are small; a spatial index would add maintenance and storage.
+            for (collector, origin, capability, mut inventory) in &mut collectors {
+                // Sphere/box overlap without allocating a spatial-query structure.
+                let distance = (origin.current - position.current).abs() - half;
+                let radius = capability.radius as f64;
+                if !radius.is_finite()
+                    || radius < 0.0
+                    || distance.max(DVec3::ZERO).length_squared() > radius * radius
+                {
+                    continue;
+                }
+                let stack = drop.stack;
+                let remaining =
+                    PlayerInventory::edit(&mut inventory, |inventory| inventory.insert(stack));
+                if remaining == Some(stack) {
+                    continue;
+                }
+                commands.trigger(ItemCollected {
+                    entity: collector,
+                    stack: stack
+                        .with_count(stack.count() - remaining.map_or(0, |s| s.count()))
+                        .expect("A successful collection transfers at least one item"),
+                });
+                if let Some(remaining) = remaining {
+                    drop.stack = remaining;
+                } else {
+                    drop.remaining = Duration::ZERO;
+                    break;
+                }
+            }
+        }
+        if drop.remaining.is_zero() {
+            commands.entity(entity).despawn();
+        }
     }
 }
 
