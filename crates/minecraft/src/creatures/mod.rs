@@ -7,7 +7,6 @@ mod presentation;
 pub(crate) mod spawning;
 
 pub use combat::{CreatureCombat, CreatureCombatPlugin};
-pub(crate) use navigation::PathPool;
 pub use navigation::VoxelNavigator;
 pub use persistence::{ColumnActors, SavedCreature};
 pub(crate) use persistence::{CreatureSnapshots, SavedSpawner};

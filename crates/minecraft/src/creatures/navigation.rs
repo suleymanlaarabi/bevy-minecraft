@@ -274,15 +274,6 @@ impl PathPool {
             .filter(|slot| slot.in_use)
             .map(|slot| slot.points.as_slice())
     }
-    pub(crate) fn retained_bytes(&self) -> usize {
-        self.slots.capacity() * std::mem::size_of::<PathSlot>()
-            + self.free.capacity() * std::mem::size_of::<u32>()
-            + self
-                .slots
-                .iter()
-                .map(|slot| slot.points.capacity() * std::mem::size_of::<Vec3>())
-                .sum::<usize>()
-    }
 }
 
 fn release_removed_navigation(
