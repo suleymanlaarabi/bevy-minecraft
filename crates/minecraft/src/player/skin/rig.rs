@@ -7,7 +7,7 @@ use crate::{
 };
 use bevy::{
     camera::{RenderTarget, visibility::RenderLayers},
-    light::NotShadowCaster,
+    light::{NotShadowCaster, cluster::ClusterConfig},
     picking::Pickable,
 };
 
@@ -80,6 +80,7 @@ pub(super) fn spawn_preview(
             ..default()
         },
         RenderTarget::Image(assets.preview.clone().into()),
+        ClusterConfig::Single,
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: bevy::camera::ScalingMode::FixedVertical {
                 viewport_height: 2.15,
@@ -126,6 +127,7 @@ pub(super) fn spawn_world_rig(
                 ..default()
             },
             RenderTarget::Image(assets.arm_view.clone().into()),
+            ClusterConfig::Single,
             Msaa::Off,
             Projection::from(PerspectiveProjection {
                 fov: 70_f32.to_radians(),

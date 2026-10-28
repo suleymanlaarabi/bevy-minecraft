@@ -1052,10 +1052,12 @@ fn storage_pressure(
         ready += work.ready_count();
         suspended += work.suspended.len();
         let retired = loaded.is_none_or(|loaded| loaded.is_empty());
+        // Streamed columns are the common case; skip them before resolving creatures.
+        if !retired && stream.data.contains(&column.position) {
+            continue;
+        }
         let mobile_bytes = creatures.retirement_bytes(mobiles);
-        if (column.revision == column.saved_revision && mobile_bytes == 0)
-            || (!retired && stream.data.contains(&column.position))
-        {
+        if column.revision == column.saved_revision && mobile_bytes == 0 {
             continue;
         }
         let retained = mobile_bytes

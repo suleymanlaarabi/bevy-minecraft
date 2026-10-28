@@ -8,6 +8,7 @@ use crate::{
 use bevy::{
     camera::Exposure,
     core_pipeline::tonemapping::Tonemapping,
+    light::cluster::ClusterConfig,
     pbr::{DistanceFog, FogFalloff},
     prelude::*,
 };
@@ -58,6 +59,8 @@ pub struct Player;
     },
     bevy::camera::Hdr,
     Tonemapping::AgX,
+    // Nothing clusterable exists (`crate::app::cpu_light_clustering`).
+    ClusterConfig::Single,
     Projection::from(PerspectiveProjection {
         fov: 85.0_f32.to_radians(),
         ..default()

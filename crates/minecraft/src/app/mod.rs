@@ -93,6 +93,7 @@ impl Plugin for HollowPlugin {
         .insert_resource(UiTheme(create_dark_theme()))
         .insert_resource(ClearColor(Color::srgb_u8(15, 15, 18)))
         .add_systems(PreStartup, fonts::install)
+        .add_systems(Startup, cpu_light_clustering)
         .add_systems(
             PostUpdate,
             fonts::style_new_text
@@ -103,5 +104,18 @@ impl Plugin for HollowPlugin {
             Update,
             crate::game::handle_escape.run_if(in_state(GameState::Game)),
         );
+    }
+}
+
+/// Hollow spawns no clustered objects (point, spot or rect lights, light probes or
+/// clustered decals). GPU clustering would still run its passes, buffer uploads and
+/// statistics readback for every camera each frame; CPU clustering of the single
+/// cluster each camera requests has nothing to assign. Any future clustered light
+/// remains correct, only unbinned.
+pub(crate) fn cpu_light_clustering(
+    settings: Option<ResMut<bevy::light::cluster::GlobalClusterSettings>>,
+) {
+    if let Some(mut settings) = settings {
+        settings.gpu_clustering = None;
     }
 }
