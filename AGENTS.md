@@ -34,6 +34,10 @@
 
 ## Targeted performance review
 
+- Performance optimizations must reduce actual runtime work in production code and benefit release execution as well as development builds.
+- Never trade development compilation speed for runtime FPS. Do not change compiler backends, Cargo profiles, optimization levels, codegen units, LTO, compiler flags, debug assertions or overflow checks as a performance fix. Preserve the existing fast development build configuration.
+- Never inflate performance results by reducing resolution, view distance, visual quality, world content, simulation work or benchmark workload. Compare the same scenario with the same build settings. Diagnostic ablations must be explicitly authorized, clearly labeled and excluded from optimization gain claims.
+- Development-only profiling does not establish release bottleneck rankings or release speedups. Distinguish observed hotspots, proposed algorithmic improvements and verified gains; never present a compiler configuration change or a lighter workload as a code optimization.
 - Review the changed path and relevant dependencies: execution frequency, CPU work, allocations, footprint, locality and lookup complexity. Fix avoidable costs there; report material adjacent issues without expanding scope.
 - Carry existing compact typed IDs, enums and Bevy handles at runtime. Resolve external names at import/initialization. Keep immutable definitions in shared catalogs and only IDs plus necessary state in instances.
 - Prefer arrays, slices, indexed vectors and bitsets for dense bounded domains; account for sparsity and total storage. Choose integer widths without truncation or overflow.
