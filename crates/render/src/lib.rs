@@ -12,6 +12,7 @@ pub mod meshing;
 pub mod mipmaps;
 pub mod model_mesh;
 pub mod models;
+mod sections;
 pub mod sort;
 pub mod source;
 pub mod streaming;
@@ -82,6 +83,7 @@ impl<C: RenderSource> Plugin for VoxelRenderPlugin<C> {
                 PostUpdate,
                 VoxelRenderSystems::Build.after(hollow_engine::streaming::VoxelPipeline),
             );
+        app.add_plugins(sections::SectionsPlugin);
         sort::register(app);
         visibility::register::<C>(app);
         uploads::register(app);

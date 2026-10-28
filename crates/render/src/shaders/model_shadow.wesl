@@ -1,3 +1,4 @@
+import super::section_transform;
 import super::surface_animation::surface_frame;
 import super::model_vertex::{ModelVertex, decode_model};
 import bevy_pbr::render::mesh_functions;
@@ -15,7 +16,7 @@ struct ShadowVaryings {
 @vertex
 fn vertex(in: ModelVertex) -> ShadowVaryings {
     var out: ShadowVaryings;
-    let transform = mesh_functions::get_world_from_local(in.instance_index);
+    let transform = section_transform::world_from_local(in.instance_index);
     let model = decode_model(in.data);
     out.position = mesh_functions::mesh_position_local_to_clip(transform, vec4<f32>(model.position, 1.0));
     // Effect surfaces share section meshes without casting solid model shadows.

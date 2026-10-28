@@ -1,3 +1,4 @@
+import super::section_transform;
 import super::surface_animation::surface_frame;
 import super::block_lighting::{sky_visibility, voxel_diffuse};
 import super::voxel_fog::{apply_voxel_fog_ray, fog_ray, sky_reflection, fully_fogged};
@@ -43,12 +44,12 @@ var still_sampler: sampler;
 @vertex
 fn vertex(in: ModelVertex) -> ModelVaryings {
     let model = decode_model(in.data);
-    let world_from_local = mesh_functions::get_world_from_local(in.instance_index);
+    let world_from_local = section_transform::world_from_local(in.instance_index);
     var out: ModelVaryings;
     out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(model.position, 1.0));
     // Match the terrain's invariant transform at coplanar water/block contacts.
     out.position = mesh_functions::mesh_position_local_to_clip(world_from_local, vec4<f32>(model.position, 1.0));
-    out.world_normal = mesh_functions::mesh_normal_local_to_world(model.normal, in.instance_index);
+    out.world_normal = section_transform::world_normal(model.normal, in.instance_index);
     out.uv = model.uv;
     out.light = model.light;
 @if(MODEL_INSTANCE_LIGHT) {

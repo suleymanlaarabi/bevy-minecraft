@@ -30,10 +30,10 @@ const POSITION_MAX: u32 = (1 << 15) - 1;
 
 /// GPU-ready geometry, with bounds and sort keys from the original positions.
 pub struct ModelGeometry {
-    vertices: Vec<[u32; 4]>,
+    pub(crate) vertices: Vec<[u32; 4]>,
     pub indices: Vec<u32>,
-    min: Vec3,
-    max: Vec3,
+    pub(crate) min: Vec3,
+    pub(crate) max: Vec3,
     sort_quads: Vec<SortQuad>,
 }
 

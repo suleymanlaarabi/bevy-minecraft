@@ -1,3 +1,4 @@
+import super::section_transform;
 import super::surface_animation::surface_frame;
 import super::voxel_vertex::{PackedVertex, decode, block_uv, face_index, transform_uv, face_layer, face_transform};
 import bevy_pbr::render::mesh_functions;
@@ -21,7 +22,7 @@ struct PrepassVaryings {
 @vertex
 fn vertex(in: PackedVertex) -> PrepassVaryings {
     let vertex = decode(in.voxel);
-    let world_from_local = mesh_functions::get_world_from_local(in.instance_index);
+    let world_from_local = section_transform::world_from_local(in.instance_index);
     var out: PrepassVaryings;
     // Match the forward pass without changing the geometry or biasing depth.
     out.position = mesh_functions::mesh_position_local_to_clip(

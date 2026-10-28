@@ -304,9 +304,12 @@ fn removed_topology(
     event: On<Remove<(VoxelChunk, ChunkSections)>>,
     chunks: Query<&VoxelChunk>,
     mut graph: ResMut<VisibilityGraph>,
+    mut feed: ResMut<super::sections::SectionFeed>,
 ) {
     if let Ok(chunk) = chunks.get(event.entity) {
         graph.invalidate_column(chunk.position, u32::MAX);
+        feed.ops
+            .push(super::sections::SectionOp::RemoveColumn(chunk.position));
     }
 }
 
@@ -345,6 +348,7 @@ fn update_visibility<C: RenderSource>(
     )>,
     mut graph: ResMut<VisibilityGraph>,
     mut sort_version: ResMut<super::sort::SortVersion>,
+    mut feed: ResMut<super::sections::SectionFeed>,
     #[cfg(feature = "dev")] diagnostics: Option<ResMut<crate::diagnostics::VoxelDiagnostics>>,
 ) {
     let started = Instant::now();
@@ -472,6 +476,12 @@ fn update_visibility<C: RenderSource>(
                 }
                 let column = &mut g.columns[cursor];
                 let mut changed = (visible ^ column.published) | column.publish;
+                if changed != 0 {
+                    feed.ops.push(super::sections::SectionOp::Visibility {
+                        column: position,
+                        mask: visible,
+                    });
+                }
                 let mut meshes = layers.p1();
                 while changed != 0 {
                     if started.elapsed() >= Duration::from_micros(500) {
@@ -483,7 +493,7 @@ fn update_visibility<C: RenderSource>(
                     changed &= !bit;
                     column.published = (column.published & !bit) | (visible & bit);
                     column.publish &= !bit;
-                    for entity in sections.camera_entities(y).into_iter().flatten() {
+                    if let Some(entity) = sections.sections[y].translucent {
                         if let Ok(current) = meshes.get_mut(entity) {
                             let mut target = current.as_deref().cloned().unwrap_or_default();
                             let was_visible = target.intersects(&RenderLayers::layer(0));
@@ -592,6 +602,7 @@ fn update_visibility<C: RenderSource>(
             g.propagate(i);
         }
     }
+    feed.conservative = g.conservative;
     for (entity, current) in &mut layers.p0() {
         let current_value = current.as_deref().cloned().unwrap_or_default();
         let target = if g.conservative {

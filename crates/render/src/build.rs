@@ -5,12 +5,12 @@ use super::{
     environment::EnvironmentSettings,
     meshing::{ChunkNeighborhood, build_sections},
 };
-use crate::{RenderSource, SHADOW_LAYER, VoxelViewer};
+use crate::{
+    RenderSource, VoxelViewer,
+    sections::{PassGeometry, SectionFeed, SectionOp},
+};
 use bevy::{
-    camera::{
-        primitives::MeshAabb,
-        visibility::{NoCpuCulling, RenderLayers},
-    },
+    camera::{primitives::MeshAabb, visibility::RenderLayers},
     light::NotShadowCaster,
     mesh::Indices,
     prelude::*,
@@ -36,12 +36,8 @@ pub struct ChunkSections {
 }
 #[derive(Default)]
 pub struct SectionEntities {
-    pub terrain: Option<Entity>,
-    pub cutout: Option<Entity>,
-    pub models: Option<Entity>,
-    pub models_cutout: Option<Entity>,
     pub translucent: Option<Entity>,
-    pub shadow: Option<Entity>,
+    pub passes: u8,
     pub connectivity: u64,
 }
 impl ChunkSections {
@@ -54,46 +50,24 @@ impl ChunkSections {
             overhanging_sections: 0,
         }
     }
-    pub fn camera_entities(&self, section: usize) -> [Option<Entity>; 5] {
-        let section = &self.sections[section];
-        [
-            section.terrain,
-            section.cutout,
-            section.models,
-            section.models_cutout,
-            section.translucent,
-        ]
-    }
     pub fn mesh_count(&self) -> usize {
         self.sections
             .iter()
-            .map(|section| {
-                [
-                    section.terrain,
-                    section.cutout,
-                    section.models,
-                    section.models_cutout,
-                    section.translucent,
-                    section.shadow,
-                ]
-                .into_iter()
-                .flatten()
-                .count()
-            })
+            .map(|s| s.passes.count_ones() as usize + usize::from(s.translucent.is_some()))
             .sum()
     }
 }
-/// GPU-ready meshes of one section, built off the main thread.
+/// GPU-ready geometry of one section, built off the main thread.
 struct BuiltSection {
     index: usize,
     connectivity: u64,
     overhang: bool,
     bytes: usize,
     mesh_count: usize,
-    terrain: Option<Mesh>,
-    cutout: Option<Mesh>,
-    models: Option<Mesh>,
-    models_cutout: Option<Mesh>,
+    terrain: Option<PassGeometry>,
+    cutout: Option<PassGeometry>,
+    models: Option<PassGeometry>,
+    models_cutout: Option<PassGeometry>,
     /// Mesh sorted for the view at build time, its quads, and the view key it
     /// was sorted for (`None` without a view).
     translucent: Option<(
@@ -101,7 +75,7 @@ struct BuiltSection {
         super::model_mesh::SortData,
         Option<super::sort::SortKey>,
     )>,
-    shadow: Option<Mesh>,
+    shadow: Option<PassGeometry>,
 }
 
 struct BuildOutput {
@@ -133,8 +107,7 @@ fn max_pending_builds() -> usize {
 /// Mesh bytes handed to the GPU per frame, including player edits.
 /// Spreads the upload of newly visible terrain over several frames.
 const UPLOAD_BUDGET_BYTES: usize = 2 << 20;
-/// Section meshes applied per frame by streaming: each one is an asset to prepare
-/// and often an entity for the render world to extract and specialize.
+/// Translucent mesh assets applied per frame; opaque geometry uses shared arenas.
 const UPLOAD_BUDGET_MESHES: usize = 32;
 const UPLOAD_BUDGET_TIME: Duration = Duration::from_millis(1);
 
@@ -187,8 +160,8 @@ pub fn mark_changed_chunks<C: RenderSource>(
     }
 }
 
-pub fn update_shadow_geometry<C: RenderSource>(
-    mut commands: Commands,
+pub(crate) fn update_shadow_geometry<C: RenderSource>(
+    mut feed: ResMut<SectionFeed>,
     settings: Res<EnvironmentSettings>,
     mut previous: Local<Option<bool>>,
     mut chunks: Query<(&mut ChunkVoxels<C::Cell>, &mut ChunkSections)>,
@@ -197,15 +170,15 @@ pub fn update_shadow_geometry<C: RenderSource>(
     if previous.replace(enabled) == Some(enabled) {
         return;
     }
+    if !enabled {
+        feed.ops.push(SectionOp::ClearPass(4));
+    }
     for (mut voxels, mut sections) in &mut chunks {
         if enabled {
             voxels.mark_sections(sections.built_sections);
         } else {
-            // Existing camera geometry remains valid; only discard the unused pass.
             for section in &mut sections.sections {
-                if let Some(shadow) = section.shadow.take() {
-                    commands.entity(shadow).despawn();
-                }
+                section.passes &= !(1 << 4);
             }
         }
     }
@@ -344,10 +317,10 @@ fn spawn_chunk_build<C: RenderSource>(
                 bytes: 0,
                 mesh_count: 0,
                 index: section.index,
-                terrain: section.terrain.map(|geometry| geometry.into_mesh()),
-                cutout: section.cutout.map(|geometry| geometry.into_mesh()),
-                models: section.models.map(|geometry| geometry.into_mesh()),
-                models_cutout: section.models_cutout.map(|geometry| geometry.into_mesh()),
+                terrain: section.terrain.map(PassGeometry::terrain),
+                cutout: section.cutout.map(PassGeometry::terrain),
+                models: section.models.map(PassGeometry::model),
+                models_cutout: section.models_cutout.map(PassGeometry::model),
                 translucent: section.translucent.map(|mut geometry| {
                     // First sort runs off the main thread; later sorts patch only GPU indices.
                     let origin = (neighborhood.origin
@@ -360,27 +333,30 @@ fn spawn_chunk_build<C: RenderSource>(
                     });
                     (geometry.into_mesh(), sort, key)
                 }),
-                shadow: section.shadow.map(|geometry| geometry.into_mesh()),
+                shadow: section.shadow.map(PassGeometry::terrain),
             })
             .collect::<Vec<_>>();
         for section in &mut sections {
-            for mesh in [
-                section.terrain.as_ref(),
-                section.cutout.as_ref(),
-                section.models.as_ref(),
-                section.models_cutout.as_ref(),
-                section.translucent.as_ref().map(|(mesh, _, _)| mesh),
-                section.shadow.as_ref(),
+            for geometry in [
+                &section.terrain,
+                &section.cutout,
+                &section.models,
+                &section.models_cutout,
+                &section.shadow,
             ]
             .into_iter()
             .flatten()
             {
+                section.overhang |= geometry.overhang();
+                section.bytes += geometry.vertices.len() + geometry.indices.len();
+            }
+            if let Some((mesh, _, _)) = &section.translucent {
                 section.overhang |= mesh.final_aabb.is_none_or(|bounds| {
                     bounds.min.min_element() < 0.0
                         || bounds.max.max_element() > SECTION_HEIGHT as f32
                 });
                 section.bytes += mesh_bytes(mesh);
-                section.mesh_count += 1;
+                section.mesh_count = 1;
             }
         }
         BuildOutput {
@@ -402,11 +378,13 @@ fn spawn_chunk_build<C: RenderSource>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn poll_builds<C: RenderSource>(
+pub(crate) fn poll_builds<C: RenderSource>(
     mut commands: Commands,
     assets: Option<Res<VoxelAssets>>,
     settings: Res<EnvironmentSettings>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut feed: ResMut<SectionFeed>,
+    layout: Res<WorldLayout>,
     viewer: Option<Single<&Transform, With<VoxelViewer>>>,
     mut topology: Option<ResMut<super::visibility::VisibilityGraph>>,
     mut candidates: Local<Vec<((bool, i32, Entity), Entity)>>,
@@ -516,56 +494,27 @@ pub fn poll_builds<C: RenderSource>(
                     },
                 );
                 let slots = &mut entities.sections[section.index];
-                update_section(
-                    &mut commands,
-                    &mut meshes,
-                    &mut slots.models,
-                    section.models,
-                    None,
-                    |mesh, _| {
-                        (
-                            Mesh3d(mesh),
-                            MeshMaterial3d(assets.models.clone()),
-                            // Static like terrain: culled on GPU only.
-                            NoCpuCulling,
-                            camera.clone(),
-                            placement.clone(),
-                        )
-                    },
-                );
-                update_section(
-                    &mut commands,
-                    &mut meshes,
-                    &mut slots.models_cutout,
-                    section.models_cutout,
-                    None,
-                    |mesh, _| {
-                        (
-                            Mesh3d(mesh),
-                            MeshMaterial3d(assets.models_cutout.clone()),
-                            NoCpuCulling,
-                            camera.clone(),
-                            placement.clone(),
-                        )
-                    },
-                );
-                update_section(
-                    &mut commands,
-                    &mut meshes,
-                    &mut slots.cutout,
+                let geometry = [
+                    section.terrain,
                     section.cutout,
-                    None,
-                    |mesh, _| {
-                        (
-                            Mesh3d(mesh),
-                            MeshMaterial3d(assets.cutout.clone()),
-                            // Casts its own alpha-tested shadow.
-                            NoCpuCulling,
-                            camera.clone(),
-                            placement.clone(),
-                        )
-                    },
-                );
+                    section.models,
+                    section.models_cutout,
+                    section.shadow,
+                ];
+                slots.passes = geometry
+                    .iter()
+                    .enumerate()
+                    .fold(0, |bits, (i, g)| bits | (u8::from(g.is_some()) << i));
+                feed.ops.push(SectionOp::Replace {
+                    column: chunk.position,
+                    section: section.index,
+                    origin: Vec3::new(
+                        (chunk.position.x * 16) as f32,
+                        layout.min_y() as f32 + (section.index as i32 * SECTION_HEIGHT) as f32,
+                        (chunk.position.y * 16) as f32,
+                    ),
+                    geometry,
+                });
                 let (translucent, sort) = section
                     .translucent
                     .map(|(mesh, sort, key)| (mesh, (sort, key)))
@@ -586,41 +535,6 @@ pub fn poll_builds<C: RenderSource>(
                             placement.clone(),
                             sort,
                             super::sort::SortState::new(key),
-                        )
-                    },
-                );
-                update_section(
-                    &mut commands,
-                    &mut meshes,
-                    &mut slots.terrain,
-                    section.terrain,
-                    None,
-                    |mesh, _| {
-                        (
-                            Mesh3d(mesh),
-                            MeshMaterial3d(assets.terrain.clone()),
-                            // The shadow entity below casts its shadow.
-                            NotShadowCaster,
-                            // Culled on GPU only: no per-frame CPU work for static terrain.
-                            NoCpuCulling,
-                            camera.clone(),
-                            placement.clone(),
-                        )
-                    },
-                );
-                update_section(
-                    &mut commands,
-                    &mut meshes,
-                    &mut slots.shadow,
-                    section.shadow,
-                    None,
-                    |mesh, _| {
-                        (
-                            Mesh3d(mesh),
-                            MeshMaterial3d(assets.terrain.clone()),
-                            RenderLayers::layer(SHADOW_LAYER),
-                            NoCpuCulling,
-                            placement.clone(),
                         )
                     },
                 );

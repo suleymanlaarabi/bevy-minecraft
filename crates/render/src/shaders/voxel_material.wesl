@@ -1,3 +1,4 @@
+import super::section_transform;
 import super::surface_animation::surface_frame;
 import super::block_lighting::voxel_diffuse;
 import super::voxel_fog::{apply_voxel_fog_ray, fog_ray, fully_fogged};
@@ -31,7 +32,7 @@ struct VoxelVaryings {
 @vertex
 fn vertex(in: PackedVertex) -> VoxelVaryings {
     let vertex = decode(in.voxel);
-    let world_from_local = mesh_functions::get_world_from_local(in.instance_index);
+    let world_from_local = section_transform::world_from_local(in.instance_index);
     var out: VoxelVaryings;
     out.world_position = mesh_functions::mesh_position_local_to_world(
         world_from_local,
@@ -42,7 +43,7 @@ fn vertex(in: PackedVertex) -> VoxelVaryings {
         world_from_local,
         vec4<f32>(vertex.position, 1.0),
     );
-    out.world_normal = mesh_functions::mesh_normal_local_to_world(
+    out.world_normal = section_transform::world_normal(
         face_normal(vertex.direction),
         in.instance_index,
     );
