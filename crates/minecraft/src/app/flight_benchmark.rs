@@ -24,6 +24,7 @@ use std::{
 const CPU_ACTIVE: DiagnosticPath = DiagnosticPath::const_new("voxel/cpu_active");
 const CPU_PENDING: DiagnosticPath = DiagnosticPath::const_new("voxel/cpu_pending");
 const REST_SECONDS: f64 = 20.0;
+const FLIGHT_DISTANCE: f32 = 960.0;
 
 pub(super) struct FlightBenchmarkPlugin;
 
@@ -47,12 +48,13 @@ impl Plugin for FlightBenchmarkPlugin {
             "flight benchmark: frame CSV at {}",
             std::path::Path::new(&path).display()
         );
+        let speed = option("HOLLOW_FLIGHT_SPEED", 64.0, 1.0, 128.0) as f32;
         app.insert_resource(FlightBenchmark {
             csv,
             phase: Phase::Warmup,
             phase_elapsed: 0.0,
-            flight_seconds: option("HOLLOW_FLIGHT_SECONDS", 60.0, 5.0, 600.0),
-            speed: option("HOLLOW_FLIGHT_SPEED", 16.0, 1.0, 128.0) as f32,
+            flight_seconds: f64::from(FLIGHT_DISTANCE / speed),
+            speed,
             origin: None,
             start: Instant::now(),
             frame_start: Instant::now(),
@@ -257,10 +259,9 @@ fn fly(
             }
         }
     }
-    let distance = benchmark.speed * benchmark.flight_seconds as f32;
     let x = match benchmark.phase {
         Phase::Outbound => benchmark.speed * benchmark.phase_elapsed as f32,
-        Phase::Return => distance - benchmark.speed * benchmark.phase_elapsed as f32,
+        Phase::Return => FLIGHT_DISTANCE - benchmark.speed * benchmark.phase_elapsed as f32,
         _ => 0.0,
     };
     transform.translation = benchmark.origin.unwrap() + Vec3::X * x;

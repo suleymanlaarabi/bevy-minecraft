@@ -368,10 +368,10 @@ impl Padded {
         self.summary = summary;
     }
 
+    #[inline]
     pub fn get(&self, local: IVec3) -> Sample {
-        let width = self.dimensions[0] + 2;
-        let depth = self.dimensions[2] + 2;
-        self.samples[((local.x + 1) + width * ((local.z + 1) + depth * (local.y + 1))) as usize]
+        self.samples
+            [((local.x + 1) + PADDED_SIZE * ((local.z + 1) + PADDED_SIZE * (local.y + 1))) as usize]
     }
 }
 
@@ -520,8 +520,15 @@ fn shared_point(padded: &Padded, point: [u32; 3]) -> bool {
     let cell_at = |corner: usize| {
         std::array::from_fn::<_, 3, _>(|axis| point[axis] - 1 + (corner >> axis & 1) as i32)
     };
-    let samples: [Sample; 8] =
-        std::array::from_fn(|corner| padded.get(IVec3::from_array(cell_at(corner))));
+    // Corner bits follow X/Y/Z, while padded rows follow X/Z/Y. All eight
+    // cells share this base index, including points on a section boundary.
+    let base = (point[0] + PADDED_SIZE * (point[2] + PADDED_SIZE * point[1])) as usize;
+    let samples: [Sample; 8] = std::array::from_fn(|corner| {
+        padded.samples[base
+            + (corner & 1)
+            + ((corner >> 1) & 1) * (PADDED_SIZE * PADDED_SIZE) as usize
+            + ((corner >> 2) & 1) * PADDED_SIZE as usize]
+    });
     let mut owner = None;
     for corner in 0..8 {
         let from = samples[corner];

@@ -68,3 +68,9 @@ overflow-checks = false
 opt-level = 3
 debug-assertions = false
 overflow-checks = false
+
+# Keep the section mesher optimized like generation and shared section storage.
+[profile.dev.package.hollow-render]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
