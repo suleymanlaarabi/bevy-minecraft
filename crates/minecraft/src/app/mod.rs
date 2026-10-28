@@ -4,6 +4,8 @@ mod assets;
 #[cfg(feature = "dev")]
 mod dev;
 mod fonts;
+#[cfg(not(feature = "dev"))]
+mod fps;
 
 pub use assets::{asset_directory, load_nearest};
 
@@ -81,6 +83,8 @@ impl Plugin for HollowPlugin {
         ));
         #[cfg(feature = "dev")]
         app.add_plugins(dev::DevelopmentPlugin);
+        #[cfg(not(feature = "dev"))]
+        app.add_plugins(fps::FpsCounterPlugin);
         app.insert_resource(bevy::render::render_asset::RenderAssetBytesPerFrame::new(
             4 << 20,
         ))
