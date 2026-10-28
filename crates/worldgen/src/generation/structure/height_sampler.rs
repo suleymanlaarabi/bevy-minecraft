@@ -25,6 +25,7 @@ pub struct NoiseHeightSampler<'a> {
     heights: FxHashMap<(i32, i32), i32>,
     ocean_floor_heights: FxHashMap<(i32, i32), i32>,
     columns: FxHashMap<(i32, i32), (i32, Vec<&'static BlockState>)>,
+    height_noise: Option<ChunkNoiseGenerator<'a>>,
 }
 
 impl<'a> NoiseHeightSampler<'a> {
@@ -44,6 +45,7 @@ impl<'a> NoiseHeightSampler<'a> {
             heights: FxHashMap::default(),
             ocean_floor_heights: FxHashMap::default(),
             columns: FxHashMap::default(),
+            height_noise: None,
         }
     }
 
@@ -105,7 +107,7 @@ impl<'a> NoiseHeightSampler<'a> {
             None,
         );
         if generator.fast_terrain {
-            noise.router.coarsen_vertical_interpolation();
+            noise.router.coarsen_interpolation();
         }
 
         (volume, noise)
@@ -132,7 +134,25 @@ impl<'a> NoiseHeightSampler<'a> {
     fn compute_heights(&mut self, x: i32, z: i32) -> [i32; 2] {
         // Density interpolation is kept identical to the full-height volume.
         // Only block/aquifer evaluation stops once both height predicates match.
-        let (volume, mut noise) = self.noise_column(x, z);
+        let mut noise = if self.generator.fast_terrain {
+            match self.height_noise.take() {
+                Some(mut noise)
+                    if noise.volume().min_block_x.div_euclid(16) == x.div_euclid(16)
+                        && noise.volume().min_block_z.div_euclid(16) == z.div_euclid(16) =>
+                {
+                    noise.move_height_column(x, z);
+                    noise
+                }
+                _ => {
+                    let (_, mut noise) = self.noise_column(x, z);
+                    noise.router.reuse_interpolation_corners();
+                    noise
+                }
+            }
+        } else {
+            self.noise_column(x, z).1
+        };
+        let volume = *noise.volume();
         let densities = noise.sample_density();
         let mut surface = None;
         let mut floor = None;
@@ -159,6 +179,9 @@ impl<'a> NoiseHeightSampler<'a> {
         }
         let surface = surface.unwrap_or(volume.min_block_y);
         let floor = floor.unwrap_or(volume.min_block_y);
+        if self.generator.fast_terrain {
+            self.height_noise = Some(noise);
+        }
         static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *VERIFY.get_or_init(|| std::env::var("WORLDGEN_VERIFY_HEIGHTS").as_deref() == Ok("1")) {
             assert_eq!(

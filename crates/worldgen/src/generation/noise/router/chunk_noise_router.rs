@@ -222,15 +222,27 @@ impl ChunkNoiseRouter<'_> {
 }
 
 impl<'a> ChunkNoiseRouter<'a> {
-    /// Apply once before sampling. Alignment uses world coordinates, so adjacent
+    /// Double horizontal and vertical cell sizes once before sampling.
+    /// Alignment uses world coordinates, so adjacent
     /// chunks interpolate the same shared cell corners, including negative Y.
-    pub fn coarsen_vertical_interpolation(&mut self) {
+    pub fn coarsen_interpolation(&mut self) {
         for component in &mut self.component_stack {
             if let ChunkNoiseFunctionComponent::Chunk(
                 ChunkSpecificNoiseFunctionComponent::Interpolated(interpolated),
             ) = component
             {
-                interpolated.coarsen_vertical();
+                interpolated.coarsen();
+            }
+        }
+    }
+
+    pub(crate) fn reuse_interpolation_corners(&mut self) {
+        for component in &mut self.component_stack {
+            if let ChunkNoiseFunctionComponent::Chunk(
+                ChunkSpecificNoiseFunctionComponent::Interpolated(interpolated),
+            ) = component
+            {
+                interpolated.reuse_corners();
             }
         }
     }

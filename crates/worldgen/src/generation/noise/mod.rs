@@ -189,6 +189,16 @@ impl<'a> ChunkNoiseGenerator<'a> {
         &self.volume
     }
 
+    pub(crate) fn move_height_column(&mut self, x: i32, z: i32) {
+        debug_assert_eq!((self.volume.size_x, self.volume.size_z), (1, 1));
+        debug_assert_eq!(self.volume.min_block_x.div_euclid(16), x.div_euclid(16));
+        debug_assert_eq!(self.volume.min_block_z.div_euclid(16), z.div_euclid(16));
+        // Aquifer arrays are indexed relative to this chunk. Its random points
+        // and cached fluid levels remain valid when moving within the chunk.
+        self.volume.min_block_x = x;
+        self.volume.min_block_z = z;
+    }
+
     pub fn sample_density(&mut self) -> ChunkDensities {
         let mut density = DensityBuffer::acquire(&self.volume);
         self.router.final_density_volume(&mut density, &self.volume);

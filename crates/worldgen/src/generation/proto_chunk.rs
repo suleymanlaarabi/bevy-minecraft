@@ -709,7 +709,7 @@ impl ProtoChunk {
             affected_box,
         );
         if generator.fast_terrain {
-            noise_sampler.router.coarsen_vertical_interpolation();
+            noise_sampler.router.coarsen_interpolation();
         }
 
         let surface_config = SurfaceHeightSamplerBuilderOptions::new(

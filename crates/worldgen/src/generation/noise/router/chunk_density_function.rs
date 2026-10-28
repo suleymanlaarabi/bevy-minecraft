@@ -113,6 +113,87 @@ impl MutableChunkNoiseFunctionComponentImpl for Cache {
     }
 }
 
+// Structure height probes revisit nearby columns. Retain only one chunk's
+// corner grid per interpolator; missing columns use the existing volume kernel.
+// No terrain columns are precomputed for isolated height requests.
+struct CornerTile {
+    volume: DensityVolume,
+    values: Box<[f32]>,
+    present: Box<[u64]>,
+}
+
+impl CornerTile {
+    fn volume(request: &DensityVolume) -> DensityVolume {
+        let axis = |block: i32, step: i32| {
+            let start = block.div_euclid(16) * 16;
+            let min = start.div_euclid(step) * step;
+            let max = (start + 16).div_euclid(step) * step;
+            let max = if max < start + 16 { max + step } else { max };
+            (min, ((max - min) / step + 1) as usize)
+        };
+        let (x, size_x) = axis(request.min_block_x, request.step_block_x);
+        let (z, size_z) = axis(request.min_block_z, request.step_block_z);
+        DensityVolume::new(
+            size_x,
+            request.size_y,
+            size_z,
+            x,
+            request.min_block_y,
+            z,
+            request.step_block_x,
+            request.step_block_y,
+            request.step_block_z,
+        )
+    }
+
+    fn new(volume: DensityVolume) -> Self {
+        Self {
+            values: vec![0.0; volume.size()].into_boxed_slice(),
+            present: vec![0; (volume.size_x * volume.size_z).div_ceil(64)].into_boxed_slice(),
+            volume,
+        }
+    }
+
+    fn sample(
+        &mut self,
+        stack: &mut [ChunkNoiseFunctionComponent],
+        output: &mut [f32],
+        request: &DensityVolume,
+    ) {
+        for z in 0..request.size_z {
+            for x in 0..request.size_x {
+                let block_x = request.block_x(x);
+                let block_z = request.block_z(z);
+                let cached = self
+                    .volume
+                    .index_of_block(block_x, request.min_block_y, block_z)
+                    .expect("Height probe corners must fit their chunk tile");
+                let column = cached / self.volume.size_y;
+                let mask = 1u64 << (column % 64);
+                let target = request.index_unchecked(x, 0, z);
+                let output = &mut output[target..target + request.size_y];
+                let values = &mut self.values[cached..cached + request.size_y];
+                if self.present[column / 64] & mask == 0 {
+                    let volume = DensityVolume::new(
+                        1,
+                        request.size_y,
+                        1,
+                        block_x,
+                        request.min_block_y,
+                        block_z,
+                        request.step_block_x,
+                        request.step_block_y,
+                        request.step_block_z,
+                    );
+                    ChunkNoiseFunctionComponent::sample_volume_from_stack(stack, values, &volume);
+                    self.present[column / 64] |= mask;
+                }
+                output.copy_from_slice(values);
+            }
+        }
+    }
+}
+
 pub struct Interpolated {
     pub(crate) input_index: usize,
     cell_size_xz: i32,
@@ -121,10 +202,18 @@ pub struct Interpolated {
     cell_size_y_inv: f32,
     min_value: f32,
     max_value: f32,
+    reuse_corners: bool,
+    corners: Option<Box<CornerTile>>,
 }
 
 impl Interpolated {
-    pub(crate) fn coarsen_vertical(&mut self) {
+    pub(crate) fn reuse_corners(&mut self) {
+        self.reuse_corners = true;
+    }
+
+    pub(crate) fn coarsen(&mut self) {
+        self.cell_size_xz *= 2;
+        self.cell_size_xz_inv = 1.0 / self.cell_size_xz as f32;
         self.cell_size_y *= 2;
         self.cell_size_y_inv = 1.0 / self.cell_size_y as f32;
     }
@@ -145,6 +234,8 @@ impl Interpolated {
             cell_size_y_inv: 1.0 / cell_size_y as f32,
             min_value,
             max_value,
+            reuse_corners: false,
+            corners: None,
         }
     }
 
@@ -158,7 +249,7 @@ impl Interpolated {
     }
 
     fn sample_with_block_step(
-        &self,
+        &mut self,
         component_stack: &mut [ChunkNoiseFunctionComponent],
         buffer: &mut [f32],
         volume: &DensityVolume,
@@ -191,11 +282,41 @@ impl Interpolated {
             self.cell_size_xz,
         );
         let mut corners = DensityBuffer::acquire(&cell_volume);
-        ChunkNoiseFunctionComponent::sample_volume_from_stack(
-            &mut component_stack[..=self.input_index],
-            &mut corners,
-            &cell_volume,
-        );
+        // Nested interpolation can request a wider volume. Cache only grids
+        // fitting one tile, with at most 32 KiB of f32 data per interpolator.
+        let tile = self
+            .reuse_corners
+            .then(|| CornerTile::volume(&cell_volume))
+            .filter(|tile| {
+                tile.size() <= 8192
+                    && tile
+                        .index_of_block(
+                            cell_volume.block_x(cell_volume.size_x - 1),
+                            cell_volume.min_block_y,
+                            cell_volume.block_z(cell_volume.size_z - 1),
+                        )
+                        .is_some()
+            });
+        if let Some(tile) = tile {
+            if self
+                .corners
+                .as_ref()
+                .is_none_or(|cache| cache.volume != tile)
+            {
+                self.corners = Some(Box::new(CornerTile::new(tile)));
+            }
+            self.corners.as_mut().unwrap().sample(
+                &mut component_stack[..=self.input_index],
+                &mut corners,
+                &cell_volume,
+            );
+        } else {
+            ChunkNoiseFunctionComponent::sample_volume_from_stack(
+                &mut component_stack[..=self.input_index],
+                &mut corners,
+                &cell_volume,
+            );
+        }
 
         for cell_z in 0..cell_count_z {
             let next_z = (cell_z + 1).min(cell_volume.size_z - 1);
