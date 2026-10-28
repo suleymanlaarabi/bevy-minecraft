@@ -16,12 +16,21 @@
 | Shared slots, motion, articulation, following, cursor | `crates/features/src` |
 | Gameplay, player, inventory/UI, Minecraft adapters, sky, audio | `crates/minecraft/src` |
 | Terrain generation and native data adapters | `crates/worldgen/src` |
-| Application composition | `src/main.rs`, `examples/voxel_sandbox/src` |
+| Application composition | `src/main.rs` |
 
 - Locate files with `rg --files <area>` and symbols with scoped `rg -n`. Read relevant sections, then follow callers and dependencies only as needed for correctness. Stop expanding once the affected behavior and constraints are understood.
-- For cross-project exploration, exclude bulk data: `rg -n -g '*.rs' -g '!**/generated/**' <pattern> src crates examples`. Use `rg -l` when only filenames are needed. Narrow an overflowing search instead of repeatedly reading truncated output.
+- For cross-project exploration, exclude bulk data: `rg -n -g '*.rs' -g '!**/generated/**' <pattern> src crates`. Use `rg -l` when only filenames are needed. Narrow an overflowing search instead of repeatedly reading truncated output.
 - Generated registry sources in `crates/worldgen/crates/pumpkin-data/src/generated` are very large. Consult exact symbols there only for native definitions or generation changes; do not read whole generated files. Search shaders separately in `crates/render/src/shaders`.
-- Read `docs/PLUGIN_ARCHITECTURE.md` for cross-crate boundaries, the relevant content/ECS document for its API, and `crates/worldgen/README.md` for generator work. Read `ROADMAP.md` only for planning. No documentation sweep is required before ordinary edits; current code determines implemented behavior.
+- Use the crate map above for boundaries and current code for implemented behavior. Read `crates/worldgen/README.md` only for generator context and `ROADMAP.md` only for planning. No documentation sweep or additional context document is required.
+
+## Targeted Cargo verification
+
+- For an internal change, start with `cargo check -p <affected-package>`. Group affected packages with repeated `-p` flags instead of rerunning overlapping checks.
+- When a shared interface changes, also check its affected consumer packages. Use the manifests and callers to identify consumers; a library check alone does not verify them.
+- For conditional code, check the default configuration and the affected feature configurations, including `dev`, `sqlite` or `content-ron` where relevant. Check the owning package independently when workspace feature unification could hide a missing feature or dependency.
+- Reserve `cargo check --workspace` for changes spanning the workspace or shared dependency configuration. Do not repeat a successful check unless a new change or unresolved failure requires it.
+- Check crate examples only when affected, using `cargo check -p <package> --example <name>` with the relevant features. Do not use `--all-targets`, which includes test and benchmark targets.
+- Documentation, instruction and Codex configuration changes need no Cargo check. Changed Cargo manifests require an appropriate targeted check. Never run tests, benchmarks, release builds or the application.
 
 ## Targeted performance review
 

@@ -56,8 +56,6 @@ Checked boxes below identify existing capabilities. Remaining-work boxes stay un
 
 Source entry points: [engine](crates/engine/src/), [shared gameplay services](crates/features/src/), [game composition](crates/minecraft/src/game.rs), [player interactions](crates/minecraft/src/player/interaction.rs), [inventory and crafting](crates/minecraft/src/inventory/), [block behavior](crates/minecraft/src/block_behavior/), [voxel generation](crates/minecraft/src/voxel/generation.rs), [world lifecycle and saves](crates/minecraft/src/world/), and [world-generation crate](crates/worldgen/src/).
 
-The plugin architecture refactor is in progress. See [implemented boundaries and remaining work](docs/PLUGIN_ARCHITECTURE.md).
-
 ## Milestone order
 
 | Milestone | Outcome | Prerequisites |
@@ -81,7 +79,7 @@ Milestones group dependencies rather than require strictly serial development. S
 
 ## M1 - Persistent gameplay simulation
 
-**Status: Partial.** The persistent tick/column/fluid foundation is implemented and compile-checked; see [implementation and static review](docs/M1_SIMULATION.md). Bounded coherent save admission is implemented; later entity/item families and runtime acceptance remain.
+**Status: Partial.** The persistent tick/column/fluid foundation is implemented and compile-checked. Bounded coherent save admission is implemented; later entity/item families and runtime acceptance remain.
 
 - [x] Add a gameplay clock, scheduled block/fluid ticks, random ticks, and bounded neighbor-update processing; keep rendering and simulation clocks distinct.
 - [x] Separate simulation distance from render distance, with explicit activation and deactivation rules for chunks, entities, and block machines.
@@ -98,8 +96,6 @@ Milestones group dependencies rather than require strictly serial development. S
 
 **Status: Partial.** Tool-aware gathering, saved durability, simplified block loot, and personal/workbench crafting exist. Processing stations, recipe search, and the full resource-progression audit remain.
 
-Implementation details and static review: [M2 gathering and crafting](docs/M2_GATHERING.md).
-
 - [x] Add pickaxes, axes, shovels, hoes, and shears, with material tiers, suitable blocks, harvest requirements, and durability.
 - [x] Derive mining results from tool, block, and player state, including incorrect tools, underwater work, instant-break blocks, and unbreakable blocks.
 - [x] Replace generic self-drops with loot rules: stone/cobblestone, ores/raw materials/gems, leaves/saplings, gravel/flint, crops, multi-part blocks, and container contents.
@@ -114,8 +110,6 @@ Implementation details and static review: [M2 gathering and crafting](docs/M2_GA
 ## M3 - Player survival
 
 **Status: Partial.** Fixed-step health, nutrition, consumables, damage, equipment mitigation, feedback, and a survival HUD are implemented. Death retains inventory; beds, experience, freezing, and the remaining death consequences are still pending.
-
-Implementation details and static review: [M3 survival](docs/M3_SURVIVAL.md).
 
 - [x] Add health, hunger, saturation/exhaustion, eating/drinking, food effects, regeneration, and starvation.
 - [x] Add damage sources, invulnerability windows, armor mitigation, knockback, and damage feedback.

@@ -31,8 +31,7 @@ are retained.
 Generation records use the shared terrain codec and the engine SQLite backend.
 The generator stores its typed stage alongside the payload; Minecraft owns its
 application metadata and checkpoints. Saves are disposable: there are no format
-versions, compatibility readers or migrations. See the current package boundaries
-in [Voxel engine architecture](../../docs/PLUGIN_ARCHITECTURE.md).
+versions, compatibility readers or migrations.
 
 ## Historical refactor measurements
 
