@@ -13,6 +13,9 @@ pub struct VoxelDiagnostics {
     pub mesh_worker_seconds: f64,
     pub mesh_apply_seconds: f64,
     pub visibility_seconds: f64,
+    pub visibility_columns: u64,
+    pub visibility_remaining: usize,
+    pub visibility_conservative: bool,
     pub translucent_sort_seconds: f64,
     // Asset bytes queued on the main world, before render extraction/GPU upload.
     pub uploaded_bytes: u64,

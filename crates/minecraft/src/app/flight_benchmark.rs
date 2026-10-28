@@ -41,7 +41,7 @@ impl Plugin for FlightBenchmarkPlugin {
         let path =
             std::env::var_os("HOLLOW_FLIGHT_CSV").unwrap_or_else(|| "flight-benchmark.csv".into());
         let mut csv = BufWriter::new(File::create(&path).expect("Create flight benchmark CSV"));
-        writeln!(csv, "seconds,phase,x,y,z,frame_ms,main_schedule_ms,loads_completed,builds_completed,load_wall_ms,mesh_worker_ms,mesh_apply_ms,uploaded_bytes,uploaded_meshes,cpu_active,cpu_pending,pending_write_bytes,world_phase,visibility_ms,translucent_sort_ms")
+        writeln!(csv, "seconds,phase,x,y,z,frame_ms,main_schedule_ms,loads_completed,builds_completed,load_wall_ms,mesh_worker_ms,mesh_apply_ms,uploaded_bytes,uploaded_meshes,cpu_active,cpu_pending,pending_write_bytes,world_phase,visibility_ms,translucent_sort_ms,visibility_columns,visibility_remaining,visibility_conservative")
             .expect("Write flight benchmark CSV header");
         info!(
             "flight benchmark: frame CSV at {}",
@@ -324,9 +324,10 @@ fn record_frame(
             (current.visibility - old.visibility) * 1000.0,
             (current.sort - old.sort) * 1000.0,
         );
-        writeln!(benchmark.csv, "{elapsed:.6},{phase:?},{:.3},{:.3},{:.3},{frame_ms:.4},{main_ms:.4},{},{},{:.4},{:.4},{:.4},{},{},{active:.0},{pending:.0},{},{:?},{:.4},{:.4}",
+        writeln!(benchmark.csv, "{elapsed:.6},{phase:?},{:.3},{:.3},{:.3},{frame_ms:.4},{main_ms:.4},{},{},{:.4},{:.4},{:.4},{},{},{active:.0},{pending:.0},{},{:?},{:.4},{:.4},{},{},{}",
             position.x, position.y, position.z, row.0, row.1, row.2, row.3, row.4, row.5, row.6,
-            simulation.pending_write_bytes, world_phase.as_ref().map(|phase| *phase.get()), row.7, row.8)
+            simulation.pending_write_bytes, world_phase.as_ref().map(|phase| *phase.get()), row.7, row.8,
+            voxel.visibility_columns, voxel.visibility_remaining, u8::from(voxel.visibility_conservative))
             .expect("Write flight benchmark frame");
     }
     benchmark.counters = current;

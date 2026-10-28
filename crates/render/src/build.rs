@@ -371,7 +371,7 @@ pub fn poll_builds<C: RenderSource>(
     assets: Option<Res<VoxelAssets>>,
     mut meshes: ResMut<Assets<Mesh>>,
     viewer: Option<Single<&Transform, With<VoxelViewer>>>,
-    mut topology: Option<ResMut<super::visibility::TopologyVersion>>,
+    mut topology: Option<ResMut<super::visibility::VisibilityGraph>>,
     mut candidates: Local<Vec<((bool, i32, Entity), Entity)>>,
     mut chunks: Query<(
         Entity,
@@ -399,7 +399,7 @@ pub fn poll_builds<C: RenderSource>(
     }));
     candidates.sort_unstable();
     for &(_, entity) in candidates.iter() {
-        let Ok((_, _, mut voxels, mut build, sections, _)) = chunks.get_mut(entity) else {
+        let Ok((_, chunk, mut voxels, mut build, sections, _)) = chunks.get_mut(entity) else {
             continue;
         };
         if build.revision != voxels.revision {
@@ -446,16 +446,8 @@ pub fn poll_builds<C: RenderSource>(
                 break;
             }
             let section = output.sections.next().expect("pending section");
-            let previous_connectivity = if entities.built_sections & (1 << section.index) != 0 {
-                entities.sections[section.index].connectivity
-            } else {
-                super::visibility::ALL_CONNECTIONS
-            };
-            if entities.content_revision == voxels.content_revision
-                && previous_connectivity != section.connectivity
-                && let Some(version) = topology.as_deref_mut()
-            {
-                version.invalidate();
+            if let Some(graph) = topology.as_deref_mut() {
+                graph.invalidate_column(chunk.position, 1 << section.index);
             }
             entities.sections[section.index].connectivity = section.connectivity;
             entities.built_sections |= 1 << section.index;
@@ -585,7 +577,7 @@ pub fn poll_builds<C: RenderSource>(
             if entities.content_revision != build.content_revision
                 && let Some(version) = topology.as_deref_mut()
             {
-                version.invalidate();
+                version.invalidate_column(chunk.position, u32::MAX);
             }
             entities.content_revision = build.content_revision;
         }
