@@ -536,7 +536,11 @@ pub(super) fn refresh_save_status(
     mut errors: Query<&mut Text, (With<SaveStatus>, Without<SaveIndicator>)>,
 ) {
     for mut text in &mut texts {
-        let message = if save.task.is_some() { "Saving…" } else { "" };
+        let message = if save.task.is_some() || !save.remaining.is_empty() {
+            "Saving…"
+        } else {
+            ""
+        };
         if text.0 != message {
             text.0 = message.into();
         }

@@ -25,11 +25,7 @@ use std::{
     collections::{HashMap, VecDeque},
     io,
     path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc::{self, SyncSender, TrySendError},
-    },
+    sync::Arc,
 };
 use storage::{CatalogEntry, Database};
 
@@ -80,8 +76,7 @@ enum Destination {
 #[derive(Resource, Default)]
 pub(crate) struct SaveState {
     in_flight_bytes: usize,
-    progressive: Option<ProgressiveCapture>,
-    automatic_pause: bool,
+    remaining: VecDeque<IVec2>,
     task: Option<Task<io::Result<SaveAck>>>,
     elapsed: f32,
     destination: Destination,
@@ -93,19 +88,6 @@ pub(crate) struct SaveState {
     // Give inventory OnExit and deferred commands one complete frame to settle.
     settle_frames: u8,
 }
-type CaptureColumn = (
-    IVec2,
-    Option<ChunkVoxels>,
-    Option<crate::block_behavior::containers::ColumnSnapshot>,
-);
-
-struct ProgressiveCapture {
-    remaining: VecDeque<(IVec2, usize)>,
-    sender: SyncSender<Vec<CaptureColumn>>,
-    pending: Option<Vec<CaptureColumn>>,
-    ready: Arc<AtomicBool>,
-}
-
 struct SaveAck {
     revisions: Vec<(IVec2, u64)>,
     gameplay_revisions: Vec<(IVec2, u64)>,
@@ -480,7 +462,6 @@ fn resume_session(
     virtual_time.unpause();
     commands.despawn_all::<With<ui::SaveOverlay>>();
     save.error = None;
-    save.automatic_pause = false;
 }
 
 /// `NextState` keeps the last write of a frame: run last so no transition requested
@@ -554,52 +535,11 @@ fn checkpoint(
     gameplay: crate::block_behavior::containers::ColumnSnapshots,
     clock: Res<crate::simulation::GameplayClock>,
     time_of_day: Res<crate::sky::TimeOfDay>,
-    mut next_phase: ResMut<NextState<WorldSessionPhase>>,
 ) {
     let (generator, budget) = generation;
     let Some(session) = session else {
         return;
     };
-    if let Some(progressive) = &mut save.progressive {
-        if progressive.pending.is_none()
-            && !progressive.remaining.is_empty()
-            && progressive.ready.swap(false, Ordering::Acquire)
-        {
-            let mut batch = Vec::new();
-            let mut bytes = 0usize;
-            while let Some(&(position, cost)) = progressive.remaining.front() {
-                if !batch.is_empty()
-                    && (batch.len() >= 128
-                        || bytes.saturating_add(cost) > crate::simulation::ENCODING_BATCH_BYTES)
-                {
-                    break;
-                }
-                progressive.remaining.pop_front();
-                bytes = bytes.saturating_add(cost);
-                // Direct lookups keep each batch proportional to its own columns.
-                let dirty = |voxels: &&ChunkVoxels| voxels.save_revision != voxels.saved_revision;
-                let terrain = chunk_index
-                    .get(&position)
-                    .and_then(|&entity| chunks.get(entity).ok())
-                    .map(|(_, voxels)| voxels)
-                    .filter(dirty)
-                    .or_else(|| stored.get(&position).filter(dirty))
-                    .map(ChunkVoxels::save_snapshot);
-                batch.push((position, terrain, gameplay.capture_at(position)));
-            }
-            progressive.pending = Some(batch);
-        }
-        if let Some(batch) = progressive.pending.take() {
-            match progressive.sender.try_send(batch) {
-                Ok(()) => {}
-                Err(TrySendError::Full(batch)) => progressive.pending = Some(batch),
-                Err(TrySendError::Disconnected(_)) => save.progressive = None,
-            }
-        } else if progressive.remaining.is_empty() {
-            save.progressive = None;
-        }
-        return;
-    }
     if save.task.is_some()
         || matches!(
             phase.get(),
@@ -610,7 +550,6 @@ fn checkpoint(
     }
     save.elapsed += time.delta_secs();
     let saving = *phase.get() == WorldSessionPhase::Saving;
-    let final_save = saving && !save.automatic_pause;
     let forced = saving || save.force;
     if !forced && save.elapsed < 30.0 {
         return;
@@ -668,154 +607,85 @@ fn checkpoint(
             .collect(),
         time_of_day: Some(time_of_day.days()),
     };
-    // Layers are copy-on-write: these clones only bump reference counts.
-    let mut snapshots = HashMap::new();
+    // Estimate before cloning: only the selected columns retain snapshots while
+    // the worker encodes them. Terrain and gameplay from a column share a capture.
+    let mut reservations: HashMap<_, _> = gameplay
+        .candidates()
+        .into_iter()
+        .map(|(position, codec, snapshot)| (position, (codec, snapshot)))
+        .collect();
+    let terrain_at = |position: &IVec2| {
+        chunk_index
+            .get(position)
+            .and_then(|&entity| chunks.get(entity).ok())
+            .map(|(_, voxels)| voxels)
+            .filter(|voxels| voxels.save_revision != voxels.saved_revision)
+            .or_else(|| {
+                stored
+                    .get(position)
+                    .filter(|voxels| voxels.save_revision != voxels.saved_revision)
+            })
+    };
     for (position, voxels) in stored
         .iter()
         .map(|(p, v)| (*p, v))
         .chain(chunks.iter().map(|(p, v)| (p.position, v)))
     {
         if voxels.save_revision != voxels.saved_revision {
-            snapshots.insert(position, voxels.save_snapshot());
+            // A loaded column can also be retained in StoredChunks. Resolve its
+            // current owner once below rather than charging both copies.
+            reservations.entry(position).or_default();
         }
     }
-    let candidates = gameplay.candidates();
-    let mut reservations: HashMap<_, usize> = candidates
-        .iter()
-        .map(|&(position, codec, _)| (position, codec))
-        .collect();
-    for (&position, voxels) in &snapshots {
-        *reservations.entry(position).or_default() += voxels.retained_bytes() * 8 + 4096;
-    }
-    let snapshot_bytes = candidates.iter().map(|(_, _, bytes)| bytes).sum::<usize>()
-        + snapshots.len() * std::mem::size_of::<ChunkVoxels>();
-    let codec_bytes = reservations
-        .values()
-        .copied()
-        .max()
-        .unwrap_or(0)
-        .max(crate::simulation::ENCODING_BATCH_BYTES);
-    let captured_bytes = snapshot_bytes.saturating_add(codec_bytes);
-    if captured_bytes > crate::simulation::MAX_CAPTURE_BYTES {
-        if !saving {
-            save.automatic_pause = true;
-            save.force = true;
-            next_phase.set(WorldSessionPhase::Saving);
-            return;
+    for (position, (codec, snapshot)) in &mut reservations {
+        if let Some(voxels) = terrain_at(position) {
+            *codec += voxels.retained_bytes() * 8 + 4096;
+            *snapshot += std::mem::size_of::<ChunkVoxels>();
         }
-        let estimates: HashMap<_, _> = candidates
-            .iter()
-            .map(|&(position, _, bytes)| (position, bytes))
-            .collect();
-        let too_large = reservations.iter().any(|(position, codec)| {
-            codec.saturating_add(estimates.get(position).copied().unwrap_or(0))
-                > crate::simulation::MAX_CAPTURE_BYTES
-        });
-        if too_large {
+    }
+    // On exit, rebuild from all dirty revisions after the previous write was
+    // acknowledged, including edits made during the last background capture.
+    if saving {
+        save.remaining.clear();
+    }
+    if save.remaining.is_empty() {
+        save.remaining.extend(reservations.keys().copied());
+    }
+    let mut snapshots = HashMap::new();
+    let mut gameplay_snapshots = Vec::new();
+    let mut snapshot_bytes = 0usize;
+    let mut codec_bytes = crate::simulation::ENCODING_BATCH_BYTES;
+    let mut selected = 0usize;
+    while let Some(&position) = save.remaining.front() {
+        let Some(&(codec, snapshot)) = reservations.get(&position) else {
+            save.remaining.pop_front();
+            continue;
+        };
+        let next_snapshot_bytes = snapshot_bytes.saturating_add(snapshot);
+        let next_codec_bytes = codec_bytes.max(codec);
+        let next_bytes = next_snapshot_bytes.saturating_add(next_codec_bytes);
+        if selected > 0 && (selected >= 128 || next_bytes > crate::simulation::MAX_CAPTURE_BYTES) {
+            break;
+        }
+        if next_bytes > crate::simulation::MAX_CAPTURE_BYTES {
             let error = io::Error::other("A world column exceeds the bounded save capture budget.");
             save.task = Some(IoTaskPool::get().spawn(async move { Err(error) }));
             return;
         }
-        let positions: Vec<_> = reservations.keys().copied().collect();
-        let updates = positions
-            .iter()
-            .map(|position| {
-                (
-                    (position.x, position.y),
-                    snapshots.contains_key(position),
-                    estimates.contains_key(position),
-                )
-            })
-            .collect();
-        drop(snapshots);
-        let mut metadata = session.metadata.clone();
-        metadata.last_played = model::now();
-        let database = session.database.clone();
-        let generator = generator.clone();
-        let budget = budget.clone();
-        let (sender, receiver) = mpsc::sync_channel::<Vec<CaptureColumn>>(0);
-        let remaining = positions
-            .into_iter()
-            .map(|position| {
-                let cost = reservations[&position]
-                    .saturating_add(estimates.get(&position).copied().unwrap_or(0));
-                (position, cost)
-            })
-            .collect();
-        let ready = Arc::new(AtomicBool::new(false));
-        save.progressive = Some(ProgressiveCapture {
-            remaining,
-            sender,
-            pending: None,
-            ready: ready.clone(),
-        });
-        save.in_flight_bytes = crate::simulation::MAX_CAPTURE_BYTES;
-        save.task = Some(IoTaskPool::get().spawn(async move {
-            generator.flush().await?;
-            let (prepared, checkpoint, metadata) = budget
-                .spawn(hollow_engine::tasks::WorkClass::Encoding, 0, async move {
-                    prepare_checkpoint(&metadata, &checkpoint, updates)
-                        .map(|prepared| (prepared, checkpoint, metadata))
-                })
-                .await?;
-            let mut revisions = Vec::new();
-            let mut gameplay_revisions = Vec::new();
-            let batches = std::iter::from_fn(|| {
-                ready.store(true, Ordering::Release);
-                receiver.recv().ok()
-            })
-            .map(|batch| {
-                for (position, terrain, gameplay) in &batch {
-                    if let Some(voxels) = terrain {
-                        revisions.push((*position, voxels.save_revision));
-                    }
-                    if let Some(data) = gameplay {
-                        gameplay_revisions.push((*position, data.revision));
-                    }
-                }
-                bevy::tasks::block_on(budget.spawn(
-                    hollow_engine::tasks::WorkClass::Encoding,
-                    0,
-                    async move {
-                        batch
-                            .into_iter()
-                            .map(|(position, terrain, gameplay)| {
-                                let terrain = terrain.map(|voxels| {
-                                    hollow_worldgen::codec::compress_record(&voxels.encode_saved())
-                                });
-                                let application = gameplay
-                                    .map(|snapshot| {
-                                        let bytes = snapshot.encode()?;
-                                        if bytes.len() > hollow_worldgen::codec::MAX_RECORD_BYTES {
-                                            return Err(io::Error::other(
-                                                "Gameplay snapshot exceeds the record size limit.",
-                                            ));
-                                        }
-                                        Ok(hollow_worldgen::codec::compress_record(&bytes))
-                                    })
-                                    .transpose()?;
-                                Ok(storage::EncodedColumn {
-                                    position: (position.x, position.y),
-                                    terrain,
-                                    application,
-                                })
-                            })
-                            .collect::<io::Result<Vec<_>>>()
-                    },
-                ))
-            });
-            database.checkpoint(prepared, batches)?;
-            Ok(SaveAck {
-                revisions,
-                gameplay_revisions,
-                checkpoint,
-                metadata,
-                final_save,
-            })
-        }));
-        return;
+        save.remaining.pop_front();
+        snapshot_bytes = next_snapshot_bytes;
+        codec_bytes = next_codec_bytes;
+        selected += 1;
+        if let Some(voxels) = terrain_at(&position) {
+            snapshots.insert(position, voxels.save_snapshot());
+        }
+        if let Some(snapshot) = gameplay.capture_at(position) {
+            gameplay_snapshots.push((position, snapshot));
+        }
     }
-    let gameplay_snapshots = gameplay.capture();
+    let captured_bytes = snapshot_bytes.saturating_add(codec_bytes);
+    save.force = !save.remaining.is_empty();
+    let final_save = saving && save.remaining.is_empty();
     if !forced
         && gameplay_snapshots.is_empty()
         && snapshots.is_empty()
@@ -851,12 +721,12 @@ fn checkpoint(
             ),
         > = snapshots
             .into_iter()
-            .map(|(position, voxels)| (position, (Some(voxels), None, reservations[&position])))
+            .map(|(position, voxels)| (position, (Some(voxels), None, reservations[&position].0)))
             .collect();
         for (position, gameplay) in gameplay_snapshots {
             captures
                 .entry(position)
-                .or_insert_with(|| (None, None, reservations[&position]))
+                .or_insert_with(|| (None, None, reservations[&position].0))
                 .1 = Some(gameplay);
         }
         let positions = captures
@@ -948,7 +818,6 @@ fn poll_save(
         return;
     };
     save.task = None;
-    save.progressive = None;
     save.in_flight_bytes = 0;
     match result {
         Ok(ack) => {
@@ -988,14 +857,12 @@ fn poll_save(
                 // Only leave after a checkpoint captured while frozen.
                 if ack.final_save {
                     leave(&save.destination, &mut next, &mut commands);
-                } else if save.automatic_pause {
-                    save.automatic_pause = false;
-                    next_phase.set(WorldSessionPhase::Playing);
                 }
             }
         }
         Err(e) => {
-            save.automatic_pause = false;
+            // Rebuild from dirty revisions on retry, including the failed batch.
+            save.remaining.clear();
             save.error = Some(e.to_string());
             next_phase.set(WorldSessionPhase::SaveError);
         }

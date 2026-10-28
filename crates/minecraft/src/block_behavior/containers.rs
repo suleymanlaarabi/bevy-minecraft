@@ -751,13 +751,7 @@ impl ColumnSnapshots<'_, '_> {
             })
             .collect()
     }
-    pub fn capture(&self) -> Vec<(IVec2, ColumnSnapshot)> {
-        self.columns
-            .iter()
-            .filter_map(|column| self.snapshot(column))
-            .collect()
-    }
-    /// Progressive saves resolve each selected column directly instead of scanning all.
+    /// Resolve the selected column without rescanning every gameplay owner.
     pub fn capture_at(&self, position: IVec2) -> Option<ColumnSnapshot> {
         self.snapshot(self.columns.get(*self.index.get(&position)?).ok()?)
             .map(|(_, snapshot)| snapshot)
