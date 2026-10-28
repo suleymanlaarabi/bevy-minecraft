@@ -357,6 +357,8 @@ fn report_voxel_diagnostics(
     sections: Query<&ChunkSections>,
     pending: Res<PendingChunks>,
     simulation: Res<crate::simulation::SimulationDiagnostics>,
+    creatures: Query<Has<crate::simulation::Simulating>, With<crate::creatures::Creature>>,
+    paths: Res<crate::creatures::PathPool>,
 ) {
     diagnostics.elapsed += time.delta_secs_f64();
     if diagnostics.elapsed < 5.0 {
@@ -414,6 +416,22 @@ fn report_voxel_diagnostics(
         simulation.random_attempts,
         simulation.maximum_lateness,
         simulation.pending_write_bytes
+    );
+    let (creature_count, active_creatures) = creatures
+        .iter()
+        .fold((0usize, 0usize), |(total, active), simulating| {
+            (total + 1, active + usize::from(simulating))
+        });
+    let path_bytes = paths.retained_bytes();
+    info!(
+        "creatures: total={creature_count} active={active_creatures} path_capacity_bytes={path_bytes} paths_pending={} oldest_wait_ticks={} queue_bytes={} search_table_bytes={} expansions={} probes={}/32768 spawn_refusals[cap,terrain,space,occupied,biome,light,distance]={:?}",
+        simulation.navigation_pending,
+        simulation.navigation_oldest_wait,
+        simulation.navigation_queue_bytes,
+        simulation.navigation_search_bytes,
+        simulation.navigation_expansions,
+        simulation.navigation_probes,
+        simulation.spawn_rejections
     );
     diagnostics.generation_ms.clear();
     diagnostics.meshing_ms.clear();

@@ -196,6 +196,16 @@ pub struct LightingState<T: VoxelCell> {
     synchronized_version: Option<u64>,
 }
 
+impl<T: VoxelCell> LightingState<T> {
+    /// Light outside the edit neighborhoods submitted to the worker is already authoritative.
+    pub fn is_settled(&self, position: IVec2, version: &LightingVersion) -> bool {
+        !self.submitted.contains_key(&position)
+            || (self.task.is_none()
+                && self.ready.is_empty()
+                && self.synchronized_version == Some(version.0))
+    }
+}
+
 pub fn update_lighting<T: VoxelCell>(
     mut commands: Commands,
     mut state: ResMut<LightingState<T>>,

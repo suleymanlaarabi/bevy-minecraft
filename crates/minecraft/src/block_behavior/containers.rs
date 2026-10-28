@@ -47,7 +47,7 @@ pub(crate) struct TopologyDirty;
 pub(crate) struct AvailableContainer;
 
 pub use hollow_engine::blocks::ColumnOwners as GameplayColumns;
-pub type GameplayColumn = hollow_engine::simulation::ColumnData<Vec<crate::world::SavedDrop>>;
+pub type GameplayColumn = hollow_engine::simulation::ColumnData<crate::creatures::ColumnActors>;
 pub(crate) fn column(world: &mut World, position: IVec2) -> Entity {
     let entity = hollow_engine::blocks::column(world, position);
     if world.get::<GameplayColumn>(entity).is_none() {
@@ -56,7 +56,7 @@ pub(crate) fn column(world: &mut World, position: IVec2) -> Entity {
             revision: 0,
             saved_revision: 0,
             initialized: false,
-            application: Vec::new(),
+            application: default(),
         });
     }
     entity
@@ -111,12 +111,18 @@ pub(crate) struct PreparedColumn {
     pub revision: u64,
     pub simulation: crate::simulation::ColumnSimulation,
     pub drops: Vec<crate::world::SavedDrop>,
+    pub creatures: Vec<crate::creatures::SavedCreature>,
+    pub spawners: Vec<crate::creatures::SavedSpawner>,
+    pub biomes: std::sync::Arc<[u8]>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ColumnRecord {
     containers: Vec<ContainerRecord>,
     simulation: crate::simulation::SimulationSnapshot,
     drops: Vec<crate::world::SavedDrop>,
+    creatures: Vec<crate::creatures::SavedCreature>,
+    spawners: Vec<crate::creatures::SavedSpawner>,
+    biomes: Vec<u8>,
 }
 type ContainerRecord = ([i32; 3], [Option<crate::world::SavedStack>; CONTAINER_SIZE]);
 impl PreparedColumn {
@@ -161,7 +167,7 @@ impl PreparedColumn {
     }
 
     pub fn restore(&mut self, bytes: &[u8], chunk: IVec2) -> io::Result<()> {
-        let record: ColumnRecord = serde_json::from_slice(bytes).map_err(io::Error::other)?;
+        let mut record: ColumnRecord = serde_json::from_slice(bytes).map_err(io::Error::other)?;
         self.simulation = crate::simulation::ColumnSimulation::restore(
             record.simulation,
             hollow_worldgen::coordinates::SECTION_COUNT,
@@ -172,10 +178,52 @@ impl PreparedColumn {
                 return Err(io::Error::other("Dropped item belongs to another column."));
             }
         }
-        self.drops = record.drops;
-        let records = record.containers;
+        for creature in &record.creatures {
+            creature.validate(chunk)?;
+        }
+        if !record.biomes.is_empty()
+            && record.biomes.len() != hollow_worldgen::coordinates::SECTION_COUNT * 64
+        {
+            return Err(io::Error::other("Invalid column biomes."));
+        }
         self.entries
             .sort_unstable_by_key(|(p, _, _)| (p.y, p.z, p.x));
+        record.spawners.sort_unstable_by_key(|s| s.position);
+        if record
+            .spawners
+            .windows(2)
+            .any(|pair| pair[0].position == pair[1].position)
+        {
+            return Err(io::Error::other("Duplicate spawner record."));
+        }
+        for spawner in &record.spawners {
+            let position = IVec3::from_array(spawner.position);
+            let matches = self
+                .entries
+                .binary_search_by_key(&(position.y, position.z, position.x), |(p, _, _)| {
+                    (p.y, p.z, p.x)
+                })
+                .ok()
+                .is_some_and(|index| {
+                    self.entries[index].1.kind()
+                        == crate::voxel::VoxelKind::from_native(pumpkin_data::Block::SPAWNER.id)
+                });
+            if !matches
+                || pumpkin_data::entity::EntityType::from_raw(spawner.species.0).is_none()
+                || crate::voxel::chunk_at(position.as_vec3()) != chunk
+                || !(0..hollow_worldgen::coordinates::CHUNK_HEIGHT).contains(&position.y)
+                || spawner.delay > 800
+            {
+                return Err(io::Error::other("Invalid saved spawner."));
+            }
+        }
+        self.creatures = record.creatures;
+        self.spawners = record.spawners;
+        if !record.biomes.is_empty() {
+            self.biomes = record.biomes.into();
+        }
+        self.drops = record.drops;
+        let records = record.containers;
         let mut seen = vec![false; self.entries.len()];
         for (position, slots) in records {
             let position = IVec3::from_array(position);
@@ -244,7 +292,13 @@ pub(crate) fn spawn_for_chunk(
             world
                 .get_mut::<GameplayColumn>(owner)
                 .expect("Gameplay column")
-                .application = prepared.drops;
+                .application = crate::creatures::ColumnActors {
+                drops: prepared.drops,
+                creatures: prepared.creatures,
+            };
+            world
+                .entity_mut(owner)
+                .insert(crate::creatures::spawning::ColumnBiomes(prepared.biomes));
             world.entity_mut(owner).insert(prepared.simulation);
             // A shared clone keeps the resource available to factory-triggered observers.
             let catalog = world
@@ -256,6 +310,22 @@ pub(crate) fn spawn_for_chunk(
                 if profile(state.kind()).chest {
                     world.entity_mut(entity).insert(inventory);
                 }
+            }
+            let layout = world.resource::<hollow_engine::world::WorldLayout>().0;
+            for saved in prepared.spawners {
+                let cell =
+                    hollow_engine::blocks::local_index(IVec3::from_array(saved.position), layout);
+                let entity = world
+                    .get::<hollow_engine::blocks::ColumnBlocks>(owner)
+                    .and_then(|blocks| blocks.cells.get(&cell))
+                    .copied()
+                    .expect("Discovered spawner block");
+                world
+                    .entity_mut(entity)
+                    .insert(crate::creatures::CreatureSpawner {
+                        species: saved.species,
+                        delay: saved.delay,
+                    });
             }
             let mut data = world
                 .get_mut::<GameplayColumn>(owner)
@@ -275,6 +345,8 @@ pub(crate) fn loaded(
     topology: TopologyUpdates,
     simulations: Query<&crate::simulation::ColumnSimulation>,
     mut columns: Query<&mut GameplayColumn>,
+    catalog: Res<crate::creatures::CreatureCatalog>,
+    spawners: Query<&crate::creatures::CreatureSpawner>,
     mut waits: ResMut<crate::simulation::BoundaryWaits>,
     mut light: super::visuals::LightInvalidation,
     mut commands: Commands,
@@ -287,9 +359,30 @@ pub(crate) fn loaded(
             waits.register(IVec2::from_array(task.chunk), owner.0);
         }
     }
+    let invalid_spawner = topology.blocks.get(owner.0).is_ok_and(|blocks| {
+        blocks
+            .iter()
+            .filter_map(|entity| spawners.get(entity).ok())
+            .any(|spawner| catalog.get(spawner.species).is_none())
+    });
     if let Ok(mut column) = columns.get_mut(owner.0) {
-        for drop in column.application.drain(..) {
+        if invalid_spawner
+            || column
+                .application
+                .creatures
+                .iter()
+                .any(|saved| catalog.get(saved.species).is_none())
+        {
+            commands.trigger(crate::world::LoadError(
+                "Saved creature or spawner has no registered profile.".into(),
+            ));
+            return;
+        }
+        for drop in column.application.drops.drain(..) {
             crate::dropped_item::restore_drop(&mut commands, drop);
+        }
+        for saved in std::mem::take(&mut column.application.creatures) {
+            crate::creatures::persistence::restore(&mut commands, saved, &catalog, owner.0);
         }
     }
     if let Ok(blocks) = topology.blocks.get(owner.0) {
@@ -555,6 +648,9 @@ pub(crate) struct ColumnSnapshot {
     containers: Vec<(IVec3, ContainerInventory)>,
     simulation: crate::simulation::SimulationSnapshot,
     drops: Vec<crate::world::SavedDrop>,
+    creatures: Vec<crate::creatures::SavedCreature>,
+    spawners: Vec<crate::creatures::SavedSpawner>,
+    biomes: std::sync::Arc<[u8]>,
 }
 impl ColumnSnapshot {
     pub fn encode(self) -> io::Result<Vec<u8>> {
@@ -574,22 +670,23 @@ impl ColumnSnapshot {
             containers: records,
             simulation: self.simulation,
             drops: self.drops,
+            creatures: self.creatures,
+            spawners: self.spawners,
+            biomes: self.biomes.to_vec(),
         })
         .map_err(io::Error::other)
     }
 }
+type SnapshotColumn = (
+    &'static GameplayColumn,
+    Option<&'static BlockEntities>,
+    &'static crate::simulation::ColumnSimulation,
+    Option<&'static crate::simulation::SimulatedEntities>,
+    Option<&'static crate::creatures::spawning::ColumnBiomes>,
+);
 #[derive(SystemParam)]
 pub(crate) struct ColumnSnapshots<'w, 's> {
-    columns: Query<
-        'w,
-        's,
-        (
-            &'static GameplayColumn,
-            Option<&'static BlockEntities>,
-            &'static crate::simulation::ColumnSimulation,
-            Option<&'static crate::simulation::SimulatedEntities>,
-        ),
-    >,
+    columns: Query<'w, 's, SnapshotColumn>,
     drops: Query<
         'w,
         's,
@@ -600,20 +697,22 @@ pub(crate) struct ColumnSnapshots<'w, 's> {
         ),
     >,
     inventories: Query<'w, 's, (&'static BlockEntity, &'static ContainerInventory)>,
+    creatures: crate::creatures::CreatureSnapshots<'w, 's>,
+    index: Res<'w, GameplayColumns>,
 }
 impl ColumnSnapshots<'_, '_> {
     pub fn candidates(&self) -> Vec<(IVec2, usize, usize)> {
         self.columns
             .iter()
-            .filter(|(data, _, _, _)| data.revision != data.saved_revision)
-            .map(|(data, blocks, work, mobiles)| {
+            .filter(|(data, ..)| data.revision != data.saved_revision)
+            .map(|(data, blocks, work, mobiles, _)| {
                 let containers = blocks
                     .into_iter()
                     .flat_map(|blocks| blocks.iter())
                     .filter_map(|entity| self.inventories.get(entity).ok())
                     .filter(|(_, inventory)| !inventory.is_empty())
                     .count();
-                let drops = data.application.len()
+                let drops = data.application.drops.len()
                     + mobiles
                         .into_iter()
                         .flat_map(|entities| entities.iter())
@@ -623,11 +722,31 @@ impl ColumnSnapshots<'_, '_> {
                 // records plus worst-case textual contents and compression buffers.
                 (
                     data.position,
-                    work.capture_reservation() + containers * 32768 + drops * 2048,
+                    work.capture_reservation()
+                        + containers * 32768
+                        + drops * 2048
+                        + data.application.creatures.len() * 8192
+                        + mobiles
+                            .into_iter()
+                            .flat_map(|m| m.iter())
+                            .filter(|&e| self.creatures.contains(e))
+                            .count()
+                            * 8192
+                        + blocks.map_or(0, |b| b.len()) * 128
+                        + 8192,
+                    // Creature records are captured into exact-capacity vectors, so
+                    // a large herd is charged once rather than for doubling growth.
                     work.snapshot_bytes()
                         + containers * 2 * std::mem::size_of::<(IVec3, ContainerInventory)>()
                         + drops * 2 * std::mem::size_of::<crate::world::SavedDrop>()
-                        + 256,
+                        + data.application.retained_bytes() * 2
+                        + mobiles
+                            .into_iter()
+                            .flat_map(|m| m.iter())
+                            .map(|e| self.creatures.bytes(e))
+                            .sum::<usize>()
+                        + blocks.map_or(0, |b| b.len()) * 256
+                        + 4096,
                 )
             })
             .collect()
@@ -635,38 +754,71 @@ impl ColumnSnapshots<'_, '_> {
     pub fn capture(&self) -> Vec<(IVec2, ColumnSnapshot)> {
         self.columns
             .iter()
-            .filter(|(data, _, _, _)| data.revision != data.saved_revision)
-            .map(|(data, blocks, simulation, mobiles)| {
-                (
-                    data.position,
-                    ColumnSnapshot {
-                        containers: blocks
-                            .into_iter()
-                            .flat_map(|blocks| blocks.iter())
-                            .filter_map(|entity| {
-                                self.inventories
-                                    .get(entity)
-                                    .ok()
-                                    .map(|(block, inventory)| (block.position, inventory.clone()))
-                            })
-                            .collect(),
-                        revision: data.revision,
-                        simulation: simulation.capture(),
-                        drops: data
-                            .application
-                            .iter()
-                            .cloned()
-                            .chain(
-                                mobiles
-                                    .into_iter()
-                                    .flat_map(|entities| entities.iter())
-                                    .filter_map(|entity| self.drops.get(entity).ok())
-                                    .map(|(drop, motion, position)| drop.capture(motion, position)),
-                            )
-                            .collect(),
-                    },
-                )
-            })
+            .filter_map(|column| self.snapshot(column))
             .collect()
+    }
+    /// Progressive saves resolve each selected column directly instead of scanning all.
+    pub fn capture_at(&self, position: IVec2) -> Option<ColumnSnapshot> {
+        self.snapshot(self.columns.get(*self.index.get(&position)?).ok()?)
+            .map(|(_, snapshot)| snapshot)
+    }
+    fn snapshot(
+        &self,
+        (data, blocks, simulation, mobiles, biomes): (
+            &GameplayColumn,
+            Option<&BlockEntities>,
+            &crate::simulation::ColumnSimulation,
+            Option<&crate::simulation::SimulatedEntities>,
+            Option<&crate::creatures::spawning::ColumnBiomes>,
+        ),
+    ) -> Option<(IVec2, ColumnSnapshot)> {
+        if data.revision == data.saved_revision {
+            return None;
+        }
+        let live = mobiles.map_or(&[][..], |m| m.as_slice());
+        let mut creatures = Vec::with_capacity(
+            data.application.creatures.len()
+                + live.iter().filter(|&&e| self.creatures.contains(e)).count(),
+        );
+        creatures.extend(data.application.creatures.iter().cloned());
+        creatures.extend(
+            live.iter()
+                .filter_map(|&entity| self.creatures.capture(entity)),
+        );
+        Some((
+            data.position,
+            ColumnSnapshot {
+                containers: blocks
+                    .into_iter()
+                    .flat_map(|blocks| blocks.iter())
+                    .filter_map(|entity| {
+                        self.inventories
+                            .get(entity)
+                            .ok()
+                            .map(|(block, inventory)| (block.position, inventory.clone()))
+                    })
+                    .collect(),
+                creatures,
+                spawners: blocks
+                    .into_iter()
+                    .flat_map(|b| b.iter())
+                    .filter_map(|entity| self.creatures.spawner(entity))
+                    .collect(),
+                biomes: biomes.map(|b| b.0.clone()).unwrap_or_default(),
+                revision: data.revision,
+                simulation: simulation.capture(),
+                drops: data
+                    .application
+                    .drops
+                    .iter()
+                    .cloned()
+                    .chain(
+                        live.iter()
+                            .filter_map(|&entity| self.drops.get(entity).ok())
+                            .map(|(drop, motion, position)| drop.capture(motion, position)),
+                    )
+                    .collect(),
+            },
+        ))
     }
 }

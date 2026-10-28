@@ -73,6 +73,7 @@ impl Plugin for GamePlugin {
                 SkyPlugin,
                 DevToolsPlugin,
             ))
+            .add_plugins(crate::creatures::CreaturesPlugin)
             .configure_sets(
                 RunFixedMainLoop,
                 hollow_features::motion::InterpolatePosition.run_if(crate::simulation::running),

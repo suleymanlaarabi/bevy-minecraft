@@ -14,6 +14,7 @@ pub use consume::{ItemConsumed, ItemUsePlugin};
 pub(crate) use consume::{cancel as cancel_use, choose_slot as choose_use_slot};
 pub use damage::{DamageApplied, DamageRequest};
 pub use model::UseInput;
+pub(crate) use model::validate_living;
 pub use model::{
     ActiveEffect, ActiveEffects, ArmorStats, DamageState, Hazards, Health, Living, Nutrition,
     RespawnPoint, SurvivalRules, SurvivalSnapshot, UsingItem,

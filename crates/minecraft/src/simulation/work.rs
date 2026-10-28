@@ -8,7 +8,7 @@ use bevy::prelude::*;
 pub(crate) struct MinecraftRules;
 impl hollow_engine::simulation::runtime::NeighborRules for MinecraftRules {
     type Cell = VoxelState;
-    type Application = Vec<crate::world::SavedDrop>;
+    type Application = crate::creatures::ColumnActors;
     type Support = EditBatch;
     fn connected(
         &self,

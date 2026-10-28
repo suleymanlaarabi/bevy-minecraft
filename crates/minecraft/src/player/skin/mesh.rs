@@ -3,9 +3,9 @@ use bevy::{
     asset::RenderAssetUsages, mesh::Indices, prelude::*, render::render_resource::PrimitiveTopology,
 };
 
-pub(super) const PIXEL: f32 = 1.8 / 32.0;
+pub(crate) const PIXEL: f32 = 1.8 / 32.0;
 
-pub(super) fn cuboid(size: Vec3, center: Vec3, uv: Vec2, texture: Vec2, inflate: f32) -> Mesh {
+pub(crate) fn cuboid(size: Vec3, center: Vec3, uv: Vec2, texture: Vec2, inflate: f32) -> Mesh {
     let half = size * 0.5 + Vec3::splat(inflate);
     let [x, y, z] = half.to_array();
     let [w, h, d] = size.to_array();

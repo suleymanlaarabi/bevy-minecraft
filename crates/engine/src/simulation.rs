@@ -538,6 +538,14 @@ pub struct SimulationDiagnostics {
     pub suspended_work: usize,
     pub pending_write_bytes: usize,
     pub maximum_lateness: u64,
+    pub navigation_pending: usize,
+    pub navigation_expansions: usize,
+    pub navigation_probes: usize,
+    pub navigation_oldest_wait: u64,
+    pub navigation_queue_bytes: usize,
+    pub navigation_search_bytes: usize,
+    /// Cap, terrain, space, occupancy, biome, light, distance.
+    pub spawn_rejections: [u64; 7],
 }
 #[derive(Resource, Default)]
 pub struct SimulationBudget {

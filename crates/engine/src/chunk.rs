@@ -116,6 +116,14 @@ impl<T: VoxelCell> ChunkVoxels<T> {
         self.revision = self.revision.wrapping_add(1);
     }
 
+    /// Gameplay cannot use edit-frame estimates as authoritative light.
+    pub fn gameplay_light_at(&self, local: IVec3) -> Option<u8> {
+        if self.render_light.is_some() {
+            return None;
+        }
+        column_cell_index(local, self.states.section_count()).map(|index| self.light.get(index))
+    }
+
     pub fn render_light(&self) -> &Layer<u8> {
         self.render_light.as_ref().unwrap_or(&self.light)
     }

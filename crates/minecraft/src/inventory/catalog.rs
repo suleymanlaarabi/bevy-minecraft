@@ -61,10 +61,12 @@ impl ConsumableProfile {
     }
 }
 
-pub(super) struct ItemProperties {
+pub(crate) struct ItemProperties {
     pub block: Option<crate::voxel::VoxelKind>,
     pub max_stack_size: u8,
     pub max_damage: u32,
+    pub attack_damage: f32,
+    pub attack_wear: u32,
     /// Zero-based humanoid armor slot; inventory offsets are applied at the API boundary.
     pub armor_slot: Option<u8>,
     pub remainder: Option<ItemKind>,
@@ -86,6 +88,43 @@ fn compiled() -> &'static Result<Catalog, String> {
         let items = (0..ITEM_ID_LIMIT)
             .map(|id| {
                 let item = Item::from_id(id);
+                let mut attack_damage = 1.0_f64;
+                if let Some(modifiers) = item.and_then(component::<AttributeModifiersImpl>) {
+                    let relevant = |modifier: &&Modifier| {
+                        modifier.r#type.id == Attributes::ATTACK_DAMAGE.id
+                            && matches!(
+                                modifier.slot,
+                                pumpkin_data::AttributeModifierSlot::Any
+                                    | pumpkin_data::AttributeModifierSlot::Hand
+                                    | pumpkin_data::AttributeModifierSlot::MainHand
+                            )
+                    };
+                    for modifier in modifiers
+                        .attribute_modifiers
+                        .iter()
+                        .filter(relevant)
+                        .filter(|m| m.operation == Operation::AddValue)
+                    {
+                        attack_damage += modifier.amount;
+                    }
+                    let base = attack_damage;
+                    for modifier in modifiers
+                        .attribute_modifiers
+                        .iter()
+                        .filter(relevant)
+                        .filter(|m| m.operation == Operation::AddMultipliedBase)
+                    {
+                        attack_damage += base * modifier.amount;
+                    }
+                    for modifier in modifiers
+                        .attribute_modifiers
+                        .iter()
+                        .filter(relevant)
+                        .filter(|m| m.operation == Operation::AddMultipliedTotal)
+                    {
+                        attack_damage *= 1.0 + modifier.amount;
+                    }
+                }
                 let equipment = item.and_then(component::<EquippableImpl>);
                 let armor_slot = equipment.and_then(|equipment| match equipment.slot {
                     EquipmentSlot::Head(_) => Some(0),
@@ -135,6 +174,10 @@ fn compiled() -> &'static Result<Catalog, String> {
                     None
                 };
                 Ok(ItemProperties {
+                    attack_damage: attack_damage.max(0.0) as f32,
+                    attack_wear: item
+                        .and_then(component::<WeaponImpl>)
+                        .map_or(0, |weapon| weapon.item_damage_per_attack),
                     block: item
                         .and_then(|item| crate::voxel::VoxelKind::from_key(item.registry_key))
                         .filter(|kind| kind.is_itemizable()),
@@ -173,7 +216,7 @@ fn catalog() -> &'static Catalog {
         .expect("Item metadata must compile before gameplay")
 }
 
-pub(super) fn properties(item: ItemKind) -> &'static ItemProperties {
+pub(crate) fn properties(item: ItemKind) -> &'static ItemProperties {
     &catalog().items[item.id() as usize]
 }
 

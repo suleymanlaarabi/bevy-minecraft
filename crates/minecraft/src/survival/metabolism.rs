@@ -13,20 +13,22 @@ pub(super) fn locomotion(
     mut actors: Query<
         (
             &Health,
+            &CharacterBody,
             &ActiveEffects,
             Option<&Nutrition>,
             Option<&UsingItem>,
+            Option<&hollow_features::actors::Decision>,
             &mut Locomotion,
         ),
         With<crate::simulation::Simulating>,
     >,
 ) {
-    actors
-        .par_iter_mut()
-        .for_each(|(health, effects, nutrition, using, mut locomotion)| {
+    actors.par_iter_mut().for_each(
+        |(health, body, effects, nutrition, using, decision, mut locomotion)| {
             let mut next = Locomotion {
                 enabled: health.alive(),
-                speed: (1.0 + 0.2 * effects.level(E::SPEED.id) as f64)
+                speed: body.speed
+                    * (1.0 + 0.2 * effects.level(E::SPEED.id) as f64)
                     * (1.0 - 0.15 * effects.level(E::SLOWNESS.id) as f64).max(0.0),
                 jump_boost: effects.level(E::JUMP_BOOST.id) as f64 * 0.1,
                 sprint_allowed: health.alive()
@@ -34,13 +36,19 @@ pub(super) fn locomotion(
                     && effects.level(E::BLINDNESS.id) == 0,
                 slow_falling: effects.level(E::SLOW_FALLING.id) > 0,
             };
+            if decision.is_some_and(|decision| {
+                decision.behavior == hollow_features::actors::Behavior::Flee
+            }) {
+                next.speed *= 1.5;
+            }
             if let Some(action) = using.and_then(|using| using.0) {
                 next.speed *= super::catalog::consumable(action.stack.item())
                     .map_or(0.2, |profile| profile.speed);
                 next.sprint_allowed = false;
             }
             locomotion.set_if_neq(next);
-        });
+        },
+    );
 }
 
 pub(super) fn nutrition(
@@ -135,7 +143,7 @@ pub(super) fn hazards(
             continue;
         }
         let feet = position - Vec3::Y * body.origin_height;
-        let eye = feet + Vec3::Y * state.pose.eye_height();
+        let eye = feet + Vec3::Y * body.eye_height(state.pose);
         if activity.vertical < 0.0 {
             hazards.fall_distance -= activity.vertical;
         }
@@ -173,7 +181,7 @@ pub(super) fn hazards(
         let max = (feet
             + Vec3::new(
                 body.half_width + 0.01,
-                state.pose.height() - 0.01,
+                body.height(state.pose) - 0.01,
                 body.half_width + 0.01,
             ))
         .floor()

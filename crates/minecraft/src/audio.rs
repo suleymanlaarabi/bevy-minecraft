@@ -84,6 +84,11 @@ impl Sound {
         }
     }
 
+    pub fn with_volume(mut self, volume: f32) -> Self {
+        self.volume = volume;
+        self
+    }
+
     pub fn block(kind: VoxelKind, action: BlockSound, position: IVec3) -> Self {
         let (volume, pitch) = match action {
             BlockSound::Step => (0.5, 1.0),

@@ -156,37 +156,14 @@ pub struct SurvivalSnapshot {
 
 impl SurvivalSnapshot {
     pub fn validate(&self) -> bool {
-        let h = &self.health;
         let n = &self.nutrition;
-        h.maximum.is_finite()
-            && (1.0..=1024.0).contains(&h.maximum)
-            && h.current.is_finite()
-            && (0.0..=h.maximum).contains(&h.current)
-            && h.absorption.is_finite()
-            && (0.0..=256.0).contains(&h.absorption)
+        validate_living(&self.health, &self.effects, &self.damage, &self.hazards)
             && n.food <= 20
             && n.saturation.is_finite()
             && (0.0..=n.food as f32).contains(&n.saturation)
             && n.exhaustion.is_finite()
             && (0.0..=40.0).contains(&n.exhaustion)
             && n.recovery_ticks <= 80
-            && self.effects.0.len() <= 64
-            && self.effects.0.iter().enumerate().all(|(index, effect)| {
-                super::effects::supported(effect.id)
-                    && effect.amplifier <= 4
-                    && (1..=20 * 60 * 60 * 24).contains(&effect.ticks)
-                    && !self.effects.0[..index]
-                        .iter()
-                        .any(|other| other.id == effect.id)
-            })
-            && self.damage.last_amount.is_finite()
-            && self.damage.last_amount >= 0.0
-            && self.damage.direction.iter().all(|value| value.is_finite())
-            && self.damage.invulnerable_ticks <= 20
-            && self.damage.flash_ticks <= 10
-            && self.hazards.fall_distance.is_finite()
-            && self.hazards.fall_distance >= 0.0
-            && self.hazards.air_used <= 320
             && self
                 .respawn
                 .0
@@ -194,6 +171,35 @@ impl SurvivalSnapshot {
                 .all(|value| value.is_finite() && value.abs() <= 30_000_000.0)
             && (-8.0..=512.0).contains(&self.respawn.0[1])
     }
+}
+
+pub(crate) fn validate_living(
+    health: &Health,
+    effects: &ActiveEffects,
+    damage: &DamageState,
+    hazards: &Hazards,
+) -> bool {
+    health.maximum.is_finite()
+        && (1.0..=1024.0).contains(&health.maximum)
+        && health.current.is_finite()
+        && (0.0..=health.maximum).contains(&health.current)
+        && health.absorption.is_finite()
+        && (0.0..=256.0).contains(&health.absorption)
+        && effects.0.len() <= 64
+        && effects.0.iter().enumerate().all(|(index, effect)| {
+            super::effects::supported(effect.id)
+                && effect.amplifier <= 4
+                && (1..=20 * 60 * 60 * 24).contains(&effect.ticks)
+                && !effects.0[..index].iter().any(|other| other.id == effect.id)
+        })
+        && damage.last_amount.is_finite()
+        && damage.last_amount >= 0.0
+        && damage.direction.iter().all(|value| value.is_finite())
+        && damage.invulnerable_ticks <= 20
+        && damage.flash_ticks <= 10
+        && hazards.fall_distance.is_finite()
+        && hazards.fall_distance >= 0.0
+        && hazards.air_used <= 320
 }
 
 #[derive(Resource)]

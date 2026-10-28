@@ -17,6 +17,8 @@ CUES = [
     'entity.player.hurt_on_fire', 'entity.player.death', 'entity.generic.eat',
     'entity.generic.drink', 'entity.player.burp', 'item.chorus_fruit.teleport',
     'entity.item.break', 'ui.button.click',
+    'entity.cow.ambient', 'entity.cow.hurt', 'entity.cow.death', 'entity.cow.step',
+    'entity.pig.ambient', 'entity.pig.hurt', 'entity.pig.death', 'entity.pig.step',
 ]
 
 

@@ -50,23 +50,53 @@ impl<T: VoxelCell> VoxelWorld<'_, '_, T> {
         Some((entity, self.chunks.get(entity).ok()?.content_revision))
     }
 
-    /// Visits every cell of an inclusive region, each column from top to bottom,
-    /// looking its chunk up once. Cells of unloaded chunks come back as `None`;
-    /// cells above or below the world are air.
+    /// Visits every cell of an inclusive region, each vertical stack top to bottom.
+    /// Small regions resolve each chunk once. Cells of unloaded chunks come back as
+    /// `None`; cells above or below the world are air.
     pub fn visit_cells(&self, min: IVec3, max: IVec3, mut visit: impl FnMut(IVec3, Option<T>)) {
         let air = T::air();
+        let first = self.layout.split(min).0;
+        let last = self.layout.split(max).0;
+        let width = i64::from(last.x) - i64::from(first.x) + 1;
+        let depth = i64::from(last.y) - i64::from(first.y) + 1;
+        // Character probes normally touch at most four columns. Resolve those once
+        // on the stack; large regions keep the bounded strip-based fallback.
+        let small_region = width > 0 && depth > 0 && width * depth <= 4;
+        let mut nearby = [None; 4];
+        if small_region {
+            for x in first.x..=last.x {
+                for z in first.y..=last.y {
+                    let slot = ((i64::from(x) - i64::from(first.x)) * depth + i64::from(z)
+                        - i64::from(first.y)) as usize;
+                    nearby[slot] = self
+                        .index
+                        .get(&IVec2::new(x, z))
+                        .and_then(|&entity| self.chunks.get(entity).ok());
+                }
+            }
+        }
         for x in min.x..=max.x {
+            let mut cached_chunk = None;
+            let mut cached_voxels = None;
             for z in min.z..=max.z {
                 let (chunk, local) = self.layout.split(IVec3::new(x, 0, z));
-                let voxels = self
-                    .index
-                    .get(&chunk)
-                    .and_then(|&entity| self.chunks.get(entity).ok());
+                if small_region {
+                    let slot = ((i64::from(chunk.x) - i64::from(first.x)) * depth
+                        + i64::from(chunk.y)
+                        - i64::from(first.y)) as usize;
+                    cached_voxels = nearby[slot];
+                } else if cached_chunk != Some(chunk) {
+                    cached_chunk = Some(chunk);
+                    cached_voxels = self
+                        .index
+                        .get(&chunk)
+                        .and_then(|&entity| self.chunks.get(entity).ok());
+                }
                 for y in (min.y..=max.y).rev() {
                     let cell = IVec3::new(x, y, z);
                     visit(
                         cell,
-                        voxels.map(|voxels| {
+                        cached_voxels.map(|voxels| {
                             voxels
                                 .state(local.with_y(y.saturating_sub(self.layout.min_y())))
                                 .unwrap_or(air)
@@ -99,6 +129,14 @@ impl<T: VoxelCell> VoxelWorld<'_, '_, T> {
             .get(&chunk)
             .and_then(|&entity| self.chunks.get(entity).ok())
             .and_then(|voxels| voxels.state(local))
+    }
+
+    pub fn gameplay_light(&self, position: IVec3) -> Option<u8> {
+        let (chunk, local) = self.layout.split(position);
+        self.chunks
+            .get(*self.index.get(&chunk)?)
+            .ok()?
+            .gameplay_light_at(local)
     }
 
     pub fn light(&self, position: IVec3) -> Option<u8> {

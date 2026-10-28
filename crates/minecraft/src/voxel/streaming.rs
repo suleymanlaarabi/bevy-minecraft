@@ -111,9 +111,12 @@ pub struct RetirementPolicy<'w, 's> {
             &'static crate::block_behavior::containers::GameplayColumn,
             &'static crate::simulation::ColumnSimulation,
             Option<&'static crate::block_behavior::containers::BlockEntities>,
+            Option<&'static crate::simulation::SimulatedEntities>,
+            Option<&'static crate::creatures::spawning::ColumnBiomes>,
         ),
     >,
     sections: Query<'w, 's, &'static ChunkSections>,
+    creatures: crate::creatures::CreatureSnapshots<'w, 's>,
 }
 impl hollow_engine::streaming::TerrainProvider for WorldGenerator {
     type Cell = super::VoxelState;
@@ -176,20 +179,22 @@ impl hollow_engine::streaming::TerrainProvider for WorldGenerator {
                 0
             };
             terrain
-                + policy
-                    .gameplay
-                    .get(owner.0)
-                    .map_or(0, |(column, work, blocks)| {
-                        if column.revision != column.saved_revision {
+                + policy.gameplay.get(owner.0).map_or(
+                    0,
+                    |(column, work, blocks, mobiles, biomes)| {
+                        let mobile_bytes = policy.creatures.retirement_bytes(mobiles);
+                        let retained = if column.revision != column.saved_revision {
                             work.estimated_bytes()
                                 + blocks.map_or(0, |blocks| blocks.len())
                                     * crate::block_behavior::containers::RETAINED_BLOCK_BYTES
-                                + column.application.capacity()
-                                    * std::mem::size_of::<crate::world::SavedDrop>()
+                                + column.application.retained_bytes()
+                                + biomes.map_or(0, |b| b.0.len())
                         } else {
                             0
-                        }
-                    })
+                        };
+                        retained + mobile_bytes
+                    },
+                )
         })
     }
     fn retirement_weight(

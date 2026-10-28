@@ -9,7 +9,7 @@ use crate::{
     settings::SimulationSettings,
     voxel::{VoxelChunk, chunk_at},
 };
-use bevy::prelude::*;
+use bevy::{ecs::query::QueryFilter, prelude::*};
 use std::time::Duration;
 
 pub use hollow_engine::simulation::*;
@@ -23,7 +23,9 @@ pub(crate) const MAX_CAPTURE_BYTES: usize = MAX_PENDING_WRITE_BYTES / 2 - 2 * 10
 pub struct GameplaySimulationPlugin;
 impl Plugin for GameplaySimulationPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(hollow_engine::simulation::runtime::VoxelSimulationPlugin::<MinecraftRules>::default())
+        app.add_plugins(hollow_engine::simulation::runtime::VoxelSimulationPlugin::<
+            MinecraftRules,
+        >::default())
             .insert_resource(MinecraftRules)
             .insert_resource(Time::<Fixed>::from_hz(20.0))
             .configure_sets(
@@ -47,14 +49,18 @@ impl Plugin for GameplaySimulationPlugin {
             )
             .add_systems(
                 FixedUpdate,
-                (sync_region, update_mobile_owners)
+                (sync_region, update_mobile_owners::<()>)
                     .chain()
                     .in_set(SimulationSystems::Activation)
-                    .before(hollow_engine::simulation::runtime::activate::<Vec<crate::world::SavedDrop>>),
+                    .before(
+                        hollow_engine::simulation::runtime::activate::<
+                            crate::creatures::ColumnActors,
+                        >,
+                    ),
             )
             .add_systems(
                 FixedUpdate,
-                update_mobile_owners.in_set(SimulationSystems::Finalize),
+                update_mobile_owners::<Changed<FixedPosition>>.in_set(SimulationSystems::Finalize),
             )
             .add_observer(displaced)
             .add_observer(unload)
@@ -93,19 +99,23 @@ fn sync_region(
     seed.0 = voxel.seed;
 }
 
-fn update_mobile_owners(
+fn update_mobile_owners<F: QueryFilter>(
     mut commands: Commands,
     columns: Res<GameplayColumns>,
-    owners: Query<&GameplayColumn>,
+    mut owners: Query<&mut GameplayColumn>,
     active: Query<(), With<Simulating>>,
-    mobiles: Query<(
-        Entity,
-        &FixedPosition,
-        Option<&SimulatedIn>,
-        Has<Simulating>,
-    )>,
+    mobiles: Query<
+        (
+            Entity,
+            &FixedPosition,
+            Option<&SimulatedIn>,
+            Has<Simulating>,
+            Has<crate::creatures::Creature>,
+        ),
+        F,
+    >,
 ) {
-    for (entity, position, previous, was_active) in &mobiles {
+    for (entity, position, previous, was_active, creature) in &mobiles {
         let chunk = chunk_at(position.current.as_vec3());
         let owner = if let Some(previous) = previous
             && owners
@@ -120,6 +130,13 @@ fn update_mobile_owners(
         let is_active = owner.is_some_and(|owner| active.contains(owner));
         if !changed_owner && was_active == is_active {
             continue;
+        }
+        if changed_owner && creature {
+            for owner in [previous.map(|p| p.0), owner].into_iter().flatten() {
+                if let Ok(mut column) = owners.get_mut(owner) {
+                    column.revision += 1;
+                }
+            }
         }
         let mut mobile = commands.entity(entity);
         if changed_owner {
@@ -174,6 +191,8 @@ fn unload(
         &crate::dropped_item::DropMotion,
         &FixedPosition,
     )>,
+    creatures: crate::creatures::CreatureSnapshots,
+    creature_entities: Query<(), With<crate::creatures::Creature>>,
     mut commands: Commands,
 ) {
     let Ok(owner) = terrain.get(event.entity) else {
@@ -193,7 +212,13 @@ fn unload(
     if let Some(mobiles) = mobiles {
         for entity in mobiles.iter() {
             if let Ok((drop, motion, position)) = drops.get(entity) {
-                work.application.push(drop.capture(motion, position));
+                work.application.drops.push(drop.capture(motion, position));
+                commands.entity(entity).despawn();
+            } else if let Some(saved) = creatures.capture(entity) {
+                work.application.creatures.push(saved);
+                work.revision += 1;
+                commands.entity(entity).despawn();
+            } else if creature_entities.contains(entity) {
                 commands.entity(entity).despawn();
             } else {
                 commands

@@ -205,16 +205,21 @@ pub(super) fn resolve(
 /// The survival integration owns knockback; the controller has no damage dependency.
 pub(super) fn apply_knockback(
     impact: On<DamageApplied>,
-    mut motion: Query<&mut crate::character::CharacterMotion>,
+    mut motion: Query<(
+        &mut crate::character::CharacterMotion,
+        &crate::character::CharacterState,
+    )>,
     mut movement: Query<&mut crate::character::CharacterMovement>,
 ) {
-    if let Ok(mut motion) = motion.get_mut(impact.target) {
+    if let Ok((mut motion, state)) = motion.get_mut(impact.target) {
         if impact.fatal {
             motion.velocity = bevy::math::DVec3::ZERO;
         } else if impact.impulse != Vec3::ZERO {
-            motion.velocity.x *= 0.5;
-            motion.velocity.z *= 0.5;
-            motion.velocity += impact.impulse.as_dvec3();
+            motion.velocity.x = motion.velocity.x * 0.5 + impact.impulse.x as f64;
+            motion.velocity.z = motion.velocity.z * 0.5 + impact.impulse.z as f64;
+            if state.on_ground {
+                motion.velocity.y = (motion.velocity.y * 0.5 + impact.impulse.y as f64).min(0.4);
+            }
         }
     }
     if impact.fatal

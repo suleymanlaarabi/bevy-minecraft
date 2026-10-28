@@ -7,7 +7,7 @@ use bevy::{
     ecs::template::{EntityTemplate, OptionTemplate},
     feathers::{
         containers::{pane, pane_body, pane_header},
-        controls::{FeathersSlider, FeathersToggleSwitch},
+        controls::{ButtonVariant, FeathersButton, FeathersSlider, FeathersToggleSwitch},
         focus::FocusIndicator,
         theme::{InheritableThemeTextColor, ThemeBackgroundColor, ThemeToken, ThemedText},
         tokens,
@@ -15,8 +15,8 @@ use bevy::{
     prelude::*,
     ui::Checked,
     ui_widgets::{
-        SelectedTab, SliderPrecision, SliderStep, SliderValue, Tab, TabActivation, TabList,
-        ValueChange, checkbox_self_update, slider_self_update, tablist_self_update,
+        Activate, SelectedTab, SliderPrecision, SliderStep, SliderValue, Tab, TabActivation,
+        TabList, ValueChange, checkbox_self_update, slider_self_update, tablist_self_update,
     },
 };
 
@@ -51,6 +51,17 @@ struct TimeSlider;
 #[derive(Component, Clone, Copy, Debug, Default)]
 struct ClockText;
 
+#[derive(Component, Clone, Default)]
+struct CreatureSpawnMessage;
+
+#[derive(Resource)]
+pub(crate) struct CreatureSpawnStatus(pub(crate) &'static str);
+impl Default for CreatureSpawnStatus {
+    fn default() -> Self {
+        Self("Choose a creature to spawn.")
+    }
+}
+
 #[derive(Component, Clone, Copy, Debug, Default)]
 #[require(hollow_features::cursor::FreeCursor)]
 struct DevPanel;
@@ -66,13 +77,21 @@ pub struct DevToolsPlugin;
 
 impl Plugin for DevToolsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_sub_state::<DevPanelState>()
+        app.init_resource::<CreatureSpawnStatus>()
+            .add_observer(developer_spawn)
+            .add_sub_state::<DevPanelState>()
             .add_systems(
                 Update,
                 toggle_panel
                     .run_if(crate::world::playing)
                     .run_if(in_state(InventoryState::Closed))
                     .run_if(any_with_component::<Player>),
+            )
+            .add_systems(
+                Update,
+                spawn_creature_keys
+                    .run_if(crate::world::playing)
+                    .run_if(in_state(DevPanelState::Open)),
             )
             // Keys held when the panel opens must not keep the player moving.
             .add_systems(
@@ -81,8 +100,10 @@ impl Plugin for DevToolsPlugin {
             )
             .add_systems(
                 Update,
-                sync_clock
-                    .after(crate::sky::SkySystems::Advance)
+                (
+                    sync_clock.after(crate::sky::SkySystems::Advance),
+                    sync_creature_spawn_status,
+                )
                     .run_if(in_state(DevPanelState::Open)),
             );
     }
@@ -161,6 +182,19 @@ fn panel(
                     @row("Day Speed", speed_control(time.speed))
                     --
                     Text({clock(&time)}) ThemedText ClockText
+                    --
+                    Text("Creatures: C cow / V pig (F6 also works)") ThemedText
+                    --
+                    @FeathersButton { @caption: bsn! { Text("Spawn Cow") ThemedText }, @variant: ButtonVariant::Normal }
+                    on(spawn_cow_button)
+                    --
+                    @FeathersButton { @caption: bsn! { Text("Spawn Pig") ThemedText }, @variant: ButtonVariant::Normal }
+                    on(spawn_pig_button)
+                    --
+                    @FeathersButton { @caption: bsn! { Text("Spawn 10000 Animals") ThemedText }, @variant: ButtonVariant::Normal }
+                    on(spawn_population_button)
+                    --
+                    Text("Choose a creature to spawn.") ThemedText CreatureSpawnMessage
                 ]
                 --
                 Node { display: Display::None }
@@ -330,5 +364,149 @@ fn sync_clock(
     let clock = clock(&time);
     if text.0 != clock {
         text.0 = clock;
+    }
+}
+
+#[derive(Event)]
+struct DeveloperSpawn(crate::creatures::SpeciesId);
+
+fn spawn_cow_button(_: On<Activate>, mut commands: Commands) {
+    commands.trigger(DeveloperSpawn(crate::creatures::SpeciesId(
+        pumpkin_data::entity::EntityType::COW.id,
+    )));
+}
+fn spawn_pig_button(_: On<Activate>, mut commands: Commands) {
+    commands.trigger(DeveloperSpawn(crate::creatures::SpeciesId(
+        pumpkin_data::entity::EntityType::PIG.id,
+    )));
+}
+fn spawn_population_button(_: On<Activate>, mut commands: Commands) {
+    commands.trigger(crate::creatures::SpawnCreaturePopulation(10_000));
+}
+
+fn spawn_creature_keys(keys: Res<ButtonInput<KeyCode>>, mut commands: Commands) {
+    let native = if keys.just_pressed(KeyCode::KeyV)
+        || (keys.just_pressed(KeyCode::F6)
+            && (keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight)))
+    {
+        &pumpkin_data::entity::EntityType::PIG
+    } else if keys.just_pressed(KeyCode::KeyC) || keys.just_pressed(KeyCode::F6) {
+        &pumpkin_data::entity::EntityType::COW
+    } else {
+        return;
+    };
+    commands.trigger(DeveloperSpawn(crate::creatures::SpeciesId(native.id)));
+}
+
+/// Check a few nearby positions only when a developer requests an animal.
+fn developer_spawn(
+    event: On<DeveloperSpawn>,
+    player: Query<
+        (
+            &hollow_features::motion::FixedPosition,
+            &crate::character::CharacterBody,
+            &crate::character::CharacterState,
+            &Transform,
+        ),
+        With<Player>,
+    >,
+    creatures: Query<
+        (
+            &hollow_features::motion::FixedPosition,
+            &crate::character::CharacterBody,
+            &crate::character::CharacterState,
+        ),
+        With<crate::creatures::Creature>,
+    >,
+    columns: Res<crate::block_behavior::containers::GameplayColumns>,
+    members: Query<&crate::simulation::SimulatedEntities>,
+    catalog: Res<crate::creatures::CreatureCatalog>,
+    world: crate::voxel::VoxelWorld,
+    mut terrain: Local<crate::character::Terrain>,
+    mut status: ResMut<CreatureSpawnStatus>,
+    mut commands: Commands,
+) {
+    let Ok((position, player_body, player_state, transform)) = player.single() else {
+        return;
+    };
+    let Some(profile) = catalog.get(event.0) else {
+        return;
+    };
+    let player_bounds = player_body.aabb(position.current, player_state.pose);
+    let forward = transform
+        .forward()
+        .as_vec3()
+        .with_y(0.0)
+        .normalize_or_zero();
+    let right = Vec3::new(-forward.z, 0.0, forward.x);
+    let player_feet = position.current.as_vec3() - Vec3::Y * player_body.origin_height;
+    for (distance, sideways) in [(3.0, 0.0), (2.5, 1.0), (2.5, -1.0), (4.0, 0.0)] {
+        let point = player_feet + forward * distance + right * sideways;
+        if !world.collision_ready(point) {
+            continue;
+        }
+        for offset in [0.0, 0.5, 1.0, -0.5, -1.0, 1.5, 2.0, -1.5, -2.0, 3.0] {
+            let feet = point.with_y(player_feet.y.floor() + offset);
+            let precise_origin =
+                feet.as_dvec3() + bevy::math::DVec3::Y * profile.body.origin_height as f64;
+            let bounds = profile
+                .body
+                .aabb(precise_origin, crate::character::Pose::Standing);
+            terrain.gather(
+                &world,
+                bounds.expanded_towards(bevy::math::DVec3::NEG_Y * 0.05),
+            );
+            if terrain.collides(&bounds)
+                || terrain.has_fluid(&bounds)
+                || terrain
+                    .collide_box(bounds, bevy::math::DVec3::NEG_Y * 0.05)
+                    .y
+                    < -0.049
+                || bounds.intersects(&player_bounds)
+            {
+                continue;
+            }
+            let reach = bevy::math::DVec3::splat(catalog.maximum_half_width() as f64);
+            let min = crate::voxel::chunk_at((bounds.min - reach).as_vec3());
+            let max = crate::voxel::chunk_at((bounds.max + reach).as_vec3());
+            let occupied = (min.x..=max.x).any(|x| {
+                (min.y..=max.y).any(|z| {
+                    columns
+                        .get(&IVec2::new(x, z))
+                        .and_then(|owner| members.get(*owner).ok())
+                        .is_some_and(|entities| {
+                            entities.iter().any(|entity| {
+                                creatures.get(entity).is_ok_and(|(other, body, state)| {
+                                    bounds.intersects(&body.aabb(other.current, state.pose))
+                                })
+                            })
+                        })
+                })
+            });
+            if occupied {
+                continue;
+            }
+            status.0 = "Spawn requested...";
+            commands.trigger(crate::creatures::SpawnCreature {
+                species: event.0,
+                feet,
+                source: crate::creatures::SpawnSource::Developer,
+                population_center: position.current.as_vec3(),
+            });
+            return;
+        }
+    }
+    status.0 = "No free ground nearby. Move to an open area.";
+    warn!("Could not find free ground nearby for the creature.");
+}
+
+fn sync_creature_spawn_status(
+    status: Res<CreatureSpawnStatus>,
+    mut messages: Query<(Ref<CreatureSpawnMessage>, &mut Text)>,
+) {
+    for (message, mut text) in &mut messages {
+        if (status.is_changed() || message.is_added()) && text.0 != status.0 {
+            text.0 = status.0.into();
+        }
     }
 }

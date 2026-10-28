@@ -103,10 +103,8 @@ impl WorldGenerator {
                     }
                     let revision = column.revision;
                     let (edited, records) = column.decode()?;
-                    let initial_ticks = generator
-                        .runtime
-                        .snapshot(position)
-                        .map(|snapshot| (snapshot.min_y, snapshot.fluid_ticks));
+                    // One lock and clone of the shared native snapshot per load.
+                    let generated = generator.runtime.snapshot(position);
                     let voxels = if let Some(bytes) = edited {
                         ChunkVoxels::decode_saved(
                             &bytes,
@@ -114,10 +112,10 @@ impl WorldGenerator {
                             hollow_worldgen::content::catalog(),
                         )?
                     } else {
-                        let Some(generated) = generator.runtime.snapshot(position) else {
+                        let Some(generated) = &generated else {
                             return Ok(ChunkLoad::Missing);
                         };
-                        ChunkVoxels::from_layers(generated.states, generated.light)
+                        ChunkVoxels::from_layers(generated.states.clone(), generated.light.clone())
                     };
                     let mut containers =
                         crate::block_behavior::containers::PreparedColumn::discover(
@@ -125,6 +123,10 @@ impl WorldGenerator {
                             position,
                             &generator.blocks,
                         );
+                    let initial_ticks = generated.map(|snapshot| {
+                        containers.biomes = snapshot.biomes;
+                        (snapshot.min_y, snapshot.fluid_ticks)
+                    });
                     if let Some(bytes) = records {
                         containers.restore(&bytes, position)?;
                         containers.revision = 1;
@@ -158,6 +160,9 @@ impl WorldGenerator {
                             }
                         }
                     }
+                    // An edited column can load before its native snapshot exists. It
+                    // loads without biomes (natural spawning skips it) rather than
+                    // retrying; restore never replaces biomes with an empty record.
                     Ok::<_, std::io::Error>(ChunkLoad::Ready {
                         voxels,
                         attachment: containers,

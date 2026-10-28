@@ -14,7 +14,8 @@ from vanilla_held_items import import_held_items
 from vanilla_survival import import_survival
 from import_sounds import import_sounds
 
-DEST = Path(__file__).resolve().parents[1] / 'assets/player/vanilla'
+ROOT = Path(__file__).resolve().parents[1]
+DEST = ROOT / 'assets/player/vanilla'
 
 def import_player_assets(jar):
     prefix = 'assets/minecraft/textures/'
@@ -43,6 +44,11 @@ def import_player_assets(jar):
             target = DEST / name.removeprefix(prefix)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(jar.read(name))
+    for species in ('cow', 'pig'):
+        name = f'entity/{species}/{species}_temperate.png'
+        target = ROOT / 'assets/creatures/vanilla' / f'{species}.png'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(jar.read(prefix + name))
     import_held_items(jar, DEST)
     import_survival(jar, DEST)
     import_sounds()

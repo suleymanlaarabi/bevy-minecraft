@@ -1,5 +1,5 @@
 //! Shared skin assets, articulated player rigs, and the inventory portrait.
-mod mesh;
+pub(crate) mod mesh;
 mod texture;
 
 use crate::inventory::InventoryState;

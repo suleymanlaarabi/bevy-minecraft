@@ -47,6 +47,7 @@ pub struct ChunkSnapshot {
     pub height: i32,
     pub states: crate::sections::Layer<crate::VoxelState>,
     pub light: crate::sections::Layer<u8>,
+    pub biomes: std::sync::Arc<[u8]>,
     pub fluid_ticks: std::sync::Arc<[GeneratedFluidTick]>,
 }
 
@@ -74,6 +75,7 @@ impl ChunkSnapshot {
             min_y,
             height,
             states,
+            biomes: chunk.flat_biome_map.clone().into(),
             light: lighting::working_sections(&chunk.light, height as usize / 16),
             fluid_ticks: chunk
                 .fluid_ticks

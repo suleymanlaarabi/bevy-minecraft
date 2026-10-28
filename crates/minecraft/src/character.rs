@@ -54,54 +54,60 @@ pub enum Pose {
     Swimming,
 }
 
-impl Pose {
-    pub const fn height(self) -> f32 {
-        match self {
-            Self::Standing => 1.8,
-            Self::Crouching => 1.5,
-            Self::Swimming => 0.6,
-        }
-    }
-
-    pub const fn eye_height(self) -> f32 {
-        match self {
-            Self::Standing => 1.62,
-            Self::Crouching => 1.27,
-            Self::Swimming => 0.4,
-        }
-    }
-}
-
-/// Collision box footprint. The entity's `Transform::translation` sits `origin_height` above
-/// the feet whatever the pose, so changing pose never moves the entity.
-#[derive(Component, Debug, Clone, Copy)]
-#[require(FluidContactState)]
-pub struct CharacterBody {
+/// Shared immutable geometry and movement coefficients, selected at spawn.
+#[derive(Debug)]
+pub struct CharacterShape {
     pub half_width: f32,
     pub origin_height: f32,
+    pub heights: [f32; 3],
+    pub eyes: [f32; 3],
+    pub step_height: f64,
+    pub jump_velocity: f64,
+    pub speed: f64,
 }
+
+pub static PLAYER_SHAPE: CharacterShape = CharacterShape {
+    half_width: 0.3,
+    origin_height: 0.9,
+    heights: [1.8, 1.5, 0.6],
+    eyes: [1.62, 1.27, 0.4],
+    step_height: STEP_HEIGHT,
+    jump_velocity: JUMP_VELOCITY,
+    speed: 1.0,
+};
+
+/// A pointer avoids duplicating species geometry in every actor. Profiles have
+/// static lifetime: reading a shape needs neither hashing nor reference counting.
+#[derive(Component, Debug, Clone, Copy, Deref)]
+#[require(FluidContactState)]
+pub struct CharacterBody(pub &'static CharacterShape);
 
 impl Default for CharacterBody {
     fn default() -> Self {
-        Self {
-            half_width: 0.3,
-            origin_height: 0.9,
-        }
+        Self(&PLAYER_SHAPE)
     }
 }
 
 impl CharacterBody {
+    pub fn height(&self, pose: Pose) -> f32 {
+        self.heights[pose as usize]
+    }
+
+    pub fn eye_height(&self, pose: Pose) -> f32 {
+        self.eyes[pose as usize]
+    }
+
     pub(crate) fn aabb(&self, origin: DVec3, pose: Pose) -> Aabb {
         let feet = origin - DVec3::Y * self.origin_height as f64;
         let half_width = self.half_width as f64;
         Aabb {
             min: feet - DVec3::new(half_width, 0.0, half_width),
-            max: feet + DVec3::new(half_width, pose.height() as f64, half_width),
+            max: feet + DVec3::new(half_width, self.height(pose) as f64, half_width),
         }
     }
 
     fn eye_offset(&self, pose: Pose) -> f32 {
-        pose.eye_height() - self.origin_height
+        self.eye_height(pose) - self.origin_height
     }
 }
 
@@ -297,7 +303,7 @@ pub(crate) struct Terrain {
 }
 
 impl Terrain {
-    fn gather(&mut self, world: &VoxelWorld, region: Aabb) {
+    pub(crate) fn gather(&mut self, world: &VoxelWorld, region: Aabb) {
         self.gather_region::<true>(world, region);
     }
 
@@ -355,11 +361,11 @@ impl Terrain {
         });
     }
 
-    fn collides(&self, body: &Aabb) -> bool {
+    pub(crate) fn collides(&self, body: &Aabb) -> bool {
         self.boxes.iter().any(|other| body.intersects(other))
     }
 
-    fn has_fluid(&self, body: &Aabb) -> bool {
+    pub(crate) fn has_fluid(&self, body: &Aabb) -> bool {
         self.fluids
             .iter()
             .any(|fluid| body.intersects(&fluid.cell) && body.min.y < fluid.top)
@@ -421,6 +427,86 @@ impl Terrain {
         result
     }
 
+    /// Navigation uses the same collected shapes, clearance and axis clipping as travel.
+    /// Returns feet elevation and water penalty for one cardinal transition.
+    pub(crate) fn navigation_step(
+        &self,
+        from: DVec3,
+        xz: DVec3,
+        body: &CharacterBody,
+        swimming: bool,
+    ) -> Option<(f64, bool)> {
+        let half = body.half_width as f64;
+        let bounds_at = |y| {
+            body.aabb(
+                DVec3::new(xz.x, y + body.origin_height as f64, xz.z),
+                Pose::Standing,
+            )
+        };
+        let mut best = None;
+        let mut consider = |y: f64| {
+            if y > from.y + 1.00001 || y < from.y - 3.00001 || best.is_some_and(|(old, _)| y <= old)
+            {
+                return;
+            }
+            let next = bounds_at(y);
+            if self.collides(&next) {
+                return;
+            }
+            let (_, depth) = self.fluid_environment(&next);
+            if depth > 0.6 && !swimming {
+                return;
+            }
+            let current = body.aabb(from + DVec3::Y * body.origin_height as f64, Pose::Standing);
+            let rise = (y - from.y).max(0.0);
+            let lift = if rise > body.step_height { 1.25 } else { rise };
+            // Check the upward and horizontal sweep separately, then the landing.
+            let up = DVec3::Y * lift;
+            if (self.collide_box(current, up) - up).length_squared() > 1e-8 {
+                return;
+            }
+            let horizontal = (xz - from).with_y(0.0);
+            let raised = current.moved(up);
+            if (self.collide_box(raised, horizontal) - horizontal).length_squared() > 1e-8 {
+                return;
+            }
+            let down = DVec3::Y * (y - from.y - lift);
+            if (self.collide_box(raised.moved(horizontal), down) - down).length_squared() > 1e-8 {
+                return;
+            }
+            best = Some((y, depth > 0.01));
+        };
+        for obstacle in &self.boxes {
+            if obstacle.min.x < xz.x + half
+                && obstacle.max.x > xz.x - half
+                && obstacle.min.z < xz.z + half
+                && obstacle.max.z > xz.z - half
+                && obstacle.min.x <= xz.x
+                && obstacle.max.x >= xz.x
+                && obstacle.min.z <= xz.z
+                && obstacle.max.z >= xz.z
+            {
+                consider(obstacle.max.y);
+            }
+        }
+        if swimming {
+            for fluid in &self.fluids {
+                if xz.x >= fluid.cell.min.x
+                    && xz.x < fluid.cell.max.x
+                    && xz.z >= fluid.cell.min.z
+                    && xz.z < fluid.cell.max.z
+                    && crate::content::fluid_catalog()
+                        .profile(fluid.fluid)
+                        .contact
+                        .swimmable
+                {
+                    consider(fluid.top - 0.3);
+                }
+            }
+        }
+        best
+    }
+
     /// Recover restored contacts and items embedded by a block placement.
     pub(crate) fn depenetrate(&self, mut body: Aabb) -> DVec3 {
         let mut total = DVec3::ZERO;
@@ -454,7 +540,7 @@ impl Terrain {
 
     /// Vanilla `Entity.collide`: when blocked sideways on the ground, also try the
     /// same move raised by the step height and keep whichever goes farther.
-    fn collide(&self, body: Aabb, delta: DVec3, on_ground: bool) -> DVec3 {
+    fn collide(&self, body: Aabb, delta: DVec3, on_ground: bool, step_height: f64) -> DVec3 {
         let collided = self.collide_box(body, delta);
         let blocked_x = (collided.x - delta.x).abs() > MOVE_EPSILON;
         let blocked_z = (collided.z - delta.z).abs() > MOVE_EPSILON;
@@ -463,9 +549,9 @@ impl Terrain {
             return collided;
         }
         let horizontal = DVec3::new(delta.x, 0.0, delta.z);
-        let mut stepped = self.collide_box(body, horizontal.with_y(STEP_HEIGHT));
-        let lift = self.collide_box(body.expanded_towards(horizontal), DVec3::Y * STEP_HEIGHT);
-        if lift.y < STEP_HEIGHT {
+        let mut stepped = self.collide_box(body, horizontal.with_y(step_height));
+        let lift = self.collide_box(body.expanded_towards(horizontal), DVec3::Y * step_height);
+        if lift.y < step_height {
             let raised = self.collide_box(body.moved(lift), horizontal) + lift;
             if horizontal_length_squared(raised) > horizontal_length_squared(stepped) {
                 stepped = raised;
@@ -479,8 +565,8 @@ impl Terrain {
     }
 
     /// Vanilla `maybeBackOffFromEdge`: a sneaking body never walks off a ledge.
-    fn back_off_from_edge(&self, body: Aabb, mut delta: DVec3) -> DVec3 {
-        let down = -STEP_HEIGHT;
+    fn back_off_from_edge(&self, body: Aabb, mut delta: DVec3, step_height: f64) -> DVec3 {
+        let down = -step_height;
         let free = |x: f64, z: f64| !self.collides(&body.moved(DVec3::new(x, down, z)));
         let toward_zero = |value: f64| {
             if value.abs() < SNEAK_EDGE_STEP {
@@ -558,11 +644,24 @@ struct CharacterPhysics {
 /// Advance each character with one reusable collision scratch buffer.
 fn character_physics(
     world: VoxelWorld,
-    mut terrain: Local<Terrain>,
+    terrain: Local<bevy::utils::Parallel<Terrain>>,
     mut characters: Query<CharacterPhysics, With<crate::simulation::Simulating>>,
 ) {
-    for mut character in &mut characters {
-        character.step(&world, &mut terrain);
+    if characters.iter().len() < 128 {
+        let mut terrain = terrain.borrow_local_mut();
+        for mut character in &mut characters {
+            character.step(&world, &mut terrain);
+        }
+    } else {
+        characters
+            .par_iter_mut()
+            .batching_strategy(bevy::ecs::batching::BatchingStrategy::new().min_batch_size(64))
+            .for_each_init(
+                || terrain.borrow_local_mut(),
+                |terrain, mut character| {
+                    character.step(&world, terrain);
+                },
+            );
     }
 }
 
@@ -601,8 +700,15 @@ impl CharacterPhysicsItem<'_, '_> {
         }
         let position = transform.translation;
         // Spawns, respawns and developer tools write the transform directly.
-        if motion.is_added() || fixed_position.externally_moved(transform) {
-            fixed_position.current = position.as_dvec3();
+        let teleported = fixed_position.externally_moved(transform);
+        if motion.is_added() || teleported {
+            if teleported {
+                let position = position.as_dvec3();
+                if fixed_position.current != position {
+                    fixed_position.current = position;
+                }
+                motion.velocity = DVec3::ZERO;
+            }
             if world.collision_ready(position) {
                 // Saved positions use f32. Restoring them as f64 can put the feet
                 // just inside a supporting face, which axis clipping cannot stop.
@@ -620,11 +726,15 @@ impl CharacterPhysicsItem<'_, '_> {
                     .map(|obstacle| obstacle.max.y)
                     .max_by(f64::total_cmp);
                 if let Some(support) = support {
-                    fixed_position.current.y = support + body.origin_height as f64;
+                    let y = support + body.origin_height as f64;
+                    if fixed_position.current.y != y {
+                        fixed_position.current.y = y;
+                    }
                 }
             }
-            fixed_position.previous = fixed_position.current;
-            motion.velocity = DVec3::ZERO;
+            if fixed_position.previous != fixed_position.current {
+                fixed_position.previous = fixed_position.current;
+            }
             motion.eye = body.eye_offset(state.pose);
             motion.previous_eye = motion.eye;
             motion.walk_distance = 0.0;
@@ -632,17 +742,23 @@ impl CharacterPhysicsItem<'_, '_> {
             motion.bob = 0.0;
             motion.previous_bob = 0.0;
         }
-        fixed_position.previous = fixed_position.current;
+        if fixed_position.previous != fixed_position.current {
+            fixed_position.previous = fixed_position.current;
+        }
         motion.previous_eye = motion.eye;
         if !world.collision_ready(fixed_position.current.as_vec3()) {
             motion.velocity = DVec3::ZERO;
             fluid_contact.set_if_neq(FluidContactState::default());
-            fixed_position.acknowledge(transform);
+            fixed_position
+                .bypass_change_detection()
+                .acknowledge(transform);
             return;
         }
         let contact = self.travel(world, terrain);
         self.fluid_contact.set_if_neq(contact);
-        self.fixed_position.acknowledge(self.transform);
+        self.fixed_position
+            .bypass_change_detection()
+            .acknowledge(self.transform);
     }
 
     /// One vanilla tick: sample the environment, apply intent, then integrate travel.
@@ -682,9 +798,10 @@ impl CharacterPhysicsItem<'_, '_> {
         let reach = velocity.abs() + DVec3::new(0.6, 0.0, 0.6);
         let feet = aabb.min.y;
         let region = Aabb {
-            min: aabb.min - reach - DVec3::Y * (STEP_HEIGHT + 0.1),
-            max: (aabb.max + reach)
-                .with_y(feet + reach.y + Pose::Standing.height() as f64 + AUTO_JUMP_HEIGHT + 0.5),
+            min: aabb.min - reach - DVec3::Y * (body.step_height + 0.1),
+            max: (aabb.max + reach).with_y(
+                feet + reach.y + body.height(Pose::Standing) as f64 + AUTO_JUMP_HEIGHT + 0.5,
+            ),
         };
         terrain.gather(world, region);
 
@@ -698,7 +815,7 @@ impl CharacterPhysicsItem<'_, '_> {
         });
         let eyes = DVec3::new(
             fixed_position.current.x,
-            feet + state.pose.eye_height() as f64,
+            feet + body.eye_height(state.pose) as f64,
             fixed_position.current.z,
         );
         let eye_fluid = terrain.fluid_at(eyes);
@@ -754,7 +871,7 @@ impl CharacterPhysicsItem<'_, '_> {
             if state.in_fluid && (!state.on_ground || depth > FLUID_JUMP_THRESHOLD) {
                 velocity.y += FLUID_SWIM_UP;
             } else if state.on_ground {
-                velocity.y = JUMP_VELOCITY * jump_factor + locomotion.jump_boost;
+                velocity.y = body.jump_velocity * jump_factor + locomotion.jump_boost;
                 activity.jumped = true;
                 if sprinting {
                     let facing =
@@ -769,9 +886,9 @@ impl CharacterPhysicsItem<'_, '_> {
             && !sneaking
             && !state.in_fluid
             && wish != DVec3::ZERO
-            && should_auto_jump(terrain, aabb, wish)
+            && should_auto_jump(terrain, aabb, wish, body.step_height)
         {
-            velocity.y = JUMP_VELOCITY * jump_factor + locomotion.jump_boost;
+            velocity.y = body.jump_velocity * jump_factor + locomotion.jump_boost;
             activity.jumped = true;
         }
         if sneaking && state.in_fluid {
@@ -913,6 +1030,7 @@ impl CharacterPhysicsItem<'_, '_> {
             state,
             sneaking,
             speed_factor,
+            self.body.step_height,
         );
         velocity.y -= gravity;
         velocity *= drag;
@@ -928,7 +1046,14 @@ impl CharacterPhysicsItem<'_, '_> {
                     velocity.y - movement_profile.gravity
                 };
             }
-            climb_out_of_fluid(terrain, aabb, &mut velocity, state, start_y);
+            climb_out_of_fluid(
+                terrain,
+                aabb,
+                &mut velocity,
+                state,
+                start_y,
+                self.body.step_height,
+            );
         }
 
         if climbing && !sneaking && (state.horizontal_collision || movement.jump) {
@@ -961,11 +1086,14 @@ impl CharacterPhysicsItem<'_, '_> {
             ..
         } = frame;
         let flying = *flying;
-        fixed_position.current = DVec3::new(
+        let position = DVec3::new(
             (aabb.min.x + aabb.max.x) * 0.5,
             aabb.min.y + body.origin_height as f64,
             (aabb.min.z + aabb.max.z) * 0.5,
         );
+        if fixed_position.current != position {
+            fixed_position.current = position;
+        }
         motion.velocity = velocity;
         let displacement = fixed_position.current - fixed_position.previous;
         activity.distance = displacement.xz().length() as f32;
@@ -1000,12 +1128,13 @@ fn move_body(
     state: &mut CharacterState,
     sneaking: bool,
     speed_factor: f64,
+    step_height: f64,
 ) {
     let mut delta = *velocity;
     if sneaking && state.on_ground && delta.y <= 0.0 {
-        delta = terrain.back_off_from_edge(*aabb, delta);
+        delta = terrain.back_off_from_edge(*aabb, delta, step_height);
     }
-    let moved = terrain.collide(*aabb, delta, state.on_ground);
+    let moved = terrain.collide(*aabb, delta, state.on_ground, step_height);
     *aabb = aabb.moved(moved);
 
     let blocked = (moved - delta).abs().cmpgt(DVec3::splat(MOVE_EPSILON));
@@ -1031,13 +1160,14 @@ fn climb_out_of_fluid(
     velocity: &mut DVec3,
     state: &CharacterState,
     start_y: f64,
+    step_height: f64,
 ) {
     if !state.horizontal_collision {
         return;
     }
     let probe = aabb.moved(DVec3::new(
         velocity.x,
-        velocity.y + STEP_HEIGHT - (aabb.min.y - start_y),
+        velocity.y + step_height - (aabb.min.y - start_y),
         velocity.z,
     ));
     if !terrain.collides(&probe) && !terrain.has_fluid(&probe) {
@@ -1059,10 +1189,10 @@ fn choose_pose(terrain: &Terrain, body: &CharacterBody, origin: DVec3, desired: 
 }
 
 /// A one-block rise ahead that a plain step cannot climb but a jump clears.
-fn should_auto_jump(terrain: &Terrain, aabb: Aabb, wish: DVec3) -> bool {
+fn should_auto_jump(terrain: &Terrain, aabb: Aabb, wish: DVec3, step_height: f64) -> bool {
     let ahead = aabb.moved(wish * AUTO_JUMP_PROBE);
     terrain.collides(&ahead)
-        && terrain.collides(&ahead.moved(DVec3::Y * STEP_HEIGHT))
+        && terrain.collides(&ahead.moved(DVec3::Y * step_height))
         && !terrain.collides(&ahead.moved(DVec3::Y * AUTO_JUMP_HEIGHT))
         && !terrain.collides(&aabb.moved(DVec3::Y * AUTO_JUMP_HEIGHT))
 }

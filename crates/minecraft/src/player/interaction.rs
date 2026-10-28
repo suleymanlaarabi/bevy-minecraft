@@ -168,14 +168,18 @@ fn update_breaking(
     mut breaking: Single<&mut BreakingState, With<PlayerCamera>>,
     mut swing: Single<&mut super::skin::ArmSwing, With<PlayerCamera>>,
     voxel_world: VoxelWorld,
+    mut creatures: crate::creatures::CreatureCombat,
     player: Single<
         (
             Entity,
-            &crate::inventory::PlayerInventory,
+            &mut crate::inventory::PlayerInventory,
             &crate::inventory::HotbarSelection,
             &crate::character::CharacterState,
             &crate::survival::UsingItem,
             &crate::survival::ActiveEffects,
+            &hollow_features::motion::FixedPosition,
+            &crate::character::CharacterBody,
+            &crate::character::CharacterMovement,
         ),
         With<Player>,
     >,
@@ -186,6 +190,24 @@ fn update_breaking(
         breaking.0 = None;
         return;
     }
+    let (actor, mut inventory, selection, player_state, using, effects, position, body, movement) =
+        player.into_inner();
+    if using.0.is_none()
+        && creatures.attack(
+            actor,
+            position.current.as_vec3()
+                + Vec3::Y * (body.eye_height(player_state.pose) - body.origin_height),
+            movement.look_direction,
+            clock.0,
+            &voxel_world,
+            &mut inventory,
+            selection,
+        )
+    {
+        breaking.0 = None;
+        swing.request();
+        return;
+    }
     let Some(target) = target.0 else {
         breaking.0 = None;
         return;
@@ -194,12 +216,11 @@ fn update_breaking(
         breaking.0 = None;
         return;
     };
-    let (actor, inventory, selection, player_state, using, effects) = *player;
     if using.0.is_some() {
         breaking.0 = None;
         return;
     }
-    let tool = selection.stack(inventory);
+    let tool = selection.stack(&inventory);
     let Some(mut outcome) = crate::inventory::mining::outcome(state, tool, player_state) else {
         breaking.0 = None;
         return;

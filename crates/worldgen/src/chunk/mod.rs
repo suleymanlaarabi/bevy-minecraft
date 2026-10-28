@@ -51,6 +51,7 @@ impl ChunkData {
     pub fn snapshot(&self) -> ChunkSnapshot {
         ChunkSnapshot {
             fluid_ticks: self.fluid_ticks.clone(),
+            biomes: self.section.biomes.clone(),
             chunk_x: self.x,
             chunk_z: self.z,
             min_y: self.section.min_y,
