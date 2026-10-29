@@ -60,6 +60,47 @@ pub enum DisplayMode {
     BorderlessFullscreen,
 }
 
+#[derive(Component, Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[type_path = "hollow_minecraft::settings"]
+pub enum RenderResolution {
+    #[default]
+    Native,
+    R480p,
+    R720p,
+    R900p,
+    R1080p,
+    R1440p,
+    R2160p,
+}
+
+impl RenderResolution {
+    /// Keep the window's aspect ratio, including ultrawide and portrait displays.
+    pub(crate) fn size(self, window: UVec2, max_dimension: u32) -> UVec2 {
+        let window = window.max(UVec2::ONE);
+        let height = match self {
+            Self::Native => return window,
+            Self::R480p => 480,
+            Self::R720p => 720,
+            Self::R900p => 900,
+            Self::R1080p => 1080,
+            Self::R1440p => 1440,
+            Self::R2160p => 2160,
+        };
+        let width = (u64::from(window.x) * u64::from(height) + u64::from(window.y) / 2)
+            / u64::from(window.y);
+        // Very wide, short windows can otherwise exceed the GPU's texture limit.
+        let limit = u64::from(max_dimension.max(1));
+        if width > limit {
+            UVec2::new(
+                limit as u32,
+                (u64::from(height) * limit / width).max(1) as u32,
+            )
+        } else {
+            UVec2::new(width.max(1) as u32, height)
+        }
+    }
+}
+
 #[derive(Resource, SettingsGroup, Reflect, Clone, Copy, Debug, PartialEq)]
 #[component(immutable)]
 #[reflect(Resource, SettingsGroup, Default)]
@@ -81,6 +122,7 @@ pub struct GraphicsSettings {
     pub field_of_view: f32,
     pub view_distance: u32,
     pub display_mode: DisplayMode,
+    pub render_resolution: RenderResolution,
 }
 
 impl Default for GraphicsSettings {
@@ -98,6 +140,7 @@ impl Default for GraphicsSettings {
             field_of_view: 85.0,
             view_distance: 14,
             display_mode: DisplayMode::BorderlessFullscreen,
+            render_resolution: RenderResolution::Native,
         }
     }
 }

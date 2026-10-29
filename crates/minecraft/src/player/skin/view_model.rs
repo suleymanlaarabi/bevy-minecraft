@@ -141,6 +141,8 @@ pub(super) fn first_person_pose(progress: f32) -> Transform {
 /// All transforms are camera-local: camera movement cancels out of this calculation.
 pub(super) fn resize_arm_target(
     window: Single<&Window, With<PrimaryWindow>>,
+    settings: Res<crate::settings::GraphicsSettings>,
+    device: Res<bevy::render::renderer::RenderDevice>,
     assets: Res<SkinAssets>,
     meshes: Res<Assets<Mesh>>,
     ui_scale: Res<UiScale>,
@@ -151,10 +153,10 @@ pub(super) fn resize_arm_target(
     mut images: ResMut<Assets<Image>>,
     mut allocation: Local<(UVec2, UVec2)>,
 ) {
-    let full_size = UVec2::new(
-        window.physical_width().max(1),
-        window.physical_height().max(1),
-    );
+    let window_size = window.physical_size().max(UVec2::ONE);
+    let full_size = settings
+        .render_resolution
+        .size(window_size, device.limits().max_texture_dimension_2d);
     for (mut camera, projection) in &mut cameras {
         if !camera.is_active {
             continue;
@@ -250,10 +252,11 @@ pub(super) fn resize_arm_target(
                 depth_or_array_layers: 1,
             });
         }
-        let scale = window.scale_factor() * ui_scale.0;
+        let scale =
+            window_size.as_vec2() / full_size.as_vec2() / (window.scale_factor() * ui_scale.0);
         for (mut node, _) in &mut overlays {
-            let (left, top) = (px(offset.x / scale), px(offset.y / scale));
-            let (width, height) = (px(size.x as f32 / scale), px(size.y as f32 / scale));
+            let (left, top) = (px(offset.x * scale.x), px(offset.y * scale.y));
+            let (width, height) = (px(size.x as f32 * scale.x), px(size.y as f32 * scale.y));
             if node.left != left || node.top != top || node.width != width || node.height != height
             {
                 node.left = left;

@@ -2,6 +2,7 @@
 
 mod apply;
 mod model;
+mod resolution;
 mod ui;
 
 use crate::{game::GameState, voxel::TexturePackId};
@@ -11,7 +12,8 @@ use ui::spawn_settings_page;
 pub(crate) use ui::settings_panel;
 
 pub use model::{
-    AntiAliasingMode, DisplayMode, GraphicsSettings, ShadowQuality, SimulationSettings,
+    AntiAliasingMode, DisplayMode, GraphicsSettings, RenderResolution, ShadowQuality,
+    SimulationSettings,
 };
 
 const SETTINGS_APP_NAME: &str = "org.hollow.game";
@@ -25,10 +27,12 @@ impl Plugin for GameSettingsPlugin {
         app.register_type::<AntiAliasingMode>()
             .register_type::<ShadowQuality>()
             .register_type::<DisplayMode>()
+            .register_type::<RenderResolution>()
             .register_type::<TexturePackId>()
             .register_type::<GraphicsSettings>()
             .register_type::<SimulationSettings>();
         apply::register(app);
+        resolution::register(app);
         app.add_plugins(SettingsPlugin::new(SETTINGS_APP_NAME))
             .add_systems(OnEnter(GameState::Settings), spawn_settings_page)
             .add_systems(

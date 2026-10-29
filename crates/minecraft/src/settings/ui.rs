@@ -19,7 +19,10 @@ use bevy::{
 use crate::{game::GameState, voxel::TexturePackId};
 
 use super::model::{FOV_MAX, FOV_MIN, VIEW_DISTANCE_MAX, VIEW_DISTANCE_MIN, normalized_fov};
-use super::{AntiAliasingMode, DisplayMode, GraphicsSettings, ShadowQuality, SimulationSettings};
+use super::{
+    AntiAliasingMode, DisplayMode, GraphicsSettings, RenderResolution, ShadowQuality,
+    SimulationSettings,
+};
 
 use super::SAVE_DELAY;
 
@@ -87,6 +90,18 @@ pub(crate) fn settings_panel(
                     flex_shrink: 0.0,
                 }
                 Children [
+                    @setting_row("3D Render Resolution", choice_control(settings.render_resolution, [
+                        ("Native", RenderResolution::Native),
+                        ("480p", RenderResolution::R480p),
+                        ("720p", RenderResolution::R720p),
+                        ("900p", RenderResolution::R900p),
+                        ("1080p", RenderResolution::R1080p),
+                        ("1440p", RenderResolution::R1440p),
+                        ("2160p", RenderResolution::R2160p),
+                    ], |settings, value| settings.render_resolution = value))
+                    --
+                    Text("3D rendering only. Window size and interface resolution stay unchanged.") ThemedText
+                    --
                     @setting_row("Anti-Aliasing", choice_control(settings.anti_aliasing, [
                         ("Off", AntiAliasingMode::Off),
                         ("FXAA", AntiAliasingMode::Fxaa),
