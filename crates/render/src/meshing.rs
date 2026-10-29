@@ -436,21 +436,33 @@ thread_local! {
 pub fn face_light(padded: &Padded, outside: [i32; 3], axis: usize) -> [u16; 4] {
     let u = (axis + 1) % 3;
     let v = (axis + 2) % 3;
+    // The four corners share the 3x3 cells around the face, so each cell is read once.
+    let mut around = [[(0u32, 0u32, false); 3]; 3];
+    for (dv, row) in around.iter_mut().enumerate() {
+        for (du, entry) in row.iter_mut().enumerate() {
+            let mut cell = outside;
+            cell[u] += du as i32 - 1;
+            cell[v] += dv as i32 - 1;
+            let sample = padded.get(IVec3::from_array(cell));
+            *entry = (
+                u32::from(sample.light >> 4),
+                u32::from(sample.light & 15),
+                sample.occludes(),
+            );
+        }
+    }
     [(0, 0), (1, 0), (1, 1), (0, 1)].map(|(cu, cv)| {
         let mut sum = [0u32; 2];
         let mut count = 0u32;
         for du in [cu - 1, cu] {
             for dv in [cv - 1, cv] {
-                let mut cell = outside;
-                cell[u] += du;
-                cell[v] += dv;
-                let sample = padded.get(IVec3::from_array(cell));
+                let (high, low, occludes) = around[(dv + 1) as usize][(du + 1) as usize];
                 // Solid neighbors must not darken an exposed surface corner.
-                if (du != 0 || dv != 0) && sample.occludes() {
+                if (du != 0 || dv != 0) && occludes {
                     continue;
                 }
-                sum[0] += u32::from(sample.light >> 4);
-                sum[1] += u32::from(sample.light & 15);
+                sum[0] += high;
+                sum[1] += low;
                 count += 1;
             }
         }
