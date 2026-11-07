@@ -16,13 +16,16 @@ use bevy::{
 #[extract_app(RenderApp)]
 pub struct SkyPalette(pub Handle<ShaderBuffer>);
 
+/// Sky colors, then the sun, moon and star inputs (`sky_color.wesl` indices).
+const PALETTE_LEN: usize = 10;
+
 impl FromWorld for SkyPalette {
     fn from_world(world: &mut World) -> Self {
         Self(
             world
                 .resource_mut::<Assets<ShaderBuffer>>()
                 .add(ShaderBuffer::with_size(
-                    4 * size_of::<Vec4>() as u64,
+                    PALETTE_LEN as u64 * size_of::<Vec4>() as u64,
                     RenderAssetUsages::RENDER_WORLD,
                 )),
         )
@@ -58,11 +61,17 @@ fn upload_palette(
     let Some(buffer) = buffers.get(&palette.0) else {
         return;
     };
-    let colors = [
+    let colors: [Vec4; PALETTE_LEN] = [
         sky.zenith_color.to_linear().to_vec4(),
         sky.horizon_color.to_linear().to_vec4(),
         sky.sun_direction.extend(0.0),
         sky.sunset_color.to_linear().to_vec4(),
+        sky.sun.direction,
+        sky.sun.color,
+        sky.moon.direction,
+        sky.moon.color,
+        sky.moon.params,
+        Vec4::new(sky.night, 0.0, 0.0, 0.0),
     ];
     // Keep the GPU allocation and all material bindings stable throughout the day.
     queue.write_buffer(&buffer.buffer, 0, bytemuck::cast_slice(&colors));

@@ -43,6 +43,18 @@ pub fn edited_lighting<T: VoxelCell>(
 #[derive(Resource, Default)]
 pub struct BlockLightEdits(HashSet<IVec3>);
 
+/// Both lighting systems mutate `ChunkVoxels`: run conditions keep idle frames from
+/// scheduling them against every voxel reader.
+pub fn block_light_pending(edits: Res<BlockLightEdits>) -> bool {
+    !edits.0.is_empty()
+}
+pub fn lighting_pending<T: VoxelCell>(
+    state: Res<LightingState<T>>,
+    version: Res<LightingVersion>,
+) -> bool {
+    state.task.is_some() || !state.ready.is_empty() || state.synchronized_version != Some(version.0)
+}
+
 /// One mutable voxel query supplies sequential reads and writes during propagation.
 #[derive(SystemParam)]
 pub struct BlockLight<'w, 's, T: VoxelCell> {
@@ -104,9 +116,6 @@ pub fn update_block_light<T: VoxelCell>(
         IVec3::Z,
         IVec3::NEG_Z,
     ];
-    if edits.0.is_empty() {
-        return;
-    }
     for position in edits.0.drain() {
         let Some((_, previous)) = light.sample(position) else {
             continue;
@@ -220,12 +229,6 @@ pub fn update_lighting<T: VoxelCell>(
     mut edited_positions: Local<Vec<IVec2>>,
     mut current_positions: Local<Vec<IVec2>>,
 ) {
-    if state.task.is_none()
-        && state.ready.is_empty()
-        && state.synchronized_version == Some(version.0)
-    {
-        return;
-    }
     if let Some(task) = state.task.as_mut() {
         let Some(output) = check_ready(task) else {
             return;

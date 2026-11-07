@@ -6,7 +6,7 @@ use bevy::{
         render_resource::{Extent3d, TextureFormat},
         renderer::RenderDevice,
     },
-    window::PrimaryWindow,
+    window::{PrimaryWindow, WindowResized},
 };
 
 use super::GraphicsSettings;
@@ -20,7 +20,15 @@ struct RenderSurface {
 }
 
 pub(super) fn register(app: &mut App) {
-    app.add_systems(PostUpdate, sync_resolution.before(CameraUpdateSystems));
+    // Only settings, window sizes and new cameras change the target resolution.
+    app.add_systems(
+        PostUpdate,
+        sync_resolution.before(CameraUpdateSystems).run_if(
+            resource_changed::<GraphicsSettings>
+                .or_else(on_message::<WindowResized>)
+                .or_else(any_match_filter::<Added<PlayerCamera>>),
+        ),
+    );
 }
 
 fn sync_resolution(

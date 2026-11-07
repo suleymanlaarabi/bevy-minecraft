@@ -462,7 +462,7 @@ pub(crate) fn poll_builds<C: RenderSource>(
             }
             let section = output.sections.next().expect("pending section");
             if let Some(graph) = topology.as_deref_mut() {
-                graph.invalidate_column(chunk.position, 1 << section.index);
+                graph.invalidate_column(chunk.position, 1 << section.index, false);
             }
             entities.sections[section.index].connectivity = section.connectivity;
             entities.built_sections |= 1 << section.index;
@@ -545,7 +545,7 @@ pub(crate) fn poll_builds<C: RenderSource>(
             if entities.content_revision != build.content_revision
                 && let Some(version) = topology.as_deref_mut()
             {
-                version.invalidate_column(chunk.position, u32::MAX);
+                version.invalidate_column(chunk.position, u32::MAX, false);
             }
             entities.content_revision = build.content_revision;
         }

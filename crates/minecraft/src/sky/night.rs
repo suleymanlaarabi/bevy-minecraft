@@ -35,7 +35,7 @@ pub(super) fn spawn_night_sky(
         Mesh3d(meshes.add(star_mesh())),
         MeshMaterial3d(materials.add(SkyMaterial {
             pass: SkyPass::Stars,
-            settings: stars_settings(&sky),
+            settings: SkySettings::default(),
             palette: palette.0.clone(),
         })),
         Transform::from_rotation(sky.sky_rotation),
@@ -48,7 +48,7 @@ pub(super) fn spawn_night_sky(
         Mesh3d(meshes.add(Rectangle::new(2.0, 2.0))),
         MeshMaterial3d(materials.add(SkyMaterial {
             pass: SkyPass::Moon,
-            settings: moon_settings(&sky),
+            settings: SkySettings::default(),
             palette: palette.0.clone(),
         })),
         Transform::default(),
@@ -58,23 +58,14 @@ pub(super) fn spawn_night_sky(
     ));
 }
 
+/// Turns the star field and hides night bodies that add nothing. Star brightness and
+/// the moon's disk follow the sky palette, written from [`moon_settings`].
 pub(super) fn update_night_sky(
     sky: Res<SkyState>,
-    mut star_fields: Query<
-        (
-            &mut Transform,
-            &mut Visibility,
-            &MeshMaterial3d<SkyMaterial>,
-        ),
-        (With<Stars>, Without<MoonDisk>),
-    >,
-    mut moons: Query<(&mut Visibility, &MeshMaterial3d<SkyMaterial>), With<MoonDisk>>,
-    mut materials: ResMut<Assets<SkyMaterial>>,
+    mut star_fields: Query<(&mut Transform, &mut Visibility), (With<Stars>, Without<MoonDisk>)>,
+    mut moons: Query<&mut Visibility, With<MoonDisk>>,
 ) {
-    if !sky.is_changed() {
-        return;
-    }
-    for (mut transform, mut visibility, material) in &mut star_fields {
+    for (mut transform, mut visibility) in &mut star_fields {
         // Invisible in full daylight: skip drawing 2600 quads that add nothing.
         visibility.set_if_neq(if sky.night > 0.0 {
             Visibility::Inherited
@@ -82,39 +73,20 @@ pub(super) fn update_night_sky(
             Visibility::Hidden
         });
         transform.rotation = sky.sky_rotation;
-        let settings = stars_settings(&sky);
-        // Only re-upload while the brightness actually changes, at dusk and dawn.
-        if materials
-            .get(&material.0)
-            .is_some_and(|stars| stars.settings != settings)
-            && let Some(mut stars) = materials.get_mut(&material.0)
-        {
-            stars.settings = settings;
-        }
     }
-    let settings = moon_settings(&sky);
-    // Fully transparent below the horizon: hidden, and its material left alone.
-    let shown = settings.color.w > 0.0;
-    for (mut visibility, material) in &mut moons {
+    // Fully transparent below the horizon: hidden.
+    let shown = moon_settings(&sky).color.w > 0.0;
+    for mut visibility in &mut moons {
         visibility.set_if_neq(if shown {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         });
-        if shown && let Some(mut moon) = materials.get_mut(&material.0) {
-            moon.settings = settings;
-        }
     }
 }
 
-fn stars_settings(sky: &SkyState) -> SkySettings {
-    SkySettings {
-        params: Vec4::new(sky.night, 0.0, 0.0, 0.0),
-        ..default()
-    }
-}
-
-fn moon_settings(sky: &SkyState) -> SkySettings {
+/// Read through the sky palette ([`hollow_render::environment::SkyLighting`]).
+pub(crate) fn moon_settings(sky: &SkyState) -> SkySettings {
     let direction = sky.moon_direction;
     // Dimmed and reddened by the long path through the air near the horizon,
     // and faint against the daylight sky.

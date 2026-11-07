@@ -1,6 +1,6 @@
 // Every sky and environment pass of `SkyMaterial`. Each pass is a pair of entry
 // points selected at pipeline specialization; all share one material bind group.
-import super::sky_color::{sample_sky, horizon_haze};
+import super::sky_color::{sample_sky, horizon_haze, palette_entry, SUN_DIRECTION, SUN_COLOR, MOON_DIRECTION, MOON_COLOR, MOON_PARAMS, STAR_PARAMS};
 import super::block_lighting::celestial_irradiance;
 import super::voxel_fog::apply_voxel_fog;
 import bevy_pbr::render::{
@@ -17,8 +17,8 @@ struct SkySettings {
     // Moon: output-space color in RGB, opacity in A.
     color: vec4<f32>,
     // Moon: lit fraction of the disk in X, +1 waxing or -1 waning in Y.
-    // Stars: brightness in X, from 0 by day to 1 at night.
     // Clouds: horizontal distances where the dithered fade starts and ends in XY.
+    // The sun, moon and stars read theirs from the palette instead.
     params: vec4<f32>,
 }
 
@@ -72,7 +72,7 @@ fn stars_vertex(in: StarVertex) -> StarVaryings {
     // Extinction near the horizon, where the air is thickest.
     let horizon = smoothstep(-0.02, 0.3, direction.y);
     out.corner = in.corner;
-    out.color = vec4<f32>(in.color.rgb * (horizon * sky.params.x), in.color.a);
+    out.color = vec4<f32>(in.color.rgb * (horizon * palette_entry(STAR_PARAMS).x), in.color.a);
     return out;
 }
 
@@ -93,14 +93,15 @@ struct DiskVaryings {
     @location(0) disk: vec2<f32>,
 }
 
-// A quad around `sky.direction`, reaching `extent` disk radii from its center.
-fn disk_vertex(position: vec3<f32>, extent: f32) -> DiskVaryings {
-    let forward = sky.direction.xyz;
+// A quad around `body` (direction in XYZ, disk radius in W), reaching `extent` disk
+// radii from its center.
+fn disk_vertex(position: vec3<f32>, extent: f32, body: vec4<f32>) -> DiskVaryings {
+    let forward = body.xyz;
     // The orbits are tilted, so neither body reaches the zenith and Y is a safe up.
     // Face the observer inside the sky, so back-face culling keeps the disk.
     let right = normalize(cross(forward, vec3<f32>(0.0, 1.0, 0.0)));
     let up = cross(right, forward);
-    let direction = forward + (position.x * right + position.y * up) * (sky.direction.w * extent);
+    let direction = forward + (position.x * right + position.y * up) * (body.w * extent);
     var out: DiskVaryings;
     // At infinity, like the stars: depth 0 in reverse Z.
     out.position = view_bindings::view.clip_from_world * vec4<f32>(direction, 0.0);
@@ -113,7 +114,7 @@ const SUN_EXTENT: f32 = 3.5;
 
 @vertex
 fn sun_vertex(@location(0) position: vec3<f32>) -> DiskVaryings {
-    return disk_vertex(position, SUN_EXTENT);
+    return disk_vertex(position, SUN_EXTENT, palette_entry(SUN_DIRECTION));
 }
 
 @fragment
@@ -131,7 +132,7 @@ fn sun_fragment(in: DiskVaryings) -> @location(0) vec4<f32> {
     let outside = max(r - 1.0, 0.0);
     let halo = (0.018 * exp(-3.0 * outside) + 0.003 * exp(-outside * outside))
         * (1.0 - smoothstep(2.0, SUN_EXTENT, r));
-    let color = sky.color.rgb;
+    let color = palette_entry(SUN_COLOR).rgb;
     // Additive: premultiplied color with zero alpha.
     return vec4<f32>(color * (disk + vec3<f32>(1.0, 0.57, 0.20) * halo), 0.0);
 }
@@ -141,7 +142,7 @@ const MOON_EXTENT: f32 = 3.0;
 
 @vertex
 fn moon_vertex(@location(0) position: vec3<f32>) -> DiskVaryings {
-    return disk_vertex(position, MOON_EXTENT);
+    return disk_vertex(position, MOON_EXTENT, palette_entry(MOON_DIRECTION));
 }
 
 fn hash(p: vec2<f32>) -> f32 {
@@ -191,14 +192,15 @@ fn moon_fragment(in: DiskVaryings) -> @location(0) vec4<f32> {
     let r2 = dot(in.disk, in.disk);
     let r = sqrt(r2);
     let edge_width = max(fwidth(r), 0.002);
-    let lit_fraction = sky.params.x;
+    let params = palette_entry(MOON_PARAMS);
+    let lit_fraction = params.x;
     var color = vec3<f32>(0.0);
     if r2 < 1.0 {
         // Sphere normal, Z toward the viewer.
         let normal = vec3<f32>(in.disk, sqrt(1.0 - r2));
         // The sun swings from behind the moon (new) to behind the viewer (full).
         let cos_phase = 2.0 * lit_fraction - 1.0;
-        let sun = vec3<f32>(sky.params.y * sqrt(max(1.0 - cos_phase * cos_phase, 0.0)), 0.0, cos_phase);
+        let sun = vec3<f32>(params.y * sqrt(max(1.0 - cos_phase * cos_phase, 0.0)), 0.0, cos_phase);
         let lit = smoothstep(-0.04, 0.06, dot(normal, sun));
         // Faint earthshine keeps the dark side barely visible.
         let light = lit * (0.65 + 0.35 * normal.z) + 0.025;
@@ -210,7 +212,8 @@ fn moon_fragment(in: DiskVaryings) -> @location(0) vec4<f32> {
         * smoothstep(0.8, 1.1, r) * (1.0 - smoothstep(2.0, MOON_EXTENT, r));
     color += vec3<f32>(0.65, 0.78, 1.0) * halo;
     // Additive: premultiplied color with zero alpha.
-    return vec4<f32>(color * sky.color.rgb * sky.color.a, 0.0);
+    let tint = palette_entry(MOON_COLOR);
+    return vec4<f32>(color * tint.rgb * tint.a, 0.0);
 }
 
 // ---- Clouds: opaque, flat-shaded boxes lit like terrain ----

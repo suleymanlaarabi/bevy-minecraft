@@ -46,7 +46,7 @@ fn vertex(in: ModelVertex) -> ModelVaryings {
     let model = decode_model(in.data);
     let world_from_local = section_transform::world_from_local(in.instance_index);
     var out: ModelVaryings;
-    out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(model.position, 1.0));
+    out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(model.position, 1.0)).xyz;
     // Match the terrain's invariant transform at coplanar water/block contacts.
     out.position = mesh_functions::mesh_position_local_to_clip(world_from_local, vec4<f32>(model.position, 1.0));
     out.world_normal = section_transform::world_normal(model.normal, in.instance_index);
@@ -129,7 +129,7 @@ fn shade_water(
     in: ModelVaryings,
     is_front: bool,
 ) -> FragmentOutput {
-    let world = in.world_position.xyz;
+    let world = in.world_position;
     let ray = fog_ray(world);
     // Flat like vanilla: the motion lives in the texture, not in bent normals.
     let normal = normalize(in.world_normal);
@@ -140,10 +140,10 @@ fn shade_water(
     pbr_input.is_orthographic = view.clip_from_view[3].w == 1.0;
     pbr_input.V = -ray.direction;
     if pbr_input.is_orthographic {
-        pbr_input.V = calculate_view(in.world_position, true);
+        pbr_input.V = calculate_view(vec4<f32>(world, 1.0), true);
     }
     pbr_input.frag_coord = in.position;
-    pbr_input.world_position = in.world_position;
+    pbr_input.world_position = vec4<f32>(world, 1.0);
     pbr_input.world_normal = in.world_normal;
     pbr_input.N = select(-normal, normal, is_front);
     pbr_input.material.perceptual_roughness = 0.08;
@@ -225,10 +225,10 @@ fn fragment(
     breaking_out.color = vec4<f32>(crack.rgb * crack.a, crack.a);
     return breaking_out;
 }
-    let ray = fog_ray(in.world_position.xyz);
+    let ray = fog_ray(in.world_position);
     if fully_fogged(ray) {
         var fogged: FragmentOutput;
-        fogged.color = apply_voxel_fog_ray(vec4<f32>(0.0, 0.0, 0.0, texture_color.a), in.world_position.xyz, ray);
+        fogged.color = apply_voxel_fog_ray(vec4<f32>(0.0, 0.0, 0.0, texture_color.a), in.world_position, ray);
         return fogged;
     }
     var albedo = texture_color.rgb * in.tint;
@@ -251,7 +251,7 @@ fn fragment(
     let normal = normalize(select(-in.world_normal, in.world_normal, is_front));
     var shaded = albedo;
     if (in.flags & 4u) == 0u {
-        shaded = voxel_diffuse(albedo, normal, in.world_position, in.position.xy, in.light);
+        shaded = voxel_diffuse(albedo, normal, vec4<f32>(in.world_position, 1.0), in.position.xy, in.light);
     }
     var out: FragmentOutput;
     out.color = apply_voxel_fog_ray(
@@ -259,7 +259,7 @@ fn fragment(
             shaded,
             texture_color.a,
         ),
-        in.world_position.xyz, ray,
+        in.world_position, ray,
     );
     return out;
 }

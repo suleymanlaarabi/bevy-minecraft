@@ -50,7 +50,8 @@ pub(super) struct SkyLight;
 #[derive(Component)]
 pub(super) struct SunDiskMesh;
 
-fn sun_settings(sky: &SkyState) -> SkySettings {
+/// Read through the sky palette ([`hollow_render::environment::SkyLighting`]).
+pub(crate) fn sun_settings(sky: &SkyState) -> SkySettings {
     let height = (sky.sun_direction.y * 5.0 + 0.2).clamp(0.0, 1.0);
     SkySettings {
         direction: sky.sun_direction.extend(SUN_RADIUS),
@@ -68,9 +69,19 @@ pub(super) fn spawn_sky(
     palette: Res<hollow_render::fog::SkyPalette>,
     sky: Res<SkyState>,
 ) {
+    // One triangle past the screen corners: a two-triangle quad shades its shared
+    // diagonal twice in partially covered 2x2 pixel blocks.
+    let screen = Mesh::new(
+        bevy::mesh::PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        vec![[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]],
+    );
     commands.spawn((
         SkyBackground,
-        Mesh3d(meshes.add(Rectangle::new(2.0, 2.0))),
+        Mesh3d(meshes.add(screen)),
         MeshMaterial3d(materials.add(SkyMaterial {
             pass: SkyPass::Background,
             settings: SkySettings::default(),
@@ -138,7 +149,7 @@ pub(super) fn spawn_sky(
         Mesh3d(meshes.add(Rectangle::new(2.0, 2.0))),
         MeshMaterial3d(materials.add(SkyMaterial {
             pass: SkyPass::Sun,
-            settings: sun_settings(&sky),
+            settings: SkySettings::default(),
             palette: palette.0.clone(),
         })),
         Transform::default(),
@@ -148,30 +159,20 @@ pub(super) fn spawn_sky(
     ));
 }
 
-/// Moves the visible sun every frame the sky changes, and hides it below the horizon
-/// when it is below the horizon.
+/// Hides the visible sun below the horizon. Its position and color follow the sky
+/// palette, written from [`sun_settings`].
 pub(super) fn update_sun_disk(
     sky: Res<SkyState>,
-    mut disks: Query<(&mut Visibility, &MeshMaterial3d<SkyMaterial>), With<SunDiskMesh>>,
-    mut materials: ResMut<Assets<SkyMaterial>>,
+    mut disks: Query<&mut Visibility, With<SunDiskMesh>>,
 ) {
-    if !sky.is_changed() {
-        return;
-    }
     let settings = sun_settings(&sky);
     let shown = settings.direction.y > -settings.direction.w;
-    for (mut visibility, material) in &mut disks {
+    for mut visibility in &mut disks {
         visibility.set_if_neq(if shown {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         });
-        if !shown {
-            continue;
-        }
-        if let Some(mut sun) = materials.get_mut(&material.0) {
-            sun.settings = settings;
-        }
     }
 }
 

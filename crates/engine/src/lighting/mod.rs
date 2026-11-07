@@ -32,8 +32,8 @@ impl<T: VoxelCell> Plugin for VoxelLightingPlugin<T> {
             .add_systems(
                 PostUpdate,
                 (
-                    runtime::update_block_light::<T>,
-                    runtime::update_lighting::<T>,
+                    runtime::update_block_light::<T>.run_if(runtime::block_light_pending),
+                    runtime::update_lighting::<T>.run_if(runtime::lighting_pending::<T>),
                 )
                     .chain()
                     .in_set(VoxelLighting)

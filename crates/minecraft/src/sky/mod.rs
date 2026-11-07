@@ -13,9 +13,11 @@ mod night;
 use crate::game::GameState;
 use bevy::prelude::*;
 
+pub(crate) use celestial::sun_settings;
 pub(crate) use clouds::cloud_reach;
 pub(crate) use cycle::SkyState;
 pub use cycle::TimeOfDay;
+pub(crate) use night::moon_settings;
 
 /// Real seconds per in-game day: twice vanilla's, for a slower sun.
 pub const DAY_LENGTH_SECS: f32 = 2400.0;
@@ -78,8 +80,8 @@ impl Plugin for SkyPlugin {
                 Update,
                 (
                     celestial::update_lights,
-                    celestial::update_sun_disk,
-                    night::update_night_sky,
+                    (celestial::update_sun_disk, night::update_night_sky)
+                        .run_if(resource_changed::<SkyState>),
                     clouds::update_clouds,
                 )
                     .in_set(SkySystems::Apply),

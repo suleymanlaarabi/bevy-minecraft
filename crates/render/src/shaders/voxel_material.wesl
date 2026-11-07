@@ -17,10 +17,14 @@ var blocks_sampler: sampler;
 @group(constants::MATERIAL_BIND_GROUP) @binding(2)
 var<storage, read> faces: array<vec4<f32>>;
 
+// Terrain is drawn only from section arenas, whose transforms are pure translations:
+// the world normal is exactly `face_normal(direction)`. A flat direction replaces three
+// interpolated normal components and a per-fragment normalize; positions drop the
+// constant w.
 struct VoxelVaryings {
     @invariant @builtin(position) position: vec4<f32>,
-    @location(0) world_position: vec4<f32>,
-    @location(1) world_normal: vec3<f32>,
+    @location(0) world_position: vec3<f32>,
+    @location(1) @interpolate(flat) direction: u32,
     @location(2) uv: vec2<f32>,
     @location(3) light: vec2<f32>,
     @location(4) @interpolate(flat) layer: u32,
@@ -37,16 +41,13 @@ fn vertex(in: PackedVertex) -> VoxelVaryings {
     out.world_position = mesh_functions::mesh_position_local_to_world(
         world_from_local,
         vec4<f32>(vertex.position, 1.0),
-    );
+    ).xyz;
     // Use exactly the same transform and invariant position as the depth prepass.
     out.position = mesh_functions::mesh_position_local_to_clip(
         world_from_local,
         vec4<f32>(vertex.position, 1.0),
     );
-    out.world_normal = section_transform::world_normal(
-        face_normal(vertex.direction),
-        in.instance_index,
-    );
+    out.direction = vertex.direction;
     out.light = vertex.light;
     // Constant over a quad, whose four vertices share appearance and direction.
     let face = faces[face_index(vertex)];
@@ -66,11 +67,11 @@ fn fragment(
 ) -> FragmentOutput {
     let uv_dx = dpdx(in.uv);
     let uv_dy = dpdy(in.uv);
-    let ray = fog_ray(in.world_position.xyz);
+    let ray = fog_ray(in.world_position);
     var out: FragmentOutput;
 @if(!VOXEL_CUTOUT) {
     if fully_fogged(ray) {
-        out.color = apply_voxel_fog_ray(vec4<f32>(0.0, 0.0, 0.0, 1.0), in.world_position.xyz, ray);
+        out.color = apply_voxel_fog_ray(vec4<f32>(0.0, 0.0, 0.0, 1.0), in.world_position, ray);
         return out;
     }
 }
@@ -82,7 +83,7 @@ fn fragment(
     // Leaves and other cutout cubes: real holes, alpha-tested like vanilla.
     if texture_color.a < 0.5 { discard; }
     if fully_fogged(ray) {
-        out.color = apply_voxel_fog_ray(vec4<f32>(0.0, 0.0, 0.0, 1.0), in.world_position.xyz, ray);
+        out.color = apply_voxel_fog_ray(vec4<f32>(0.0, 0.0, 0.0, 1.0), in.world_position, ray);
         return out;
     }
 } @else {
@@ -97,10 +98,10 @@ fn fragment(
     let albedo = texture_color.rgb * in.tint;
     out.color = apply_voxel_fog_ray(
         vec4<f32>(
-            voxel_diffuse(albedo, normalize(in.world_normal), in.world_position, in.position.xy, in.light),
+            voxel_diffuse(albedo, face_normal(in.direction), vec4<f32>(in.world_position, 1.0), in.position.xy, in.light),
             1.0,
         ),
-        in.world_position.xyz, ray,
+        in.world_position, ray,
     );
     return out;
 }

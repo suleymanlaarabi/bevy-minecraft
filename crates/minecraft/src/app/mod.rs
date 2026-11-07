@@ -70,7 +70,12 @@ impl Plugin for HollowPlugin {
                     ..default()
                 }),
                 ..default()
-            });
+            })
+            // Settings only select FXAA, MSAA and bloom (added below). The grouped SMAA,
+            // TAA, CAS, motion blur, depth of field and lens effects would still run
+            // their render systems for every view each frame.
+            .disable::<bevy::anti_alias::AntiAliasPlugin>()
+            .disable::<bevy::post_process::PostProcessPlugin>();
         if headless {
             plugins = plugins.disable::<bevy::winit::WinitPlugin>();
             app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(
@@ -79,6 +84,11 @@ impl Plugin for HollowPlugin {
         }
         app.add_plugins((
             plugins,
+            (
+                bevy::anti_alias::fxaa::FxaaPlugin,
+                bevy::post_process::bloom::BloomPlugin,
+                bevy::post_process::msaa_writeback::MsaaWritebackPlugin,
+            ),
             FeathersPlugins,
             GameSettingsPlugin,
             crate::content::MinecraftContentPlugin,

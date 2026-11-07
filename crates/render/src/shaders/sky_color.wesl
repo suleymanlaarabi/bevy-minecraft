@@ -1,6 +1,19 @@
-// Display-space palette shared by the sky, distance fog and water reflection.
+// Display-space palette shared by the sky, distance fog and water reflection
+// (`fog::upload_palette`). Entries 4 to 9 hold the per-frame sun, moon and star
+// inputs, so the day cycle never modifies a material.
 @group(constants::MATERIAL_BIND_GROUP) @binding(11)
 var<storage, read> sky_palette: array<vec4<f32>>;
+
+const SUN_DIRECTION: u32 = 4u;
+const SUN_COLOR: u32 = 5u;
+const MOON_DIRECTION: u32 = 6u;
+const MOON_COLOR: u32 = 7u;
+const MOON_PARAMS: u32 = 8u;
+const STAR_PARAMS: u32 = 9u;
+
+fn palette_entry(index: u32) -> vec4<f32> {
+    return sky_palette[index];
+}
 
 fn sample_sky(direction: vec3<f32>) -> vec3<f32> {
     let height = smoothstep(0.0, 0.65, max(direction.y, 0.0));

@@ -131,14 +131,7 @@ impl Plugin for SectionsPlugin {
             .add_systems(ExtractSchedule, extract_sections)
             .add_systems(
                 Render,
-                (
-                    prepare_sections,
-                    queue_sections::<0>,
-                    queue_sections::<1>,
-                    queue_sections::<2>,
-                    queue_sections::<3>,
-                    queue_sections::<4>,
-                )
+                (prepare_sections, queue_sections)
                     .chain()
                     .in_set(RenderSystems::QueueMeshes),
             );
@@ -192,16 +185,40 @@ struct Column {
     mask: u32,
 }
 struct Slot {
-    visible: bool,
-    origin: Vec3,
-    min: Vec3,
-    max: Vec3,
     passes: [Option<Allocation>; 5],
+}
+/// Per-slot culling inputs, dense and parallel to `SectionGpu::slots`: the per-view
+/// loop streams 28 bytes per slot and reads allocations only for drawn sections.
+#[derive(Clone, Copy, Default)]
+struct Cull {
+    center: Vec3,
+    extent: Vec3,
+    /// Bit per pass holding geometry; zero for a free slot.
+    passes: u8,
+    visible: bool,
 }
 struct Allocation {
     vertices: Range<u64>,
     indices: Range<u64>,
-    count: u32,
+    /// Indirect arguments, fixed while the allocation lives.
+    draw: [u32; 5],
+}
+/// Bytes per index and vertex of each pass (u16 terrain and shadow indices,
+/// 16-byte model vertices).
+const INDEX_BYTES: [u64; 5] = [2, 4, 4, 4, 2];
+const VERTEX_BYTES: [u64; 5] = [8, 8, 16, 16, 8];
+/// Front-to-back draw order in 8-block distance buckets.
+const DISTANCE_BUCKETS: usize = 256;
+const BUCKETS_PER_BLOCK: f32 = 1.0 / 8.0;
+
+/// Culling inputs of one view; unchanged views and sections keep last frame's draws.
+#[derive(Clone, Copy, PartialEq)]
+struct ViewCull {
+    entity: Entity,
+    clip: Mat4,
+    eye: Vec3,
+    enabled: u8,
+    camera: bool,
 }
 struct ArenaBuffer {
     buffer: Buffer,
@@ -278,9 +295,16 @@ struct SectionGpu {
     arenas: [Arena; 5],
     columns: HashMap<IVec2, Column>,
     slots: Vec<Option<Slot>>,
+    cull: Vec<Cull>,
     free: Vec<usize>,
     origins: Buffer,
     origins_capacity: usize,
+    /// CPU copy of `origins`; only the slots replaced since the last upload are written.
+    origin_data: Vec<[f32; 4]>,
+    origins_dirty: Option<Range<usize>>,
+    /// Views the current `args` and `ranges` were built for.
+    views: Vec<ViewCull>,
+    conservative: bool,
     bind_group: BindGroup,
     layout: BindGroupLayoutDescriptor,
     layouts: [MeshVertexBufferLayoutRef; 2],
@@ -344,9 +368,14 @@ impl SectionGpu {
             }),
             columns: default(),
             slots: Vec::new(),
+            cull: Vec::new(),
             free: Vec::new(),
             origins,
             origins_capacity: 1,
+            origin_data: Vec::new(),
+            origins_dirty: None,
+            views: Vec::new(),
+            conservative: false,
             bind_group,
             layout,
             layouts,
@@ -371,20 +400,26 @@ impl SectionGpu {
         {
             self.arenas[pass].vertices.release(a.vertices);
             self.arenas[pass].indices.release(a.indices);
+            self.cull[slot].passes &= !(1 << pass);
         }
+    }
+    fn free_slot(&mut self, slot: usize) {
+        for pass in 0..5 {
+            self.release(slot, pass);
+        }
+        self.slots[slot] = None;
+        self.cull[slot] = Cull::default();
+        self.free.push(slot);
     }
     fn remove(&mut self, column: IVec2) {
         if let Some(column) = self.columns.remove(&column) {
             for slot in column.slots.into_iter().flatten() {
-                for pass in 0..5 {
-                    self.release(slot, pass);
-                }
-                self.slots[slot] = None;
-                self.free.push(slot);
+                self.free_slot(slot);
             }
         }
     }
 }
+#[allow(clippy::too_many_arguments)]
 fn prepare_sections(
     mut gpu: ResMut<SectionGpu>,
     mut feed: ResMut<SectionFeed>,
@@ -398,14 +433,22 @@ fn prepare_sections(
     )>,
     lights: Query<Option<&RenderLayers>>,
     mut draws: Local<[Vec<[u32; 5]>; 5]>,
+    mut current: Local<Vec<ViewCull>>,
+    mut survivors: Local<Vec<(u32, u8, u8)>>,
+    mut ordered: Local<Vec<(u32, u8)>>,
 ) {
     let gpu = &mut *gpu;
+    let changed = !feed.ops.is_empty() || gpu.conservative != feed.conservative;
+    gpu.conservative = feed.conservative;
     let mut uploads = Vec::new();
     for op in feed.ops.drain(..) {
         match op {
             SectionOp::Clear => {
                 gpu.columns.clear();
                 gpu.slots.clear();
+                gpu.cull.clear();
+                gpu.origin_data.clear();
+                gpu.origins_dirty = None;
                 gpu.free.clear();
                 for arena in &mut gpu.arenas {
                     for buffer in [&mut arena.vertices, &mut arena.indices] {
@@ -428,8 +471,8 @@ fn prepare_sections(
                 });
                 c.mask = mask;
                 for (section, slot) in c.slots.iter().enumerate() {
-                    if let Some(s) = slot.and_then(|i| gpu.slots[i].as_mut()) {
-                        s.visible = mask & (1 << section) != 0;
+                    if let Some(i) = *slot {
+                        gpu.cull[i].visible = mask & (1 << section) != 0;
                     }
                 }
             }
@@ -445,11 +488,7 @@ fn prepare_sections(
                         .get_mut(&column)
                         .and_then(|c| c.slots[section].take())
                     {
-                        for pass in 0..5 {
-                            gpu.release(slot, pass);
-                        }
-                        gpu.slots[slot] = None;
-                        gpu.free.push(slot);
+                        gpu.free_slot(slot);
                     }
                     continue;
                 }
@@ -461,6 +500,8 @@ fn prepare_sections(
                 let slot = *c.slots[section].get_or_insert_with(|| {
                     gpu.free.pop().unwrap_or_else(|| {
                         gpu.slots.push(None);
+                        gpu.cull.push(Cull::default());
+                        gpu.origin_data.push([0.0; 4]);
                         gpu.slots.len() - 1
                     })
                 });
@@ -468,26 +509,46 @@ fn prepare_sections(
                     gpu.release(slot, pass);
                 }
                 let mut record = Slot {
-                    visible,
-                    origin,
-                    min: Vec3::MAX,
-                    max: Vec3::MIN,
                     passes: std::array::from_fn(|_| None),
                 };
+                let (mut min, mut max, mut passes) = (Vec3::MAX, Vec3::MIN, 0u8);
                 for (pass, geometry) in geometry.into_iter().enumerate() {
                     if let Some(g) = geometry {
-                        record.min = record.min.min(g.min + origin);
-                        record.max = record.max.max(g.max + origin);
-                        let a = Allocation {
-                            vertices: gpu.arenas[pass].vertices.allocate(g.vertices.len() as u64),
-                            indices: gpu.arenas[pass].indices.allocate(g.indices.len() as u64),
-                            count: g.count,
-                        };
-                        uploads.push((slot, pass, a.vertices.start, a.indices.start, g));
-                        record.passes[pass] = Some(a);
+                        min = min.min(g.min + origin);
+                        max = max.max(g.max + origin);
+                        let vertices = gpu.arenas[pass].vertices.allocate(g.vertices.len() as u64);
+                        let indices = gpu.arenas[pass].indices.allocate(g.indices.len() as u64);
+                        let draw = [
+                            g.count,
+                            1,
+                            u32::try_from(indices.start / INDEX_BYTES[pass])
+                                .expect("arena index offset"),
+                            i32::try_from(vertices.start / VERTEX_BYTES[pass])
+                                .expect("arena vertex offset") as u32,
+                            u32::try_from(slot).expect("section slot"),
+                        ];
+                        uploads.push((slot, pass, vertices.start, indices.start, g));
+                        record.passes[pass] = Some(Allocation {
+                            vertices,
+                            indices,
+                            draw,
+                        });
+                        passes |= 1 << pass;
                     }
                 }
                 gpu.slots[slot] = Some(record);
+                gpu.cull[slot] = Cull {
+                    center: (min + max) * 0.5,
+                    extent: (max - min) * 0.5,
+                    passes,
+                    visible,
+                };
+                gpu.origin_data[slot] = origin.extend(0.0).to_array();
+                gpu.origins_dirty = Some(
+                    gpu.origins_dirty
+                        .take()
+                        .map_or(slot..slot + 1, |r| r.start.min(slot)..r.end.max(slot + 1)),
+                );
             }
         }
     }
@@ -522,37 +583,35 @@ fn prepare_sections(
             queue.write_buffer(&gpu.arenas[p].vertices.buffer, v, &g.vertices);
             queue.write_buffer(&gpu.arenas[p].indices.buffer, i, &g.indices);
         }
-        if gpu.slots.len() > gpu.origins_capacity {
-            gpu.origins_capacity = gpu.slots.len().next_power_of_two();
-            gpu.origins = device.create_buffer(&BufferDescriptor {
-                label: Some("section origins"),
-                size: (gpu.origins_capacity * 16) as u64,
-                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            gpu.bind_group = device.create_bind_group(
-                "section origins",
-                &device.create_bind_group_layout(gpu.layout.label.as_ref(), &gpu.layout.entries),
-                &[BindGroupEntry {
-                    binding: 32,
-                    resource: gpu.origins.as_entire_binding(),
-                }],
-            );
-        }
-        let origins: Vec<[f32; 4]> = gpu
-            .slots
-            .iter()
-            .map(|s| {
-                s.as_ref()
-                    .map_or([0.0; 4], |s| s.origin.extend(0.0).to_array())
-            })
-            .collect();
-        if !origins.is_empty() {
-            queue.write_buffer(&gpu.origins, 0, bytemuck::cast_slice(&origins));
-        }
     }
-    gpu.args.clear();
-    gpu.ranges.clear();
+    if gpu.slots.len() > gpu.origins_capacity {
+        gpu.origins_capacity = gpu.slots.len().next_power_of_two();
+        gpu.origins = device.create_buffer(&BufferDescriptor {
+            label: Some("section origins"),
+            size: (gpu.origins_capacity * 16) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        gpu.bind_group = device.create_bind_group(
+            "section origins",
+            &device.create_bind_group_layout(gpu.layout.label.as_ref(), &gpu.layout.entries),
+            &[BindGroupEntry {
+                binding: 32,
+                resource: gpu.origins.as_entire_binding(),
+            }],
+        );
+        gpu.origins_dirty = Some(0..gpu.slots.len());
+    }
+    if let Some(range) = gpu.origins_dirty.take()
+        && !range.is_empty()
+    {
+        queue.write_buffer(
+            &gpu.origins,
+            (range.start * 16) as u64,
+            bytemuck::cast_slice(&gpu.origin_data[range]),
+        );
+    }
+    current.clear();
     for (entity, view, camera, light) in &views {
         let shadow_layers = match light {
             Some(LightEntity::Directional { light_entity, .. }) => Some(
@@ -567,19 +626,8 @@ fn prepare_sections(
             None if camera.is_some() => None,
             _ => continue,
         };
-        let clip = view
-            .clip_from_world
-            .unwrap_or_else(|| view.clip_from_view * view.world_from_view.to_matrix().inverse());
-        let rows = clip.transpose().to_cols_array_2d().map(Vec4::from_array);
-        let planes = [
-            rows[3] + rows[0],
-            rows[3] - rows[0],
-            rows[3] + rows[1],
-            rows[3] - rows[1],
-            rows[3] - rows[2],
-        ];
-        let enabled: [bool; 5] = std::array::from_fn(|p| {
-            shadow_layers.as_ref().map_or(p != 4, |layers| {
+        let enabled = (0..5).fold(0u8, |mask, p| {
+            let on = shadow_layers.as_ref().map_or(p != 4, |layers| {
                 if p == 0 {
                     false
                 } else if p == 4 {
@@ -590,44 +638,107 @@ fn prepare_sections(
                         crate::visibility::OCCLUDED_LAYER,
                     ]))
                 }
-            })
+            });
+            mask | u8::from(on) << p
         });
+        current.push(ViewCull {
+            entity,
+            clip: view.clip_from_world.unwrap_or_else(|| {
+                view.clip_from_view * view.world_from_view.to_matrix().inverse()
+            }),
+            eye: view.world_from_view.translation(),
+            enabled,
+            camera: shadow_layers.is_none(),
+        });
+    }
+    // Still views over unchanged sections keep last frame's draws and GPU arguments.
+    if !changed && *current == gpu.views {
+        return;
+    }
+    gpu.args.clear();
+    gpu.ranges.clear();
+    for view in current.iter() {
+        let rows = view
+            .clip
+            .transpose()
+            .to_cols_array_2d()
+            .map(Vec4::from_array);
+        // Shadow views keep everything behind their near plane.
+        let near = if view.camera {
+            rows[3] - rows[2]
+        } else {
+            Vec4::W
+        };
+        let planes = [
+            rows[3] + rows[0],
+            rows[3] - rows[0],
+            rows[3] + rows[1],
+            rows[3] - rows[1],
+            near,
+        ]
+        .map(|p| {
+            (
+                Vec3A::from(p.truncate()),
+                Vec3A::from(p.truncate().abs()),
+                p.w,
+            )
+        });
+        let require_visible = view.camera && !feed.conservative;
+        let eye = Vec3A::from(view.eye);
+        let mut counts = [0u32; DISTANCE_BUCKETS];
+        survivors.clear();
+        for (slot, c) in gpu.cull.iter().enumerate() {
+            let passes = c.passes & view.enabled;
+            if passes == 0 || (require_visible && !c.visible) {
+                continue;
+            }
+            let center = Vec3A::from(c.center);
+            let extent = Vec3A::from(c.extent);
+            // Inside when the box's farthest corner is in front of every plane.
+            let inside = planes
+                .iter()
+                .fold(f32::INFINITY, |inside, (normal, abs, w)| {
+                    inside.min(normal.dot(center) + w + abs.dot(extent))
+                });
+            if inside < 0.0 {
+                continue;
+            }
+            // Orthographic shadow views keep slot order in a single bucket.
+            let bucket = if view.camera {
+                ((center.distance(eye) * BUCKETS_PER_BLOCK) as usize).min(DISTANCE_BUCKETS - 1)
+            } else {
+                0
+            };
+            counts[bucket] += 1;
+            survivors.push((slot as u32, passes, bucket as u8));
+        }
+        // Counting sort, nearest first: early depth tests then reject hidden fragments,
+        // above all in passes without a depth prepass (cutouts and models).
+        let mut start = 0;
+        for count in &mut counts {
+            (*count, start) = (start, start + *count);
+        }
+        ordered.clear();
+        ordered.resize(survivors.len(), (0, 0));
+        for &(slot, passes, bucket) in survivors.iter() {
+            let at = &mut counts[usize::from(bucket)];
+            ordered[*at as usize] = (slot, passes);
+            *at += 1;
+        }
         for buffer in draws.iter_mut() {
             buffer.clear();
         }
-        for (slot, s) in gpu
-            .slots
-            .iter()
-            .enumerate()
-            .filter_map(|(i, s)| s.as_ref().map(|s| (i, s)))
-        {
-            if shadow_layers.is_none() && !feed.conservative && !s.visible {
+        for &(slot, passes) in ordered.iter() {
+            let Some(s) = &gpu.slots[slot as usize] else {
                 continue;
-            }
-            let center = (s.min + s.max) * 0.5;
-            let extent = (s.max - s.min) * 0.5;
-            if planes[..if shadow_layers.is_some() { 4 } else { 5 }]
-                .iter()
-                .any(|p| p.truncate().dot(center) + p.w + p.truncate().abs().dot(extent) < 0.0)
-            {
-                continue;
-            }
-            for p in 0..5 {
-                if !enabled[p] {
-                    continue;
+            };
+            let mut bits = passes;
+            while bits != 0 {
+                let p = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if let Some(a) = &s.passes[p] {
+                    draws[p].push(a.draw);
                 }
-                let Some(a) = &s.passes[p] else {
-                    continue;
-                };
-                draws[p].push([
-                    a.count,
-                    1,
-                    u32::try_from(a.indices.start / if p == 0 || p == 4 { 2 } else { 4 })
-                        .expect("arena index offset"),
-                    i32::try_from(a.vertices.start / if p == 2 || p == 3 { 16 } else { 8 })
-                        .expect("arena vertex offset") as u32,
-                    u32::try_from(slot).expect("section slot"),
-                ]);
             }
         }
         let ranges = std::array::from_fn(|p| {
@@ -635,8 +746,9 @@ fn prepare_sections(
             gpu.args.extend_from_slice(&draws[p]);
             start..gpu.args.len()
         });
-        gpu.ranges.insert(entity, ranges);
+        gpu.ranges.insert(view.entity, ranges);
     }
+    gpu.views.clone_from(&current);
     if gpu.args.len() > gpu.indirect_capacity {
         gpu.indirect_capacity = gpu.args.len().next_power_of_two();
         gpu.indirect = device.create_buffer(&BufferDescriptor {
@@ -704,8 +816,10 @@ impl SpecializedMeshPipeline for SectionSpecializer {
         Ok(d)
     }
 }
+/// Section draws are retained `NonMesh` phase items: one is replaced only when its
+/// pipeline or presence changes instead of being removed and re-added every frame.
 #[allow(clippy::too_many_arguments)]
-fn queue_sections<const P: usize>(
+fn queue_sections(
     gpu: Res<SectionGpu>,
     ids: Res<SectionIds>,
     materials: Res<SectionMaterials>,
@@ -734,40 +848,42 @@ fn queue_sections<const P: usize>(
     let Some(materials) = &materials.0 else {
         return;
     };
-    let Some(material) = prepared.get(materials[P]) else {
-        return;
-    };
-    let specializer = SectionSpecializer {
-        mesh: MaterialPipeline {
-            mesh_pipeline: mesh.clone(),
-        },
-        prepass: prepass.clone(),
-        properties: material.properties.clone(),
-        layout: gpu.layout.clone(),
-    };
-    let layout = &gpu.layouts[usize::from(P == 2 || P == 3)];
-    let main = ids.0[P];
-    for (entity, view, light) in &views {
-        let retained = view.retained_view_entity;
-        if let Some(phase) = opaque.get_mut(&retained) {
-            phase.remove(main);
-        }
-        if let Some(phase) = alpha.get_mut(&retained) {
-            phase.remove(main);
-        }
-        if let Some(phase) = depth.get_mut(&retained) {
-            phase.remove(main);
-        }
-        if let Some(phase) = shadows.get_mut(&retained) {
-            phase.remove(main);
-        }
-        if gpu.ranges.get(&entity).is_none_or(|r| r[P].is_empty()) {
+    let (od, ad, dd, sd) = (od.read(), ad.read(), dd.read(), sd.read());
+    let main_draws = [
+        od.id::<MainDraw<0>>(),
+        ad.id::<MainDraw<1>>(),
+        od.id::<MainDraw<2>>(),
+        ad.id::<MainDraw<3>>(),
+        od.id::<MainDraw<4>>(),
+    ];
+    let shadow_draws = [
+        sd.id::<DepthDraw<0>>(),
+        sd.id::<DepthDraw<1>>(),
+        sd.id::<DepthDraw<2>>(),
+        sd.id::<DepthDraw<3>>(),
+        sd.id::<DepthDraw<4>>(),
+    ];
+    let depth_draw = dd.id::<DepthDraw<0>>();
+    let topology = MeshPipelineKey::from_primitive_topology_and_strip_index(
+        PrimitiveTopology::TriangleList,
+        None,
+    );
+    let asset_id = AssetId::<Mesh>::default().untyped();
+    let mut specializer = None;
+    for (p, &material_id) in materials.iter().enumerate() {
+        let Some(material) = prepared.get(material_id) else {
             continue;
-        }
-        let topology = MeshPipelineKey::from_primitive_topology_and_strip_index(
-            PrimitiveTopology::TriangleList,
-            None,
-        );
+        };
+        let specializer = specializer.get_or_insert_with(|| SectionSpecializer {
+            mesh: MaterialPipeline {
+                mesh_pipeline: mesh.clone(),
+            },
+            prepass: prepass.clone(),
+            properties: material.properties.clone(),
+            layout: gpu.layout.clone(),
+        });
+        specializer.properties = material.properties.clone();
+        let layout = &gpu.layouts[usize::from(p == 2 || p == 3)];
         let key_for = |view_key: MeshPipelineKey, depth: bool| {
             let mut key = view_key | topology;
             if !depth {
@@ -788,97 +904,106 @@ fn queue_sections<const P: usize>(
                 ErasedMaterialPipelineKey {
                     mesh_key: ErasedMeshPipelineKey::new(key),
                     material_key: material.properties.material_key.clone(),
-                    type_id: materials[P].type_id(),
+                    type_id: material_id.type_id(),
                 },
             )
         };
-        let asset_id = AssetId::<Mesh>::default().untyped();
-        if light.is_some() {
-            let (Some(phase), Some(key)) = (shadows.get_mut(&retained), light_keys.get(&retained))
-            else {
-                continue;
+        let item = |entity| (entity, ids.0[p]);
+        for (entity, view, light) in &views {
+            let retained = view.retained_view_entity;
+            let active = gpu.ranges.get(&entity).is_some_and(|r| !r[p].is_empty());
+            let mut pipeline = |key: Option<&MeshPipelineKey>, depth: bool| {
+                key.filter(|_| active).and_then(|key| {
+                    pipelines
+                        .specialize(&cache, specializer, key_for(*key, depth), layout)
+                        .ok()
+                })
             };
-            if let Ok(pipeline) =
-                pipelines.specialize(&cache, &specializer, key_for(*key, true), layout)
-            {
-                phase.add(
-                    ShadowBatchSetKey {
-                        pipeline,
-                        draw_function: sd.read().id::<DepthDraw<P>>(),
-                        material_bind_group_index: None,
-                        slabs: MeshSlabs::default(),
-                    },
-                    ShadowBinKey { asset_id },
-                    (entity, main),
-                    InputUniformIndex::default(),
-                    BinnedRenderPhaseType::NonMesh,
-                );
-            }
-            continue;
-        }
-        if let Some(key) = keys.get(&retained) {
-            if let Ok(pipeline) =
-                pipelines.specialize(&cache, &specializer, key_for(*key, false), layout)
-            {
-                let batch = Opaque3dBatchSetKey {
-                    pipeline,
-                    draw_function: if P == 1 || P == 3 {
-                        ad.read().id::<MainDraw<P>>()
-                    } else {
-                        od.read().id::<MainDraw<P>>()
-                    },
-                    material_bind_group_index: None,
-                    slabs: MeshSlabs::default(),
-                    lightmap_slab: None,
-                };
-                if P == 1 || P == 3 {
-                    if let Some(phase) = alpha.get_mut(&retained) {
-                        phase.add(
-                            OpaqueNoLightmap3dBatchSetKey {
-                                pipeline: batch.pipeline,
-                                draw_function: batch.draw_function,
-                                material_bind_group_index: None,
-                                slabs: MeshSlabs::default(),
-                            },
-                            OpaqueNoLightmap3dBinKey { asset_id },
-                            (entity, main),
-                            InputUniformIndex::default(),
-                            BinnedRenderPhaseType::NonMesh,
-                        );
-                    }
-                } else if let Some(phase) = opaque.get_mut(&retained) {
-                    phase.add(
-                        batch,
-                        Opaque3dBinKey { asset_id },
-                        (entity, main),
-                        InputUniformIndex::default(),
-                        BinnedRenderPhaseType::NonMesh,
-                    );
-                }
-            }
-        }
-        if P == 0 {
-            if let (Some(phase), Some(key)) = (depth.get_mut(&retained), depth_keys.get(&retained))
-            {
-                if let Ok(pipeline) =
-                    pipelines.specialize(&cache, &specializer, key_for(*key, true), layout)
-                {
-                    phase.add(
-                        OpaqueNoLightmap3dBatchSetKey {
+            if light.is_some() {
+                if let Some(phase) = shadows.get_mut(&retained) {
+                    let keys = pipeline(light_keys.get(&retained), true).map(|pipeline| {
+                        let batch = ShadowBatchSetKey {
                             pipeline,
-                            draw_function: dd.read().id::<DepthDraw<P>>(),
+                            draw_function: shadow_draws[p],
                             material_bind_group_index: None,
                             slabs: MeshSlabs::default(),
-                        },
-                        OpaqueNoLightmap3dBinKey { asset_id },
-                        (entity, main),
-                        InputUniformIndex::default(),
-                        BinnedRenderPhaseType::NonMesh,
-                    );
+                        };
+                        (batch, ShadowBinKey { asset_id })
+                    });
+                    keep(phase, keys, item(entity));
                 }
+                continue;
+            }
+            let main = pipeline(keys.get(&retained), false);
+            if p == 1 || p == 3 {
+                if let Some(phase) = alpha.get_mut(&retained) {
+                    let keys = main.map(|pipeline| {
+                        let batch = OpaqueNoLightmap3dBatchSetKey {
+                            pipeline,
+                            draw_function: main_draws[p],
+                            material_bind_group_index: None,
+                            slabs: MeshSlabs::default(),
+                        };
+                        (batch, OpaqueNoLightmap3dBinKey { asset_id })
+                    });
+                    keep(phase, keys, item(entity));
+                }
+            } else if let Some(phase) = opaque.get_mut(&retained) {
+                let keys = main.map(|pipeline| {
+                    let batch = Opaque3dBatchSetKey {
+                        pipeline,
+                        draw_function: main_draws[p],
+                        material_bind_group_index: None,
+                        slabs: MeshSlabs::default(),
+                        lightmap_slab: None,
+                    };
+                    (batch, Opaque3dBinKey { asset_id })
+                });
+                keep(phase, keys, item(entity));
+            }
+            if p == 0
+                && let Some(phase) = depth.get_mut(&retained)
+            {
+                let keys = pipeline(depth_keys.get(&retained), true).map(|pipeline| {
+                    let batch = OpaqueNoLightmap3dBatchSetKey {
+                        pipeline,
+                        draw_function: depth_draw,
+                        material_bind_group_index: None,
+                        slabs: MeshSlabs::default(),
+                    };
+                    (batch, OpaqueNoLightmap3dBinKey { asset_id })
+                });
+                keep(phase, keys, item(entity));
             }
         }
     }
+}
+/// Keeps one retained non-mesh item in `phase` under `keys`, or removes it.
+fn keep<BPI: BinnedPhaseItem>(
+    phase: &mut BinnedRenderPhase<BPI>,
+    keys: Option<(BPI::BatchSetKey, BPI::BinKey)>,
+    (entity, main): (Entity, MainEntity),
+) {
+    let Some(keys) = keys else {
+        phase.remove(main);
+        return;
+    };
+    if phase
+        .non_mesh_items
+        .get(&keys)
+        .is_some_and(|items| items.entities.get(&main) == Some(&entity))
+    {
+        return;
+    }
+    // `add` alone would leave the item in its previous bin as well.
+    phase.remove(main);
+    phase.add(
+        keys.0,
+        keys.1,
+        (entity, main),
+        InputUniformIndex::default(),
+        BinnedRenderPhaseType::NonMesh,
+    );
 }
 type MainDraw<const P: usize> = (
     SetItemPipeline,

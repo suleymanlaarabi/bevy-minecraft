@@ -146,8 +146,9 @@ pub struct SkyMaterial {
     pub pass: SkyPass,
     #[uniform(0)]
     pub settings: SkySettings,
-    /// The shared [`super::fog::SkyPalette`].
-    #[storage(11, read_only, visibility(fragment))]
+    /// The shared [`super::fog::SkyPalette`], which also carries the sun, moon and
+    /// star inputs that change every frame: the day cycle never modifies a material.
+    #[storage(11, read_only, visibility(vertex, fragment))]
     pub palette: Handle<ShaderBuffer>,
 }
 
@@ -173,7 +174,8 @@ pub enum SkyPass {
     Horizon,
 }
 
-/// Per-pass inputs; each field lists the passes that read it.
+/// Per-pass inputs; each field lists the passes that read it. The sun and the moon
+/// read theirs from [`SkyLighting`] through the sky palette.
 #[derive(Clone, Copy, Debug, Default, PartialEq, ShaderType)]
 pub struct SkySettings {
     /// Sun and moon: unit vector toward the body in XYZ, angular radius of the disk in W.
@@ -182,7 +184,6 @@ pub struct SkySettings {
     /// Moon: output-space color in RGB, opacity in A.
     pub color: Vec4,
     /// Moon: lit fraction of the disk in X, +1 waxing or -1 waning in Y.
-    /// Stars: brightness in X, from 0 by day to 1 at night.
     /// Clouds: horizontal distances where the dithered fade starts and ends in XY.
     pub params: Vec4,
 }
@@ -379,6 +380,9 @@ pub struct SkyLighting {
     pub zenith_color: Color,
     pub sun_direction: Vec3,
     pub sunset_color: Color,
+    /// Disk inputs of the sun and the moon (see [`SkySettings`]).
+    pub sun: SkySettings,
+    pub moon: SkySettings,
 }
 impl SkyLighting {
     fn exposure(&self) -> f32 {
@@ -396,6 +400,8 @@ impl Default for SkyLighting {
             zenith_color: Color::srgb(0.35, 0.6, 1.0),
             sun_direction: Vec3::Y,
             sunset_color: Color::BLACK,
+            sun: SkySettings::default(),
+            moon: SkySettings::default(),
         }
     }
 }

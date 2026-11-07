@@ -101,6 +101,8 @@ pub fn sync_environment(
         zenith_color: sky.zenith_color,
         sun_direction: sky.sun_direction,
         sunset_color: sky.sunset_color,
+        sun: crate::sky::sun_settings(&sky),
+        moon: crate::sky::moon_settings(&sky),
     });
     let effects = effects.single().ok();
     vision.set_if_neq(ViewEffects {

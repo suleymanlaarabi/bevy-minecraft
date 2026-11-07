@@ -193,15 +193,25 @@ impl VisibilityGraph {
             self.queue.push_back(i as u32);
         }
     }
-    pub fn invalidate_column(&mut self, position: IVec2, section_mask: u32) {
+    /// `may_grow` marks changes that can open new paths (edited cells, unloaded data).
+    /// Built connectivity only replaces `ALL_CONNECTIONS`, so it can only close paths:
+    /// the published masks stay a superset and culling remains active.
+    pub fn invalidate_column(&mut self, position: IVec2, section_mask: u32, may_grow: bool) {
         if let Some(i) = self.slot(position)
             && i < self.columns.len()
         {
-            self.columns[i].dirty |= section_mask & self.mask;
-            self.columns[i].publish |= section_mask & self.mask;
+            let column = &mut self.columns[i];
+            column.dirty |= section_mask & self.mask;
+            column.publish |= section_mask & self.mask;
+            // Paths can only open through a section that is already reached.
+            if may_grow
+                && column.position == Some(position)
+                && (column.visible | column.published) & section_mask != 0
+            {
+                self.conservative = true;
+            }
             self.enqueue(i);
             self.stale.insert(i);
-            self.conservative = true;
         }
     }
     /// The layer the next publish most likely assigns to a section, so new entities
@@ -291,13 +301,15 @@ impl VisibilityGraph {
     }
 }
 
-fn edited_topology(
+fn edited_topology<C: RenderSource>(
     event: On<Insert<EditedChunk>>,
-    chunks: Query<&VoxelChunk>,
+    chunks: Query<(&VoxelChunk, &ChunkVoxels<C::Cell>, Option<&ChunkSections>)>,
     mut graph: ResMut<VisibilityGraph>,
 ) {
-    if let Ok(chunk) = chunks.get(event.entity) {
-        graph.invalidate_column(chunk.position, u32::MAX);
+    if let Ok((chunk, voxels, sections)) = chunks.get(event.entity) {
+        // Light and border refreshes keep the cells, hence the connectivity.
+        let may_grow = sections.is_some_and(|s| s.content_revision != voxels.content_revision);
+        graph.invalidate_column(chunk.position, u32::MAX, may_grow);
     }
 }
 fn removed_topology(
@@ -307,7 +319,7 @@ fn removed_topology(
     mut feed: ResMut<super::sections::SectionFeed>,
 ) {
     if let Ok(chunk) = chunks.get(event.entity) {
-        graph.invalidate_column(chunk.position, u32::MAX);
+        graph.invalidate_column(chunk.position, u32::MAX, true);
         feed.ops
             .push(super::sections::SectionOp::RemoveColumn(chunk.position));
     }
@@ -315,7 +327,7 @@ fn removed_topology(
 
 pub fn register<C: RenderSource>(app: &mut App) {
     app.init_resource::<VisibilityGraph>()
-        .add_observer(edited_topology)
+        .add_observer(edited_topology::<C>)
         .add_observer(removed_topology)
         .add_observer(
             |_: On<hollow_engine::session::SessionClosed>, mut graph: ResMut<VisibilityGraph>| {
@@ -352,6 +364,13 @@ fn update_visibility<C: RenderSource>(
     #[cfg(feature = "dev")] diagnostics: Option<ResMut<crate::diagnostics::VoxelDiagnostics>>,
 ) {
     let started = Instant::now();
+    let deadline = started + Duration::from_micros(500);
+    // A clock read costs about as much as one cheap step: poll it every 16 steps.
+    let mut steps = 0u32;
+    let mut expired = move || {
+        steps = steps.wrapping_add(1);
+        steps % 16 == 0 && Instant::now() >= deadline
+    };
     let (Some(camera), Some(stream_center)) = (camera, stream.center) else {
         return;
     };
@@ -397,9 +416,10 @@ fn update_visibility<C: RenderSource>(
         g.begin();
         g.mark_all_stale();
     } else if g.origin != origin {
-        // Slot positions and the ring boundary of every hull change.
+        // Slot positions and the ring boundary of every hull change. The published
+        // masks stay in effect until the new pass publishes; entering columns are
+        // shown until their first publish.
         g.origin = origin;
-        g.conservative = true;
         g.begin();
         g.mark_all_stale();
     }
@@ -408,9 +428,16 @@ fn update_visibility<C: RenderSource>(
         if g.eye.is_none_or(|(_, valid)| valid != valid_eye) {
             g.mark_all_stale();
         }
+        // A camera stepping through one face of its section entered the new one from
+        // a section the published traversal reached, through cells connected to that
+        // face: everything it can see was already reachable. Jumps and validity
+        // changes have no such path and show everything until the next publish.
+        let stepped = g.eye.is_some_and(|(previous, valid)| {
+            valid == valid_eye && (previous - center).abs().element_sum() == 1
+        });
         g.repeat |= g.eye.is_some();
         g.eye = Some((center, valid_eye));
-        g.conservative = true;
+        g.conservative |= !stepped;
         if valid_eye
             && let Some(i) = g.slot(IVec2::new(center.x, center.z))
             && i < g.columns.len()
@@ -424,7 +451,7 @@ fn update_visibility<C: RenderSource>(
     }
     #[cfg(feature = "dev")]
     let mut processed = 0u64;
-    'work: while started.elapsed() < Duration::from_micros(500) {
+    'work: while !expired() {
         let initializing = g.initialize;
         let i = if let Some(i) = initializing {
             if i == g.count() {
@@ -484,7 +511,7 @@ fn update_visibility<C: RenderSource>(
                 }
                 let mut meshes = layers.p1();
                 while changed != 0 {
-                    if started.elapsed() >= Duration::from_micros(500) {
+                    if expired() {
                         g.stale.insert(cursor);
                         break 'work;
                     }
@@ -548,7 +575,7 @@ fn update_visibility<C: RenderSource>(
             let data = index.get(&position).and_then(|e| chunks.get(*e).ok());
             let mut pending = dirty;
             while pending != 0 {
-                if started.elapsed() >= Duration::from_micros(500) {
+                if expired() {
                     g.columns[i].dirty |= pending;
                     if initializing.is_some() {
                         g.initialize = Some(i);

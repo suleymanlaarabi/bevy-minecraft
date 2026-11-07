@@ -106,7 +106,9 @@ impl<C: RenderSource> Plugin for VoxelRenderPlugin<C> {
         .add_systems(
             PostUpdate,
             (
-                build::update_shadow_geometry::<C>,
+                // Mutable `ChunkVoxels` access: keep it out of the schedule on unchanged frames.
+                build::update_shadow_geometry::<C>
+                    .run_if(resource_changed::<environment::EnvironmentSettings>),
                 build::poll_builds::<C>,
                 build::mark_changed_chunks::<C>,
                 build::start_changed_builds::<C>,
