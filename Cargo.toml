@@ -10,6 +10,7 @@ edition = "2024"
 [features]
 default = []
 dev = ["hollow-minecraft/dev"]
+trace = ["hollow-minecraft/trace"]
 
 [dependencies]
 bevy = { version = "0.20", default-features = false, features = ["std"] }

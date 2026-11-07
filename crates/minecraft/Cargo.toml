@@ -6,6 +6,8 @@ edition = "2024"
 [features]
 default = []
 dev = ["hollow-render/dev", "bevy/bevy_dev_tools", "bevy/render_dev_tools", "bevy/sysinfo_plugin"]
+# Writes a Chrome trace (trace-*.json) with a span per ECS system, main and render world.
+trace = ["bevy/trace_chrome", "bevy/detailed_trace"]
 
 [dependencies]
 bevy = { version = "0.20", default-features = false, features = [

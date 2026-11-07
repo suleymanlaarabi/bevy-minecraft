@@ -40,7 +40,7 @@ impl Plugin for HollowPlugin {
                         min_threads: 1,
                         max_threads: 8,
                         percent: 0.3,
-                        on_thread_spawn: Some(std::sync::Arc::new(background_priority)),
+                        on_thread_spawn: Some(std::sync::Arc::new(voxel_worker_start)),
                         on_thread_destroy: None,
                     },
                     io: bevy::app::TaskPoolThreadAssignmentPolicy {
@@ -123,8 +123,50 @@ pub(crate) fn cpu_light_clustering(
     }
 }
 
-/// Voxel workers run at nice 10: the scheduler preempts them whenever a frame
-/// thread wakes on their core, yet they keep every otherwise idle cycle.
+/// Voxel workers run at nice 10 and, on hybrid CPUs, stay on the performance cores:
+/// the scheduler preempts them whenever a frame thread wakes on their core, yet they
+/// keep every otherwise idle cycle. Only the workers are placed; frame threads remain
+/// unpinned.
+fn voxel_worker_start() {
+    background_priority();
+    #[cfg(target_os = "linux")]
+    pin_to_performance_cpus();
+}
+
+#[cfg(target_os = "linux")]
+fn pin_to_performance_cpus() {
+    use std::sync::OnceLock;
+    static PERFORMANCE_CPUS: OnceLock<Option<libc::cpu_set_t>> = OnceLock::new();
+    let Some(set) = PERFORMANCE_CPUS.get_or_init(performance_cpu_set) else {
+        return;
+    };
+    // SAFETY: `sched_setaffinity` with pid 0 applies to the calling thread and only reads
+    // the mask. A failure (for example a restricted container) keeps the default placement.
+    unsafe {
+        libc::sched_setaffinity(0, core::mem::size_of::<libc::cpu_set_t>(), set);
+    }
+}
+
+/// CPU mask of the performance cores, from the per-core-type CPU lists that hybrid Intel
+/// kernels expose. Machines without them yield `None` and keep the scheduler's placement.
+#[cfg(target_os = "linux")]
+fn performance_cpu_set() -> Option<libc::cpu_set_t> {
+    let list = std::fs::read_to_string("/sys/devices/cpu_core/cpus").ok()?;
+    // SAFETY: an all-zero `cpu_set_t` is a valid empty mask.
+    let mut set: libc::cpu_set_t = unsafe { core::mem::zeroed() };
+    for range in list.trim().split(',') {
+        let (first, last) = range.split_once('-').unwrap_or((range, range));
+        let first: usize = first.trim().parse().ok()?;
+        let last: usize = last.trim().parse().ok()?;
+        for cpu in (first..=last).filter(|&cpu| cpu < libc::CPU_SETSIZE as usize) {
+            // SAFETY: `cpu` is below CPU_SETSIZE, so the bit index stays inside the mask.
+            unsafe { libc::CPU_SET(cpu, &mut set) };
+        }
+    }
+    Some(set)
+}
+
+/// Voxel workers run at nice 10 (see `voxel_worker_start`).
 fn background_priority() {
     // Linux nice values are per thread; elsewhere workers keep the default priority.
     #[cfg(target_os = "linux")]
