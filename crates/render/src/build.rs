@@ -76,6 +76,7 @@ struct BuiltSection {
         Option<super::sort::SortKey>,
     )>,
     shadow: Option<PassGeometry>,
+    casts_shadow: bool,
 }
 
 struct BuildOutput {
@@ -334,6 +335,7 @@ fn spawn_chunk_build<C: RenderSource>(
                     (geometry.into_mesh(), sort, key)
                 }),
                 shadow: section.shadow.map(PassGeometry::terrain),
+                casts_shadow: section.casts_shadow,
             })
             .collect::<Vec<_>>();
         for section in &mut sections {
@@ -514,6 +516,7 @@ pub(crate) fn poll_builds<C: RenderSource>(
                         (chunk.position.y * 16) as f32,
                     ),
                     geometry,
+                    casts_shadow: section.casts_shadow,
                 });
                 let (translucent, sort) = section
                     .translucent

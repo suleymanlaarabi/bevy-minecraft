@@ -33,7 +33,13 @@ use bevy::{
     },
     shader::ShaderDefVal,
 };
-use std::{ops::Range, sync::Arc};
+use std::{
+    ops::Range,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
+};
 
 pub(crate) struct PassGeometry {
     pub vertices: Vec<u8>,
@@ -90,6 +96,9 @@ pub(crate) enum SectionOp {
         section: usize,
         origin: Vec3,
         geometry: [Option<PassGeometry>; 5],
+        /// Sunlight reaches the section or its border. Buried cutouts and models
+        /// stay out of the shadow maps, like buried terrain (`SectionMeshes::shadow`).
+        casts_shadow: bool,
     },
     Visibility {
         column: IVec2,
@@ -195,7 +204,19 @@ struct Cull {
     extent: Vec3,
     /// Bit per pass holding geometry; zero for a free slot.
     passes: u8,
+    /// `passes` drawn into shadow maps.
+    casters: u8,
     visible: bool,
+}
+/// Passes drawn into shadow maps from sections that sunlight never reaches: only the
+/// shadow hull, which is built for sunlit sections alone.
+const BURIED_CASTERS: u8 = 1 << 4;
+/// Draw ranges of one view. Depth passes record what they drew: with occlusion
+/// culling, Bevy renders the same phase again in its late prepass and late shadow
+/// passes, where these CPU-culled sections would only repeat identical depth.
+struct ViewDraws {
+    ranges: [Range<usize>; 5],
+    depth_drawn: AtomicU8,
 }
 struct Allocation {
     vertices: Range<u64>,
@@ -311,7 +332,7 @@ struct SectionGpu {
     indirect: Buffer,
     indirect_capacity: usize,
     args: Vec<[u32; 5]>,
-    ranges: HashMap<Entity, [Range<usize>; 5]>,
+    ranges: HashMap<Entity, ViewDraws>,
     indirect_first_instance: bool,
 }
 impl SectionGpu {
@@ -481,6 +502,7 @@ fn prepare_sections(
                 section,
                 origin,
                 geometry,
+                casts_shadow,
             } => {
                 if geometry.iter().all(Option::is_none) {
                     if let Some(slot) = gpu
@@ -541,6 +563,11 @@ fn prepare_sections(
                     center: (min + max) * 0.5,
                     extent: (max - min) * 0.5,
                     passes,
+                    casters: if casts_shadow {
+                        passes
+                    } else {
+                        passes & BURIED_CASTERS
+                    },
                     visible,
                 };
                 gpu.origin_data[slot] = origin.extend(0.0).to_array();
@@ -611,6 +638,9 @@ fn prepare_sections(
             bytemuck::cast_slice(&gpu.origin_data[range]),
         );
     }
+    for draws in gpu.ranges.values_mut() {
+        *draws.depth_drawn.get_mut() = 0;
+    }
     current.clear();
     for (entity, view, camera, light) in &views {
         let shadow_layers = match light {
@@ -663,18 +693,20 @@ fn prepare_sections(
             .transpose()
             .to_cols_array_2d()
             .map(Vec4::from_array);
-        // Shadow views keep everything behind their near plane.
-        let near = if view.camera {
+        // Shadow views keep every caster between the light and their near plane, but
+        // drop sections past their far plane: depth there is clipped or clamped to the
+        // cleared far value, so they can never change the map.
+        let depth = if view.camera {
             rows[3] - rows[2]
         } else {
-            Vec4::W
+            rows[2]
         };
         let planes = [
             rows[3] + rows[0],
             rows[3] - rows[0],
             rows[3] + rows[1],
             rows[3] - rows[1],
-            near,
+            depth,
         ]
         .map(|p| {
             (
@@ -687,8 +719,11 @@ fn prepare_sections(
         let eye = Vec3A::from(view.eye);
         let mut counts = [0u32; DISTANCE_BUCKETS];
         survivors.clear();
+        for buffer in draws.iter_mut() {
+            buffer.clear();
+        }
         for (slot, c) in gpu.cull.iter().enumerate() {
-            let passes = c.passes & view.enabled;
+            let passes = (if view.camera { c.passes } else { c.casters }) & view.enabled;
             if passes == 0 || (require_visible && !c.visible) {
                 continue;
             }
@@ -703,42 +738,32 @@ fn prepare_sections(
             if inside < 0.0 {
                 continue;
             }
-            // Orthographic shadow views keep slot order in a single bucket.
-            let bucket = if view.camera {
-                ((center.distance(eye) * BUCKETS_PER_BLOCK) as usize).min(DISTANCE_BUCKETS - 1)
+            if view.camera {
+                let bucket =
+                    ((center.distance(eye) * BUCKETS_PER_BLOCK) as usize).min(DISTANCE_BUCKETS - 1);
+                counts[bucket] += 1;
+                survivors.push((slot as u32, passes, bucket as u8));
             } else {
-                0
-            };
-            counts[bucket] += 1;
-            survivors.push((slot as u32, passes, bucket as u8));
+                // Orthographic shadow views need no order: draw in slot order.
+                push_draws(&gpu.slots, &mut draws, slot, passes);
+            }
         }
-        // Counting sort, nearest first: early depth tests then reject hidden fragments,
-        // above all in passes without a depth prepass (cutouts and models).
-        let mut start = 0;
-        for count in &mut counts {
-            (*count, start) = (start, start + *count);
-        }
-        ordered.clear();
-        ordered.resize(survivors.len(), (0, 0));
-        for &(slot, passes, bucket) in survivors.iter() {
-            let at = &mut counts[usize::from(bucket)];
-            ordered[*at as usize] = (slot, passes);
-            *at += 1;
-        }
-        for buffer in draws.iter_mut() {
-            buffer.clear();
-        }
-        for &(slot, passes) in ordered.iter() {
-            let Some(s) = &gpu.slots[slot as usize] else {
-                continue;
-            };
-            let mut bits = passes;
-            while bits != 0 {
-                let p = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                if let Some(a) = &s.passes[p] {
-                    draws[p].push(a.draw);
-                }
+        if view.camera {
+            // Counting sort, nearest first: early depth tests then reject hidden
+            // fragments, above all in passes without a depth prepass (cutouts, models).
+            let mut start = 0;
+            for count in &mut counts {
+                (*count, start) = (start, start + *count);
+            }
+            ordered.clear();
+            ordered.resize(survivors.len(), (0, 0));
+            for &(slot, passes, bucket) in survivors.iter() {
+                let at = &mut counts[usize::from(bucket)];
+                ordered[*at as usize] = (slot, passes);
+                *at += 1;
+            }
+            for &(slot, passes) in ordered.iter() {
+                push_draws(&gpu.slots, &mut draws, slot as usize, passes);
             }
         }
         let ranges = std::array::from_fn(|p| {
@@ -746,7 +771,13 @@ fn prepare_sections(
             gpu.args.extend_from_slice(&draws[p]);
             start..gpu.args.len()
         });
-        gpu.ranges.insert(view.entity, ranges);
+        gpu.ranges.insert(
+            view.entity,
+            ViewDraws {
+                ranges,
+                depth_drawn: AtomicU8::new(0),
+            },
+        );
     }
     gpu.views.clone_from(&current);
     if gpu.args.len() > gpu.indirect_capacity {
@@ -763,6 +794,21 @@ fn prepare_sections(
     }
 }
 
+/// Appends the indirect draws of `passes` of one slot.
+fn push_draws(slots: &[Option<Slot>], draws: &mut [Vec<[u32; 5]>; 5], slot: usize, passes: u8) {
+    let Some(s) = &slots[slot] else {
+        return;
+    };
+    let mut bits = passes;
+    while bits != 0 {
+        let p = bits.trailing_zeros() as usize;
+        bits &= bits - 1;
+        if let Some(a) = &s.passes[p] {
+            draws[p].push(a.draw);
+        }
+    }
+}
+
 struct SectionSpecializer {
     mesh: MaterialPipeline,
     prepass: PrepassPipeline,
@@ -770,10 +816,11 @@ struct SectionSpecializer {
     layout: BindGroupLayoutDescriptor,
 }
 impl SpecializedMeshPipeline for SectionSpecializer {
-    type Key = (bool, ErasedMaterialPipelineKey);
+    /// Depth pass, then whether a main pass reuses the prepass depth unchanged.
+    type Key = (bool, bool, ErasedMaterialPipelineKey);
     fn specialize(
         &self,
-        (depth, key): Self::Key,
+        (depth, reuse_depth, key): Self::Key,
         layout: &MeshVertexBufferLayoutRef,
     ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
         let mut d = if depth {
@@ -804,6 +851,10 @@ impl SpecializedMeshPipeline for SectionSpecializer {
                 .insert(3, self.properties.material_layout.clone().unwrap());
             if let Some(specialize) = self.properties.user_specialize {
                 specialize(&self.mesh, &mut d, layout, key)?;
+            }
+            // The depth prepass already wrote this exact (`@invariant`) depth.
+            if reuse_depth && let Some(depth_stencil) = &mut d.depth_stencil {
+                depth_stencil.depth_write_enabled = Some(false);
             }
             d
         };
@@ -884,7 +935,7 @@ fn queue_sections(
         });
         specializer.properties = material.properties.clone();
         let layout = &gpu.layouts[usize::from(p == 2 || p == 3)];
-        let key_for = |view_key: MeshPipelineKey, depth: bool| {
+        let key_for = |view_key: MeshPipelineKey, depth: bool, reuse_depth: bool| {
             let mut key = view_key | topology;
             if !depth {
                 key |= material
@@ -901,6 +952,7 @@ fn queue_sections(
             }
             (
                 depth,
+                reuse_depth,
                 ErasedMaterialPipelineKey {
                     mesh_key: ErasedMeshPipelineKey::new(key),
                     material_key: material.properties.material_key.clone(),
@@ -911,17 +963,26 @@ fn queue_sections(
         let item = |entity| (entity, ids.0[p]);
         for (entity, view, light) in &views {
             let retained = view.retained_view_entity;
-            let active = gpu.ranges.get(&entity).is_some_and(|r| !r[p].is_empty());
-            let mut pipeline = |key: Option<&MeshPipelineKey>, depth: bool| {
+            let active = gpu
+                .ranges
+                .get(&entity)
+                .is_some_and(|draws| !draws.ranges[p].is_empty());
+            let mut pipeline = |key: Option<&MeshPipelineKey>, depth: bool, reuse_depth: bool| {
                 key.filter(|_| active).and_then(|key| {
                     pipelines
-                        .specialize(&cache, specializer, key_for(*key, depth), layout)
+                        .specialize(
+                            &cache,
+                            specializer,
+                            key_for(*key, depth, reuse_depth),
+                            layout,
+                        )
                         .ok()
                 })
             };
+            let ready = |id: CachedRenderPipelineId| cache.get_render_pipeline(id).is_some();
             if light.is_some() {
                 if let Some(phase) = shadows.get_mut(&retained) {
-                    let keys = pipeline(light_keys.get(&retained), true).map(|pipeline| {
+                    let keys = pipeline(light_keys.get(&retained), true, false).map(|pipeline| {
                         let batch = ShadowBatchSetKey {
                             pipeline,
                             draw_function: shadow_draws[p],
@@ -934,7 +995,19 @@ fn queue_sections(
                 }
                 continue;
             }
-            let main = pipeline(keys.get(&retained), false);
+            let prepass = if p == 0 && depth.contains_key(&retained) {
+                pipeline(depth_keys.get(&retained), true, false)
+            } else {
+                None
+            };
+            let mut main = pipeline(keys.get(&retained), false, false);
+            // Terrain shading keeps the prepass depth without rewriting it. Until the
+            // prepass and this variant are both compiled, the writing pipeline stays.
+            if prepass.is_some_and(ready) && main.is_some() {
+                main = pipeline(keys.get(&retained), false, true)
+                    .filter(|&id| ready(id))
+                    .or(main);
+            }
             if p == 1 || p == 3 {
                 if let Some(phase) = alpha.get_mut(&retained) {
                     let keys = main.map(|pipeline| {
@@ -964,7 +1037,7 @@ fn queue_sections(
             if p == 0
                 && let Some(phase) = depth.get_mut(&retained)
             {
-                let keys = pipeline(depth_keys.get(&retained), true).map(|pipeline| {
+                let keys = prepass.map(|pipeline| {
                     let batch = OpaqueNoLightmap3dBatchSetKey {
                         pipeline,
                         draw_function: depth_draw,
@@ -1011,7 +1084,7 @@ type MainDraw<const P: usize> = (
     SetMeshViewBindingArrayBindGroup<1>,
     SetSections,
     SetSectionMaterial<P>,
-    DrawSections<P>,
+    DrawSections<P, false>,
 );
 type DepthDraw<const P: usize> = (
     SetItemPipeline,
@@ -1019,7 +1092,7 @@ type DepthDraw<const P: usize> = (
     SetPrepassViewEmptyBindGroup<1>,
     SetSections,
     SetSectionMaterial<P>,
-    DrawSections<P>,
+    DrawSections<P, true>,
 );
 struct SetSections;
 impl<I: PhaseItem> RenderCommand<I> for SetSections {
@@ -1072,8 +1145,8 @@ impl<I: PhaseItem, const P: usize> RenderCommand<I> for SetSectionMaterial<P> {
         RenderCommandResult::Success
     }
 }
-struct DrawSections<const P: usize>;
-impl<I: PhaseItem, const P: usize> RenderCommand<I> for DrawSections<P> {
+struct DrawSections<const P: usize, const DEPTH: bool>;
+impl<I: PhaseItem, const P: usize, const DEPTH: bool> RenderCommand<I> for DrawSections<P, DEPTH> {
     type Param = SRes<SectionGpu>;
     type ViewQuery = Entity;
     type ItemQuery = ();
@@ -1085,11 +1158,14 @@ impl<I: PhaseItem, const P: usize> RenderCommand<I> for DrawSections<P> {
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let gpu = gpu.into_inner();
-        let Some(ranges) = gpu.ranges.get(&view) else {
+        let Some(draws) = gpu.ranges.get(&view) else {
             return RenderCommandResult::Skip;
         };
-        let range = ranges[P].clone();
-        if range.is_empty() {
+        let range = draws.ranges[P].clone();
+        // Late depth passes repeat the phase: its sections are already in the target.
+        if range.is_empty()
+            || (DEPTH && draws.depth_drawn.fetch_or(1 << P, Ordering::Relaxed) & (1 << P) != 0)
+        {
             return RenderCommandResult::Skip;
         }
         pass.set_vertex_buffer(0, gpu.arenas[P].vertices.buffer.slice(..));

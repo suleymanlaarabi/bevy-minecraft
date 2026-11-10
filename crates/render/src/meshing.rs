@@ -485,6 +485,8 @@ pub struct SectionMeshes {
     /// Depth-only terrain for the shadow maps. Only built when sunlight reaches the
     /// section or its border; otherwise its faces are buried beneath other geometry.
     pub shadow: Option<TerrainGeometry>,
+    /// Sunlight reaches the section or its border, so its geometry may cast shadows.
+    pub casts_shadow: bool,
 }
 
 /// Terrain or water in the packed [`ATTRIBUTE_VOXEL`] format.
@@ -825,6 +827,7 @@ pub fn build_sections<C: RenderSource>(
                         models_cutout: None,
                         translucent: None,
                         shadow: None,
+                        casts_shadow: false,
                     };
                 }
                 padded.fill_section(neighborhood, index);
@@ -903,6 +906,7 @@ pub fn build_sections<C: RenderSource>(
                 SectionMeshes {
                     connectivity,
                     index,
+                    casts_shadow,
                     models,
                     models_cutout,
                     translucent,

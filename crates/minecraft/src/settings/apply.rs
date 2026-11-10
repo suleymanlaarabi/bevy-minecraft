@@ -48,7 +48,6 @@ fn apply_graphics_settings(
     settings: Res<GraphicsSettings>,
     mut windows: Query<&mut Window>,
     mut cameras: Query<(Entity, &mut Projection), With<PlayerCamera>>,
-    lights: Query<Entity, With<DirectionalLight>>,
     shadow_map: Option<ResMut<DirectionalLightShadowMap>>,
     mut commands: Commands,
 ) {
@@ -61,20 +60,16 @@ fn apply_graphics_settings(
     for (entity, mut projection) in &mut cameras {
         apply_camera_settings(&settings, entity, &mut projection, &mut commands);
     }
-    for entity in &lights {
-        apply_light_settings(&settings, entity, &mut commands);
-    }
     if let (Some(size), Some(mut shadow_map)) = (settings.shadow_quality.map_size(), shadow_map) {
         shadow_map.size = size;
     }
 }
 
 fn apply_settings_to_new_target(
-    add: On<Add<(Window, PlayerCamera, DirectionalLight)>>,
+    add: On<Add<(Window, PlayerCamera)>>,
     settings: Res<GraphicsSettings>,
     mut windows: Query<&mut Window>,
     mut cameras: Query<&mut Projection, With<PlayerCamera>>,
-    lights: Query<(), With<DirectionalLight>>,
     mut commands: Commands,
 ) {
     let settings = settings.normalized();
@@ -83,20 +78,6 @@ fn apply_settings_to_new_target(
     }
     if let Ok(mut projection) = cameras.get_mut(add.entity) {
         apply_camera_settings(&settings, add.entity, &mut projection, &mut commands);
-    }
-    if lights.contains(add.entity) {
-        apply_light_settings(&settings, add.entity, &mut commands);
-    }
-}
-
-fn apply_light_settings(settings: &GraphicsSettings, entity: Entity, commands: &mut Commands) {
-    // Shadow maps are the sky's: only the sun or the moon ever casts one (`crate::sky`).
-    // Also culls shadow casters hidden from the sun in every cascade.
-    let mut light = commands.entity(entity);
-    if settings.occlusion_culling {
-        light.insert(OcclusionCulling);
-    } else {
-        light.remove::<OcclusionCulling>();
     }
 }
 
@@ -132,8 +113,9 @@ fn apply_camera_settings(
 
     let mut camera = commands.entity(entity);
     camera.insert(settings.anti_aliasing.msaa());
-    // Depth first: the costly terrain shading then runs once per pixel, and the
-    // depth pyramid lets occlusion culling skip whole sections hidden by terrain.
+    // Depth first: the costly terrain shading then runs once per pixel. Occlusion
+    // culling stays on the camera only: in shadow cascades it would build four depth
+    // pyramids per frame for the few Bevy meshes there, never for terrain sections.
     camera.insert(DepthPrepass);
     if settings.occlusion_culling {
         camera.insert(OcclusionCulling);
