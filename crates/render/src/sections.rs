@@ -45,16 +45,26 @@ pub(crate) struct PassGeometry {
     pub vertices: Vec<u8>,
     pub indices: Vec<u8>,
     count: u32,
+    /// End of each face group in `indices` (`face_group` order), in indices.
+    groups: [u32; 6],
     min: Vec3,
     max: Vec3,
+}
+/// Index groups put the three negative faces first, then the positive ones: the faces
+/// a camera can see from one side of a section are then mostly contiguous.
+fn face_group(vertex: [u32; 2]) -> usize {
+    let direction = vertex[0] >> 15 & 7;
+    ((direction & 1) * 3 + (direction >> 1)) as usize
 }
 impl PassGeometry {
     fn new(vertices: Vec<u8>, mut indices: Vec<u8>, count: usize, min: Vec3, max: Vec3) -> Self {
         indices.resize(indices.len().next_multiple_of(4), 0);
+        let count = u32::try_from(count).expect("section index count");
         Self {
             vertices,
             indices,
-            count: u32::try_from(count).expect("section index count"),
+            count,
+            groups: [count; 6],
             min,
             max,
         }
@@ -69,13 +79,35 @@ impl PassGeometry {
             .fold((Vec3::MAX, Vec3::MIN), |(min, max), p| {
                 (min.min(p), max.max(p))
             });
-        Self::new(
+        // Counting sort of the triangles by face direction: the camera then draws
+        // only the groups facing it. A triangle's vertices share one direction.
+        let group = |triangle: &[I]| face_group(geometry.vertices[triangle[0].get() as usize]);
+        let mut groups = [0u32; 6];
+        for triangle in geometry.indices.chunks_exact(3) {
+            groups[group(triangle)] += 3;
+        }
+        let mut next = [0usize; 6];
+        let mut end = 0;
+        for (group, next) in groups.iter_mut().zip(&mut next) {
+            *next = end as usize;
+            end += *group;
+            *group = end;
+        }
+        let mut indices = geometry.indices.clone();
+        for triangle in geometry.indices.chunks_exact(3) {
+            let at = &mut next[group(triangle)];
+            indices[*at..*at + 3].copy_from_slice(triangle);
+            *at += 3;
+        }
+        let mut pass = Self::new(
             bytemuck::cast_slice(&geometry.vertices).to_vec(),
-            bytemuck::cast_slice(&geometry.indices).to_vec(),
-            geometry.indices.len(),
+            bytemuck::cast_slice(&indices).to_vec(),
+            indices.len(),
             min,
             max,
-        )
+        );
+        pass.groups = groups;
+        pass
     }
     pub fn model(geometry: crate::model_mesh::ModelGeometry) -> Self {
         Self::new(
@@ -114,7 +146,7 @@ pub(crate) struct SectionFeed {
     pub conservative: bool,
 }
 #[derive(Resource)]
-struct SectionIds([MainEntity; 5]);
+struct SectionIds([MainEntity; RANGES]);
 
 pub(crate) struct SectionsPlugin;
 impl Plugin for SectionsPlugin {
@@ -149,6 +181,7 @@ impl Plugin for SectionsPlugin {
         register_draws::<2>(render);
         register_draws::<3>(render);
         register_draws::<4>(render);
+        register_draws::<5>(render);
     }
     fn finish(&self, app: &mut App) {
         let Some(render) = app.get_sub_app_mut(RenderApp) else {
@@ -181,12 +214,13 @@ fn extract_sections(
             a.models.id().untyped(),
             a.models_cutout.id().untyped(),
             a.terrain.id().untyped(),
+            a.terrain.id().untyped(),
         ]
     });
     commands.insert_resource(SectionMaterials(materials));
 }
 #[derive(Resource)]
-struct SectionMaterials(Option<[UntypedAssetId; 5]>);
+struct SectionMaterials(Option<[UntypedAssetId; RANGES]>);
 
 /// Sparse columns own section slots and conservative bounds for hierarchical culling.
 struct Column {
@@ -228,7 +262,7 @@ const BURIED_CASTERS: u8 = 1 << 4;
 /// culling, Bevy renders the same phase again in its late prepass and late shadow
 /// passes, where these CPU-culled sections would only repeat identical depth.
 struct ViewDraws {
-    ranges: [Range<usize>; 5],
+    ranges: [Range<usize>; RANGES],
     depth_drawn: AtomicU8,
 }
 struct Allocation {
@@ -236,6 +270,48 @@ struct Allocation {
     indices: Range<u64>,
     /// Indirect arguments, fixed while the allocation lives.
     draw: [u32; 5],
+    /// `PassGeometry::groups`.
+    groups: [u32; 6],
+}
+/// Draw ranges of a view: the five geometry passes, then the camera's far terrain.
+const RANGES: usize = 6;
+/// Terrain (pass 0 geometry and material) past `PREPASS_BUCKETS`, drawn by the main
+/// pass alone with depth writes.
+const FAR_TERRAIN: usize = 5;
+const fn range_pass(range: usize) -> usize {
+    if range == FAR_TERRAIN { 0 } else { range }
+}
+/// The depth prepass keeps the costly shadowed shading of near terrain to one
+/// fragment per pixel. Past the shadow cascades (128 blocks plus a section) shading
+/// is a texture and fog, most of a long view's triangles are there and sections
+/// already draw front to back: rasterizing them twice costs more than it saves.
+const PREPASS_BUCKETS: usize = 20;
+/// Sections with at most this many indices draw whole: a second draw would cost
+/// more than the back faces it removes.
+const WHOLE_DRAW_INDICES: u32 = 384;
+/// Hidden indices drawn between two visible face groups rather than splitting a draw.
+const MERGE_GAP: u32 = 96;
+const ALL_FACES: u8 = 0b111111;
+
+/// Calls `emit(first index, index count)` for each run of non-empty `faces` groups.
+#[inline]
+fn face_runs(groups: &[u32; 6], faces: u8, mut emit: impl FnMut(u32, u32)) {
+    let (mut start, mut end, mut previous) = (0, 0, 0);
+    for (group, &next) in groups.iter().enumerate() {
+        if faces & 1 << group != 0 && next > previous {
+            if end == start {
+                start = previous;
+            } else if previous - end > MERGE_GAP {
+                emit(start, end - start);
+                start = previous;
+            }
+            end = next;
+        }
+        previous = next;
+    }
+    if end != start {
+        emit(start, end - start);
+    }
 }
 /// Bytes per index and vertex of each pass (u16 terrain and shadow indices,
 /// 16-byte model vertices).
@@ -461,7 +537,7 @@ fn prepare_sections(
     )>,
     lights: Query<Option<&RenderLayers>>,
     mut current: Local<Vec<ViewCull>>,
-    mut survivors: Local<Vec<(u32, u8, u8)>>,
+    mut pending: Local<Vec<(u8, u8, [u32; 5])>>,
 ) {
     let gpu = &mut *gpu;
     let changed = !feed.ops.is_empty() || gpu.conservative != feed.conservative;
@@ -545,11 +621,13 @@ fn prepare_sections(
                                 .expect("arena vertex offset") as u32,
                             u32::try_from(slot).expect("section slot"),
                         ];
+                        let groups = g.groups;
                         uploads.push((slot, pass, vertices.start, indices.start, g));
                         record.passes[pass] = Some(Allocation {
                             vertices,
                             indices,
                             draw,
+                            groups,
                         });
                         passes |= 1 << pass;
                     }
@@ -700,8 +778,8 @@ fn prepare_sections(
         });
         let require_visible = view.camera && !feed.conservative;
         let eye = Vec3A::from(view.eye);
-        let mut counts = [[0usize; DISTANCE_BUCKETS]; 5];
-        survivors.clear();
+        let mut counts = [[0usize; DISTANCE_BUCKETS]; RANGES];
+        pending.clear();
         for column in gpu.columns.values() {
             let mut sections = column.occupied
                 & if require_visible {
@@ -730,21 +808,48 @@ fn prepare_sections(
                 {
                     continue;
                 }
-                let bucket = if view.camera {
-                    ((Vec3A::from(c.center).distance(eye) * BUCKETS_PER_BLOCK) as usize)
-                        .min(DISTANCE_BUCKETS - 1)
+                // A face can only be seen from the outer side of its plane, which
+                // lies within the section's bounds: skip the groups facing away.
+                let (bucket, faces) = if view.camera {
+                    let (center, extent) = (Vec3A::from(c.center), Vec3A::from(c.extent));
+                    (
+                        ((center.distance(eye) * BUCKETS_PER_BLOCK) as usize)
+                            .min(DISTANCE_BUCKETS - 1),
+                        (eye.cmplt(center + extent).bitmask()
+                            | eye.cmpgt(center - extent).bitmask() << 3)
+                            as u8,
+                    )
                 } else {
-                    0
+                    (0, ALL_FACES)
                 };
+                let allocations = &gpu.slots[slot].as_ref().unwrap().passes;
                 let mut bits = passes;
                 while bits != 0 {
-                    counts[bits.trailing_zeros() as usize][bucket] += 1;
+                    let pass = bits.trailing_zeros() as usize;
                     bits &= bits - 1;
+                    let a = allocations[pass].as_ref().unwrap();
+                    let range = if view.camera && pass == 0 && bucket >= PREPASS_BUCKETS {
+                        FAR_TERRAIN
+                    } else {
+                        pass
+                    };
+                    // Only greedy cube faces are grouped; shadow views draw both sides.
+                    if !view.camera || pass > 1 || a.draw[0] <= WHOLE_DRAW_INDICES {
+                        counts[range][bucket] += 1;
+                        pending.push((range as u8, bucket as u8, a.draw));
+                        continue;
+                    }
+                    face_runs(&a.groups, faces, |first, count| {
+                        counts[range][bucket] += 1;
+                        let mut draw = a.draw;
+                        draw[0] = count;
+                        draw[2] += first;
+                        pending.push((range as u8, bucket as u8, draw));
+                    });
                 }
-                survivors.push((slot as u32, passes, bucket as u8));
             }
         }
-        // Prefix sums place each pass directly into the final indirect buffer,
+        // Prefix sums place each range directly into the final indirect buffer,
         // nearest buckets first. Shadow views use just one unsorted bucket.
         let ranges = std::array::from_fn(|p| {
             let start = arg_end;
@@ -757,16 +862,10 @@ fn prepare_sections(
         if gpu.args.len() < arg_end {
             gpu.args.resize(arg_end, [0; 5]);
         }
-        for &(slot, passes, bucket) in survivors.iter() {
-            let s = gpu.slots[slot as usize].as_ref().unwrap();
-            let mut bits = passes;
-            while bits != 0 {
-                let p = bits.trailing_zeros() as usize;
-                let at = &mut counts[p][usize::from(bucket)];
-                gpu.args[*at] = s.passes[p].as_ref().unwrap().draw;
-                *at += 1;
-                bits &= bits - 1;
-            }
+        for &(range, bucket, draw) in pending.iter() {
+            let at = &mut counts[usize::from(range)][usize::from(bucket)];
+            gpu.args[*at] = draw;
+            *at += 1;
         }
         gpu.ranges.insert(
             view.entity,
@@ -915,6 +1014,7 @@ fn queue_sections(
         od.id::<MainDraw<2>>(),
         ad.id::<MainDraw<3>>(),
         od.id::<MainDraw<4>>(),
+        od.id::<MainDraw<5>>(),
     ];
     let shadow_draws = [
         sd.id::<DepthDraw<0>>(),
@@ -990,7 +1090,9 @@ fn queue_sections(
             };
             let ready = |id: CachedRenderPipelineId| cache.get_render_pipeline(id).is_some();
             if light.is_some() {
-                if let Some(phase) = shadows.get_mut(&retained) {
+                if p != FAR_TERRAIN
+                    && let Some(phase) = shadows.get_mut(&retained)
+                {
                     let keys = pipeline(light_keys.get(&retained), true, false).map(|pipeline| {
                         let batch = ShadowBatchSetKey {
                             pipeline,
@@ -1177,10 +1279,11 @@ impl<I: PhaseItem, const P: usize, const DEPTH: bool> RenderCommand<I> for DrawS
         {
             return RenderCommandResult::Skip;
         }
-        pass.set_vertex_buffer(0, gpu.arenas[P].vertices.buffer.slice(..));
+        let arena = &gpu.arenas[range_pass(P)];
+        pass.set_vertex_buffer(0, arena.vertices.buffer.slice(..));
         pass.set_index_buffer(
-            gpu.arenas[P].indices.buffer.slice(..),
-            if P == 0 || P == 4 {
+            arena.indices.buffer.slice(..),
+            if INDEX_BYTES[range_pass(P)] == 2 {
                 IndexFormat::Uint16
             } else {
                 IndexFormat::Uint32

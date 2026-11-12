@@ -117,6 +117,23 @@ impl Plugin for HollowPlugin {
             Update,
             crate::game::handle_escape.run_if(in_state(GameState::Game)),
         );
+        // The frame schedules hold about a thousand systems that mostly finish in
+        // microseconds or are skipped by their conditions. Dispatching each one to
+        // the compute pool costs a task and a thread wake-up, far more than the
+        // systems themselves; heavy systems parallelize internally instead.
+        for (_, schedule) in app
+            .world_mut()
+            .resource_mut::<bevy::ecs::schedule::Schedules>()
+            .iter_mut()
+        {
+            schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+        }
+        // Extraction blocks both worlds and is made of the same kind of tiny systems.
+        if let Some(render) = app.get_sub_app_mut(bevy::render::RenderApp) {
+            render.edit_schedule(bevy::render::ExtractSchedule, |schedule| {
+                schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+            });
+        }
     }
 }
 

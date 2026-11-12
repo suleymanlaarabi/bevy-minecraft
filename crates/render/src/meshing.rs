@@ -612,12 +612,17 @@ struct EdgeIndices {
 /// so the opaque section bound still holds after removing T-junctions.
 pub trait TerrainIndex: Copy {
     fn new(index: u32) -> Self;
+    fn get(self) -> u32;
     fn into_indices(indices: Vec<Self>, vertices: usize) -> Indices;
 }
 impl TerrainIndex for u16 {
     #[inline]
     fn new(index: u32) -> Self {
         index as u16
+    }
+    #[inline]
+    fn get(self) -> u32 {
+        u32::from(self)
     }
     fn into_indices(indices: Vec<Self>, vertices: usize) -> Indices {
         debug_assert!(vertices <= usize::from(u16::MAX) + 1);
@@ -628,6 +633,10 @@ impl TerrainIndex for u32 {
     #[inline]
     fn new(index: u32) -> Self {
         index
+    }
+    #[inline]
+    fn get(self) -> u32 {
+        self
     }
     fn into_indices(indices: Vec<Self>, vertices: usize) -> Indices {
         super::model_mesh::compact_indices(indices, vertices)
