@@ -188,10 +188,24 @@ fn extract_sections(
 #[derive(Resource)]
 struct SectionMaterials(Option<[UntypedAssetId; 5]>);
 
-/// Sparse columns map to dense slots; no hashing in the per-view section loop.
+/// Sparse columns own section slots and conservative bounds for hierarchical culling.
 struct Column {
-    slots: [Option<usize>; 32],
+    slots: [u32; 32],
+    occupied: u32,
     mask: u32,
+    min: Vec3,
+    max: Vec3,
+}
+impl Default for Column {
+    fn default() -> Self {
+        Self {
+            slots: [0; 32],
+            occupied: 0,
+            mask: u32::MAX,
+            min: Vec3::INFINITY,
+            max: Vec3::NEG_INFINITY,
+        }
+    }
 }
 struct Slot {
     passes: [Option<Allocation>; 5],
@@ -206,7 +220,6 @@ struct Cull {
     passes: u8,
     /// `passes` drawn into shadow maps.
     casters: u8,
-    visible: bool,
 }
 /// Passes drawn into shadow maps from sections that sunlight never reaches: only the
 /// shadow hull, which is built for sunlit sections alone.
@@ -241,27 +254,45 @@ struct ViewCull {
     enabled: u8,
     camera: bool,
 }
+fn section_buffer(device: &RenderDevice, label: &str, size: u64, usage: BufferUsages) -> Buffer {
+    device.create_buffer(&BufferDescriptor {
+        label: Some(label),
+        size,
+        usage: usage | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+fn section_bind_group(
+    device: &RenderDevice,
+    layout: &BindGroupLayoutDescriptor,
+    origins: &Buffer,
+) -> BindGroup {
+    device.create_bind_group(
+        "section origins",
+        &device.create_bind_group_layout(layout.label.as_ref(), &layout.entries),
+        &[BindGroupEntry {
+            binding: 32,
+            resource: origins.as_entire_binding(),
+        }],
+    )
+}
 struct ArenaBuffer {
     buffer: Buffer,
-    capacity: u64,
     end: u64,
     free: Vec<Range<u64>>,
-    usage: BufferUsages,
 }
 impl ArenaBuffer {
     fn new(device: &RenderDevice, usage: BufferUsages) -> Self {
         let capacity = 4096;
         Self {
-            buffer: device.create_buffer(&BufferDescriptor {
-                label: Some("section arena"),
-                size: capacity,
-                usage: usage | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            }),
-            capacity,
+            buffer: section_buffer(
+                &device,
+                "section arena",
+                capacity,
+                usage | BufferUsages::COPY_SRC,
+            ),
             end: 0,
             free: Vec::new(),
-            usage,
         }
     }
     fn allocate(&mut self, size: u64) -> Range<u64> {
@@ -292,19 +323,13 @@ impl ArenaBuffer {
         }
     }
     fn grow(&mut self, device: &RenderDevice, encoder: &mut CommandEncoder) {
-        if self.end <= self.capacity {
+        if self.end <= self.buffer.size() {
             return;
         }
         let capacity = self.end.next_power_of_two();
-        let buffer = device.create_buffer(&BufferDescriptor {
-            label: Some("section arena"),
-            size: capacity,
-            usage: self.usage | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        encoder.copy_buffer_to_buffer(&self.buffer, 0, &buffer, 0, self.capacity);
+        let buffer = section_buffer(&device, "section arena", capacity, self.buffer.usage());
+        encoder.copy_buffer_to_buffer(&self.buffer, 0, &buffer, 0, self.buffer.size());
         self.buffer = buffer;
-        self.capacity = capacity;
     }
 }
 struct Arena {
@@ -319,7 +344,6 @@ struct SectionGpu {
     cull: Vec<Cull>,
     free: Vec<usize>,
     origins: Buffer,
-    origins_capacity: usize,
     /// CPU copy of `origins`; only the slots replaced since the last upload are written.
     origin_data: Vec<[f32; 4]>,
     origins_dirty: Option<Range<usize>>,
@@ -330,7 +354,6 @@ struct SectionGpu {
     layout: BindGroupLayoutDescriptor,
     layouts: [MeshVertexBufferLayoutRef; 2],
     indirect: Buffer,
-    indirect_capacity: usize,
     args: Vec<[u32; 5]>,
     ranges: HashMap<Entity, ViewDraws>,
     indirect_first_instance: bool,
@@ -368,20 +391,8 @@ impl SectionGpu {
                 count: None,
             }],
         );
-        let origins = device.create_buffer(&BufferDescriptor {
-            label: Some("section origins"),
-            size: 16,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let bind_group = device.create_bind_group(
-            "section origins",
-            &device.create_bind_group_layout(layout.label.as_ref(), &layout.entries),
-            &[BindGroupEntry {
-                binding: 32,
-                resource: origins.as_entire_binding(),
-            }],
-        );
+        let origins = section_buffer(&device, "section origins", 16, BufferUsages::STORAGE);
+        let bind_group = section_bind_group(device, &layout, &origins);
         Self {
             arenas: std::array::from_fn(|_| Arena {
                 vertices: ArenaBuffer::new(device, BufferUsages::VERTEX),
@@ -392,7 +403,6 @@ impl SectionGpu {
             cull: Vec::new(),
             free: Vec::new(),
             origins,
-            origins_capacity: 1,
             origin_data: Vec::new(),
             origins_dirty: None,
             views: Vec::new(),
@@ -400,13 +410,7 @@ impl SectionGpu {
             bind_group,
             layout,
             layouts,
-            indirect: device.create_buffer(&BufferDescriptor {
-                label: Some("section draws"),
-                size: 20,
-                usage: BufferUsages::INDIRECT | BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }),
-            indirect_capacity: 1,
+            indirect: section_buffer(&device, "section draws", 20, BufferUsages::INDIRECT),
             args: Vec::new(),
             ranges: default(),
             indirect_first_instance: device
@@ -422,6 +426,7 @@ impl SectionGpu {
             self.arenas[pass].vertices.release(a.vertices);
             self.arenas[pass].indices.release(a.indices);
             self.cull[slot].passes &= !(1 << pass);
+            self.cull[slot].casters &= !(1 << pass);
         }
     }
     fn free_slot(&mut self, slot: usize) {
@@ -434,8 +439,10 @@ impl SectionGpu {
     }
     fn remove(&mut self, column: IVec2) {
         if let Some(column) = self.columns.remove(&column) {
-            for slot in column.slots.into_iter().flatten() {
-                self.free_slot(slot);
+            let mut sections = column.occupied;
+            while sections != 0 {
+                self.free_slot(column.slots[sections.trailing_zeros() as usize] as usize);
+                sections &= sections - 1;
             }
         }
     }
@@ -453,10 +460,8 @@ fn prepare_sections(
         Option<&LightEntity>,
     )>,
     lights: Query<Option<&RenderLayers>>,
-    mut draws: Local<[Vec<[u32; 5]>; 5]>,
     mut current: Local<Vec<ViewCull>>,
     mut survivors: Local<Vec<(u32, u8, u8)>>,
-    mut ordered: Local<Vec<(u32, u8)>>,
 ) {
     let gpu = &mut *gpu;
     let changed = !feed.ops.is_empty() || gpu.conservative != feed.conservative;
@@ -486,16 +491,7 @@ fn prepare_sections(
                 }
             }
             SectionOp::Visibility { column, mask } => {
-                let c = gpu.columns.entry(column).or_insert(Column {
-                    slots: [None; 32],
-                    mask,
-                });
-                c.mask = mask;
-                for (section, slot) in c.slots.iter().enumerate() {
-                    if let Some(i) = *slot {
-                        gpu.cull[i].visible = mask & (1 << section) != 0;
-                    }
-                }
+                gpu.columns.entry(column).or_default().mask = mask;
             }
             SectionOp::Replace {
                 column,
@@ -504,29 +500,29 @@ fn prepare_sections(
                 geometry,
                 casts_shadow,
             } => {
+                let c = gpu.columns.entry(column).or_default();
+                let bit = 1 << section;
                 if geometry.iter().all(Option::is_none) {
-                    if let Some(slot) = gpu
-                        .columns
-                        .get_mut(&column)
-                        .and_then(|c| c.slots[section].take())
-                    {
+                    if c.occupied & bit != 0 {
+                        c.occupied &= !bit;
+                        let slot = c.slots[section] as usize;
                         gpu.free_slot(slot);
                     }
                     continue;
                 }
-                let c = gpu.columns.entry(column).or_insert(Column {
-                    slots: [None; 32],
-                    mask: u32::MAX,
-                });
-                let visible = c.mask & (1 << section) != 0;
-                let slot = *c.slots[section].get_or_insert_with(|| {
-                    gpu.free.pop().unwrap_or_else(|| {
+                let slot = if c.occupied & bit == 0 {
+                    let slot = gpu.free.pop().unwrap_or_else(|| {
                         gpu.slots.push(None);
                         gpu.cull.push(Cull::default());
                         gpu.origin_data.push([0.0; 4]);
                         gpu.slots.len() - 1
-                    })
-                });
+                    });
+                    c.slots[section] = u32::try_from(slot).expect("section slot");
+                    c.occupied |= bit;
+                    slot
+                } else {
+                    c.slots[section] as usize
+                };
                 for pass in 0..5 {
                     gpu.release(slot, pass);
                 }
@@ -558,6 +554,11 @@ fn prepare_sections(
                         passes |= 1 << pass;
                     }
                 }
+                // Bounds only expand until the column is retired. Stale space is
+                // conservative after replacement and avoids rescanning its sections.
+                let c = gpu.columns.get_mut(&column).unwrap();
+                c.min = c.min.min(min);
+                c.max = c.max.max(max);
                 gpu.slots[slot] = Some(record);
                 gpu.cull[slot] = Cull {
                     center: (min + max) * 0.5,
@@ -568,7 +569,6 @@ fn prepare_sections(
                     } else {
                         passes & BURIED_CASTERS
                     },
-                    visible,
                 };
                 gpu.origin_data[slot] = origin.extend(0.0).to_array();
                 gpu.origins_dirty = Some(
@@ -592,11 +592,9 @@ fn prepare_sections(
     });
     // Submit growth copies before queue writes: otherwise old bytes overwrite uploads.
     if !uploads.is_empty() {
-        if gpu
-            .arenas
-            .iter()
-            .any(|a| a.vertices.end > a.vertices.capacity || a.indices.end > a.indices.capacity)
-        {
+        if gpu.arenas.iter().any(|a| {
+            a.vertices.end > a.vertices.buffer.size() || a.indices.end > a.indices.buffer.size()
+        }) {
             let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
                 label: Some("grow section arenas"),
             });
@@ -611,22 +609,14 @@ fn prepare_sections(
             queue.write_buffer(&gpu.arenas[p].indices.buffer, i, &g.indices);
         }
     }
-    if gpu.slots.len() > gpu.origins_capacity {
-        gpu.origins_capacity = gpu.slots.len().next_power_of_two();
-        gpu.origins = device.create_buffer(&BufferDescriptor {
-            label: Some("section origins"),
-            size: (gpu.origins_capacity * 16) as u64,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        gpu.bind_group = device.create_bind_group(
+    if gpu.slots.len() as u64 > gpu.origins.size() / 16 {
+        gpu.origins = section_buffer(
+            &device,
             "section origins",
-            &device.create_bind_group_layout(gpu.layout.label.as_ref(), &gpu.layout.entries),
-            &[BindGroupEntry {
-                binding: 32,
-                resource: gpu.origins.as_entire_binding(),
-            }],
+            (gpu.slots.len().next_power_of_two() * 16) as u64,
+            BufferUsages::STORAGE,
         );
+        gpu.bind_group = section_bind_group(&device, &gpu.layout, &gpu.origins);
         gpu.origins_dirty = Some(0..gpu.slots.len());
     }
     if let Some(range) = gpu.origins_dirty.take()
@@ -656,20 +646,13 @@ fn prepare_sections(
             None if camera.is_some() => None,
             _ => continue,
         };
-        let enabled = (0..5).fold(0u8, |mask, p| {
-            let on = shadow_layers.as_ref().map_or(p != 4, |layers| {
-                if p == 0 {
-                    false
-                } else if p == 4 {
-                    layers.intersects(&RenderLayers::layer(crate::SHADOW_LAYER))
-                } else {
-                    layers.intersects(&RenderLayers::from_layers(&[
-                        0,
-                        crate::visibility::OCCLUDED_LAYER,
-                    ]))
-                }
-            });
-            mask | u8::from(on) << p
+        let enabled = shadow_layers.as_ref().map_or(0b01111, |layers| {
+            let models = layers.intersects(&RenderLayers::from_layers(&[
+                0,
+                crate::visibility::OCCLUDED_LAYER,
+            ]));
+            let terrain = layers.intersects(&RenderLayers::layer(crate::SHADOW_LAYER));
+            u8::from(models) * 0b01110 | u8::from(terrain) << 4
         });
         current.push(ViewCull {
             entity,
@@ -685,7 +668,7 @@ fn prepare_sections(
     if !changed && *current == gpu.views {
         return;
     }
-    gpu.args.clear();
+    let mut arg_end = 0;
     gpu.ranges.clear();
     for view in current.iter() {
         let rows = view
@@ -717,60 +700,74 @@ fn prepare_sections(
         });
         let require_visible = view.camera && !feed.conservative;
         let eye = Vec3A::from(view.eye);
-        let mut counts = [0u32; DISTANCE_BUCKETS];
+        let mut counts = [[0usize; DISTANCE_BUCKETS]; 5];
         survivors.clear();
-        for buffer in draws.iter_mut() {
-            buffer.clear();
-        }
-        for (slot, c) in gpu.cull.iter().enumerate() {
-            let passes = (if view.camera { c.passes } else { c.casters }) & view.enabled;
-            if passes == 0 || (require_visible && !c.visible) {
+        for column in gpu.columns.values() {
+            let mut sections = column.occupied
+                & if require_visible {
+                    column.mask
+                } else {
+                    u32::MAX
+                };
+            if sections == 0 {
                 continue;
             }
-            let center = Vec3A::from(c.center);
-            let extent = Vec3A::from(c.extent);
-            // Inside when the box's farthest corner is in front of every plane.
-            let inside = planes
-                .iter()
-                .fold(f32::INFINITY, |inside, (normal, abs, w)| {
-                    inside.min(normal.dot(center) + w + abs.dot(extent))
-                });
-            if inside < 0.0 {
+            let Some(mask) = cull_planes(
+                (column.min + column.max) * 0.5,
+                (column.max - column.min) * 0.5,
+                &planes,
+                0b11111,
+            ) else {
                 continue;
-            }
-            if view.camera {
-                let bucket =
-                    ((center.distance(eye) * BUCKETS_PER_BLOCK) as usize).min(DISTANCE_BUCKETS - 1);
-                counts[bucket] += 1;
+            };
+            while sections != 0 {
+                let slot = column.slots[sections.trailing_zeros() as usize] as usize;
+                sections &= sections - 1;
+                let c = &gpu.cull[slot];
+                let passes = (if view.camera { c.passes } else { c.casters }) & view.enabled;
+                if passes == 0
+                    || (mask != 0 && cull_planes(c.center, c.extent, &planes, mask).is_none())
+                {
+                    continue;
+                }
+                let bucket = if view.camera {
+                    ((Vec3A::from(c.center).distance(eye) * BUCKETS_PER_BLOCK) as usize)
+                        .min(DISTANCE_BUCKETS - 1)
+                } else {
+                    0
+                };
+                let mut bits = passes;
+                while bits != 0 {
+                    counts[bits.trailing_zeros() as usize][bucket] += 1;
+                    bits &= bits - 1;
+                }
                 survivors.push((slot as u32, passes, bucket as u8));
-            } else {
-                // Orthographic shadow views need no order: draw in slot order.
-                push_draws(&gpu.slots, &mut draws, slot, passes);
             }
         }
-        if view.camera {
-            // Counting sort, nearest first: early depth tests then reject hidden
-            // fragments, above all in passes without a depth prepass (cutouts, models).
-            let mut start = 0;
-            for count in &mut counts {
-                (*count, start) = (start, start + *count);
-            }
-            ordered.clear();
-            ordered.resize(survivors.len(), (0, 0));
-            for &(slot, passes, bucket) in survivors.iter() {
-                let at = &mut counts[usize::from(bucket)];
-                ordered[*at as usize] = (slot, passes);
-                *at += 1;
-            }
-            for &(slot, passes) in ordered.iter() {
-                push_draws(&gpu.slots, &mut draws, slot as usize, passes);
-            }
-        }
+        // Prefix sums place each pass directly into the final indirect buffer,
+        // nearest buckets first. Shadow views use just one unsorted bucket.
         let ranges = std::array::from_fn(|p| {
-            let start = gpu.args.len();
-            gpu.args.extend_from_slice(&draws[p]);
-            start..gpu.args.len()
+            let start = arg_end;
+            let buckets = if view.camera { DISTANCE_BUCKETS } else { 1 };
+            for count in &mut counts[p][..buckets] {
+                (*count, arg_end) = (arg_end, arg_end + *count);
+            }
+            start..arg_end
         });
+        if gpu.args.len() < arg_end {
+            gpu.args.resize(arg_end, [0; 5]);
+        }
+        for &(slot, passes, bucket) in survivors.iter() {
+            let s = gpu.slots[slot as usize].as_ref().unwrap();
+            let mut bits = passes;
+            while bits != 0 {
+                let p = bits.trailing_zeros() as usize;
+                let at = &mut counts[p][usize::from(bucket)];
+                gpu.args[*at] = s.passes[p].as_ref().unwrap().draw;
+                *at += 1;
+                bits &= bits - 1;
+            }
+        }
         gpu.ranges.insert(
             view.entity,
             ViewDraws {
@@ -779,34 +776,46 @@ fn prepare_sections(
             },
         );
     }
+    gpu.args.truncate(arg_end);
     gpu.views.clone_from(&current);
-    if gpu.args.len() > gpu.indirect_capacity {
-        gpu.indirect_capacity = gpu.args.len().next_power_of_two();
-        gpu.indirect = device.create_buffer(&BufferDescriptor {
-            label: Some("section draws"),
-            size: (gpu.indirect_capacity * 20) as u64,
-            usage: BufferUsages::INDIRECT | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+    if gpu.args.len() as u64 > gpu.indirect.size() / 20 {
+        gpu.indirect = section_buffer(
+            &device,
+            "section draws",
+            (gpu.args.len().next_power_of_two() * 20) as u64,
+            BufferUsages::INDIRECT,
+        );
     }
     if !gpu.args.is_empty() && gpu.indirect_first_instance {
         queue.write_buffer(&gpu.indirect, 0, bytemuck::cast_slice(&gpu.args));
     }
 }
 
-/// Appends the indirect draws of `passes` of one slot.
-fn push_draws(slots: &[Option<Slot>], draws: &mut [Vec<[u32; 5]>; 5], slot: usize, passes: u8) {
-    let Some(s) = &slots[slot] else {
-        return;
-    };
-    let mut bits = passes;
-    while bits != 0 {
-        let p = bits.trailing_zeros() as usize;
-        bits &= bits - 1;
-        if let Some(a) = &s.passes[p] {
-            draws[p].push(a.draw);
+/// Reject outside bounds and pass only intersecting planes down the hierarchy.
+#[inline]
+fn cull_planes(
+    center: Vec3,
+    extent: Vec3,
+    planes: &[(Vec3A, Vec3A, f32); 5],
+    mut mask: u8,
+) -> Option<u8> {
+    let center = Vec3A::from(center);
+    let extent = Vec3A::from(extent);
+    let mut remaining = mask;
+    while remaining != 0 {
+        let plane = remaining.trailing_zeros() as usize;
+        let (normal, abs, w) = planes[plane];
+        let distance = normal.dot(center) + w;
+        let radius = abs.dot(extent);
+        if distance + radius < 0.0 {
+            return None;
         }
+        if distance >= radius {
+            mask &= !(1 << plane);
+        }
+        remaining &= remaining - 1;
     }
+    Some(mask)
 }
 
 struct SectionSpecializer {

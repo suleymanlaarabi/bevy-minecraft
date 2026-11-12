@@ -23,8 +23,8 @@ use std::{
 
 const CPU_ACTIVE: DiagnosticPath = DiagnosticPath::const_new("voxel/cpu_active");
 const CPU_PENDING: DiagnosticPath = DiagnosticPath::const_new("voxel/cpu_pending");
-const REST_SECONDS: f64 = 20.0;
-const FLIGHT_DISTANCE: f32 = 960.0;
+// Six seconds of rendered measurements; loading is reported separately.
+const PHASE_SECONDS: f64 = 1.5;
 
 pub(super) struct FlightBenchmarkPlugin;
 
@@ -53,7 +53,7 @@ impl Plugin for FlightBenchmarkPlugin {
             csv,
             phase: Phase::Warmup,
             phase_elapsed: 0.0,
-            flight_seconds: f64::from(FLIGHT_DISTANCE / speed),
+            flight_seconds: PHASE_SECONDS,
             speed,
             origin: None,
             start: Instant::now(),
@@ -195,6 +195,7 @@ fn resolution(mut windows: Query<&mut Window>) {
 fn fly(
     time: Res<Time<Real>>,
     mut time_of_day: ResMut<crate::sky::TimeOfDay>,
+    diagnostics: Res<DiagnosticsStore>,
     mut benchmark: ResMut<FlightBenchmark>,
     mut players: Query<
         (
@@ -221,7 +222,6 @@ fn fly(
     if benchmark.origin.is_none() {
         let origin = transform.translation + Vec3::Y * 40.0;
         benchmark.origin = Some(origin);
-        benchmark.start = Instant::now();
         benchmark.phase_elapsed = 0.0;
         commands.entity(entity).insert(Flying);
         time_of_day.fraction = 0.5;
@@ -233,8 +233,8 @@ fn fly(
     }
     benchmark.phase_elapsed += time.delta_secs_f64();
     let duration = match benchmark.phase {
-        Phase::Warmup => 10.0,
-        Phase::Stationary | Phase::Recovery => REST_SECONDS,
+        Phase::Warmup => 0.5,
+        Phase::Stationary | Phase::Recovery => PHASE_SECONDS,
         _ => benchmark.flight_seconds,
     };
     if benchmark.phase_elapsed >= duration {
@@ -260,18 +260,37 @@ fn fly(
                 _ => Phase::Done,
             };
             benchmark.phase_elapsed = 0.0;
-            info!("flight benchmark: phase={:?}", benchmark.phase);
+            info!(
+                "flight benchmark: phase={:?} elapsed_seconds={:.3}",
+                benchmark.phase,
+                benchmark.start.elapsed().as_secs_f64()
+            );
             if benchmark.phase == Phase::Done {
                 summarize(&mut benchmark);
+                for diagnostic in diagnostics.iter() {
+                    if diagnostic.path().as_str().ends_with("elapsed_gpu")
+                        || diagnostic.path().as_str().ends_with("elapsed_cpu")
+                    {
+                        info!(
+                            "flight render: {} mean={:.4}{}",
+                            diagnostic.path(),
+                            diagnostic.average().unwrap_or(0.0),
+                            diagnostic.suffix
+                        );
+                    }
+                }
                 commands.insert_resource(benchmark.original_graphics.take().unwrap());
-                crate::world::request_exit(&mut commands);
+                // This disposable benchmark world does not need an exit checkpoint.
+                commands.write_message(AppExit::Success);
                 return;
             }
         }
     }
     let x = match benchmark.phase {
         Phase::Outbound => benchmark.speed * benchmark.phase_elapsed as f32,
-        Phase::Return => FLIGHT_DISTANCE - benchmark.speed * benchmark.phase_elapsed as f32,
+        Phase::Return => {
+            benchmark.speed * (benchmark.flight_seconds - benchmark.phase_elapsed) as f32
+        }
         _ => 0.0,
     };
     transform.translation = benchmark.origin.unwrap() + Vec3::X * x;
@@ -358,6 +377,8 @@ fn finish_frame(mut benchmark: ResMut<FlightBenchmark>, players: Query<&Transfor
 
 fn summarize(benchmark: &mut FlightBenchmark) {
     benchmark.csv.flush().expect("Flush flight benchmark CSV");
+    let measured_seconds = benchmark.samples.iter().flatten().map(|s| s.0).sum::<f64>() / 1000.0;
+    info!("flight result: measured_seconds={measured_seconds:.3} (loading excluded)");
     for (phase, samples) in [
         Phase::Stationary,
         Phase::Outbound,
