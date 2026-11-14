@@ -5,10 +5,13 @@ use super::{
 use crate::{game::GameState, settings::GraphicsSettings};
 use bevy::{
     camera::visibility::{NoFrustumCulling, RenderLayers},
-    light::{CascadeShadowConfigBuilder, NotShadowCaster, SunDisk},
+    light::{NotShadowCaster, SunDisk},
     prelude::*,
 };
-use hollow_render::environment::{SkyMaterial, SkyPass, SkySettings};
+use hollow_render::{
+    environment::{SkyMaterial, SkyPass, SkySettings},
+    shadows::ShadowClipmap,
+};
 
 /// Output-space radiance of the sun's disk at its center: far past white, so bloom
 /// gives it a halo.
@@ -97,15 +100,8 @@ pub(super) fn spawn_sky(
         DespawnOnExit(GameState::Game),
     ));
 
-    // Both lights reach the camera's layer and the terrain's shadow layer. Cascades
-    // stop where terrain shadows stop mattering, keeping the near cascade sharp.
-    let cascades = CascadeShadowConfigBuilder {
-        num_cascades: 4,
-        first_cascade_far_bound: 12.0,
-        maximum_distance: 128.0,
-        ..default()
-    }
-    .build();
+    // Both lights reach the camera's layer and the terrain's shadow layer. Their
+    // cascades are the camera-centered shadow clipmap of the voxel renderer.
     let layers = RenderLayers::from_layers(&[0, hollow_render::visibility::OCCLUDED_LAYER]);
     commands.spawn((
         Sun,
@@ -123,7 +119,7 @@ pub(super) fn spawn_sky(
             intensity: 0.0,
             ..SunDisk::EARTH
         },
-        cascades.clone(),
+        ShadowClipmap,
         light_transform(sky.sun_light_direction),
         layers.clone(),
         DespawnOnExit(GameState::Game),
@@ -138,7 +134,7 @@ pub(super) fn spawn_sky(
         },
         // The moon's disk is drawn by `SkyPass::Moon`, with its phases.
         SunDisk::OFF,
-        cascades,
+        ShadowClipmap,
         light_transform(sky.moon_light_direction),
         layers,
         DespawnOnExit(GameState::Game),

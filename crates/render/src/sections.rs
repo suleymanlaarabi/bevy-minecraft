@@ -33,13 +33,7 @@ use bevy::{
     },
     shader::ShaderDefVal,
 };
-use std::{
-    ops::Range,
-    sync::{
-        Arc,
-        atomic::{AtomicU8, Ordering},
-    },
-};
+use std::{ops::Range, sync::Arc};
 
 pub(crate) struct PassGeometry {
     pub vertices: Vec<u8>,
@@ -172,7 +166,11 @@ impl Plugin for SectionsPlugin {
             .add_systems(ExtractSchedule, extract_sections)
             .add_systems(
                 Render,
-                (prepare_sections, queue_sections)
+                (
+                    crate::shadows::keep_cached_cascades,
+                    prepare_sections,
+                    queue_sections,
+                )
                     .chain()
                     .in_set(RenderSystems::QueueMeshes),
             );
@@ -258,13 +256,6 @@ struct Cull {
 /// Passes drawn into shadow maps from sections that sunlight never reaches: only the
 /// shadow hull, which is built for sunlit sections alone.
 const BURIED_CASTERS: u8 = 1 << 4;
-/// Draw ranges of one view. Depth passes record what they drew: with occlusion
-/// culling, Bevy renders the same phase again in its late prepass and late shadow
-/// passes, where these CPU-culled sections would only repeat identical depth.
-struct ViewDraws {
-    ranges: [Range<usize>; RANGES],
-    depth_drawn: AtomicU8,
-}
 struct Allocation {
     vertices: Range<u64>,
     indices: Range<u64>,
@@ -282,7 +273,7 @@ const fn range_pass(range: usize) -> usize {
     if range == FAR_TERRAIN { 0 } else { range }
 }
 /// The depth prepass keeps the costly shadowed shading of near terrain to one
-/// fragment per pixel. Past the shadow cascades (128 blocks plus a section) shading
+/// fragment per pixel. Past the shadow clipmap (144 blocks plus a section) shading
 /// is a texture and fog, most of a long view's triangles are there and sections
 /// already draw front to back: rasterizing them twice costs more than it saves.
 const PREPASS_BUCKETS: usize = 20;
@@ -431,7 +422,7 @@ struct SectionGpu {
     layouts: [MeshVertexBufferLayoutRef; 2],
     indirect: Buffer,
     args: Vec<[u32; 5]>,
-    ranges: HashMap<Entity, ViewDraws>,
+    ranges: HashMap<Entity, [Range<usize>; RANGES]>,
     indirect_first_instance: bool,
 }
 impl SectionGpu {
@@ -527,6 +518,7 @@ impl SectionGpu {
 fn prepare_sections(
     mut gpu: ResMut<SectionGpu>,
     mut feed: ResMut<SectionFeed>,
+    refresh: Res<crate::shadows::ShadowRefresh>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
     views: Query<(
@@ -706,11 +698,12 @@ fn prepare_sections(
             bytemuck::cast_slice(&gpu.origin_data[range]),
         );
     }
-    for draws in gpu.ranges.values_mut() {
-        *draws.depth_drawn.get_mut() = 0;
-    }
     current.clear();
     for (entity, view, camera, light) in &views {
+        // A cached cascade is not drawn this frame: it needs no culling either.
+        if light.is_some_and(|light| refresh.cached(view, light)) {
+            continue;
+        }
         let shadow_layers = match light {
             Some(LightEntity::Directional { light_entity, .. }) => Some(
                 lights
@@ -828,13 +821,7 @@ fn prepare_sections(
                 *at += 1;
             }
         }
-        gpu.ranges.insert(
-            view.entity,
-            ViewDraws {
-                ranges,
-                depth_drawn: AtomicU8::new(0),
-            },
-        );
+        gpu.ranges.insert(view.entity, ranges);
     }
     gpu.args.truncate(arg_end);
     gpu.views.clone_from(&current);
@@ -1058,10 +1045,11 @@ fn queue_sections(
     cache: Res<PipelineCache>,
     mut pipelines: ResMut<SpecializedMeshPipelines<SectionSpecializer>>,
     views: Query<(Entity, &ExtractedView, Option<&LightEntity>)>,
-    (keys, depth_keys, light_keys): (
+    (keys, depth_keys, light_keys, refresh): (
         Res<ViewKeyCache>,
         Res<ViewKeyPrepassCache>,
         Res<LightKeyCache>,
+        Res<crate::shadows::ShadowRefresh>,
     ),
     mut opaque: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
     mut alpha: ResMut<ViewBinnedRenderPhases<AlphaMask3d>>,
@@ -1141,11 +1129,15 @@ fn queue_sections(
         };
         let item = |entity| (entity, ids.0[p]);
         for (entity, view, light) in &views {
+            // A cached cascade keeps its retained item for the frame it is redrawn.
+            if light.is_some_and(|light| refresh.cached(view, light)) {
+                continue;
+            }
             let retained = view.retained_view_entity;
             let active = gpu
                 .ranges
                 .get(&entity)
-                .is_some_and(|draws| !draws.ranges[p].is_empty());
+                .is_some_and(|ranges| !ranges[p].is_empty());
             let mut pipeline = |key: Option<&MeshPipelineKey>, depth: bool, reuse_depth: bool| {
                 key.filter(|_| active).and_then(|key| {
                     pipelines
@@ -1265,7 +1257,7 @@ type MainDraw<const P: usize> = (
     SetMeshViewBindingArrayBindGroup<1>,
     SetSections,
     SetSectionMaterial<P>,
-    DrawSections<P, false>,
+    DrawSections<P>,
 );
 type DepthDraw<const P: usize> = (
     SetItemPipeline,
@@ -1273,7 +1265,7 @@ type DepthDraw<const P: usize> = (
     SetPrepassViewEmptyBindGroup<1>,
     SetSections,
     SetSectionMaterial<P>,
-    DrawSections<P, true>,
+    DrawSections<P>,
 );
 struct SetSections;
 impl<I: PhaseItem> RenderCommand<I> for SetSections {
@@ -1326,8 +1318,8 @@ impl<I: PhaseItem, const P: usize> RenderCommand<I> for SetSectionMaterial<P> {
         RenderCommandResult::Success
     }
 }
-struct DrawSections<const P: usize, const DEPTH: bool>;
-impl<I: PhaseItem, const P: usize, const DEPTH: bool> RenderCommand<I> for DrawSections<P, DEPTH> {
+struct DrawSections<const P: usize>;
+impl<I: PhaseItem, const P: usize> RenderCommand<I> for DrawSections<P> {
     type Param = SRes<SectionGpu>;
     type ViewQuery = Entity;
     type ItemQuery = ();
@@ -1339,14 +1331,11 @@ impl<I: PhaseItem, const P: usize, const DEPTH: bool> RenderCommand<I> for DrawS
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let gpu = gpu.into_inner();
-        let Some(draws) = gpu.ranges.get(&view) else {
+        let Some(ranges) = gpu.ranges.get(&view) else {
             return RenderCommandResult::Skip;
         };
-        let range = draws.ranges[P].clone();
-        // Late depth passes repeat the phase: its sections are already in the target.
-        if range.is_empty()
-            || (DEPTH && draws.depth_drawn.fetch_or(1 << P, Ordering::Relaxed) & (1 << P) != 0)
-        {
+        let range = ranges[P].clone();
+        if range.is_empty() {
             return RenderCommandResult::Skip;
         }
         let arena = &gpu.arenas[range_pass(P)];

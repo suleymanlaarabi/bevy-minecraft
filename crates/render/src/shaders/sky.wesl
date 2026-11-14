@@ -1,6 +1,6 @@
 // Every sky and environment pass of `SkyMaterial`. Each pass is a pair of entry
 // points selected at pipeline specialization; all share one material bind group.
-import super::sky_color::{sample_sky, horizon_haze, palette_entry, SUN_DIRECTION, SUN_COLOR, MOON_DIRECTION, MOON_COLOR, MOON_PARAMS, STAR_PARAMS};
+import super::sky_color::{sample_sky, horizon_haze, hdr_dither, palette_entry, SUN_DIRECTION, SUN_COLOR, MOON_DIRECTION, MOON_COLOR, MOON_PARAMS, STAR_PARAMS};
 import super::block_lighting::celestial_irradiance;
 import super::voxel_fog::apply_voxel_fog;
 import bevy_pbr::render::{
@@ -43,7 +43,7 @@ fn background_vertex(@location(0) position: vec3<f32>) -> BackgroundVaryings {
 
 @fragment
 fn background_fragment(in: BackgroundVaryings) -> @location(0) vec4<f32> {
-    return vec4<f32>(sample_sky(normalize(in.direction)), 1.0);
+    return hdr_dither(vec4<f32>(sample_sky(normalize(in.direction)), 1.0), in.position.xy);
 }
 
 // ---- Stars: point stars on a sphere at infinity ----
@@ -305,7 +305,7 @@ fn horizon_fragment(in: HorizonVaryings) -> @location(0) vec4<f32> {
 @if(DISTANCE_FOG) {
     if view_bindings::fog.directional_light_color.a > 0.0 {
         let direction = normalize(in.world_position.xyz - view_bindings::view.world_position.xyz);
-        return horizon_haze(direction);
+        return hdr_dither(horizon_haze(direction), in.position.xy);
     }
 }
     // The liquid dome is fully opaque and keeps the original immersion color.

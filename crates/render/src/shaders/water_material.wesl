@@ -1,6 +1,7 @@
 import super::voxel_vertex::{PackedVertex, decode, face_normal};
 import super::voxel_lighting::apply_voxel_lighting;
 import super::voxel_fog::{apply_voxel_fog_ray, fog_ray, sky_reflection};
+import super::sky_color::hdr_dither;
 import super::block_lighting::sky_visibility;
 import bevy_pbr::render::{
     forward_io::FragmentOutput,
@@ -152,9 +153,12 @@ fn fragment(
         sky = sky_reflection(water.sky_color.rgb, ray) * sky_visibility(in.light);
     }
     var out: FragmentOutput;
-    out.color = apply_voxel_fog_ray(
-        vec4<f32>(mix(lit.rgb, sky, fresnel * water.sky_color.a), lit.a),
-        world, ray,
+    out.color = hdr_dither(
+        apply_voxel_fog_ray(
+            vec4<f32>(mix(lit.rgb, sky, fresnel * water.sky_color.a), lit.a),
+            world, ray,
+        ),
+        in.position.xy,
     );
     return out;
 }

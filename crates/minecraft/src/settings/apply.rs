@@ -5,9 +5,14 @@ use bevy::{
     post_process::bloom::Bloom,
     prelude::*,
     render::{
-        Extract, ExtractSchedule, RenderApp, occlusion_culling::OcclusionCulling,
+        Extract, ExtractSchedule, RenderApp,
+        camera::{CameraMainPassTextureFormats, extract_cameras},
+        render_resource::{TextureFormat, TextureFormatFeatureFlags, TextureUsages, WgpuFeatures},
+        renderer::{RenderAdapter, RenderDevice},
         sync_world::RenderEntity,
+        view::ExtractedView,
     },
+    ui_render::RenderUiSystems,
     window::{MonitorSelection, PresentMode, WindowMode},
 };
 
@@ -23,17 +28,22 @@ pub(super) fn register(app: &mut App) {
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
         render_app.add_systems(
             ExtractSchedule,
-            skip_prepass_depth_copy.after(extract_camera_prepass_phase),
+            (
+                skip_prepass_depth_copy.after(extract_camera_prepass_phase),
+                // The interface's views copy the camera's format when they are extracted.
+                compact_scene_target
+                    .after(extract_cameras)
+                    .before(RenderUiSystems::ExtractCameraViews),
+            ),
         );
     }
 }
 
-/// Bevy copies the depth prepass into a separate sampled texture after each prepass
-/// (twice per frame with occlusion culling), for materials reading
-/// `depth_prepass_texture`. Nothing samples it here: no Hollow shader does, and no
-/// Bevy feature that does (transmission, SSR, SSAO, decals, OIT, TAA) is used.
-/// The prepass phases, early depth and occlusion culling only need the main-world
-/// `DepthPrepass`, so the render-world marker is dropped to skip the copies.
+/// Bevy copies the depth prepass into a separate sampled texture after the prepass,
+/// for materials reading `depth_prepass_texture`. Nothing samples it here: no Hollow
+/// shader does, and no Bevy feature that does (transmission, SSR, SSAO, decals, OIT,
+/// TAA) is used. The prepass phases and early depth only need the main-world
+/// `DepthPrepass`, so the render-world marker is dropped to skip the copy.
 fn skip_prepass_depth_copy(
     cameras: Extract<Query<RenderEntity, (With<PlayerCamera>, With<DepthPrepass>)>>,
     mut commands: Commands,
@@ -41,6 +51,68 @@ fn skip_prepass_depth_copy(
     for entity in &cameras {
         commands.entity(entity).remove::<DepthPrepass>();
     }
+}
+
+/// Bevy's bloom already blurs the scene in this packed 32-bit float format.
+const COMPACT_HDR: TextureFormat = TextureFormat::Rg11b10Ufloat;
+
+/// Bevy gives an HDR camera 64-bit `Rgba16Float` color targets. Every scene pass
+/// reads or writes them: the multisampled color, its resolve, bloom, tonemapping
+/// and the final copy, which is most of the memory traffic of a frame on an
+/// integrated GPU. The scene needs no alpha, and its smooth gradients are dithered
+/// against the format's 6-bit mantissa (`hdr_dither` in `sky_color.wesl`), so the
+/// packed format carries the same image with half the bytes.
+fn compact_scene_target(
+    cameras: Extract<Query<(RenderEntity, &Msaa), (With<PlayerCamera>, With<bevy::camera::Hdr>)>>,
+    device: Res<RenderDevice>,
+    adapter: Res<RenderAdapter>,
+    mut formats: ResMut<CameraMainPassTextureFormats>,
+    mut supported: Local<Option<(u32, bool)>>,
+    mut commands: Commands,
+) {
+    for (entity, msaa) in &cameras {
+        let samples = msaa.samples();
+        let compact = match *supported {
+            Some((checked, compact)) if checked == samples => compact,
+            _ => {
+                let compact = compact_hdr_supported(&device, &adapter, samples);
+                *supported = Some((samples, compact));
+                compact
+            }
+        };
+        let Some(format) = formats.get_mut(&entity).filter(|_| compact) else {
+            continue;
+        };
+        *format = COMPACT_HDR;
+        // `extract_cameras` inserts this frame's view with a command of its own.
+        commands.entity(entity).queue(|mut camera: EntityWorldMut| {
+            if let Some(mut view) = camera.get_mut::<ExtractedView>() {
+                view.target_format = COMPACT_HDR;
+            }
+        });
+    }
+}
+
+/// Rendering, blending and resolving into the packed format are optional features.
+fn compact_hdr_supported(device: &RenderDevice, adapter: &RenderAdapter, samples: u32) -> bool {
+    let features = device.features();
+    if !features.contains(WgpuFeatures::RG11B10UFLOAT_RENDERABLE) {
+        return false;
+    }
+    let format = if features.contains(WgpuFeatures::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES) {
+        adapter.get_texture_format_features(COMPACT_HDR)
+    } else {
+        COMPACT_HDR.guaranteed_format_features(features)
+    };
+    format
+        .allowed_usages
+        .contains(TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING)
+        && format.flags.contains(TextureFormatFeatureFlags::BLENDABLE)
+        && (samples == 1
+            || format.flags.sample_count_supported(samples)
+                && format
+                    .flags
+                    .contains(TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE))
 }
 
 fn apply_graphics_settings(
@@ -117,18 +189,14 @@ fn apply_camera_settings(
     // Without shadows that shading is a texture, vertex light and fog, and sections
     // already draw front to back: a second pass over the near terrain's vertices costs
     // more than the few overdrawn fragments, so the main pass writes depth itself.
-    // Occlusion culling reads the prepass depth and stays on the camera only: in
-    // shadow cascades it would build four depth pyramids per frame for the few Bevy
-    // meshes there, never for terrain sections.
-    if settings.occlusion_culling || settings.shadow_quality != ShadowQuality::Off {
+    // Bevy's GPU occlusion culling stays off: terrain sections are culled on the CPU
+    // by the section visibility graph and never by Bevy, so it would downsample the
+    // whole multisampled depth buffer into a pyramid and run a second prepass every
+    // frame for the few Bevy meshes left.
+    if settings.shadow_quality != ShadowQuality::Off {
         camera.insert(DepthPrepass);
     } else {
         camera.remove::<DepthPrepass>();
-    }
-    if settings.occlusion_culling {
-        camera.insert(OcclusionCulling);
-    } else {
-        camera.remove::<OcclusionCulling>();
     }
     if settings.anti_aliasing == AntiAliasingMode::Fxaa {
         camera.insert(Fxaa::default());

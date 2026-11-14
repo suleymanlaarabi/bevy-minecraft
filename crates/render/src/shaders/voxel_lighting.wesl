@@ -1,4 +1,4 @@
-import super::block_lighting::{sky_visibility, block_light};
+import super::block_lighting::{sky_visibility, block_light, clipmap_shadow};
 import bevy_pbr::render::{
     pbr_ambient as ambient,
     pbr_lighting as lighting,
@@ -8,7 +8,6 @@ import bevy_pbr::render::{
     mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
     pbr_functions::{calculate_F0, calculate_F0_dielectric},
     pbr_types::PbrInput,
-    shadows,
 };
 
 // Glossy ambient-and-sun lighting of the water, kept separate from the lean
@@ -37,16 +36,6 @@ fn apply_voxel_lighting(in: PbrInput, voxel_light: vec2<f32>) -> vec4<f32> {
     lighting_input.F0_metallic = base_color.rgb;
     lighting_input.F_ab = lighting::F_AB(perceptual_roughness, NdotV);
 
-    let view_z = dot(
-        vec4<f32>(
-            view_bindings::view.view_from_world[0].z,
-            view_bindings::view.view_from_world[1].z,
-            view_bindings::view.view_from_world[2].z,
-            view_bindings::view.view_from_world[3].z,
-        ),
-        in.world_position,
-    );
-
     var direct_light = vec3<f32>(0.0);
     let n_directional_lights = view_bindings::lights.n_directional_lights;
     for (var i = 0u; i < n_directional_lights; i += 1u) {
@@ -54,13 +43,7 @@ fn apply_voxel_lighting(in: PbrInput, voxel_light: vec2<f32>) -> vec4<f32> {
         var shadow = 1.0;
         if ((in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u
                 && ((*light).flags & DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
-            shadow = shadows::fetch_directional_shadow(
-                i,
-                in.world_position,
-                in.world_normal,
-                view_z,
-                in.frag_coord.xy,
-            );
+            shadow = clipmap_shadow(i, in.world_position, in.world_normal, in.frag_coord.xy);
         }
         direct_light += lighting::directional_light(i, &lighting_input, true) * shadow;
     }

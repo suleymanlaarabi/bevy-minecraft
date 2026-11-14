@@ -109,8 +109,6 @@ impl RenderResolution {
 pub struct GraphicsSettings {
     pub anti_aliasing: AntiAliasingMode,
     pub vsync: bool,
-    /// GPU occlusion culling (experimental in Bevy): skips terrain hidden behind terrain.
-    pub occlusion_culling: bool,
     pub shadow_quality: ShadowQuality,
     /// Glow around the sun, the moon and bright light sources.
     pub bloom: bool,
@@ -130,7 +128,6 @@ impl Default for GraphicsSettings {
         Self {
             anti_aliasing: AntiAliasingMode::Msaa4x,
             vsync: true,
-            occlusion_culling: true,
             shadow_quality: ShadowQuality::Medium,
             bloom: true,
             clouds: true,

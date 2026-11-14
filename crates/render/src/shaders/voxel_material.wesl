@@ -2,6 +2,7 @@ import super::section_transform;
 import super::surface_animation::surface_frame;
 import super::block_lighting::voxel_diffuse;
 import super::voxel_fog::{apply_voxel_fog_ray, fog_ray, fully_fogged};
+import super::sky_color::hdr_dither;
 import super::voxel_vertex::{PackedVertex, decode, face_normal, block_uv, face_index, transform_uv, face_layer, face_transform};
 import bevy_pbr::render::{
     forward_io::FragmentOutput,
@@ -71,7 +72,10 @@ fn fragment(
     var out: FragmentOutput;
 @if(!VOXEL_CUTOUT) {
     if fully_fogged(ray) {
-        out.color = apply_voxel_fog_ray(vec4<f32>(0.0, 0.0, 0.0, 1.0), in.world_position, ray);
+        out.color = hdr_dither(
+            apply_voxel_fog_ray(vec4<f32>(0.0, 0.0, 0.0, 1.0), in.world_position, ray),
+            in.position.xy,
+        );
         return out;
     }
 }
@@ -83,7 +87,10 @@ fn fragment(
     // Leaves and other cutout cubes: real holes, alpha-tested like vanilla.
     if texture_color.a < 0.5 { discard; }
     if fully_fogged(ray) {
-        out.color = apply_voxel_fog_ray(vec4<f32>(0.0, 0.0, 0.0, 1.0), in.world_position, ray);
+        out.color = hdr_dither(
+            apply_voxel_fog_ray(vec4<f32>(0.0, 0.0, 0.0, 1.0), in.world_position, ray),
+            in.position.xy,
+        );
         return out;
     }
 } @else {
@@ -96,12 +103,15 @@ fn fragment(
     }
 }
     let albedo = texture_color.rgb * in.tint;
-    out.color = apply_voxel_fog_ray(
-        vec4<f32>(
-            voxel_diffuse(albedo, face_normal(in.direction), vec4<f32>(in.world_position, 1.0), in.position.xy, in.light),
-            1.0,
+    out.color = hdr_dither(
+        apply_voxel_fog_ray(
+            vec4<f32>(
+                voxel_diffuse(albedo, face_normal(in.direction), vec4<f32>(in.world_position, 1.0), in.position.xy, in.light),
+                1.0,
+            ),
+            in.world_position, ray,
         ),
-        in.world_position, ray,
+        in.position.xy,
     );
     return out;
 }

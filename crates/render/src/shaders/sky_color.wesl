@@ -29,6 +29,18 @@ fn sample_sky(direction: vec3<f32>) -> vec3<f32> {
     return base + sunset * glow;
 }
 
+// The scene's color target stores 11/11/10-bit floats (`compact_scene_target`): a
+// 6-bit mantissa for red and green, 5 bits for blue. Smooth gradients would band at
+// those steps, so shaded colors are dithered by one step before they are stored.
+fn hdr_dither(color: vec4<f32>, frag_coord: vec2<f32>) -> vec4<f32> {
+    // Interleaved gradient noise: evenly spread over neighboring pixels.
+    let noise = fract(52.9829189 * fract(dot(frag_coord, vec2<f32>(0.06711056, 0.00583715)))) - 0.5;
+    return vec4<f32>(
+        color.rgb * (vec3<f32>(1.0) + noise * vec3<f32>(0.015625, 0.015625, 0.03125)),
+        color.a,
+    );
+}
+
 fn horizon_haze(direction: vec3<f32>) -> vec4<f32> {
     let horizon = vec3<f32>(direction.x, 0.0, direction.z);
     return vec4<f32>(sample_sky(horizon), 1.0 - smoothstep(0.0, 0.052335956, direction.y));

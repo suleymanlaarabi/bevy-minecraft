@@ -116,8 +116,6 @@ pub(crate) fn settings_panel(
                     --
                     @setting_row("Sound Volume", graphics_slider(settings.gameplay_volume, 0.0..=100.0, |settings, value| settings.gameplay_volume = value))
                     --
-                    @setting_row("Occlusion Culling", toggle_control(settings.occlusion_culling, |settings, value| settings.occlusion_culling = value))
-                    --
                     @setting_row("Shadow Quality", choice_control(settings.shadow_quality, [
                         ("Off", ShadowQuality::Off),
                         ("Low", ShadowQuality::Low),

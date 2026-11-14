@@ -2,6 +2,7 @@ import super::section_transform;
 import super::surface_animation::surface_frame;
 import super::block_lighting::{sky_visibility, voxel_diffuse};
 import super::voxel_fog::{apply_voxel_fog_ray, fog_ray, sky_reflection, fully_fogged};
+import super::sky_color::hdr_dither;
 import super::model_vertex::{ModelVertex, ModelVaryings, decode_model};
 import super::voxel_lighting::apply_voxel_lighting;
 import bevy_pbr::render::{
@@ -180,9 +181,12 @@ fn shade_water(
         sky = sky_reflection(water.sky_color.rgb, ray) * sky_visibility(in.light);
     }
     var out: FragmentOutput;
-    out.color = apply_voxel_fog_ray(
-        vec4<f32>(mix(lit.rgb, sky, fresnel * water.sky_color.a), lit.a),
-        world, ray,
+    out.color = hdr_dither(
+        apply_voxel_fog_ray(
+            vec4<f32>(mix(lit.rgb, sky, fresnel * water.sky_color.a), lit.a),
+            world, ray,
+        ),
+        in.position.xy,
     );
     return out;
 }
@@ -228,7 +232,10 @@ fn fragment(
     let ray = fog_ray(in.world_position);
     if fully_fogged(ray) {
         var fogged: FragmentOutput;
-        fogged.color = apply_voxel_fog_ray(vec4<f32>(0.0, 0.0, 0.0, texture_color.a), in.world_position, ray);
+        fogged.color = hdr_dither(
+            apply_voxel_fog_ray(vec4<f32>(0.0, 0.0, 0.0, texture_color.a), in.world_position, ray),
+            in.position.xy,
+        );
         return fogged;
     }
     var albedo = texture_color.rgb * in.tint;
@@ -254,12 +261,15 @@ fn fragment(
         shaded = voxel_diffuse(albedo, normal, vec4<f32>(in.world_position, 1.0), in.position.xy, in.light);
     }
     var out: FragmentOutput;
-    out.color = apply_voxel_fog_ray(
-        vec4<f32>(
-            shaded,
-            texture_color.a,
+    out.color = hdr_dither(
+        apply_voxel_fog_ray(
+            vec4<f32>(
+                shaded,
+                texture_color.a,
+            ),
+            in.world_position, ray,
         ),
-        in.world_position, ray,
+        in.position.xy,
     );
     return out;
 }

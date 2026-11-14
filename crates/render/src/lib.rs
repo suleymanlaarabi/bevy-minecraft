@@ -7,12 +7,14 @@ pub mod diagnostics;
 pub mod environment;
 pub mod fluids;
 pub mod fog;
+mod main_pass;
 pub mod material;
 pub mod meshing;
 pub mod mipmaps;
 pub mod model_mesh;
 pub mod models;
 mod sections;
+pub mod shadows;
 pub mod sort;
 pub mod source;
 pub mod streaming;
@@ -88,6 +90,8 @@ impl<C: RenderSource> Plugin for VoxelRenderPlugin<C> {
         visibility::register::<C>(app);
         uploads::register(app);
         fog::register(app);
+        shadows::register(app);
+        main_pass::register(app);
         app.add_plugins((
             MaterialPlugin::<material::VoxelMaterial>::default(),
             MaterialPlugin::<material::VoxelCutoutMaterial>::default(),

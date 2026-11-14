@@ -153,7 +153,6 @@ fn start(
     settings.view_distance = option("HOLLOW_FLIGHT_DISTANCE", 16.0, 2.0, 64.0) as _;
     settings.anti_aliasing = AntiAliasingMode::Off;
     settings.shadow_quality = ShadowQuality::Off;
-    settings.occlusion_culling = false;
     settings.bloom = false;
     settings.clouds = false;
     settings.vsync = false;
