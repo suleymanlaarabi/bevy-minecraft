@@ -11,7 +11,7 @@ use bevy::{
     window::{MonitorSelection, PresentMode, WindowMode},
 };
 
-use super::{AntiAliasingMode, DisplayMode, GraphicsSettings};
+use super::{AntiAliasingMode, DisplayMode, GraphicsSettings, ShadowQuality};
 use crate::player::PlayerCamera;
 
 const WINDOWED_WIDTH: f32 = 1600.0;
@@ -113,10 +113,18 @@ fn apply_camera_settings(
 
     let mut camera = commands.entity(entity);
     camera.insert(settings.anti_aliasing.msaa());
-    // Depth first: the costly terrain shading then runs once per pixel. Occlusion
-    // culling stays on the camera only: in shadow cascades it would build four depth
-    // pyramids per frame for the few Bevy meshes there, never for terrain sections.
-    camera.insert(DepthPrepass);
+    // Depth first: the costly shadowed terrain shading then runs once per pixel.
+    // Without shadows that shading is a texture, vertex light and fog, and sections
+    // already draw front to back: a second pass over the near terrain's vertices costs
+    // more than the few overdrawn fragments, so the main pass writes depth itself.
+    // Occlusion culling reads the prepass depth and stays on the camera only: in
+    // shadow cascades it would build four depth pyramids per frame for the few Bevy
+    // meshes there, never for terrain sections.
+    if settings.occlusion_culling || settings.shadow_quality != ShadowQuality::Off {
+        camera.insert(DepthPrepass);
+    } else {
+        camera.remove::<DepthPrepass>();
+    }
     if settings.occlusion_culling {
         camera.insert(OcclusionCulling);
     } else {

@@ -150,7 +150,7 @@ fn start(
 ) {
     let mut settings = graphics.clone();
     benchmark.original_graphics = Some(settings.clone());
-    settings.view_distance = 16;
+    settings.view_distance = option("HOLLOW_FLIGHT_DISTANCE", 16.0, 2.0, 64.0) as _;
     settings.anti_aliasing = AntiAliasingMode::Off;
     settings.shadow_quality = ShadowQuality::Off;
     settings.occlusion_culling = false;
@@ -160,7 +160,7 @@ fn start(
     if std::env::var_os("HOLLOW_FLIGHT_RESOLUTION").is_some() {
         settings.display_mode = DisplayMode::Windowed;
     }
-    info!("flight benchmark: seed=12 distance=16 target_frame_ms=4.167 graphics={settings:?}");
+    info!("flight benchmark: seed=12 target_frame_ms=4.167 graphics={settings:?}");
     commands.insert_resource(settings);
     if std::env::var_os("HOLLOW_FLIGHT_NO_MOBS").is_some() {
         commands.insert_resource(crate::creatures::spawning::CreaturePopulationLimit(0));
@@ -260,6 +260,14 @@ fn fly(
                 _ => Phase::Done,
             };
             benchmark.phase_elapsed = 0.0;
+            if benchmark.phase == Phase::Recovery
+                && let Some(path) = std::env::var_os("HOLLOW_FLIGHT_SCREENSHOT")
+            {
+                use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+                commands
+                    .spawn(Screenshot::primary_window())
+                    .observe(save_to_disk(std::path::PathBuf::from(path)));
+            }
             info!(
                 "flight benchmark: phase={:?} elapsed_seconds={:.3}",
                 benchmark.phase,

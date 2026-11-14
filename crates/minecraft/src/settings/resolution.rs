@@ -1,6 +1,5 @@
 use bevy::{
-    camera::{CameraUpdateSystems, RenderTarget, visibility::RenderLayers},
-    image::ImageSampler,
+    camera::{CameraOutputMode, CameraUpdateSystems, RenderTarget, visibility::RenderLayers},
     prelude::*,
     render::{
         render_resource::{Extent3d, TextureFormat},
@@ -9,14 +8,16 @@ use bevy::{
     window::{PrimaryWindow, WindowResized},
 };
 
-use super::GraphicsSettings;
+use super::{
+    GraphicsSettings,
+    composite::{SceneCompositor, SceneSource},
+};
 use crate::player::PlayerCamera;
 
 #[derive(Component)]
 struct RenderSurface {
     image: Handle<Image>,
     compositor: Entity,
-    display: Entity,
 }
 
 pub(super) fn register(app: &mut App) {
@@ -34,7 +35,15 @@ pub(super) fn register(app: &mut App) {
 fn sync_resolution(
     settings: Res<GraphicsSettings>,
     window: Single<&Window, With<PrimaryWindow>>,
-    mut cameras: Query<(Entity, &mut RenderTarget, Option<&RenderSurface>), With<PlayerCamera>>,
+    mut cameras: Query<
+        (
+            Entity,
+            &mut Camera,
+            &mut RenderTarget,
+            Option<&RenderSurface>,
+        ),
+        With<PlayerCamera>,
+    >,
     mut images: ResMut<Assets<Image>>,
     device: Res<RenderDevice>,
     mut commands: Commands,
@@ -46,15 +55,15 @@ fn sync_resolution(
     let size = settings
         .render_resolution
         .size(window_size, device.limits().max_texture_dimension_2d);
-    for (entity, mut target, surface) in &mut cameras {
+    for (entity, mut camera, mut target, surface) in &mut cameras {
         if size == window_size {
             if let Some(surface) = surface {
                 *target = RenderTarget::default();
+                camera.output_mode = CameraOutputMode::default();
                 commands.entity(surface.compositor).despawn();
-                commands.entity(surface.display).despawn();
                 commands
                     .entity(entity)
-                    .remove::<RenderSurface>()
+                    .remove::<(RenderSurface, SceneSource)>()
                     .insert(IsDefaultUiCamera);
             }
             continue;
@@ -77,10 +86,15 @@ fn sync_resolution(
         if !matches!(*target, RenderTarget::Window(_)) {
             continue;
         }
-        let mut image =
-            Image::new_target_texture(size.x, size.y, TextureFormat::Rgba8UnormSrgb, None);
-        image.sampler = ImageSampler::linear();
-        let image = images.add(image);
+        // The image only gives the scene camera its resolution: the compositor
+        // samples the camera's main texture itself (see `composite`), so the
+        // camera skips writing its output here.
+        let image = images.add(Image::new_target_texture(
+            size.x,
+            size.y,
+            TextureFormat::Rgba8UnormSrgb,
+            None,
+        ));
         // Only scaled rendering needs a second camera. HUD and hand overlays remain
         // in window coordinates; native rendering keeps its existing direct path.
         let compositor = commands
@@ -93,32 +107,15 @@ fn sync_resolution(
                 Msaa::Off,
                 RenderLayers::none(),
                 IsDefaultUiCamera,
+                SceneCompositor,
                 ChildOf(entity),
             ))
             .id();
-        let display = commands
-            .spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    width: percent(100),
-                    height: percent(100),
-                    ..default()
-                },
-                ImageNode::new(image.clone()),
-                UiTargetCamera(compositor),
-                GlobalZIndex(-2),
-                Pickable::IGNORE,
-                DespawnOnExit(crate::game::GameState::Game),
-            ))
-            .id();
         *target = RenderTarget::Image(image.clone().into());
+        camera.output_mode = CameraOutputMode::Skip;
         commands
             .entity(entity)
             .remove::<IsDefaultUiCamera>()
-            .insert(RenderSurface {
-                image,
-                compositor,
-                display,
-            });
+            .insert((RenderSurface { image, compositor }, SceneSource));
     }
 }

@@ -537,7 +537,7 @@ fn prepare_sections(
     )>,
     lights: Query<Option<&RenderLayers>>,
     mut current: Local<Vec<ViewCull>>,
-    mut pending: Local<Vec<(u8, u8, [u32; 5])>>,
+    mut workers: Local<Vec<CullWorker>>,
 ) {
     let gpu = &mut *gpu;
     let changed = !feed.ops.is_empty() || gpu.conservative != feed.conservative;
@@ -748,6 +748,9 @@ fn prepare_sections(
     }
     let mut arg_end = 0;
     gpu.ranges.clear();
+    let columns: Vec<&Column> = gpu.columns.values().collect();
+    let pool = bevy::tasks::ComputeTaskPool::get();
+    let threads = pool.thread_num().clamp(1, 8);
     for view in current.iter() {
         let rows = view
             .clip
@@ -762,110 +765,68 @@ fn prepare_sections(
         } else {
             rows[2]
         };
-        let planes = [
+        let planes: [Plane; 5] = [
             rows[3] + rows[0],
             rows[3] - rows[0],
             rows[3] + rows[1],
             rows[3] - rows[1],
             depth,
         ]
-        .map(|p| {
-            (
-                Vec3A::from(p.truncate()),
-                Vec3A::from(p.truncate().abs()),
-                p.w,
-            )
-        });
+        .map(|p| (p.truncate(), p.truncate().abs(), p.w));
         let require_visible = view.camera && !feed.conservative;
-        let eye = Vec3A::from(view.eye);
-        let mut counts = [[0usize; DISTANCE_BUCKETS]; RANGES];
-        pending.clear();
-        for column in gpu.columns.values() {
-            let mut sections = column.occupied
-                & if require_visible {
-                    column.mask
-                } else {
-                    u32::MAX
-                };
-            if sections == 0 {
-                continue;
-            }
-            let Some(mask) = cull_planes(
-                (column.min + column.max) * 0.5,
-                (column.max - column.min) * 0.5,
+        // Every camera move rebuilds the draws: columns are culled in parallel, each
+        // worker counting and collecting its own draws.
+        let chunk = columns.len().div_ceil(threads).max(128);
+        let jobs = columns.len().div_ceil(chunk);
+        if workers.len() < jobs {
+            workers.resize_with(jobs, default);
+        }
+        let workers = &mut workers[..jobs];
+        let (cull, slots) = (&gpu.cull[..], &gpu.slots[..]);
+        if let [worker] = &mut *workers {
+            cull_columns(
+                &columns,
+                cull,
+                slots,
+                view,
                 &planes,
-                0b11111,
-            ) else {
-                continue;
-            };
-            while sections != 0 {
-                let slot = column.slots[sections.trailing_zeros() as usize] as usize;
-                sections &= sections - 1;
-                let c = &gpu.cull[slot];
-                let passes = (if view.camera { c.passes } else { c.casters }) & view.enabled;
-                if passes == 0
-                    || (mask != 0 && cull_planes(c.center, c.extent, &planes, mask).is_none())
-                {
-                    continue;
-                }
-                // A face can only be seen from the outer side of its plane, which
-                // lies within the section's bounds: skip the groups facing away.
-                let (bucket, faces) = if view.camera {
-                    let (center, extent) = (Vec3A::from(c.center), Vec3A::from(c.extent));
-                    (
-                        ((center.distance(eye) * BUCKETS_PER_BLOCK) as usize)
-                            .min(DISTANCE_BUCKETS - 1),
-                        (eye.cmplt(center + extent).bitmask()
-                            | eye.cmpgt(center - extent).bitmask() << 3)
-                            as u8,
-                    )
-                } else {
-                    (0, ALL_FACES)
-                };
-                let allocations = &gpu.slots[slot].as_ref().unwrap().passes;
-                let mut bits = passes;
-                while bits != 0 {
-                    let pass = bits.trailing_zeros() as usize;
-                    bits &= bits - 1;
-                    let a = allocations[pass].as_ref().unwrap();
-                    let range = if view.camera && pass == 0 && bucket >= PREPASS_BUCKETS {
-                        FAR_TERRAIN
-                    } else {
-                        pass
-                    };
-                    // Only greedy cube faces are grouped; shadow views draw both sides.
-                    if !view.camera || pass > 1 || a.draw[0] <= WHOLE_DRAW_INDICES {
-                        counts[range][bucket] += 1;
-                        pending.push((range as u8, bucket as u8, a.draw));
-                        continue;
-                    }
-                    face_runs(&a.groups, faces, |first, count| {
-                        counts[range][bucket] += 1;
-                        let mut draw = a.draw;
-                        draw[0] = count;
-                        draw[2] += first;
-                        pending.push((range as u8, bucket as u8, draw));
+                require_visible,
+                worker,
+            );
+        } else {
+            let planes = &planes;
+            pool.scope(|scope| {
+                for (columns, worker) in columns.chunks(chunk).zip(workers.iter_mut()) {
+                    scope.spawn(async move {
+                        cull_columns(columns, cull, slots, view, planes, require_visible, worker);
                     });
                 }
-            }
+            });
         }
         // Prefix sums place each range directly into the final indirect buffer,
         // nearest buckets first. Shadow views use just one unsorted bucket.
+        let buckets = if view.camera { DISTANCE_BUCKETS } else { 1 };
         let ranges = std::array::from_fn(|p| {
             let start = arg_end;
-            let buckets = if view.camera { DISTANCE_BUCKETS } else { 1 };
-            for count in &mut counts[p][..buckets] {
-                (*count, arg_end) = (arg_end, arg_end + *count);
+            for bucket in 0..buckets {
+                for worker in workers.iter_mut() {
+                    let count = &mut worker.counts[p][bucket];
+                    let next = arg_end + *count as usize;
+                    *count = arg_end as u32;
+                    arg_end = next;
+                }
             }
             start..arg_end
         });
         if gpu.args.len() < arg_end {
             gpu.args.resize(arg_end, [0; 5]);
         }
-        for &(range, bucket, draw) in pending.iter() {
-            let at = &mut counts[usize::from(range)][usize::from(bucket)];
-            gpu.args[*at] = draw;
-            *at += 1;
+        for CullWorker { counts, draws } in workers.iter_mut() {
+            for &(range, bucket, draw) in draws.iter() {
+                let at = &mut counts[usize::from(range)][usize::from(bucket)];
+                gpu.args[*at as usize] = draw;
+                *at += 1;
+            }
         }
         gpu.ranges.insert(
             view.entity,
@@ -890,22 +851,19 @@ fn prepare_sections(
     }
 }
 
+/// Frustum plane: normal, absolute normal and offset. Scalar on purpose: the
+/// culling loops run per section every frame the camera moves.
+type Plane = (Vec3, Vec3, f32);
+
 /// Reject outside bounds and pass only intersecting planes down the hierarchy.
 #[inline]
-fn cull_planes(
-    center: Vec3,
-    extent: Vec3,
-    planes: &[(Vec3A, Vec3A, f32); 5],
-    mut mask: u8,
-) -> Option<u8> {
-    let center = Vec3A::from(center);
-    let extent = Vec3A::from(extent);
+fn cull_planes(center: Vec3, extent: Vec3, planes: &[Plane; 5], mut mask: u8) -> Option<u8> {
     let mut remaining = mask;
     while remaining != 0 {
         let plane = remaining.trailing_zeros() as usize;
-        let (normal, abs, w) = planes[plane];
-        let distance = normal.dot(center) + w;
-        let radius = abs.dot(extent);
+        let (n, a, w) = &planes[plane];
+        let distance = n.x * center.x + n.y * center.y + n.z * center.z + w;
+        let radius = a.x * extent.x + a.y * extent.y + a.z * extent.z;
         if distance + radius < 0.0 {
             return None;
         }
@@ -915,6 +873,118 @@ fn cull_planes(
         remaining &= remaining - 1;
     }
     Some(mask)
+}
+
+/// Draws and per-bucket counts one culling task collects for a view.
+struct CullWorker {
+    counts: Box<[[u32; DISTANCE_BUCKETS]; RANGES]>,
+    draws: Vec<(u8, u8, [u32; 5])>,
+}
+impl Default for CullWorker {
+    fn default() -> Self {
+        Self {
+            counts: Box::new([[0; DISTANCE_BUCKETS]; RANGES]),
+            draws: Vec::new(),
+        }
+    }
+}
+
+fn cull_columns(
+    columns: &[&Column],
+    cull: &[Cull],
+    slots: &[Option<Slot>],
+    view: &ViewCull,
+    planes: &[Plane; 5],
+    require_visible: bool,
+    worker: &mut CullWorker,
+) {
+    let CullWorker { counts, draws } = worker;
+    for range in counts.iter_mut() {
+        range.fill(0);
+    }
+    draws.clear();
+    let eye = view.eye;
+    for column in columns {
+        let mut sections = column.occupied
+            & if require_visible {
+                column.mask
+            } else {
+                u32::MAX
+            };
+        if sections == 0 {
+            continue;
+        }
+        let (min, max) = (column.min, column.max);
+        let Some(mask) = cull_planes(
+            Vec3::new(
+                (min.x + max.x) * 0.5,
+                (min.y + max.y) * 0.5,
+                (min.z + max.z) * 0.5,
+            ),
+            Vec3::new(
+                (max.x - min.x) * 0.5,
+                (max.y - min.y) * 0.5,
+                (max.z - min.z) * 0.5,
+            ),
+            planes,
+            0b11111,
+        ) else {
+            continue;
+        };
+        while sections != 0 {
+            let slot = column.slots[sections.trailing_zeros() as usize] as usize;
+            sections &= sections - 1;
+            let c = &cull[slot];
+            let passes = (if view.camera { c.passes } else { c.casters }) & view.enabled;
+            if passes == 0 || (mask != 0 && cull_planes(c.center, c.extent, planes, mask).is_none())
+            {
+                continue;
+            }
+            // A face can only be seen from the outer side of its plane, which
+            // lies within the section's bounds: skip the groups facing away.
+            let (bucket, faces) = if view.camera {
+                let (center, extent) = (c.center, c.extent);
+                let (x, y, z) = (center.x - eye.x, center.y - eye.y, center.z - eye.z);
+                (
+                    (((x * x + y * y + z * z).sqrt() * BUCKETS_PER_BLOCK) as usize)
+                        .min(DISTANCE_BUCKETS - 1),
+                    u8::from(eye.x < center.x + extent.x)
+                        | u8::from(eye.y < center.y + extent.y) << 1
+                        | u8::from(eye.z < center.z + extent.z) << 2
+                        | u8::from(eye.x > center.x - extent.x) << 3
+                        | u8::from(eye.y > center.y - extent.y) << 4
+                        | u8::from(eye.z > center.z - extent.z) << 5,
+                )
+            } else {
+                (0, ALL_FACES)
+            };
+            let allocations = &slots[slot].as_ref().unwrap().passes;
+            let mut bits = passes;
+            while bits != 0 {
+                let pass = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let a = allocations[pass].as_ref().unwrap();
+                let range = if view.camera && pass == 0 && bucket >= PREPASS_BUCKETS {
+                    FAR_TERRAIN
+                } else {
+                    pass
+                };
+                // Only greedy cube faces are grouped; shadow views draw both sides.
+                if !view.camera || pass > 1 || a.draw[0] <= WHOLE_DRAW_INDICES {
+                    counts[range][bucket] += 1;
+                    draws.push((range as u8, bucket as u8, a.draw));
+                    continue;
+                }
+                face_runs(&a.groups, faces, |first, count| {
+                    counts[range][bucket] += 1;
+                    let mut draw = a.draw;
+                    draw[0] = count;
+                    draw[2] += first;
+                    draws.push((range as u8, bucket as u8, draw));
+                });
+            }
+        }
+    }
 }
 
 struct SectionSpecializer {

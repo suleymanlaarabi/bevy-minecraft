@@ -197,7 +197,11 @@ impl Material for SkyMaterial {
     }
     fn alpha_mode(&self) -> AlphaMode {
         match self.pass {
-            SkyPass::Background | SkyPass::Clouds => AlphaMode::Opaque,
+            // The alpha mask phase draws after the opaque one: the full-screen
+            // background then shades only pixels the opaque terrain left at far depth.
+            // Its shader never discards.
+            SkyPass::Background => AlphaMode::Mask(0.5),
+            SkyPass::Clouds => AlphaMode::Opaque,
             SkyPass::Stars | SkyPass::Moon | SkyPass::Sun => AlphaMode::Add,
             SkyPass::Horizon => AlphaMode::Blend,
         }
@@ -256,7 +260,7 @@ impl Material for SkyMaterial {
         if pass == SkyPass::Background
             && let Some(depth) = &mut descriptor.depth_stencil
         {
-            // Reverse-Z far depth: shade only background left by the terrain prepass.
+            // Reverse-Z far depth: shade only background left by the opaque terrain.
             depth.depth_compare = Some(CompareFunction::GreaterEqual);
             depth.depth_write_enabled = Some(false);
         }

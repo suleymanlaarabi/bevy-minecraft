@@ -1,4 +1,8 @@
 //! Conservative section connectivity, independent of camera orientation and shadows.
+//!
+//! A sight line crosses sections monotonically on every axis, so a traversal never
+//! steps back toward the eye. Each pass allows one section of slack around its eye:
+//! its masks then also cover the eye after it steps into a neighboring section.
 
 use super::build::{ChunkSections, poll_builds};
 use crate::{RenderSource, VoxelViewer};
@@ -158,6 +162,11 @@ pub struct VisibilityGraph {
     mask: u32,
     min_y: i32,
     eye: Option<(IVec3, bool)>,
+    /// Eye section whose sight lines bound the current pass; `None` leaves it unbounded.
+    pass_eye: Option<IVec3>,
+    /// Bounds of the `pass_eye` of every pass with masks still published: a pass
+    /// interrupted while publishing leaves its masks beside the previous ones.
+    published_eyes: Option<(IVec3, IVec3)>,
     initialize: Option<usize>,
     /// Columns whose `visible` mask may differ from `seen`.
     touched: Slots,
@@ -237,6 +246,7 @@ impl VisibilityGraph {
         self.queued.fill(0);
         self.initialize = Some(0);
         self.repeat = false;
+        self.pass_eye = self.eye.and_then(|(eye, valid)| valid.then_some(eye));
     }
     fn mark_all_stale(&mut self) {
         for i in 0..self.count() {
@@ -249,12 +259,25 @@ impl VisibilityGraph {
             .eye
             .filter(|(eye, valid)| *valid && position == IVec2::new(eye.x, eye.z))
             .map_or(0, |(eye, _)| 1 << eye.y);
+        // Sections that may be left through each face without stepping back toward
+        // the pass eye (vertical faces: per section; horizontal ones: whole column).
+        let allowed = self.pass_eye.map_or([u32::MAX; 6], |eye| {
+            let column = |open: bool| if open { u32::MAX } else { 0 };
+            [
+                column(position.x <= eye.x + 1),
+                column(position.x >= eye.x - 1),
+                u32::MAX >> (31 - (eye.y + 1).clamp(0, 31)),
+                u32::MAX << (eye.y - 1).clamp(0, 31),
+                column(position.y <= eye.z + 1),
+                column(position.y >= eye.z - 1),
+            ]
+        });
         for exit in 0..6 {
             let column = &mut self.columns[i];
             let exits = (0..6).fold(0, |mask, entry| {
                 mask | column.reached[entry] & column.connections[entry][exit]
             }) | seed;
-            let exits = exits & !column.sent[exit];
+            let exits = exits & allowed[exit] & !column.sent[exit];
             column.sent[exit] |= exits;
             if exits == 0 {
                 continue;
@@ -435,9 +458,16 @@ fn update_visibility<C: RenderSource>(
         let stepped = g.eye.is_some_and(|(previous, valid)| {
             valid == valid_eye && (previous - center).abs().element_sum() == 1
         });
-        g.repeat |= g.eye.is_some();
+        // A pass that has not traversed anything yet (first eye, or a ring that moved
+        // this frame with the camera) restarts bounded by the new eye instead of
+        // running once for the previous eye and again for this one.
+        let fresh = g.eye.is_none() || g.initialize == Some(0);
+        g.repeat |= !fresh;
         g.eye = Some((center, valid_eye));
         g.conservative |= !stepped;
+        if fresh {
+            g.begin();
+        }
         if valid_eye
             && let Some(i) = g.slot(IVec2::new(center.x, center.z))
             && i < g.columns.len()
@@ -486,6 +516,7 @@ fn update_visibility<C: RenderSource>(
         } else {
             let Some(cursor) = g.stale.pop() else {
                 g.conservative = false;
+                g.published_eyes = g.pass_eye.map(|eye| (eye, eye));
                 if g.repeat {
                     g.begin();
                     continue;
@@ -493,6 +524,10 @@ fn update_visibility<C: RenderSource>(
                 break;
             };
             let position = g.position(cursor);
+            if let Some(eye) = g.pass_eye {
+                let (min, max) = g.published_eyes.unwrap_or((eye, eye));
+                g.published_eyes = Some((min.min(eye), max.max(eye)));
+            }
             if let Some((_, Some(sections))) =
                 index.get(&position).and_then(|e| chunks.get(*e).ok())
             {
@@ -629,10 +664,16 @@ fn update_visibility<C: RenderSource>(
             g.propagate(i);
         }
     }
-    feed.conservative = g.conservative;
+    // Masks bounded by an eye more than one section away may miss visible sections
+    // (the camera crossed two sections before a pass completed): show everything.
+    let far = g.published_eyes.is_some_and(|(min, max)| {
+        (center - min).max_element() > 1 || (max - center).max_element() > 1
+    });
+    let conservative = g.conservative || (valid_eye && far);
+    feed.conservative = conservative;
     for (entity, current) in &mut layers.p0() {
         let current_value = current.as_deref().cloned().unwrap_or_default();
-        let target = if g.conservative {
+        let target = if conservative {
             current_value.clone().with(OCCLUDED_LAYER)
         } else {
             current_value.clone().without(OCCLUDED_LAYER)
@@ -642,7 +683,7 @@ fn update_visibility<C: RenderSource>(
         }
         if let Some(mut current) = current {
             current.set_if_neq(target);
-        } else if g.conservative {
+        } else if conservative {
             commands.entity(entity).try_insert(target);
         }
     }
@@ -655,6 +696,6 @@ fn update_visibility<C: RenderSource>(
             + g.touched.len()
             + g.stale.len()
             + if g.repeat { g.count() } else { 0 };
-        diagnostics.visibility_conservative = g.conservative;
+        diagnostics.visibility_conservative = conservative;
     }
 }
