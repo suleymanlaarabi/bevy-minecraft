@@ -207,6 +207,8 @@ pub struct TerrainCache {
     pub terrain_builder: SurfaceTerrainBuilder,
     pub surface_noise: DoublePerlinNoiseSampler,
     pub secondary_noise: DoublePerlinNoiseSampler,
+    /// Surface-rule threshold samplers by noise parameter id, built on first use.
+    pub threshold_samplers: Box<[std::sync::OnceLock<DoublePerlinNoiseSampler>]>,
 }
 
 impl TerrainCache {
@@ -230,6 +232,9 @@ impl TerrainCache {
             terrain_builder,
             surface_noise,
             secondary_noise,
+            threshold_samplers: (0..DoublePerlinNoiseParameters::COUNT)
+                .map(|_| std::sync::OnceLock::new())
+                .collect(),
         }
     }
 }
@@ -1044,6 +1049,7 @@ impl ProtoChunk {
             &terrain_cache.terrain_builder,
             &terrain_cache.surface_noise,
             &terrain_cache.secondary_noise,
+            &terrain_cache.threshold_samplers,
             settings.sea_level,
         );
         let mut vein_context = settings.ore_veins_enabled.then(|| {

@@ -450,36 +450,70 @@ impl StaticIndependentChunkNoiseFunctionComponentImpl for InterpolatedNoiseSampl
             self.main_y_multiplier,
             1.0,
         );
+        let (mut need_min, mut need_max) = (0, 0);
         for value in buffer.iter_mut() {
             *value = Self::choice(*value);
+            need_min += usize::from(*value < 1.0);
+            need_max += usize::from(*value > 0.0);
         }
-        let mut first = DensityBuffer::acquire(volume);
-        first.fill(0.0);
-        self.min_limit_noise.add_to_volume(
-            &mut first,
-            volume,
-            self.xz_multiplier,
-            self.y_multiplier,
-            1.0,
-        );
-        let mut second = DensityBuffer::acquire(volume);
-        second.fill(0.0);
-        self.max_limit_noise.add_to_volume(
-            &mut second,
-            volume,
-            self.xz_multiplier,
-            self.y_multiplier,
-            1.0,
-        );
-        for ((value, first), second) in buffer.iter_mut().zip(first.iter()).zip(second.iter()) {
-            let alpha = *value;
-            *value = if alpha == 0.0 {
-                *first
-            } else if alpha == 1.0 {
-                *second
-            } else {
-                lerp(alpha, *first, *second)
-            };
+        // A saturated choice selects a single 16-octave limit noise. Like the
+        // point path, skip the other one: batch a limit over the whole grid
+        // only when most points need it, otherwise sample just those points.
+        let len = buffer.len();
+        let limit = |noise: &NoiseStack<SmearedPerlinNoise>, needed: usize| {
+            (needed * 2 >= len).then(|| {
+                let mut values = DensityBuffer::acquire(volume);
+                values.fill(0.0);
+                noise.add_to_volume(
+                    &mut values,
+                    volume,
+                    self.xz_multiplier,
+                    self.y_multiplier,
+                    1.0,
+                );
+                values
+            })
+        };
+        let first = limit(&self.min_limit_noise, need_min);
+        let second = limit(&self.max_limit_noise, need_max);
+        let sample = |noise: &NoiseStack<SmearedPerlinNoise>,
+                      batch: &Option<DensityBuffer>,
+                      index: usize,
+                      x: i32,
+                      y: i32,
+                      z: i32| {
+            batch.as_ref().map_or_else(
+                || {
+                    noise.get(
+                        f64::from(x) * self.xz_multiplier,
+                        f64::from(y) * self.y_multiplier,
+                        f64::from(z) * self.xz_multiplier,
+                    )
+                },
+                |values| values[index],
+            )
+        };
+        for z in 0..volume.size_z {
+            let block_z = volume.block_z(z);
+            for x in 0..volume.size_x {
+                let block_x = volume.block_x(x);
+                for y in 0..volume.size_y {
+                    let index = volume.index_unchecked(x, y, z);
+                    let alpha = buffer[index];
+                    let block_y = volume.block_y(y);
+                    buffer[index] = if alpha == 0.0 {
+                        sample(&self.min_limit_noise, &first, index, block_x, block_y, block_z)
+                    } else if alpha == 1.0 {
+                        sample(&self.max_limit_noise, &second, index, block_x, block_y, block_z)
+                    } else {
+                        lerp(
+                            alpha,
+                            sample(&self.min_limit_noise, &first, index, block_x, block_y, block_z),
+                            sample(&self.max_limit_noise, &second, index, block_x, block_y, block_z),
+                        )
+                    };
+                }
+            }
         }
     }
 }

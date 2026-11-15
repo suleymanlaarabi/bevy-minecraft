@@ -12,14 +12,13 @@ use crate::generation::noise::router::multi_noise_sampler::MultiNoiseSampler;
 use crate::generation::noise::router::surface_height_sampler::{
     SurfaceHeightEstimateSampler, SurfaceHeightSamplerBuilderOptions,
 };
-use crate::generation::surface::rule::try_apply_material_rule;
+use crate::generation::surface::rule::PreparedMaterialRule;
 use crate::generation::surface::terrain::SurfaceTerrainBuilder;
 use crate::generation::surface::{MaterialRuleContext, steep_material_condition};
 use crate::generation::{biome_coords, section_coords};
 use pumpkin_data::block_state::BlockState;
 use pumpkin_data::carver::{CarverAdditionalConfig, CarverConfig};
 use pumpkin_data::fluid::Fluid;
-use pumpkin_data::material_rule::MaterialRule;
 use pumpkin_util::math::vector2::Vector2;
 use pumpkin_util::math::vector3::Vector3;
 use pumpkin_util::random::{RandomGenerator, RandomImpl};
@@ -59,11 +58,12 @@ pub struct CarvingContext<'a> {
     pub random_config: &'a GlobalRandomConfig,
     pub surface_noise: &'a DoublePerlinNoiseSampler,
     pub secondary_noise: &'a DoublePerlinNoiseSampler,
+    pub threshold_samplers: &'a [std::sync::OnceLock<DoublePerlinNoiseSampler>],
     pub terrain_builder: &'a SurfaceTerrainBuilder,
     pub sea_level: i32,
     pub default_block: &'static BlockState,
     pub default_fluid: &'static BlockState,
-    pub surface_rule: &'a MaterialRule,
+    pub surface_rule: &'a PreparedMaterialRule,
     pub surface_height_sampler: SurfaceHeightEstimateSampler<'a>,
     pub carver_aquifer: Option<CarverAquiferSampler<'a>>,
 }
@@ -93,6 +93,7 @@ impl CarvingContext<'_> {
             self.terrain_builder,
             self.surface_noise,
             self.secondary_noise,
+            self.threshold_samplers,
             self.sea_level,
         );
         context.init_horizontal(x, z);
@@ -100,12 +101,8 @@ impl CarvingContext<'_> {
         context.set_steep_material_condition(steep);
         context.init_vertical(1, 1, y, if under_fluid { y + 1 } else { i32::MIN });
 
-        try_apply_material_rule(
-            self.surface_rule,
-            chunk,
-            &mut context,
-            &mut self.surface_height_sampler,
-        )
+        self.surface_rule
+            .apply(chunk, &mut context, &mut self.surface_height_sampler)
     }
 }
 
@@ -306,11 +303,12 @@ pub fn carve(chunk: &mut ProtoChunk, generator: &TerrainGenerator) {
             random_config: &generator.random_config,
             surface_noise: &generator.terrain_cache.surface_noise,
             secondary_noise: &generator.terrain_cache.secondary_noise,
+            threshold_samplers: &generator.terrain_cache.threshold_samplers,
             terrain_builder: &generator.terrain_cache.terrain_builder,
             sea_level: generator.settings.sea_level,
             default_block: generator.settings.default_block,
             default_fluid: generator.settings.default_fluid,
-            surface_rule: generator.surface_rule,
+            surface_rule: &generator.prepared_surface_rule,
             surface_height_sampler,
             carver_aquifer,
         };

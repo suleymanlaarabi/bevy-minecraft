@@ -11,6 +11,8 @@ use pumpkin_util::{
     random::{RandomImpl, xoroshiro128::XoroshiroSplitter},
 };
 
+use std::sync::OnceLock;
+
 use terrain::SurfaceTerrainBuilder;
 
 use crate::{
@@ -59,22 +61,21 @@ pub struct MaterialRuleContext<'a> {
     pub terrain_builder: &'a SurfaceTerrainBuilder,
     pub sea_level: i32,
     steep_material_condition: Option<bool>,
-    /// Noise samplers built by [`test_noise_threshold`], keyed by noise parameter id.
-    ///
-    /// For generated constants, `DoublePerlinNoiseParameters::id` uniquely identifies
-    /// the complete parameter set; generated surface rules only reference those constants.
-    ///
-    /// Building one is expensive and only depends on `random_deriver`, so they are
-    /// reused for the lifetime of the context. Surface rules reference very few
-    /// distinct noises, so a linear scan beats hashing here.
+    /// Seed-constant threshold samplers shared by every chunk of a generator,
+    /// indexed by `DoublePerlinNoiseParameters::id` and built on first use.
+    threshold_samplers: &'a [OnceLock<DoublePerlinNoiseSampler>],
+    /// Column values of the threshold noises used by this context. Surface
+    /// rules reference very few distinct noises, so a linear scan beats hashing.
     noise_threshold_samplers: Vec<ThresholdSampler>,
+    /// Vertical-gradient splitters, keyed by `random_lo`. They only depend on
+    /// the world seed, so derive them once per context instead of per block.
+    gradient_splitters: Vec<(u64, XoroshiroSplitter)>,
     pub vein_context: Option<&'a mut VeinContext<'a>>,
     pub(crate) column_conditions: Vec<Option<bool>>,
 }
 
 struct ThresholdSampler {
     id: usize,
-    sampler: DoublePerlinNoiseSampler,
     column: Option<i64>,
     value: f64,
 }
@@ -143,6 +144,7 @@ impl<'a> MaterialRuleContext<'a> {
         terrain_builder: &'a SurfaceTerrainBuilder,
         surface_noise: &'a DoublePerlinNoiseSampler,
         secondary_noise: &'a DoublePerlinNoiseSampler,
+        threshold_samplers: &'a [OnceLock<DoublePerlinNoiseSampler>],
         sea_level: i32,
     ) -> Self {
         const HORIZONTAL_POS: i64 = -i64::MAX; // Vanilla
@@ -174,7 +176,9 @@ impl<'a> MaterialRuleContext<'a> {
             stone_depth_above: 0,
             sea_level,
             steep_material_condition: None,
+            threshold_samplers,
             noise_threshold_samplers: Vec::new(),
+            gradient_splitters: Vec::new(),
             vein_context: None,
             column_conditions: Vec::new(),
         }
@@ -474,30 +478,33 @@ pub fn test_noise_threshold(
         .iter()
         .position(|entry| entry.id == condition.noise.id);
     let index = cached.unwrap_or_else(|| {
-        let sampler = DoublePerlinNoiseBuilder::get_noise_sampler(
-            context.random_deriver,
-            context.legacy_random_source,
-            context.world_seed,
-            &condition.noise,
-        );
         context.noise_threshold_samplers.push(ThresholdSampler {
             id: condition.noise.id,
-            sampler,
             column: None,
             value: 0.0,
         });
         context.noise_threshold_samplers.len() - 1
     });
-    let entry = &mut context.noise_threshold_samplers[index];
-    if entry.column != Some(context.unique_horizontal_pos_value) {
-        entry.value = f64::from(entry.sampler.sample(
+    let column = context.unique_horizontal_pos_value;
+    if context.noise_threshold_samplers[index].column != Some(column) {
+        let sampler = context.threshold_samplers[condition.noise.id].get_or_init(|| {
+            DoublePerlinNoiseBuilder::get_noise_sampler(
+                context.random_deriver,
+                context.legacy_random_source,
+                context.world_seed,
+                &condition.noise,
+            )
+        });
+        let value = f64::from(sampler.sample(
             context.block_pos_x as f64,
             0.0,
             context.block_pos_z as f64,
         ));
-        entry.column = Some(context.unique_horizontal_pos_value);
+        let entry = &mut context.noise_threshold_samplers[index];
+        entry.value = value;
+        entry.column = Some(column);
     }
-    let value = entry.value;
+    let value = context.noise_threshold_samplers[index].value;
     value >= condition.min_threshold && value <= condition.max_threshold
 }
 
@@ -543,7 +550,7 @@ pub const fn test_water_material(
 
 pub fn test_vertical_gradient(
     condition: &VerticalGradientMaterialCondition,
-    context: &MaterialRuleContext,
+    context: &mut MaterialRuleContext,
 ) -> bool {
     let true_at = condition
         .true_at_and_below
@@ -576,11 +583,25 @@ pub fn test_vertical_gradient(
         let mut block_rand = LegacyRand::from_seed(pos_seed ^ derived_seed);
         block_rand.next_f32() < mapped
     } else {
-        let splitter = context
-            .random_deriver
-            .from_lo_and_hi(condition.random_lo, condition.random_hi)
-            .next_splitter();
-        let mut random = splitter.split_pos(context.block_pos_x, block_y, context.block_pos_z);
+        let index = context
+            .gradient_splitters
+            .iter()
+            .position(|(lo, _)| *lo == condition.random_lo)
+            .unwrap_or_else(|| {
+                let splitter = context
+                    .random_deriver
+                    .from_lo_and_hi(condition.random_lo, condition.random_hi)
+                    .next_splitter();
+                context
+                    .gradient_splitters
+                    .push((condition.random_lo, splitter));
+                context.gradient_splitters.len() - 1
+            });
+        let mut random = context.gradient_splitters[index].1.split_pos(
+            context.block_pos_x,
+            block_y,
+            context.block_pos_z,
+        );
         random.next_f32() < mapped
     }
 }

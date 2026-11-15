@@ -1,3 +1,5 @@
+use std::{cell::RefCell, rc::Rc};
+
 use pumpkin_data::{Block, BlockState};
 use pumpkin_util::{
     DoublePerlinNoiseParametersCodec,
@@ -272,36 +274,29 @@ pub struct DualNoiseBlockStateProvider {
 impl DualNoiseBlockStateProvider {
     #[must_use]
     pub fn get(&self, pos: BlockPos) -> &'static BlockState {
-        let sampler = DoublePerlinNoiseSampler::new(
-            &mut RandomGenerator::Legacy(LegacyRand::from_seed(self.base.base.seed as u64)),
-            self.slow_noise.first_octave,
-            &self.slow_noise.amplitudes,
-            false,
-        );
-        let slow_noise =
-            self.get_slow_noise(pos.0.x as f64, pos.0.y as f64, pos.0.z as f64, &sampler);
-        let mapped = clamped_map(
-            slow_noise,
-            -1.0,
-            1.0,
-            self.variety[0] as f64,
-            self.variety[1] as f64 + 1.0,
-        ) as i32;
-        let mut list = Vec::with_capacity(mapped as usize);
-        for i in 0..mapped {
-            let value = self.get_slow_noise(
+        let seed = self.base.base.seed;
+        with_noise_sampler(seed, &self.slow_noise, |sampler| {
+            let slow_noise =
+                self.get_slow_noise(pos.0.x as f64, pos.0.y as f64, pos.0.z as f64, sampler);
+            let mapped = clamped_map(
+                slow_noise,
+                -1.0,
+                1.0,
+                self.variety[0] as f64,
+                self.variety[1] as f64 + 1.0,
+            ) as i32;
+            // Only the selected candidate is observable: evaluate that one
+            // instead of materializing the whole candidate list.
+            let value = self.base.base.get_noise(pos);
+            let i = NoiseBlockStateProvider::state_index(mapped as usize, value) as i32;
+            let candidate = self.get_slow_noise(
                 (pos.0.x + i * 54545) as f64,
                 pos.0.y as f64,
                 (pos.0.z + i * 34234) as f64,
-                &sampler,
+                sampler,
             );
-            list.push(NoiseBlockStateProvider::get_state_by_value(
-                &self.base.states,
-                value,
-            ));
-        }
-        let value = self.base.base.get_noise(pos);
-        NoiseBlockStateProvider::get_state_by_value(&list, value)
+            NoiseBlockStateProvider::get_state_by_value(&self.base.states, candidate)
+        })
     }
 
     fn get_slow_noise(&self, x: f64, y: f64, z: f64, sampler: &DoublePerlinNoiseSampler) -> f64 {
@@ -311,6 +306,36 @@ impl DualNoiseBlockStateProvider {
             z * self.slow_scale,
         ))
     }
+}
+
+/// Feature noise providers use seed-constant samplers. Building one shuffles
+/// permutation tables for every octave, so keep the few distinct samplers per
+/// worker instead of rebuilding them for each placed block.
+fn with_noise_sampler<R>(
+    seed: i64,
+    noise: &DoublePerlinNoiseParametersCodec,
+    sample: impl FnOnce(&DoublePerlinNoiseSampler) -> R,
+) -> R {
+    type Entry = (i64, i32, Vec<f64>, Rc<DoublePerlinNoiseSampler>);
+    thread_local! {
+        static SAMPLERS: RefCell<Vec<Entry>> = const { RefCell::new(Vec::new()) };
+    }
+    let sampler = SAMPLERS.with_borrow_mut(|samplers| {
+        if let Some((.., sampler)) = samplers.iter().find(|(s, octave, amplitudes, _)| {
+            *s == seed && *octave == noise.first_octave && *amplitudes == noise.amplitudes
+        }) {
+            return sampler.clone();
+        }
+        let sampler = Rc::new(DoublePerlinNoiseSampler::new(
+            &mut RandomGenerator::Legacy(LegacyRand::from_seed(seed as u64)),
+            noise.first_octave,
+            &noise.amplitudes,
+            false,
+        ));
+        samplers.push((seed, noise.first_octave, noise.amplitudes.clone(), sampler.clone()));
+        sampler
+    });
+    sample(&sampler)
 }
 
 pub struct WeightedBlockStateProvider {
@@ -345,17 +370,14 @@ pub struct NoiseBlockStateProviderBase {
 impl NoiseBlockStateProviderBase {
     #[must_use]
     pub fn get_noise(&self, pos: BlockPos) -> f64 {
-        let sampler = DoublePerlinNoiseSampler::new(
-            &mut RandomGenerator::Legacy(LegacyRand::from_seed(self.seed as u64)),
-            self.noise.first_octave,
-            &self.noise.amplitudes,
-            false,
-        );
-        f64::from(sampler.sample(
-            pos.0.x as f64 * f64::from(self.scale),
-            pos.0.y as f64 * f64::from(self.scale),
-            pos.0.z as f64 * f64::from(self.scale),
-        ))
+        let scale = f64::from(self.scale);
+        with_noise_sampler(self.seed, &self.noise, |sampler| {
+            f64::from(sampler.sample(
+                pos.0.x as f64 * scale,
+                pos.0.y as f64 * scale,
+                pos.0.z as f64 * scale,
+            ))
+        })
     }
 }
 
@@ -371,9 +393,13 @@ impl NoiseBlockStateProvider {
         Self::get_state_by_value(&self.states, value)
     }
 
-    fn get_state_by_value(states: &[&'static BlockState], value: f64) -> &'static BlockState {
+    fn state_index(len: usize, value: f64) -> usize {
         let val = f64::midpoint(1.0, value).clamp(0.0, 0.9999);
-        states[(val * states.len() as f64) as usize]
+        (val * len as f64) as usize
+    }
+
+    fn get_state_by_value(states: &[&'static BlockState], value: f64) -> &'static BlockState {
+        states[Self::state_index(states.len(), value)]
     }
 }
 
