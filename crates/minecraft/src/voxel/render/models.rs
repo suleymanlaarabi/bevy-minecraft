@@ -220,57 +220,12 @@ pub(crate) fn translucent_kind(kind: VoxelKind) -> bool {
         || kind.tagged(pumpkin_data::tag::Block::C_GLASS_PANES)
 }
 
-fn base_flags(state: VoxelState) -> u8 {
-    let mut flags = 0;
-    if state.definition().is_air() {
-        flags |= cell::AIR;
-    }
-    let fluid = state.definition().fluid.id;
-    if fluid != bevy_voxel::core::FluidId::NONE
-        && fluid.0 < (1 << 14)
-        && crate::content::fluid_catalog()
-            .profile(fluid)
-            .render
-            .is_some_and(|render| render.ocean_surface && render.translucent)
-    {
-        flags |= cell::OCEAN_SURFACE;
-    }
-    if state.is_opaque_cube() {
-        flags |= cell::OCCLUDES;
-    }
-    if state.definition().is_full_cube() {
-        // Full cubes enclose adjacent water regardless of texture transparency.
-        // In particular, dry leaves and roots cover the water below them: drawing
-        // a lowered free surface there creates a visible blue ledge underneath.
-        // Keep this separate from visual occlusion so cutouts still show holes
-        // and transmit light. Waterlogged neighbors also share the fluid family.
-        flags |= cell::FLUID_OCCLUDES;
-    }
-    if state.definition().can_occlude()
-        && !state.definition().is_full_cube()
-        && !state.selection_empty()
-    {
-        flags |= cell::FLUID_OCCLUDER;
-    }
-    flags
-}
-
 fn state_info(state: VoxelState) -> CellInfo {
-    let fluid = state.definition().fluid;
-    let visible = fluid.id != bevy_voxel::core::FluidId::NONE
-        && crate::content::fluid_catalog()
-            .profile(fluid.id)
-            .render
-            .is_some();
-    CellInfo {
-        appearance: 0,
-        flags: base_flags(state),
-        fluid: if visible {
-            u32::from(fluid.id.0) << 8 | u32::from(fluid.amount) | (u32::from(fluid.falling) << 24)
-        } else {
-            0
-        },
-    }
+    CellInfo::from_definition(
+        hollow_worldgen::content::catalog(),
+        crate::content::fluid_catalog(),
+        state.definition(),
+    )
 }
 
 /// Cells without a greedy cube and with something to draw use explicit models.
@@ -919,11 +874,6 @@ fn fallback(state: VoxelState, world: IVec3, mut visit: impl FnMut(&ModelQuad)) 
         let full_cube = b.min == Vec3::ZERO && b.max == Vec3::ONE;
         for face in b.faces() {
             visit(&ModelQuad {
-                positions: face.positions.map(|position| position.to_array()),
-                normal: face.normal.to_array(),
-                uv: [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
-                texture: fallback_slot(kind, face.axis, face.positive),
-                tinted: false,
                 // Full fallback cubes follow the imported models' neighbor culling.
                 cull: if full_cube {
                     face.normal.as_ivec3().to_array()
@@ -931,9 +881,7 @@ fn fallback(state: VoxelState, world: IVec3, mut visit: impl FnMut(&ModelQuad)) 
                     [0; 3]
                 },
                 translucent,
-                shade_up: false,
-                effect: 0,
-                light_emission: 0,
+                ..ModelQuad::face(face, fallback_slot(kind, face.axis, face.positive))
             });
         }
     }

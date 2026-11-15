@@ -8,26 +8,24 @@ use crate::{
     inventory::{InventoryCursor, InventoryState, PlayerInventory},
     player::{Player, PlayerCamera},
     voxel::{
-        ChunkVoxels, VoxelChunk, VoxelSettings,
+        VoxelSettings,
         generation::WorldGenerator,
         streaming::{PendingEdits, StoredChunks},
     },
 };
 use bevy::{
-    ecs::entity::EntityHashSet,
     prelude::*,
     settings::SaveSettingsSync,
     tasks::{IoTaskPool, Task, futures::check_ready},
     window::WindowCloseRequested,
 };
+use bevy_voxel::engine::storage::save::{
+    CaptureLimits, CaptureQueue, ColumnPressure, SaveRevisions, StoragePressure,
+    TerrainAcknowledgements, TerrainSnapshots, forget_pressure,
+};
 pub(crate) use model::{Checkpoint, SavedDrop, SavedPlayer, SavedStack};
 pub use model::{WorldMetadata, WorldQuality};
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    io,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{io, path::PathBuf, sync::Arc};
 use storage::{CatalogEntry, Database};
 
 #[derive(SubStates, Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
@@ -77,7 +75,7 @@ enum Destination {
 #[derive(Resource, Default)]
 pub(crate) struct SaveState {
     in_flight_bytes: usize,
-    remaining: VecDeque<IVec2>,
+    remaining: CaptureQueue,
     task: Option<Task<io::Result<SaveAck>>>,
     elapsed: f32,
     destination: Destination,
@@ -90,8 +88,7 @@ pub(crate) struct SaveState {
     settle_frames: u8,
 }
 struct SaveAck {
-    revisions: Vec<(IVec2, u64)>,
-    gameplay_revisions: Vec<(IVec2, u64)>,
+    revisions: SaveRevisions,
     checkpoint: Checkpoint,
     metadata: WorldMetadata,
     final_save: bool,
@@ -542,9 +539,7 @@ fn checkpoint(
     >,
     cameras: Query<&PlayerCamera>,
     cursor: Res<InventoryCursor>,
-    chunks: Query<(&VoxelChunk, &ChunkVoxels)>,
-    chunk_index: Res<crate::voxel::streaming::ChunkIndex>,
-    stored: Res<StoredChunks>,
+    terrain: TerrainSnapshots<crate::voxel::VoxelState>,
     pending: Res<PendingEdits>,
     gameplay: crate::block_behavior::containers::ColumnSnapshots,
     clock: Res<crate::simulation::GameplayClock>,
@@ -621,87 +616,22 @@ fn checkpoint(
             .collect(),
         time_of_day: Some(time_of_day.days()),
     };
-    // Estimate before cloning: only the selected columns retain snapshots while
-    // the worker encodes them. Terrain and gameplay from a column share a capture.
-    let terrain_at = |position: &IVec2| {
-        chunk_index
-            .get(position)
-            .and_then(|&entity| chunks.get(entity).ok())
-            .map(|(_, voxels)| voxels)
-            .filter(|voxels| voxels.save_revision != voxels.saved_revision)
-            .or_else(|| {
-                stored
-                    .get(position)
-                    .filter(|voxels| voxels.save_revision != voxels.saved_revision)
-            })
-    };
-    // A column is charged only when it is selected, so draining a long queue in
-    // batches does not rescan and price every dirty column for each batch.
-    let reservation = |position: &IVec2| {
-        let gameplay = gameplay.reservation(*position);
-        let terrain = terrain_at(position);
-        if gameplay.is_none() && terrain.is_none() {
-            return None;
-        }
-        let (mut codec, mut snapshot) = gameplay.unwrap_or_default();
-        if let Some(voxels) = terrain {
-            codec += voxels.retained_bytes() * 8 + 4096;
-            snapshot += std::mem::size_of::<ChunkVoxels>();
-        }
-        Some((codec, snapshot))
-    };
-    // On exit, rebuild from all dirty revisions after the previous write was
-    // acknowledged, including edits made during the last background capture.
-    if saving {
-        save.remaining.clear();
-    }
-    if save.remaining.is_empty() {
-        // A loaded column can also be retained in StoredChunks; queue it once.
-        let mut dirty: HashSet<IVec2> = gameplay.dirty_positions().collect();
-        dirty.extend(
-            stored
-                .iter()
-                .map(|(p, v)| (*p, v))
-                .chain(chunks.iter().map(|(p, v)| (p.position, v)))
-                .filter(|(_, voxels)| voxels.save_revision != voxels.saved_revision)
-                .map(|(position, _)| position),
-        );
-        save.remaining.extend(dirty);
-    }
-    let mut captures = Vec::new();
-    let mut snapshot_bytes = 0usize;
-    let mut codec_bytes = crate::simulation::ENCODING_BATCH_BYTES;
-    let mut selected = 0usize;
-    while let Some(&position) = save.remaining.front() {
-        let Some((codec, snapshot)) = reservation(&position) else {
-            save.remaining.pop_front();
-            continue;
-        };
-        let next_snapshot_bytes = snapshot_bytes.saturating_add(snapshot);
-        let next_codec_bytes = codec_bytes.max(codec);
-        let next_bytes = next_snapshot_bytes.saturating_add(next_codec_bytes);
-        if selected > 0 && (selected >= 128 || next_bytes > crate::simulation::MAX_CAPTURE_BYTES) {
-            break;
-        }
-        if next_bytes > crate::simulation::MAX_CAPTURE_BYTES {
-            let error = io::Error::other("A world column exceeds the bounded save capture budget.");
+    let captures = match save.remaining.capture(
+        &terrain,
+        &gameplay,
+        CaptureLimits {
+            columns: 128,
+            bytes: crate::simulation::MAX_CAPTURE_BYTES,
+            encoding_batch_bytes: crate::simulation::ENCODING_BATCH_BYTES,
+        },
+        saving,
+    ) {
+        Ok(captures) => captures,
+        Err(error) => {
             save.task = Some(IoTaskPool::get().spawn(async move { Err(error) }));
             return;
         }
-        save.remaining.pop_front();
-        snapshot_bytes = next_snapshot_bytes;
-        codec_bytes = next_codec_bytes;
-        selected += 1;
-        captures.push((
-            position,
-            (
-                terrain_at(&position).map(ChunkVoxels::save_snapshot),
-                gameplay.capture_at(position),
-                codec,
-            ),
-        ));
-    }
-    let captured_bytes = snapshot_bytes.saturating_add(codec_bytes);
+    };
     save.force = !save.remaining.is_empty();
     let final_save = saving && save.remaining.is_empty();
     if !forced
@@ -724,77 +654,17 @@ fn checkpoint(
     } else {
         bevy_voxel::engine::tasks::WorkClass::Encoding
     };
-    save.in_flight_bytes = captured_bytes;
+    save.in_flight_bytes = captures.retained_bytes;
     save.task = Some(IoTaskPool::get().spawn(async move {
         generator.flush().await?;
-        let revisions = captures
-            .iter()
-            .filter_map(|(p, (terrain, _, _))| terrain.as_ref().map(|v| (*p, v.save_revision)))
-            .collect();
-        let gameplay_revisions = captures
-            .iter()
-            .filter_map(|(p, (_, gameplay, _))| gameplay.as_ref().map(|v| (*p, v.revision)))
-            .collect();
-        let positions = captures
-            .iter()
-            .map(|(p, (terrain, gameplay, _))| ((p.x, p.y), terrain.is_some(), gameplay.is_some()))
-            .collect();
-        let (prepared, checkpoint, metadata) = budget
-            .spawn(class, 0, async move {
+        let (revisions, (checkpoint, metadata)) = captures
+            .commit(&database, budget, class, move |positions| {
                 prepare_checkpoint(&metadata, &checkpoint, positions)
-                    .map(|prepared| (prepared, checkpoint, metadata))
+                    .map(|prepared| (prepared, (checkpoint, metadata)))
             })
             .await?;
-        let mut captures = captures.into_iter().peekable();
-        let batches = std::iter::from_fn(move || {
-            let mut batch = Vec::new();
-            let mut bytes = 0usize;
-            while let Some((_, (_, _, cost))) = captures.peek() {
-                if !batch.is_empty()
-                    && bytes.saturating_add(*cost) > crate::simulation::ENCODING_BATCH_BYTES
-                {
-                    break;
-                }
-                bytes += *cost;
-                batch.push(captures.next().expect("Peeked column"));
-            }
-            if batch.is_empty() {
-                return None;
-            }
-            // SQL stays on this I/O worker, with a single transaction. Encoding
-            // waits on the shared compute budget; no extra writer thread/channel
-            // or whole-world vector of compressed records is retained.
-            Some(bevy::tasks::block_on(budget.spawn(class, 0, async move {
-                batch
-                    .into_iter()
-                    .map(|(position, (terrain, gameplay, _))| {
-                        let terrain = terrain.map(|voxels| {
-                            hollow_worldgen::codec::compress_record(&voxels.encode_saved())
-                        });
-                        let gameplay = gameplay
-                            .map(|snapshot| {
-                                let bytes = snapshot.encode()?;
-                                if bytes.len() > hollow_worldgen::codec::MAX_RECORD_BYTES {
-                                    return Err(io::Error::other(
-                                        "Gameplay snapshot exceeds the record size limit.",
-                                    ));
-                                }
-                                Ok(hollow_worldgen::codec::compress_record(&bytes))
-                            })
-                            .transpose()?;
-                        Ok(storage::EncodedColumn {
-                            position: (position.x, position.y),
-                            terrain,
-                            application: gameplay,
-                        })
-                    })
-                    .collect::<io::Result<Vec<_>>>()
-            })))
-        });
-        database.checkpoint(prepared, batches)?;
         Ok(SaveAck {
             revisions,
-            gameplay_revisions,
             checkpoint,
             metadata,
             final_save,
@@ -806,8 +676,7 @@ fn checkpoint(
 fn poll_save(
     mut save: ResMut<SaveState>,
     mut session: Option<ResMut<WorldSession>>,
-    mut chunks: Query<(&VoxelChunk, &mut ChunkVoxels)>,
-    mut stored: ResMut<StoredChunks>,
+    mut terrain: TerrainAcknowledgements<crate::voxel::VoxelState>,
     mut gameplay_columns: Query<&mut crate::block_behavior::containers::GameplayColumn>,
     owners: Res<crate::block_behavior::containers::GameplayColumns>,
     mut pressure: ResMut<StoragePressure>,
@@ -832,26 +701,9 @@ fn poll_save(
             {
                 return;
             }
-            let revisions: HashMap<_, _> = ack.revisions.into_iter().collect();
-            for (chunks, mut voxels) in chunks
-                .contiguous_iter_mut()
-                .expect("Dense saved chunk query")
-            {
-                for (chunk, voxels) in chunks.iter().zip(voxels.bypass_change_detection()) {
-                    if let Some(&revision) = revisions.get(&chunk.position) {
-                        if revision <= voxels.save_revision {
-                            voxels.saved_revision = revision;
-                        }
-                    }
-                }
-            }
-            stored.retain(|position, voxels| {
-                !revisions
-                    .get(position)
-                    .is_some_and(|&r| r == voxels.save_revision)
-            });
+            terrain.acknowledge(ack.revisions.terrain);
             // Resolve acknowledged owners through the index instead of scanning all columns.
-            for (position, revision) in ack.gameplay_revisions {
+            for (position, revision) in ack.revisions.application {
                 if let Some(&entity) = owners.get(&position)
                     && let Ok(mut data) = gameplay_columns.get_mut(entity)
                     && revision <= data.revision
@@ -905,57 +757,6 @@ fn end_session(
             })
             .detach();
     });
-}
-
-/// One gameplay column's share of save pressure, re-measured only when its inputs change.
-#[derive(Component, Default, Clone, Copy)]
-pub(crate) struct ColumnPressure {
-    ready: usize,
-    suspended: usize,
-    retired_bytes: usize,
-    oversized: bool,
-    /// Live mobiles are charged from creature state outside the column's change ticks.
-    mobiles: bool,
-    /// Retired and saved: despawned once no stored terrain or load keeps it alive.
-    dormant: bool,
-}
-
-/// Exact sums of every live [`ColumnPressure`], so per-frame cost follows changes
-/// rather than the number of retained columns.
-#[derive(Resource, Default)]
-pub(crate) struct StoragePressure {
-    ready: usize,
-    suspended: usize,
-    retired_bytes: usize,
-    oversized: usize,
-    stream_revision: u64,
-    /// Re-measured every frame while they charge live mobiles.
-    mobiles: EntityHashSet,
-    pub(crate) dormant: EntityHashSet,
-    /// Columns changed outside change detection since the last measurement.
-    pub(crate) touched: Vec<Entity>,
-}
-impl StoragePressure {
-    fn set(&mut self, entity: Entity, current: &mut ColumnPressure, next: ColumnPressure) {
-        self.ready = self.ready - current.ready + next.ready;
-        self.suspended = self.suspended - current.suspended + next.suspended;
-        self.retired_bytes = self.retired_bytes - current.retired_bytes + next.retired_bytes;
-        self.oversized =
-            self.oversized - usize::from(current.oversized) + usize::from(next.oversized);
-        for (set, was, is) in [
-            (&mut self.mobiles, current.mobiles, next.mobiles),
-            (&mut self.dormant, current.dormant, next.dormant),
-        ] {
-            if was != is {
-                if is {
-                    set.insert(entity);
-                } else {
-                    set.remove(&entity);
-                }
-            }
-        }
-        *current = next;
-    }
 }
 
 type PressureInputs = (
@@ -1066,16 +867,6 @@ fn storage_pressure(
     diagnostics.pending_write_bytes = bytes.saturating_add(save.in_flight_bytes);
     if pressure.oversized > 0 || bytes >= crate::simulation::MAX_RETIRED_BYTES / 2 {
         save.force = true;
-    }
-}
-
-fn forget_pressure(
-    event: On<Remove<ColumnPressure>>,
-    columns: Query<&ColumnPressure>,
-    mut pressure: ResMut<StoragePressure>,
-) {
-    if let Ok(&current) = columns.get(event.entity) {
-        pressure.set(event.entity, &mut { current }, default());
     }
 }
 

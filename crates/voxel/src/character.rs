@@ -199,22 +199,16 @@ pub struct VoxelCharacter;
 pub struct CharacterSystems;
 
 pub trait CharacterPresentation: Component<Mutability = bevy::ecs::component::Mutable> {
-    fn reset(&mut self, body: &CharacterBody, pose: Pose);
-    fn snapshot(&mut self);
-    fn begin(&mut self, state: &CharacterState, velocity: DVec3, flying: bool);
-    fn pose(&mut self, body: &CharacterBody, pose: Pose);
-    fn finish(&mut self, distance: f32);
+    fn reset(&mut self, _body: &CharacterBody, _pose: Pose) {}
+    fn snapshot(&mut self) {}
+    fn begin(&mut self, _state: &CharacterState, _velocity: DVec3, _flying: bool) {}
+    fn pose(&mut self, _body: &CharacterBody, _pose: Pose) {}
+    fn finish(&mut self, _distance: f32) {}
 }
 
 #[derive(Component)]
 pub struct NoPresentation;
-impl CharacterPresentation for NoPresentation {
-    fn reset(&mut self, _: &CharacterBody, _: Pose) {}
-    fn snapshot(&mut self) {}
-    fn begin(&mut self, _: &CharacterState, _: DVec3, _: bool) {}
-    fn pose(&mut self, _: &CharacterBody, _: Pose) {}
-    fn finish(&mut self, _: f32) {}
-}
+impl CharacterPresentation for NoPresentation {}
 
 /// Static profiles let specialized controllers retain constant-folded travel coefficients.
 pub trait MovementRules: Send + Sync + 'static {

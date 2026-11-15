@@ -56,6 +56,7 @@ impl Default for Node {
 
 // An indexed heap holds one frontier entry per node: decreasing a cost never
 // creates stale entries, grows the frontier beyond its bound, or allocates.
+#[derive(Default)]
 struct Search {
     entity: Option<Entity>,
     destination: Vec3,
@@ -68,23 +69,6 @@ struct Search {
     generation: u32,
     terrain: Terrain,
     completed: Option<u16>,
-}
-impl Default for Search {
-    fn default() -> Self {
-        Self {
-            entity: None,
-            destination: Vec3::ZERO,
-            origin: IVec3::ZERO,
-            goal: IVec3::ZERO,
-            capabilities: NavigationCapabilities::default(),
-            nodes: Box::default(),
-            open: Vec::new(),
-            visited: 0,
-            generation: 0,
-            terrain: Terrain::default(),
-            completed: None,
-        }
-    }
 }
 impl Search {
     fn touch(&mut self, index: u16) {
@@ -325,7 +309,7 @@ fn revisions(
 const _: () =
     assert!(SEARCH_SLOTS * (CELLS * std::mem::size_of::<Node>() + MAX_NODES * 2) < 4 * 1024 * 1024);
 
-#[derive(Resource)]
+#[derive(Resource, Default)]
 struct Searches([Search; SEARCH_SLOTS]);
 #[derive(Resource, Default)]
 struct SearchQueue(VecDeque<(Entity, u64)>);
@@ -340,12 +324,6 @@ fn clear_searches(
     *pool = PathPool::default();
     for search in &mut searches.0 {
         *search = Search::default();
-    }
-}
-impl Default for Searches {
-    fn default() -> Self {
-        // Direct node tables and indexed heaps stay below the 4 MiB ceiling.
-        Self(std::array::from_fn(|_| Search::default()))
     }
 }
 #[derive(Resource, Default)]

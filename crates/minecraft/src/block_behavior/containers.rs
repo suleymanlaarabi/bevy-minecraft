@@ -19,7 +19,7 @@ pub(crate) type ContainerInventory = ItemSlots<CONTAINER_SIZE>;
 #[derive(Component)]
 #[require(
     ContainerInventory,
-    super::visuals::InstanceLight,
+    bevy_voxel::render::instances::InstanceLight,
     InventoryStation::Container
 )]
 pub(crate) struct Chest;
@@ -354,7 +354,7 @@ pub(crate) fn loaded(
     catalog: Res<crate::creatures::CreatureCatalog>,
     spawners: Query<&crate::creatures::CreatureSpawner>,
     mut waits: ResMut<crate::simulation::BoundaryWaits>,
-    mut light: super::visuals::LightInvalidation,
+    mut light: bevy_voxel::render::instances::LightInvalidation,
     mut commands: Commands,
 ) {
     let Ok((chunk, owner)) = terrain.get(event.entity) else {
@@ -637,7 +637,7 @@ pub(crate) fn track_inventory_changes(
 pub(crate) fn cleanup_dormant(
     mut commands: Commands,
     columns: Query<(&GameplayColumn, Option<&LoadedTerrain>)>,
-    pressure: Res<crate::world::StoragePressure>,
+    pressure: Res<bevy_voxel::engine::storage::save::StoragePressure>,
     stored: Res<crate::voxel::streaming::StoredChunks>,
     pending: Res<crate::voxel::streaming::PendingChunks>,
     mut index: ResMut<GameplayColumns>,
@@ -669,8 +669,11 @@ pub(crate) struct ColumnSnapshot {
     spawners: Vec<crate::creatures::SavedSpawner>,
     biomes: std::sync::Arc<[u8]>,
 }
-impl ColumnSnapshot {
-    pub fn encode(self) -> io::Result<Vec<u8>> {
+impl bevy_voxel::engine::storage::save::ApplicationSnapshot for ColumnSnapshot {
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+    fn encode(self) -> io::Result<Vec<u8>> {
         let records = self
             .containers
             .iter()
@@ -709,7 +712,7 @@ pub(crate) struct ColumnSnapshots<'w, 's> {
         's,
         (
             &'static crate::dropped_item::DroppedItem,
-            &'static crate::dropped_item::DropMotion,
+            &'static bevy_voxel::physics::BallisticMotion,
             &'static FixedPosition,
         ),
     >,
@@ -717,14 +720,15 @@ pub(crate) struct ColumnSnapshots<'w, 's> {
     creatures: crate::creatures::CreatureSnapshots<'w, 's>,
     index: Res<'w, GameplayColumns>,
 }
-impl ColumnSnapshots<'_, '_> {
-    pub fn dirty_positions(&self) -> impl Iterator<Item = IVec2> + '_ {
+impl bevy_voxel::engine::storage::save::ApplicationSnapshots for ColumnSnapshots<'_, '_> {
+    type Snapshot = ColumnSnapshot;
+    fn dirty_positions(&self) -> impl Iterator<Item = IVec2> + '_ {
         self.columns
             .iter()
             .filter(|(data, ..)| data.revision != data.saved_revision)
             .map(|(data, ..)| data.position)
     }
-    pub fn reservation(&self, position: IVec2) -> Option<(usize, usize)> {
+    fn reservation(&self, position: IVec2) -> Option<(usize, usize)> {
         let (data, blocks, work, mobiles, _) =
             self.columns.get(*self.index.get(&position)?).ok()?;
         if data.revision == data.saved_revision {
@@ -769,20 +773,9 @@ impl ColumnSnapshots<'_, '_> {
         })
     }
     /// Resolve the selected column without rescanning every gameplay owner.
-    pub fn capture_at(&self, position: IVec2) -> Option<ColumnSnapshot> {
-        self.snapshot(self.columns.get(*self.index.get(&position)?).ok()?)
-            .map(|(_, snapshot)| snapshot)
-    }
-    fn snapshot(
-        &self,
-        (data, blocks, simulation, mobiles, biomes): (
-            &GameplayColumn,
-            Option<&BlockEntities>,
-            &crate::simulation::ColumnSimulation,
-            Option<&crate::simulation::SimulatedEntities>,
-            Option<&crate::creatures::spawning::ColumnBiomes>,
-        ),
-    ) -> Option<(IVec2, ColumnSnapshot)> {
+    fn capture_at(&self, position: IVec2) -> Option<ColumnSnapshot> {
+        let (data, blocks, simulation, mobiles, biomes) =
+            self.columns.get(*self.index.get(&position)?).ok()?;
         if data.revision == data.saved_revision {
             return None;
         }
@@ -796,40 +789,37 @@ impl ColumnSnapshots<'_, '_> {
             live.iter()
                 .filter_map(|&entity| self.creatures.capture(entity)),
         );
-        Some((
-            data.position,
-            ColumnSnapshot {
-                containers: blocks
-                    .into_iter()
-                    .flat_map(|blocks| blocks.iter())
-                    .filter_map(|entity| {
-                        self.inventories
-                            .get(entity)
-                            .ok()
-                            .map(|(block, inventory)| (block.position, inventory.clone()))
-                    })
-                    .collect(),
-                creatures,
-                spawners: blocks
-                    .into_iter()
-                    .flat_map(|b| b.iter())
-                    .filter_map(|entity| self.creatures.spawner(entity))
-                    .collect(),
-                biomes: biomes.map(|b| b.0.clone()).unwrap_or_default(),
-                revision: data.revision,
-                simulation: simulation.capture(),
-                drops: data
-                    .application
-                    .drops
-                    .iter()
-                    .cloned()
-                    .chain(
-                        live.iter()
-                            .filter_map(|&entity| self.drops.get(entity).ok())
-                            .map(|(drop, motion, position)| drop.capture(motion, position)),
-                    )
-                    .collect(),
-            },
-        ))
+        Some(ColumnSnapshot {
+            containers: blocks
+                .into_iter()
+                .flat_map(|blocks| blocks.iter())
+                .filter_map(|entity| {
+                    self.inventories
+                        .get(entity)
+                        .ok()
+                        .map(|(block, inventory)| (block.position, inventory.clone()))
+                })
+                .collect(),
+            creatures,
+            spawners: blocks
+                .into_iter()
+                .flat_map(|b| b.iter())
+                .filter_map(|entity| self.creatures.spawner(entity))
+                .collect(),
+            biomes: biomes.map(|b| b.0.clone()).unwrap_or_default(),
+            revision: data.revision,
+            simulation: simulation.capture(),
+            drops: data
+                .application
+                .drops
+                .iter()
+                .cloned()
+                .chain(
+                    live.iter()
+                        .filter_map(|&entity| self.drops.get(entity).ok())
+                        .map(|(drop, motion, position)| drop.capture(motion, position)),
+                )
+                .collect(),
+        })
     }
 }

@@ -1,7 +1,10 @@
 //! Shared checked compression and optional transactional persistence.
 use std::io;
 #[cfg(feature = "sqlite")]
+pub mod save;
+#[cfg(feature = "sqlite")]
 pub mod sqlite;
+pub const MAX_RECORD_BYTES: usize = 8 * 1024 * 1024;
 /// Checksum, size prefix and LZ4 block share one buffer: no separate block
 /// allocation is compressed into and then copied.
 pub fn compress_record(bytes: &[u8]) -> Vec<u8> {
@@ -27,7 +30,7 @@ pub fn decompress_record(bytes: &[u8]) -> io::Result<Vec<u8>> {
     let size = compressed
         .get(..4)
         .ok_or_else(|| io::Error::other("Invalid compressed terrain record"))?;
-    if u32::from_le_bytes(size.try_into().unwrap()) as usize > 8 * 1024 * 1024 {
+    if u32::from_le_bytes(size.try_into().unwrap()) as usize > MAX_RECORD_BYTES {
         return Err(io::Error::other("Invalid compressed terrain record"));
     }
     let record = lz4_flex::decompress_size_prepended(compressed).map_err(io::Error::other)?;

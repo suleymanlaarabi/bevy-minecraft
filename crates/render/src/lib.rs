@@ -144,3 +144,7 @@ fn reset(
     *arrivals = Default::default();
     *liquid = Default::default();
 }
+
+pub mod icons;
+pub mod instances;
+pub mod sprites;

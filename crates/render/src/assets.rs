@@ -79,6 +79,38 @@ pub struct MaterialTextures {
     pub opaque: ModelBlend,
 }
 impl RenderAssetStores<'_> {
+    /// Update shared textures while retaining per-instance material overrides.
+    pub fn apply(&mut self, assets: &VoxelAssets, textures: MaterialTextures) {
+        let MaterialTextures {
+            blocks,
+            faces,
+            model_faces,
+            animations,
+            special,
+            water,
+            opaque,
+        } = textures;
+        if let Some(mut material) = self.terrain.get_mut(&assets.terrain) {
+            material.blocks = blocks.clone();
+            material.faces = faces.clone();
+            material.animations = animations.clone();
+        }
+        if let Some(mut material) = self.cutout.get_mut(&assets.cutout) {
+            material.blocks = blocks.clone();
+            material.faces = faces.clone();
+            material.animations = animations.clone();
+        }
+        for (_, material) in self.models.iter_mut() {
+            material.blocks = blocks.clone();
+            material.faces = model_faces.clone();
+            material.animations = animations.clone();
+            material.special = special.clone();
+            material.set_water(&water);
+        }
+        if let Some(mut material) = self.models.get_mut(&assets.models) {
+            material.blend = opaque;
+        }
+    }
     pub fn prepare(&mut self, textures: MaterialTextures, fog: &SkyPalette) -> VoxelAssets {
         let MaterialTextures {
             blocks,

@@ -342,5 +342,5 @@ fn working_light(layer: &Layer<u8>) -> crate::chunk::ChunkLight {
     }
 }
 
-pub const MAX_RECORD_BYTES: usize = 8 * 1024 * 1024;
+pub use hollow_engine::storage::MAX_RECORD_BYTES;
 pub use hollow_engine::storage::{compress_record, decompress_record};

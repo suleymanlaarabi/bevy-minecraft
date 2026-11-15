@@ -120,30 +120,14 @@ impl CatalogRenderSource {
         let mut appearances = HashMap::<[u16; 6], u16>::new();
         for raw in 0..content.state_count() {
             let definition = content.state(StateId(raw as u32));
-            let mut flags = 0;
-            if definition.air {
-                flags |= cell::AIR;
-            }
-            if definition.full_cube && definition.opacity == 15 {
-                flags |= cell::OCCLUDES;
-            }
-            if definition.full_cube {
-                flags |= cell::FLUID_OCCLUDES;
-            }
-            if definition.occludes
-                && !definition.full_cube
-                && !content.shapes(definition.selection).is_empty()
-            {
-                flags |= cell::FLUID_OCCLUDER;
-            }
-            let mut appearance = 0;
+            let mut info = CellInfo::from_definition(&content, &fluids, definition);
             if let Some(visual) = content.visual(definition.block) {
                 let mut slots = [0; 6];
                 for (slot, resource) in slots.iter_mut().zip(visual.faces) {
                     *slot = layer(resource)?;
                 }
                 if definition.full_cube && !visual.translucent {
-                    appearance = if let Some(&appearance) = appearances.get(&slots) {
+                    info.appearance = if let Some(&appearance) = appearances.get(&slots) {
                         appearance
                     } else {
                         let id = faces.len() / 6;
@@ -156,36 +140,23 @@ impl CatalogRenderSource {
                         appearances.insert(slots, id as u16);
                         id as u16
                     };
-                    flags |= if slots.iter().all(|&slot| opaque[slot as usize]) {
+                    info.flags |= if slots.iter().all(|&slot| opaque[slot as usize]) {
                         cell::CUBE
                     } else {
                         cell::CUTOUT
                     };
                 } else {
-                    flags |= cell::MODEL;
+                    info.flags |= cell::MODEL;
                 }
             }
             let fluid = definition.fluid;
-            let visible = fluid.id != FluidId::NONE && fluids.profile(fluid.id).render.is_some();
-            if visible {
-                let render = fluids.profile(fluid.id).render.unwrap();
+            if fluid.id != FluidId::NONE
+                && let Some(render) = fluids.profile(fluid.id).render
+            {
                 layer(render.still)?;
                 layer(render.flowing)?;
-                if fluid.id.0 < 1 << 14 && render.ocean_surface && render.translucent {
-                    flags |= cell::OCEAN_SURFACE;
-                }
             }
-            cells[raw] = CellInfo {
-                appearance,
-                flags,
-                fluid: if visible {
-                    u32::from(fluid.id.0) << 8
-                        | u32::from(fluid.amount)
-                        | u32::from(fluid.falling) << 24
-                } else {
-                    0
-                },
-            };
+            cells[raw] = info;
         }
         let faces = stores
             .buffers
@@ -268,22 +239,18 @@ impl RenderSource for CatalogRenderSource {
         for bounds in self.content().shapes(definition.selection) {
             for face in bounds.faces() {
                 visit(&ModelQuad {
-                    positions: face.positions.map(|position| position.to_array()),
-                    normal: face.normal.to_array(),
-                    uv: [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
-                    texture: self
-                        .texture_slot(visual.faces[face.axis * 2 + usize::from(face.positive)])
-                        .expect("Prepared visual"),
-                    tinted: false,
                     cull: if definition.full_cube {
                         face.normal.as_ivec3().to_array()
                     } else {
                         [0; 3]
                     },
                     translucent: visual.translucent,
-                    effect: 0,
                     light_emission: definition.luminance,
-                    shade_up: false,
+                    ..ModelQuad::face(
+                        face,
+                        self.texture_slot(visual.faces[face.axis * 2 + usize::from(face.positive)])
+                            .expect("Prepared visual"),
+                    )
                 });
             }
         }

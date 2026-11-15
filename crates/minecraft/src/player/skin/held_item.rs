@@ -6,11 +6,10 @@ use crate::{
     voxel::{VoxelAssets, render::models},
 };
 use bevy::{
-    asset::{AssetLoadFailedEvent, AssetLoader, LoadContext, RenderAssetUsages, io::Reader},
+    asset::{AssetLoadFailedEvent, AssetLoader, LoadContext, io::Reader},
     camera::visibility::RenderLayers,
     ecs::storage::SparseSet,
     light::{NotShadowCaster, NotShadowReceiver},
-    render::render_resource::PrimitiveTopology,
 };
 use bevy_voxel::render::{material::ModelMaterial, model_mesh};
 use serde::Deserialize;
@@ -426,7 +425,13 @@ impl HeldItemAssets {
             } else {
                 icons.item_uv(item).unwrap_or((Vec2::ZERO, Vec2::ONE))
             };
-            let mesh = if let Some(mesh) = sprite_mesh(image, offset, scale) {
+            let mesh = if let Some(mesh) = bevy_voxel::render::sprites::extrude_sprite(
+                image,
+                offset,
+                scale,
+                1. / 32.,
+                Vec2::new(0.2, 0.15),
+            ) {
                 mesh
             } else {
                 if !cached.failed {
@@ -437,9 +442,15 @@ impl HeldItemAssets {
                     );
                 }
                 source = icons.missing_image().clone();
-                let mesh = images
-                    .get(&source)
-                    .and_then(|image| sprite_mesh(image, Vec2::ZERO, Vec2::ONE))?;
+                let mesh = images.get(&source).and_then(|image| {
+                    bevy_voxel::render::sprites::extrude_sprite(
+                        image,
+                        Vec2::ZERO,
+                        Vec2::ONE,
+                        1. / 32.,
+                        Vec2::new(0.2, 0.15),
+                    )
+                })?;
                 mesh
             };
             ItemVisual {
@@ -478,131 +489,4 @@ pub(super) fn pose(progress: f32, equipped: f32, display: &Transform) -> Transfo
         * Mat4::from_rotation_x((-80. * strike).to_radians())
         * Mat4::from_rotation_y(-45_f32.to_radians());
     Transform::from_matrix(motion * display.to_matrix())
-}
-
-/// Front/back faces and silhouette edges; never extrude transparent pixels.
-fn sprite_mesh(image: &Image, offset: Vec2, scale: Vec2) -> Option<Mesh> {
-    image.data.as_ref()?;
-    let size = (image.size().as_vec2() * scale).as_uvec2();
-    if size.min_element() == 0 {
-        return None;
-    }
-    let origin = (image.size().as_vec2() * offset).as_uvec2();
-    let mut opaque = Vec::with_capacity((size.x * size.y) as usize);
-    for y in 0..size.y {
-        for x in 0..size.x {
-            opaque.push(image.get_color_at(origin.x + x, origin.y + y).ok()?.alpha() >= 0.5);
-        }
-    }
-    let solid = |x: i32, y: i32| {
-        x >= 0
-            && y >= 0
-            && x < size.x as i32
-            && y < size.y as i32
-            && opaque[(y as u32 * size.x + x as u32) as usize]
-    };
-    let mut positions = Vec::new();
-    let mut normals = Vec::new();
-    let mut uvs = Vec::new();
-    let mut colors = Vec::new();
-    let mut indices = Vec::new();
-    let mut quad = |mut points: [Vec3; 4], normal: Vec3, mut uv: [Vec2; 4]| {
-        if (points[1] - points[0])
-            .cross(points[2] - points[0])
-            .dot(normal)
-            < 0.
-        {
-            points.reverse();
-            uv.reverse();
-        }
-        let first = positions.len() as u32;
-        positions.extend(points.map(|point| point.to_array()));
-        normals.extend([normal.to_array(); 4]);
-        uvs.extend(uv.map(|uv| (offset + uv * scale).to_array()));
-        let shade = 1. - 0.2 * normal.x.abs() - 0.15 * normal.y.abs();
-        colors.extend([[shade, shade, shade, 1.]; 4]);
-        indices.extend([first, first + 1, first + 2, first, first + 2, first + 3]);
-    };
-    let depth = 1. / 32.;
-    for (z, normal) in [(depth, Vec3::Z), (-depth, Vec3::NEG_Z)] {
-        quad(
-            [
-                Vec3::new(-0.5, -0.5, z),
-                Vec3::new(0.5, -0.5, z),
-                Vec3::new(0.5, 0.5, z),
-                Vec3::new(-0.5, 0.5, z),
-            ],
-            normal,
-            [Vec2::new(0., 1.), Vec2::ONE, Vec2::X, Vec2::ZERO],
-        );
-    }
-    for y in 0..size.y as i32 {
-        for x in 0..size.x as i32 {
-            if !solid(x, y) {
-                continue;
-            }
-            let left = x as f32 / size.x as f32 - 0.5;
-            let right = (x + 1) as f32 / size.x as f32 - 0.5;
-            let top = 0.5 - y as f32 / size.y as f32;
-            let bottom = 0.5 - (y + 1) as f32 / size.y as f32;
-            let uv = [Vec2::new(
-                (x as f32 + 0.5) / size.x as f32,
-                (y as f32 + 0.5) / size.y as f32,
-            ); 4];
-            for (neighbor, normal, a, b) in [
-                (
-                    (x - 1, y),
-                    Vec3::NEG_X,
-                    Vec2::new(left, bottom),
-                    Vec2::new(left, top),
-                ),
-                (
-                    (x + 1, y),
-                    Vec3::X,
-                    Vec2::new(right, bottom),
-                    Vec2::new(right, top),
-                ),
-                (
-                    (x, y - 1),
-                    Vec3::Y,
-                    Vec2::new(left, top),
-                    Vec2::new(right, top),
-                ),
-                (
-                    (x, y + 1),
-                    Vec3::NEG_Y,
-                    Vec2::new(left, bottom),
-                    Vec2::new(right, bottom),
-                ),
-            ] {
-                if !solid(neighbor.0, neighbor.1) {
-                    quad(
-                        [
-                            a.extend(-depth),
-                            b.extend(-depth),
-                            b.extend(depth),
-                            a.extend(depth),
-                        ],
-                        normal,
-                        uv,
-                    );
-                }
-            }
-        }
-    }
-    let vertex_count = positions.len();
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD,
-    )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
-    .with_inserted_indices(model_mesh::compact_indices(indices, vertex_count));
-    mesh.final_aabb = Some(bevy::shape::Aabb3d::from_min_max(
-        Vec3::new(-0.5, -0.5, -depth),
-        Vec3::new(0.5, 0.5, depth),
-    ));
-    Some(mesh)
 }

@@ -20,6 +20,24 @@ pub struct ModelQuad {
     pub shade_up: bool,
 }
 
+impl ModelQuad {
+    /// Canonical full-face UVs; importers override only their material and culling policy.
+    pub fn face(face: hollow_core::shape::CuboidFace, texture: u32) -> Self {
+        Self {
+            positions: face.positions.map(|position| position.to_array()),
+            normal: face.normal.to_array(),
+            uv: [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
+            texture,
+            tinted: false,
+            cull: [0; 3],
+            translucent: false,
+            effect: 0,
+            light_emission: 0,
+            shade_up: false,
+        }
+    }
+}
+
 fn model_positions<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<[[f32; 3]; 4], D::Error> {
@@ -75,3 +93,48 @@ pub struct CellInfo {
 }
 
 const _: () = assert!(std::mem::size_of::<CellInfo>() == 8);
+
+impl CellInfo {
+    /// Classify shared shape, lighting and fluid capabilities before visual-specific flags.
+    pub fn from_definition(
+        content: &hollow_core::content::ContentCatalog,
+        fluids: &hollow_engine::fluids::FluidCatalog,
+        definition: &hollow_core::content::StateDefinition,
+    ) -> Self {
+        let mut flags = 0;
+        if definition.air {
+            flags |= cell::AIR;
+        }
+        if definition.full_cube {
+            // Full cubes bound fluids independently of texture transparency.
+            // Cutouts still transmit light, while dry and waterlogged full cubes
+            // must cover adjacent fluid surfaces.
+            flags |= cell::FLUID_OCCLUDES;
+            if definition.opacity == 15 {
+                flags |= cell::OCCLUDES;
+            }
+        } else if definition.occludes && !content.shapes(definition.selection).is_empty() {
+            flags |= cell::FLUID_OCCLUDER;
+        }
+        let fluid = definition.fluid;
+        let render = (fluid.id != hollow_core::FluidId::NONE)
+            .then(|| fluids.profile(fluid.id).render)
+            .flatten();
+        if render.is_some_and(|render| {
+            fluid.id.0 < 1 << 14 && render.ocean_surface && render.translucent
+        }) {
+            flags |= cell::OCEAN_SURFACE;
+        }
+        Self {
+            appearance: 0,
+            flags,
+            fluid: if render.is_some() {
+                u32::from(fluid.id.0) << 8
+                    | u32::from(fluid.amount)
+                    | u32::from(fluid.falling) << 24
+            } else {
+                0
+            },
+        }
+    }
+}

@@ -2,21 +2,26 @@
 use super::{
     catalog::{profile, state_behavior},
     containers::{
-        BlockEntities, BlockEntity, BlockOf, BlockState, Dormant, GameplayColumns, LoadedTerrain,
-        PairedWith,
+        BlockEntities, BlockEntity, BlockOf, BlockState, Dormant, LoadedTerrain, PairedWith,
     },
 };
 use crate::inventory::StationViewers;
 use crate::voxel::{VoxelState, VoxelWorld, render::models};
-use bevy::ecs::{entity::EntityHashSet, system::SystemParam};
+use bevy::ecs::entity::EntityHashSet;
 use bevy::{mesh::MeshTag, prelude::*};
 use bevy_voxel::features::articulation::{
     Easing, JointAnimation, JointClip, JointMotion, SetJointTarget,
 };
 use bevy_voxel::render::{material::ModelMaterial, model_mesh::ModelGeometry, models::ModelQuad};
 
+use bevy_voxel::render::instances::{self, InstanceOf, InstanceView, Instances, instance_light};
+impl InstanceView for ChestView {
+    fn meshes(&self, root: Entity) -> impl IntoIterator<Item = Entity> {
+        [root, self.lid]
+    }
+}
+
 const VIEW_BUDGET: usize = 64;
-const LIGHT_BUDGET: usize = 256;
 #[derive(Resource, Default)]
 pub(crate) struct ChestMeshes {
     meshes: Option<[[Handle<Mesh>; 2]; 3]>,
@@ -30,69 +35,22 @@ struct ChestView {
     state: VoxelState,
 }
 #[derive(Component)]
-#[relationship(relationship_target = BlockViews)]
-struct ViewOf(pub Entity);
-#[derive(Component, Default, Deref)]
-#[relationship_target(relationship = ViewOf, linked_spawn)]
-struct BlockViews(Vec<Entity>);
-#[derive(Component)]
 #[component(storage = "SparseSet", on_add = bevy_voxel::engine::work::enqueue::<Self>)]
 pub(crate) struct PrepareView;
-#[derive(Component, Default)]
-#[component(storage = "SparseSet", on_add = bevy_voxel::engine::work::enqueue::<Self>)]
-struct Relight {
-    offset: usize,
-    rerun: bool,
-}
 type ViewQueue = bevy_voxel::engine::work::EntityWork<PrepareView>;
-type LightQueue = bevy_voxel::engine::work::EntityWork<Relight>;
-#[derive(Component, Default)]
-pub(crate) struct InstanceLight(u32);
-
-#[derive(SystemParam)]
-pub(crate) struct LightInvalidation<'w, 's> {
-    columns: Res<'w, GameplayColumns>,
-    progress: Query<'w, 's, &'static mut Relight>,
-    commands: Commands<'w, 's>,
-}
-impl LightInvalidation<'_, '_> {
-    fn column(&mut self, position: IVec2) {
-        let Some(&entity) = self.columns.get(&position) else {
-            return;
-        };
-        if let Ok(mut progress) = self.progress.get_mut(entity) {
-            if !progress.rerun {
-                progress.rerun = true;
-            }
-        } else {
-            // Repeated invalidations before a flush must not replace active progress.
-            self.commands
-                .entity(entity)
-                .try_insert_if_new(Relight::default());
-        }
-    }
-    pub(crate) fn neighbors(&mut self, position: IVec2) {
-        for offset in [IVec2::ZERO, IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y] {
-            self.column(position + offset);
-        }
-    }
-}
 pub(crate) fn register(app: &mut App) {
+    instances::register::<VoxelState>(app);
     app.init_resource::<ViewQueue>()
-        .init_resource::<LightQueue>()
         .add_systems(
             OnExit(crate::game::GameState::Game),
             clear_updates.after(crate::voxel::streaming::reset_voxel_world),
         )
         .add_observer(render_requested)
-        .add_observer(changed)
-        .add_observer(light_changed)
-        .add_observer(chunk_departed)
         .add_systems(
             PostUpdate,
             (
                 prepare_views,
-                update_lighting.after(prepare_views),
+                instances::update_lighting::<VoxelState, ChestView, 256>.after(prepare_views),
                 update_open_lids
                     .after(prepare_views)
                     .before(bevy_voxel::features::articulation::ArticulationSystems),
@@ -102,50 +60,12 @@ pub(crate) fn register(app: &mut App) {
                 .run_if(crate::world::streaming),
         );
 }
-fn changed(event: On<crate::voxel::edits::BlockChanged>, mut invalidation: LightInvalidation) {
-    let positions = [IVec3::ZERO, IVec3::X, IVec3::NEG_X, IVec3::Z, IVec3::NEG_Z]
-        .map(|delta| crate::voxel::split_world_position(event.position + delta).0);
-    for (index, &position) in positions.iter().enumerate() {
-        if !positions[..index].contains(&position) {
-            invalidation.column(position);
-        }
-    }
-}
-fn chunk_departed(
-    event: On<Despawn<crate::voxel::VoxelChunk>>,
-    chunks: Query<&crate::voxel::VoxelChunk>,
-    mut invalidation: LightInvalidation,
-) {
-    if let Ok(chunk) = chunks.get(event.entity) {
-        invalidation.neighbors(chunk.position);
-    }
-}
-fn light_changed(
-    event: On<bevy_voxel::engine::lighting::ChunkLightChanged>,
-    chunks: Query<&crate::voxel::VoxelChunk>,
-    mut invalidation: LightInvalidation,
-) {
-    if let Ok(chunk) = chunks.get(event.0) {
-        invalidation.neighbors(chunk.position);
-    }
-}
 fn box_geometry(lo: Vec3, hi: Vec3, offset: Vec3) -> ModelGeometry {
     let mut result = ModelGeometry::default();
     let kind = crate::voxel::VoxelKind::from_key("chest").expect("chest registry");
     for face in (bevy_voxel::core::shape::BlockBox { min: lo, max: hi }).faces() {
         result.quad(
-            &ModelQuad {
-                positions: face.positions.map(|position| position.to_array()),
-                normal: face.normal.to_array(),
-                uv: [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
-                texture: models::fallback_slot(kind, face.axis, face.positive),
-                tinted: false,
-                cull: [0; 3],
-                translucent: false,
-                effect: 0,
-                light_emission: 0,
-                shade_up: false,
-            },
+            &ModelQuad::face(face, models::fallback_slot(kind, face.axis, face.positive)),
             offset,
             [60; 4],
             0,
@@ -202,29 +122,11 @@ impl ChestMeshes {
         }));
     }
 }
-fn light(world: &VoxelWorld, position: IVec3) -> u32 {
-    let mut sky = 0;
-    let mut block = 0;
-    for delta in [
-        IVec3::ZERO,
-        IVec3::Y,
-        IVec3::X,
-        IVec3::NEG_X,
-        IVec3::Z,
-        IVec3::NEG_Z,
-    ] {
-        if let Some(value) = world.light(position + delta) {
-            sky = sky.max(value >> 4);
-            block = block.max(value & 15);
-        }
-    }
-    u32::from((sky << 4) | block)
-}
 fn prepare_views(
     mut commands: Commands,
     mut queue: ResMut<ViewQueue>,
     blocks: Query<
-        (&BlockEntity, &BlockOf, &BlockState, Option<&BlockViews>),
+        (&BlockEntity, &BlockOf, &BlockState, Option<&Instances>),
         (With<PrepareView>, Without<Dormant>),
     >,
     columns: Query<&LoadedTerrain>,
@@ -265,7 +167,7 @@ fn prepare_views(
         }) {
             continue;
         }
-        commands.entity(entity).despawn_related::<BlockViews>();
+        commands.entity(entity).despawn_related::<Instances>();
         cache.prepare(&mut meshes, &mut materials, &assets, &mut clips);
         let info = state_behavior(state.0);
         let half = info.chest_half as usize;
@@ -277,10 +179,10 @@ fn prepare_views(
         let local = crate::voxel::split_world_position(block.position)
             .1
             .as_vec3();
-        let tag = MeshTag::new(light(&world, block.position));
+        let tag = MeshTag::new(instance_light(&world, block.position));
         let root = commands
             .spawn((
-                ViewOf(entity),
+                InstanceOf(entity),
                 ChildOf(terrain),
                 Mesh3d(meshes[0].clone()),
                 MeshMaterial3d(cache.material.clone()),
@@ -307,70 +209,13 @@ fn prepare_views(
         });
     }
 }
-fn update_lighting(
-    mut commands: Commands,
-    mut queue: ResMut<LightQueue>,
-    mut samples: Local<EntityHashSet>,
-    mut columns: Query<(Option<&BlockEntities>, &mut Relight)>,
-    mut blocks: Query<(&BlockEntity, &BlockViews, &mut InstanceLight), Without<Dormant>>,
-    views: Query<&ChestView>,
-    mut tags: Query<&mut MeshTag>,
-    world: VoxelWorld,
-) {
-    samples.clear();
-    for _ in 0..LIGHT_BUDGET {
-        let Some(column) = queue.pop_front() else {
-            break;
-        };
-        let Ok((blocks_in_column, mut progress)) = columns.get_mut(column) else {
-            continue;
-        };
-        if let Some(entity) = blocks_in_column
-            .and_then(|blocks| blocks.get(progress.offset))
-            .copied()
-        {
-            samples.insert(entity);
-        }
-        progress.offset += 1;
-        if progress.offset >= blocks_in_column.map_or(0, |blocks| blocks.len()) {
-            if !progress.rerun {
-                commands.entity(column).remove::<Relight>();
-                continue;
-            }
-            progress.offset = 0;
-            progress.rerun = false;
-        }
-        queue.push_back(column);
-    }
-    blocks
-        .par_iter_many_unique_mut(&*samples)
-        .for_each(|result| {
-            if let Ok((block, _, mut sample)) = result {
-                sample.0 = light(&world, block.position);
-            }
-        });
-    for &entity in samples.iter() {
-        let Ok((_, block_views, sample)) = blocks.get(entity) else {
-            continue;
-        };
-        for root in block_views.iter() {
-            if let Ok(view) = views.get(root) {
-                for target in [root, view.lid] {
-                    if let Ok(mut tag) = tags.get_mut(target) {
-                        tag.set_if_neq(MeshTag::new(sample.0));
-                    }
-                }
-            }
-        }
-    }
-}
 fn update_open_lids(
     mut commands: Commands,
     blocks: Query<
         (
             Entity,
             &BlockEntity,
-            Ref<BlockViews>,
+            Ref<Instances>,
             Option<Ref<PairedWith>>,
         ),
         Without<Dormant>,
@@ -424,9 +269,8 @@ fn update_open_lids(
         }
     }
 }
-fn clear_updates(mut views: ResMut<ViewQueue>, mut lights: ResMut<LightQueue>) {
+fn clear_updates(mut views: ResMut<ViewQueue>) {
     views.clear();
-    lights.clear();
 }
 
 fn render_requested(

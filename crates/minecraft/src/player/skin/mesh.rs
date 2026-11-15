@@ -1,70 +1,54 @@
 //! Minecraft's unfolded cuboid UV layout, shared by skins and armor.
-use bevy::{
-    asset::RenderAssetUsages, mesh::Indices, prelude::*, render::render_resource::PrimitiveTopology,
-};
+use bevy::{asset::RenderAssetUsages, mesh::Indices, prelude::*};
 
 pub(crate) const PIXEL: f32 = 1.8 / 32.0;
 
 pub(crate) fn cuboid(size: Vec3, center: Vec3, uv: Vec2, texture: Vec2, inflate: f32) -> Mesh {
     let half = size * 0.5 + Vec3::splat(inflate);
-    let [x, y, z] = half.to_array();
     let [w, h, d] = size.to_array();
-    let mut positions = Vec::with_capacity(24);
-    let mut normals = Vec::with_capacity(24);
-    let mut uvs = Vec::with_capacity(24);
-    let mut indices = Vec::with_capacity(36);
-    let faces = [
-        (
-            [[-x, -y, z], [x, -y, z], [x, y, z], [-x, y, z]],
-            Vec3::Z,
-            [d, d, w, h],
-        ),
-        (
-            [[x, -y, -z], [-x, -y, -z], [-x, y, -z], [x, y, -z]],
-            Vec3::NEG_Z,
-            [d + w + d, d, w, h],
-        ),
-        (
-            [[-x, -y, -z], [-x, -y, z], [-x, y, z], [-x, y, -z]],
-            Vec3::NEG_X,
-            [0., d, d, h],
-        ),
-        (
-            [[x, -y, z], [x, -y, -z], [x, y, -z], [x, y, z]],
-            Vec3::X,
-            [d + w, d, d, h],
-        ),
-        (
-            [[-x, y, z], [x, y, z], [x, y, -z], [-x, y, -z]],
-            Vec3::Y,
-            [d, 0., w, d],
-        ),
-        (
-            [[-x, -y, -z], [x, -y, -z], [x, -y, z], [-x, -y, z]],
-            Vec3::NEG_Y,
-            [d + w, 0., w, d],
-        ),
-    ];
-    for (vertices, normal, [u, v, uw, vh]) in faces {
-        let first = positions.len() as u32;
-        positions.extend(vertices.map(|p| ((Vec3::from_array(p) + center) * PIXEL).to_array()));
-        normals.extend([normal.to_array(); 4]);
-        uvs.extend(
-            [[u, v + vh], [u + uw, v + vh], [u + uw, v], [u, v]]
-                .map(|p| ((Vec2::from_array(p) + uv) / texture).to_array()),
-        );
-        indices.extend([first, first + 1, first + 2, first, first + 2, first + 3]);
+    let mut mesh = Cuboid { half_size: half }.mesh().build();
+    mesh.asset_usage = RenderAssetUsages::RENDER_WORLD;
+    if let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+    {
+        for p in positions {
+            *p = ((Vec3::from_array(*p) + center) * PIXEL).to_array();
+        }
     }
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD,
-    )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-    .with_inserted_indices(Indices::U16(
-        indices.into_iter().map(|index| index as u16).collect(),
-    ));
+    // Bevy orders faces +Z, -Z, +X, -X, +Y, -Y. Adapt its canonical
+    // coordinates to Minecraft's unfolded skin layout without rebuilding geometry.
+    let rectangles = [
+        [d, d, w, h],
+        [d + w + d, d, w, h],
+        [d + w, d, d, h],
+        [0., d, d, h],
+        [d, 0., w, d],
+        [d + w, 0., w, d],
+    ];
+    if let Some(bevy::mesh::VertexAttributeValues::Float32x2(uvs)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_UV_0)
+    {
+        for (face, vertices) in uvs.chunks_exact_mut(4).enumerate() {
+            let [u, v, width, height] = rectangles[face];
+            for vertex in vertices {
+                let [x, y] = *vertex;
+                let local = match face {
+                    0 => Vec2::new(x, 1. - y),
+                    2 => Vec2::new(1. - y, 1. - x),
+                    3 => Vec2::new(1. - y, x),
+                    5 => Vec2::new(1. - x, 1. - y),
+                    _ => Vec2::new(x, y),
+                };
+                *vertex = ((Vec2::new(u, v) + local * Vec2::new(width, height) + uv) / texture)
+                    .to_array();
+            }
+        }
+    }
+    if let Some(Indices::U32(indices)) = mesh.remove_indices() {
+        mesh.insert_indices(Indices::U16(
+            indices.into_iter().map(|i| i as u16).collect(),
+        ));
+    }
     mesh.final_aabb = Some(Aabb3d::from_min_max(
         (center - half) * PIXEL,
         (center + half) * PIXEL,

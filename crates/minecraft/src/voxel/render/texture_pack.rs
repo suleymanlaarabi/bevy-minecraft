@@ -399,8 +399,13 @@ impl TexturePack {
         table.extend(super::models::TINTS.map(|[r, g, b]| [r, g, b, 0.0]));
         table
     }
-    pub(crate) fn model_face_buffer(&self) -> ShaderBuffer {
-        ShaderBuffer::new(self.model_face_table(), RenderAssetUsages::RENDER_WORLD)
+    pub(crate) fn face_buffers(&self) -> (ShaderBuffer, ShaderBuffer) {
+        let model = self.model_face_table();
+        let cube = self.cube_face_table(&model);
+        (
+            ShaderBuffer::new(cube, RenderAssetUsages::RENDER_WORLD),
+            ShaderBuffer::new(model, RenderAssetUsages::RENDER_WORLD),
+        )
     }
 
     /// Both material families share one immutable animation descriptor buffer.
@@ -421,8 +426,7 @@ impl TexturePack {
 
     /// `(tint, layer | uv transform << 12)` of each greedy cube appearance, six
     /// faces each indexed by direction, as read by `voxel_material.wesl`.
-    pub(crate) fn cube_face_table(&self) -> Vec<[f32; 4]> {
-        let model = self.model_face_table();
+    fn cube_face_table(&self, model: &[[f32; 4]]) -> Vec<[f32; 4]> {
         let mut table: Vec<[f32; 4]> = super::models::appearances()
             .iter()
             .flat_map(|appearance| {
@@ -448,10 +452,6 @@ impl TexturePack {
             table.resize(6, [0.0; 4]);
         }
         table
-    }
-
-    pub(crate) fn cube_face_buffer(&self) -> ShaderBuffer {
-        ShaderBuffer::new(self.cube_face_table(), RenderAssetUsages::RENDER_WORLD)
     }
 }
 

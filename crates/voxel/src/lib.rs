@@ -8,6 +8,7 @@ pub use hollow_features as features;
 pub use hollow_render as render;
 pub mod character;
 pub mod navigation;
+pub mod physics;
 pub mod spatial;
 
 use bevy::prelude::*;

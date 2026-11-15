@@ -144,7 +144,7 @@ fn unload(
     )>,
     drops: Query<(
         &crate::dropped_item::DroppedItem,
-        &crate::dropped_item::DropMotion,
+        &bevy_voxel::physics::BallisticMotion,
         &FixedPosition,
     )>,
     creatures: crate::creatures::CreatureSnapshots,

@@ -1,19 +1,17 @@
-use bevy_voxel::character::{Aabb, CharacterSystems, Terrain};
+use bevy::math::DVec3;
 use bevy_voxel::features::motion::FixedPosition;
+use bevy_voxel::{
+    character::CharacterSystems,
+    physics::{BallisticMotion, simulate_bodies},
+};
 use std::{collections::HashMap, time::Duration};
 
-use bevy::{
-    ecs::{batching::BatchingStrategy, storage::SparseSet},
-    light::NotShadowCaster,
-    math::DVec3,
-    prelude::*,
-    utils::Parallel,
-};
+use bevy::{ecs::storage::SparseSet, light::NotShadowCaster, prelude::*};
 
 use crate::{
     game::GameState,
     inventory::{ItemKind, ItemStack, PlayerInventory},
-    voxel::{VoxelAssets, VoxelWorld, chunk_at, render::models},
+    voxel::{VoxelAssets, chunk_at, render::models},
 };
 
 const PICKUP_DELAY: Duration = Duration::from_millis(350);
@@ -79,85 +77,17 @@ pub struct DroppedItem {
     pickup_remaining: Duration,
 }
 
-/// Fixed-step state; sleeping items only check the revisions of touching columns.
-#[derive(Component)]
-#[require(FixedPosition)]
-pub(crate) struct DropMotion {
-    velocity: Vec3,
-    support: Option<[Option<(Entity, u64)>; 4]>,
-}
-
-impl DropMotion {
-    fn bounds(position: DVec3) -> Aabb {
-        let half = DVec3::splat(DROP_COLLIDER_SIZE as f64 * 0.5);
-        Aabb {
-            min: position - half,
-            max: position + half,
-        }
-    }
-
-    fn support_revisions(position: DVec3, world: &VoxelWorld) -> [Option<(Entity, u64)>; 4] {
-        let bounds = Self::bounds(position);
-        world.region_revisions(bounds.min.as_vec3(), bounds.max.as_vec3())
-    }
-
-    fn step(
-        &mut self,
-        position: &mut Mut<FixedPosition>,
-        world: &VoxelWorld,
-        terrain: &mut Terrain,
-        dt: f32,
-        damping: f32,
-    ) {
-        position.bypass_change_detection().previous = position.current;
-        if self
-            .support
-            .is_some_and(|support| support == Self::support_revisions(position.current, world))
-        {
-            return;
-        }
-        if !world.collision_ready(position.current.as_vec3()) {
-            return;
-        }
-        self.support = None;
-        self.velocity.y -= 9.81 * dt;
-        self.velocity *= damping;
-        let bounds = Self::bounds(position.current);
-        let delta = (self.velocity * dt).as_dvec3();
-        terrain.gather_collisions(world, bounds.expanded_towards(delta));
-        let correction = terrain.depenetrate(bounds);
-        let corrected = position.current + correction;
-        let moved = terrain.collide_box(Self::bounds(corrected), delta);
-        let next = corrected + moved;
-        if position.current != next {
-            position.current = next;
-        }
-        let blocked = (moved - delta).abs().cmpgt(DVec3::splat(1e-7));
-        if blocked.x {
-            self.velocity.x = 0.0;
-        }
-        if blocked.z {
-            self.velocity.z = 0.0;
-        }
-        if blocked.y {
-            self.velocity.y = if delta.y < 0.0 {
-                -self.velocity.y * 0.05
-            } else {
-                0.0
-            };
-            if self.velocity.y < 0.15 {
-                self.velocity.y = 0.0;
-            }
-        }
-        if blocked.y && delta.y < 0.0 {
-            self.velocity.x *= 0.7;
-            self.velocity.z *= 0.7;
-            if self.velocity.length_squared() < 0.0025 {
-                self.velocity = Vec3::ZERO;
-                self.support = Some(Self::support_revisions(position.current, world));
-            }
-        }
-    }
+struct DropPhysics;
+impl bevy_voxel::physics::BallisticRules for DropPhysics {
+    const PROFILE: bevy_voxel::physics::BallisticProfile = bevy_voxel::physics::BallisticProfile {
+        half_extent: bevy::math::DVec3::splat(DROP_COLLIDER_SIZE as f64 * 0.5),
+        gravity: 9.81,
+        air_drag: 0.3,
+        restitution: 0.05,
+        minimum_bounce: 0.15,
+        ground_drag: 0.7,
+        sleep_speed_squared: 0.0025,
+    };
 }
 
 #[derive(Component)]
@@ -185,7 +115,11 @@ impl Plugin for DroppedItemPlugin {
             .add_systems(
                 FixedUpdate,
                 (
-                    simulate_dropped_items,
+                    simulate_bodies::<
+                        crate::voxel::VoxelState,
+                        DropPhysics,
+                        (With<DroppedItem>, With<crate::simulation::Simulating>),
+                    >,
                     collect_dropped_items.after(CharacterSystems),
                 )
                     .chain()
@@ -250,10 +184,7 @@ fn spawn_dropped_item(
                 remaining,
                 pickup_remaining,
             },
-            DropMotion {
-                velocity,
-                support: None,
-            },
+            BallisticMotion::new(velocity),
             FixedPosition::new(position),
             Transform::from_translation(position),
             Visibility::default(),
@@ -333,7 +264,7 @@ pub(crate) fn restore_drop(commands: &mut Commands, drop: crate::world::SavedDro
 impl DroppedItem {
     pub(crate) fn capture(
         &self,
-        motion: &DropMotion,
+        motion: &BallisticMotion,
         position: &FixedPosition,
     ) -> crate::world::SavedDrop {
         crate::world::SavedDrop {
@@ -359,34 +290,6 @@ fn animate_dropped_item_visuals(
             transform.rotation = Quat::from_rotation_y(seconds * 2.4 + visual.phase);
             transform.translation.y = (seconds * 2.0 + visual.phase).sin() * 0.03;
         }
-    }
-}
-
-/// Reuse each worker's collision buffer instead of allocating one per item/tick.
-fn simulate_dropped_items(
-    world: VoxelWorld,
-    time: Res<Time<Fixed>>,
-    terrain: Local<Parallel<Terrain>>,
-    mut drops: Query<(&mut DropMotion, &mut FixedPosition), With<crate::simulation::Simulating>>,
-) {
-    let dt = time.delta_secs();
-    let damping = (-0.3 * dt).exp();
-    // Small groups stay on this thread; larger groups share persistent worker buffers.
-    if drops.iter().len() < 128 {
-        let mut terrain = terrain.borrow_local_mut();
-        for (mut motion, mut position) in &mut drops {
-            motion.step(&mut position, &world, &mut terrain, dt, damping);
-        }
-    } else {
-        drops
-            .par_iter_mut()
-            .batching_strategy(BatchingStrategy::new().min_batch_size(64))
-            .for_each_init(
-                || terrain.borrow_local_mut(),
-                |terrain, (mut motion, mut position)| {
-                    motion.step(&mut position, &world, terrain, dt, damping)
-                },
-            );
     }
 }
 

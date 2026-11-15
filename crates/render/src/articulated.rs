@@ -198,18 +198,7 @@ impl ModelManifest {
                     .ok_or_else(|| invalid("Unregistered model texture"))?;
                 for face in bounds.faces() {
                     geometry.quad(
-                        &ModelQuad {
-                            positions: face.positions.map(|position| position.to_array()),
-                            normal: face.normal.to_array(),
-                            uv: [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
-                            texture,
-                            tinted: false,
-                            cull: [0; 3],
-                            translucent: false,
-                            effect: 0,
-                            light_emission: 0,
-                            shade_up: false,
-                        },
+                        &ModelQuad::face(face, texture),
                         Vec3::ZERO,
                         [60; 4],
                         0,
