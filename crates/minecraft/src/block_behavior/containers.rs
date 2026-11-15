@@ -714,55 +714,55 @@ pub(crate) struct ColumnSnapshots<'w, 's> {
     index: Res<'w, GameplayColumns>,
 }
 impl ColumnSnapshots<'_, '_> {
-    pub fn candidates(&self) -> Vec<(IVec2, usize, usize)> {
+    pub fn dirty_positions(&self) -> impl Iterator<Item = IVec2> + '_ {
         self.columns
             .iter()
             .filter(|(data, ..)| data.revision != data.saved_revision)
-            .map(|(data, blocks, work, mobiles, _)| {
-                let containers = blocks
-                    .into_iter()
-                    .flat_map(|blocks| blocks.iter())
-                    .filter_map(|entity| self.inventories.get(entity).ok())
-                    .filter(|(_, inventory)| !inventory.is_empty())
-                    .count();
-                let drops = data.application.drops.len()
-                    + mobiles
-                        .into_iter()
-                        .flat_map(|entities| entities.iter())
-                        .filter(|&entity| self.drops.contains(entity))
-                        .count();
-                // One populated 27-slot inventory reserves 32 KiB, covering slot
-                // records plus worst-case textual contents and compression buffers.
-                (
-                    data.position,
-                    work.capture_reservation()
-                        + containers * 32768
-                        + drops * 2048
-                        + data.application.creatures.len() * 8192
-                        + mobiles
-                            .into_iter()
-                            .flat_map(|m| m.iter())
-                            .filter(|&e| self.creatures.contains(e))
-                            .count()
-                            * 8192
-                        + blocks.map_or(0, |b| b.len()) * 128
-                        + 8192,
-                    // Creature records are captured into exact-capacity vectors, so
-                    // a large herd is charged once rather than for doubling growth.
-                    work.snapshot_bytes()
-                        + containers * 2 * std::mem::size_of::<(IVec3, ContainerInventory)>()
-                        + drops * 2 * std::mem::size_of::<crate::world::SavedDrop>()
-                        + data.application.retained_bytes() * 2
-                        + mobiles
-                            .into_iter()
-                            .flat_map(|m| m.iter())
-                            .map(|e| self.creatures.bytes(e))
-                            .sum::<usize>()
-                        + blocks.map_or(0, |b| b.len()) * 256
-                        + 4096,
-                )
-            })
-            .collect()
+            .map(|(data, ..)| data.position)
+    }
+    pub fn reservation(&self, position: IVec2) -> Option<(usize, usize)> {
+        let (data, blocks, work, mobiles, _) =
+            self.columns.get(*self.index.get(&position)?).ok()?;
+        if data.revision == data.saved_revision {
+            return None;
+        }
+        Some({
+            let containers = blocks
+                .into_iter()
+                .flat_map(|blocks| blocks.iter())
+                .filter_map(|entity| self.inventories.get(entity).ok())
+                .filter(|(_, inventory)| !inventory.is_empty())
+                .count();
+            let (mut drops, mut creatures, mut creature_bytes) = (
+                data.application.drops.len(),
+                data.application.creatures.len(),
+                0,
+            );
+            for entity in mobiles.into_iter().flat_map(|entities| entities.iter()) {
+                drops += usize::from(self.drops.contains(entity));
+                creatures += usize::from(self.creatures.contains(entity));
+                creature_bytes += self.creatures.bytes(entity);
+            }
+            // One populated 27-slot inventory reserves 32 KiB, covering slot
+            // records plus worst-case textual contents and compression buffers.
+            (
+                work.capture_reservation()
+                    + containers * 32768
+                    + drops * 2048
+                    + creatures * 8192
+                    + blocks.map_or(0, |b| b.len()) * 128
+                    + 8192,
+                // Creature records are captured into exact-capacity vectors, so
+                // a large herd is charged once rather than for doubling growth.
+                work.snapshot_bytes()
+                    + containers * 2 * std::mem::size_of::<(IVec3, ContainerInventory)>()
+                    + drops * 2 * std::mem::size_of::<crate::world::SavedDrop>()
+                    + data.application.retained_bytes() * 2
+                    + creature_bytes
+                    + blocks.map_or(0, |b| b.len()) * 256
+                    + 4096,
+            )
+        })
     }
     /// Resolve the selected column without rescanning every gameplay owner.
     pub fn capture_at(&self, position: IVec2) -> Option<ColumnSnapshot> {

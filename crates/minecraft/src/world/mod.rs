@@ -617,11 +617,6 @@ fn checkpoint(
     };
     // Estimate before cloning: only the selected columns retain snapshots while
     // the worker encodes them. Terrain and gameplay from a column share a capture.
-    let gameplay_costs: HashMap<_, _> = gameplay
-        .candidates()
-        .into_iter()
-        .map(|(position, codec, snapshot)| (position, (codec, snapshot)))
-        .collect();
     let terrain_at = |position: &IVec2| {
         chunk_index
             .get(position)
@@ -637,7 +632,7 @@ fn checkpoint(
     // A column is charged only when it is selected, so draining a long queue in
     // batches does not rescan and price every dirty column for each batch.
     let reservation = |position: &IVec2| {
-        let gameplay = gameplay_costs.get(position).copied();
+        let gameplay = gameplay.reservation(*position);
         let terrain = terrain_at(position);
         if gameplay.is_none() && terrain.is_none() {
             return None;
@@ -656,7 +651,7 @@ fn checkpoint(
     }
     if save.remaining.is_empty() {
         // A loaded column can also be retained in StoredChunks; queue it once.
-        let mut dirty: HashSet<IVec2> = gameplay_costs.keys().copied().collect();
+        let mut dirty: HashSet<IVec2> = gameplay.dirty_positions().collect();
         dirty.extend(
             stored
                 .iter()
@@ -667,9 +662,7 @@ fn checkpoint(
         );
         save.remaining.extend(dirty);
     }
-    let mut snapshots = HashMap::new();
-    let mut gameplay_snapshots = Vec::new();
-    let mut codec_costs = HashMap::new();
+    let mut captures = Vec::new();
     let mut snapshot_bytes = 0usize;
     let mut codec_bytes = crate::simulation::ENCODING_BATCH_BYTES;
     let mut selected = 0usize;
@@ -693,20 +686,20 @@ fn checkpoint(
         snapshot_bytes = next_snapshot_bytes;
         codec_bytes = next_codec_bytes;
         selected += 1;
-        codec_costs.insert(position, codec);
-        if let Some(voxels) = terrain_at(&position) {
-            snapshots.insert(position, voxels.save_snapshot());
-        }
-        if let Some(snapshot) = gameplay.capture_at(position) {
-            gameplay_snapshots.push((position, snapshot));
-        }
+        captures.push((
+            position,
+            (
+                terrain_at(&position).map(ChunkVoxels::save_snapshot),
+                gameplay.capture_at(position),
+                codec,
+            ),
+        ));
     }
     let captured_bytes = snapshot_bytes.saturating_add(codec_bytes);
     save.force = !save.remaining.is_empty();
     let final_save = saving && save.remaining.is_empty();
     if !forced
-        && gameplay_snapshots.is_empty()
-        && snapshots.is_empty()
+        && captures.is_empty()
         && session
             .last_checkpoint
             .as_ref()
@@ -728,31 +721,14 @@ fn checkpoint(
     save.in_flight_bytes = captured_bytes;
     save.task = Some(IoTaskPool::get().spawn(async move {
         generator.flush().await?;
-        let revisions = snapshots
+        let revisions = captures
             .iter()
-            .map(|(p, v)| (*p, v.save_revision))
+            .filter_map(|(p, (terrain, _, _))| terrain.as_ref().map(|v| (*p, v.save_revision)))
             .collect();
-        let gameplay_revisions = gameplay_snapshots
+        let gameplay_revisions = captures
             .iter()
-            .map(|(p, data)| (*p, data.revision))
+            .filter_map(|(p, (_, gameplay, _))| gameplay.as_ref().map(|v| (*p, v.revision)))
             .collect();
-        let mut captures: HashMap<
-            _,
-            (
-                Option<ChunkVoxels>,
-                Option<crate::block_behavior::containers::ColumnSnapshot>,
-                usize,
-            ),
-        > = snapshots
-            .into_iter()
-            .map(|(position, voxels)| (position, (Some(voxels), None, codec_costs[&position])))
-            .collect();
-        for (position, gameplay) in gameplay_snapshots {
-            captures
-                .entry(position)
-                .or_insert_with(|| (None, None, codec_costs[&position]))
-                .1 = Some(gameplay);
-        }
         let positions = captures
             .iter()
             .map(|(p, (terrain, gameplay, _))| ((p.x, p.y), terrain.is_some(), gameplay.is_some()))

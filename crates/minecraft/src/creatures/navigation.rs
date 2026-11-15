@@ -77,8 +77,8 @@ impl Default for Search {
             origin: IVec3::ZERO,
             goal: IVec3::ZERO,
             escape: false,
-            nodes: vec![Node::default(); CELLS].into_boxed_slice(),
-            open: Vec::with_capacity(MAX_NODES),
+            nodes: Box::default(),
+            open: Vec::new(),
             visited: 0,
             generation: 0,
             terrain: Terrain::default(),
@@ -88,6 +88,10 @@ impl Default for Search {
 }
 impl Search {
     fn touch(&mut self, index: u16) {
+        if self.nodes.is_empty() {
+            self.nodes = vec![Node::default(); CELLS].into_boxed_slice();
+            self.open.reserve_exact(MAX_NODES);
+        }
         let node = &mut self.nodes[index as usize];
         if node.generation != self.generation {
             *node = Node {
@@ -337,10 +341,15 @@ struct Searches([Search; SEARCH_SLOTS]);
 #[derive(Resource, Default)]
 struct SearchQueue(VecDeque<(Entity, u64)>);
 
-fn clear_searches(mut queue: ResMut<SearchQueue>, mut searches: ResMut<Searches>) {
-    queue.0.clear();
+fn clear_searches(
+    mut queue: ResMut<SearchQueue>,
+    mut searches: ResMut<Searches>,
+    mut pool: ResMut<PathPool>,
+) {
+    *queue = SearchQueue::default();
+    *pool = PathPool::default();
     for search in &mut searches.0 {
-        search.entity = None;
+        *search = Search::default();
     }
 }
 impl Default for Searches {
@@ -653,6 +662,17 @@ fn follow(
     }
 }
 
+type NavigatorState = (
+    Entity,
+    &'static FixedPosition,
+    &'static CharacterBody,
+    &'static Decision,
+    &'static mut Navigation,
+    &'static mut SegmentValidation,
+    Has<Simulating>,
+    Has<super::combat::Dying>,
+);
+
 fn search(
     world: crate::voxel::VoxelWorld,
     clock: Res<GameplayClock>,
@@ -661,20 +681,35 @@ fn search(
     mut queue: ResMut<SearchQueue>,
     mut pool: ResMut<PathPool>,
     mut diagnostics: ResMut<crate::simulation::SimulationDiagnostics>,
-    mut actors: Query<
-        (
+    mut queries: ParamSet<(
+        Query<
             Entity,
-            &FixedPosition,
-            &CharacterBody,
-            &Decision,
-            &mut Navigation,
-            &mut SegmentValidation,
-            Has<Simulating>,
-            Has<super::combat::Dying>,
-        ),
-        With<VoxelNavigator>,
-    >,
+            (
+                With<VoxelNavigator>,
+                Or<(Changed<Navigation>, Changed<Decision>, Added<Simulating>)>,
+            ),
+        >,
+        Query<NavigatorState, With<VoxelNavigator>>,
+        Query<
+            &'static Navigation,
+            (
+                With<VoxelNavigator>,
+                With<Simulating>,
+                Without<super::combat::Dying>,
+            ),
+        >,
+    )>,
+    mut candidates: Local<Vec<Entity>>,
+    mut overflow: Local<bool>,
 ) {
+    candidates.clear();
+    candidates.extend(queries.p0().iter());
+    let mut actors = queries.p1();
+    if *overflow {
+        candidates.clear();
+        candidates.extend(actors.iter().map(|(entity, ..)| entity));
+    }
+    *overflow = false;
     for search in &mut searches.0 {
         if let Some(entity) = search.entity {
             let valid =
@@ -689,12 +724,17 @@ fn search(
                     });
             if !valid {
                 search.entity = None;
+                candidates.push(entity);
             }
         }
     }
     // The component flag deduplicates requests without a second spatial index.
     // Stale entries are discarded when dequeued; a bound prevents unbounded churn.
-    for (entity, _, _, _, navigation, mut validation, active, dying) in &mut actors {
+    for entity in candidates.iter().copied() {
+        let Ok((_, _, _, _, navigation, mut validation, active, dying)) = actors.get_mut(entity)
+        else {
+            continue;
+        };
         if !active
             || dying
             || navigation.status != NavigationStatus::Pending
@@ -704,6 +744,7 @@ fn search(
             continue;
         }
         if queue.0.len() >= 32_768 {
+            *overflow = true;
             break;
         }
         validation.queued = true;
@@ -802,11 +843,11 @@ fn search(
             }
         }
     }
-    diagnostics.navigation_pending = actors
+    drop(actors);
+    diagnostics.navigation_pending = queries
+        .p2()
         .iter()
-        .filter(|(_, _, _, _, n, _, active, dying)| {
-            *active && !*dying && n.status == NavigationStatus::Pending
-        })
+        .filter(|n| n.status == NavigationStatus::Pending)
         .count();
     diagnostics.navigation_oldest_wait = queue
         .0

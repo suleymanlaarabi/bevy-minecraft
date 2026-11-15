@@ -733,7 +733,7 @@ impl CharacterPhysicsItem<'_, '_> {
                 }
             }
             if fixed_position.previous != fixed_position.current {
-                fixed_position.previous = fixed_position.current;
+                fixed_position.bypass_change_detection().previous = fixed_position.current;
             }
             motion.eye = body.eye_offset(state.pose);
             motion.previous_eye = motion.eye;
@@ -743,7 +743,7 @@ impl CharacterPhysicsItem<'_, '_> {
             motion.previous_bob = 0.0;
         }
         if fixed_position.previous != fixed_position.current {
-            fixed_position.previous = fixed_position.current;
+            fixed_position.bypass_change_detection().previous = fixed_position.current;
         }
         motion.previous_eye = motion.eye;
         if !world.collision_ready(fixed_position.current.as_vec3()) {

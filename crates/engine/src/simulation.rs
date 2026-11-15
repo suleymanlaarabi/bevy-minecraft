@@ -5,7 +5,7 @@ use bevy_ecs::prelude::*;
 use bevy_math::IVec2;
 use bevy_platform::collections::HashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 pub const NEIGHBOR_CONNECTION: u8 = 1;
 pub const NEIGHBOR_SUPPORT: u8 = 2;
 pub const NEIGHBOR_FLUID: u8 = 4;
@@ -98,12 +98,12 @@ impl NeighborBits {
 }
 #[derive(Clone)]
 enum NeighborSection {
-    Sparse(Vec<(u16, u8)>),
+    Sparse(VecDeque<(u16, u8)>),
     Dense(Box<NeighborBits>),
 }
 impl Default for NeighborSection {
     fn default() -> Self {
-        Self::Sparse(Vec::new())
+        Self::Sparse(VecDeque::new())
     }
 }
 impl NeighborSection {
@@ -115,7 +115,7 @@ impl NeighborSection {
                     *pending |= reasons;
                     return false;
                 }
-                cells.push((cell, reasons));
+                cells.push_back((cell, reasons));
                 // Isolated edits retain only a small vector. At 64 cells, trade
                 // 1.5 KiB for constant-cost merging throughout dense cascades.
                 if cells.len() == 64 {
@@ -134,7 +134,7 @@ impl NeighborSection {
     }
     fn pop(&mut self) -> Option<(u16, u8)> {
         match self {
-            Self::Sparse(cells) => (!cells.is_empty()).then(|| cells.remove(0)),
+            Self::Sparse(cells) => cells.pop_front(),
             Self::Dense(bits) => bits.pop(),
         }
     }
@@ -513,7 +513,7 @@ pub enum SimulationSystems {
     Finalize,
 }
 
-#[derive(Resource, Default, PartialEq, Eq)]
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SimulationRegion {
     pub center: Option<IVec2>,
     pub radius: u32,

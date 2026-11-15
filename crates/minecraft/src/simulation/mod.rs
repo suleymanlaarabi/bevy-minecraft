@@ -49,7 +49,12 @@ impl Plugin for GameplaySimulationPlugin {
             )
             .add_systems(
                 FixedUpdate,
-                (sync_region, update_mobile_owners::<()>)
+                (
+                    sync_region,
+                    update_mobile_owners::<()>.run_if(resource_changed::<GameplayColumns>),
+                    update_mobile_owners::<Changed<FixedPosition>>
+                        .run_if(not(resource_changed::<GameplayColumns>)),
+                )
                     .chain()
                     .in_set(SimulationSystems::Activation)
                     .before(
@@ -96,7 +101,9 @@ fn sync_region(
             .map(|motion| chunk_at(motion.current.as_vec3())),
         radius: settings.effective_distance(),
     });
-    seed.0 = voxel.seed;
+    if seed.0 != voxel.seed {
+        seed.0 = voxel.seed;
+    }
 }
 
 fn update_mobile_owners<F: QueryFilter>(
@@ -155,12 +162,7 @@ fn update_mobile_owners<F: QueryFilter>(
 }
 
 fn track_work(
-    // Sequential access: the filtered pass visits only changed work, then drops
-    // resolve their owners.
-    mut columns: ParamSet<(
-        Query<&mut GameplayColumn, Changed<ColumnSimulation>>,
-        Query<&mut GameplayColumn>,
-    )>,
+    work: Query<Entity, Changed<ColumnSimulation>>,
     drops: Query<
         &SimulatedIn,
         (
@@ -171,17 +173,21 @@ fn track_work(
             )>,
         ),
     >,
+    mut columns: Query<&mut GameplayColumn>,
+    mut changed: Local<Vec<Entity>>,
 ) {
-    for mut column in &mut columns.p0() {
-        column.revision += 1;
-    }
-    let mut columns = columns.p1();
-    for owner in &drops {
-        if let Ok(mut column) = columns.get_mut(owner.0) {
+    changed.clear();
+    changed.extend(work.iter());
+    changed.extend(drops.iter().map(|owner| owner.0));
+    changed.sort_unstable();
+    changed.dedup();
+    for &owner in changed.iter() {
+        if let Ok(mut column) = columns.get_mut(owner) {
             column.revision += 1;
         }
     }
 }
+
 fn unload(
     event: On<Remove<VoxelChunk>>,
     terrain: Query<&LoadedColumn>,

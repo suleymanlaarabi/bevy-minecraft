@@ -5,7 +5,7 @@ use hollow_core::{
     StateId, VoxelCell,
     content::{ContentCatalog, StateDefinition},
     coordinates::SECTION_VOLUME,
-    sections::{Layer, Section},
+    sections::Layer,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -16,6 +16,8 @@ pub struct LightingChunk<T: VoxelCell> {
     pub states: Layer<T>,
     pub light: Layer<u8>,
     pub modified: bool,
+    /// Complete light-relevant edits since the previous input, or a full section diff.
+    pub changed_cells: Option<Vec<u32>>,
 }
 pub struct LightingUpdate {
     pub x: i32,
@@ -31,14 +33,15 @@ pub struct LightingSnapshots<T: VoxelCell> {
 /// Stable only during one reconciliation; queues drain before slots can be reused.
 #[derive(Clone, Copy)]
 pub(super) struct LightCell {
-    chunk: u32,
-    index: u32,
+    pub(super) chunk: u32,
+    pub(super) index: u32,
 }
 
 struct LightingSlot<T: VoxelCell> {
     chunk: Option<LightingChunk<T>>,
     neighbors: [Option<u32>; 4],
-    changed: bool,
+    changed: u32,
+    readers: [u32; 9],
 }
 
 // Coordinate lookups are confined to arrivals and seeds. Slots and four neighbor
@@ -52,6 +55,7 @@ pub(crate) struct SnapshotAccess<T: VoxelCell> {
     min_y: i32,
     height: i32,
     pub(crate) lighting_config: LightingMode,
+    track_readers: bool,
 }
 
 impl<T: VoxelCell> SnapshotAccess<T> {
@@ -108,7 +112,17 @@ impl<T: VoxelCell> SnapshotAccess<T> {
         let slot = &mut self.slots[cell.chunk as usize];
         let light = &mut slot.chunk.as_mut().unwrap().light;
         let value = (light.get(cell.index as usize) & !mask) | (value & mask);
-        slot.changed |= light.set(cell.index as usize, value);
+        if light.set(cell.index as usize, value) {
+            slot.changed |= 1 << (cell.index as usize / SECTION_VOLUME);
+            if self.track_readers {
+                let local = hollow_core::coordinates::cell_position(cell.index as usize);
+                let sections = crate::chunk::ChunkVoxels::<T>::sections_around(local.y);
+                slot.readers[4] |= sections;
+                for offset in crate::edits::border_neighbors(local) {
+                    slot.readers[((offset.y + 1) * 3 + offset.x + 1) as usize] |= sections;
+                }
+            }
+        }
     }
 
     fn chunk(&self, position: &(i32, i32)) -> Option<&LightingChunk<T>> {
@@ -123,7 +137,8 @@ impl<T: VoxelCell> SnapshotAccess<T> {
             self.slots.push(LightingSlot {
                 chunk: None,
                 neighbors: [None; 4],
-                changed: false,
+                changed: 0,
+                readers: [0; 9],
             });
             id
         });
@@ -151,7 +166,7 @@ impl<T: VoxelCell> SnapshotAccess<T> {
             }
         }
         self.slots[id as usize].chunk = None;
-        self.slots[id as usize].changed = false;
+        self.slots[id as usize].changed = 0;
         self.free.push(id);
     }
 }
@@ -171,8 +186,45 @@ impl<T: VoxelCell> LightingSnapshots<T> {
                 min_y,
                 height,
                 lighting_config: LightingMode::Default,
+                track_readers: false,
             },
         }
+    }
+    pub(crate) fn prepare(&mut self, min_y: i32, height: i32, content: ContentCatalog) {
+        self.access.min_y = min_y;
+        self.access.height = height;
+        self.access.content = content;
+    }
+    pub(crate) fn block_edits(
+        &mut self,
+        positions: impl Iterator<Item = IVec3>,
+        engine: &mut SnapshotLightEngine,
+    ) {
+        self.access.track_readers = true;
+        for position in positions {
+            if let Some(cell) = self.access.cell(position) {
+                engine.invalidate_block(&mut self.access, cell);
+            }
+        }
+        engine.perform_block_light_updates(&mut self.access);
+    }
+    pub(crate) fn insert(&mut self, snapshot: LightingChunk<T>) {
+        self.access.insert((snapshot.x, snapshot.z), snapshot);
+    }
+    pub(crate) fn release_excess(&mut self) {
+        self.access.slots.shrink_to(64);
+    }
+    pub(crate) fn drain(&mut self) -> impl Iterator<Item = (i32, i32, Layer<u8>, [u32; 9])> + '_ {
+        self.access.chunks.clear();
+        self.access.free.clear();
+        self.access
+            .slots
+            .drain(..)
+            .filter(|slot| slot.changed != 0)
+            .map(|slot| {
+                let chunk = slot.chunk.unwrap();
+                (chunk.x, chunk.z, chunk.light, slot.readers)
+            })
     }
     pub fn update(
         &mut self,
@@ -184,25 +236,53 @@ impl<T: VoxelCell> LightingSnapshots<T> {
         for position in removed {
             access.remove(position);
         }
-        let mut rebuild = BTreeMap::new();
+        let mut rebuild = BTreeSet::new();
+        let mut block_changes = Vec::new();
+        let mut sky_columns = BTreeSet::new();
         let mut borders = BTreeSet::new();
-        for snapshot in snapshots {
+        for mut snapshot in snapshots {
             let position = (snapshot.x, snapshot.z);
             if let Some(&slot) = access.chunks.get(&position) {
                 let old = access.slots[slot as usize].chunk.as_mut().unwrap();
-                let changed = old.states.changed_sections(&snapshot.states);
-                for section in 0..snapshot.states.section_count() {
-                    if changed & (1 << section) == 0 {
-                        continue;
+                let mut changed_cell = |i: u32| {
+                    let previous = old.states.get(i as usize);
+                    let next = snapshot.states.get(i as usize);
+                    if previous == next {
+                        return;
                     }
-                    for i in section * SECTION_VOLUME..(section + 1) * SECTION_VOLUME {
-                        let old = access.content.state(StateId(old.states.get(i).id()));
-                        let new = access.content.state(StateId(snapshot.states.get(i).id()));
-                        let sky_changed = old.opacity != new.opacity
-                            || old.can_occlude() != new.can_occlude()
-                            || old.is_solid_render() != new.is_solid_render();
-                        if sky_changed || old.luminance != new.luminance {
-                            *rebuild.entry(position).or_insert(false) |= sky_changed;
+                    let previous = access.content.state(StateId(previous.id()));
+                    let next = access.content.state(StateId(next.id()));
+                    if previous.opacity != next.opacity || previous.luminance != next.luminance {
+                        block_changes.push(LightCell {
+                            chunk: slot,
+                            index: i,
+                        });
+                    }
+                    if previous.opacity != next.opacity
+                        || previous.can_occlude() != next.can_occlude()
+                        || previous.is_solid_render() != next.is_solid_render()
+                    {
+                        sky_columns.insert((slot, i & 255));
+                    }
+                };
+                if let Some(cells) = snapshot.changed_cells.take() {
+                    for i in cells {
+                        changed_cell(i);
+                    }
+                } else {
+                    for section in 0..snapshot.states.section_count() {
+                        use hollow_core::sections::Section;
+                        let previous = old.states.section(section);
+                        let next = snapshot.states.section(section);
+                        let shared = match (previous, next) {
+                            (Section::Uniform(a), Section::Uniform(b)) => a == b,
+                            (Section::Dense(a), Section::Dense(b)) => std::sync::Arc::ptr_eq(a, b),
+                            _ => false,
+                        };
+                        if !shared {
+                            for i in section * SECTION_VOLUME..(section + 1) * SECTION_VOLUME {
+                                changed_cell(i as u32);
+                            }
                         }
                     }
                 }
@@ -210,7 +290,7 @@ impl<T: VoxelCell> LightingSnapshots<T> {
                 old.modified = snapshot.modified;
             } else {
                 if snapshot.modified {
-                    rebuild.insert(position, true);
+                    rebuild.insert(position);
                 }
                 access.insert(position, snapshot);
                 borders.insert(position);
@@ -221,42 +301,30 @@ impl<T: VoxelCell> LightingSnapshots<T> {
                 for dz in -1..=1 {
                     let p = (x + dx, z + dz);
                     if access.chunk(&p).is_some_and(|chunk| chunk.modified) {
-                        rebuild.insert(p, true);
+                        rebuild.insert(p);
                     }
                 }
             }
         }
-        let mut reset = BTreeMap::new();
-        for ((x, z), sky) in rebuild {
+        let mut reset = BTreeSet::new();
+        for (x, z) in rebuild {
             for dx in -1..=1 {
                 for dz in -1..=1 {
                     let p = (x + dx, z + dz);
                     if access.chunks.contains_key(&p) {
-                        *reset.entry(p).or_insert(false) |= sky;
+                        reset.insert(p);
                     }
                 }
             }
         }
-        for (p, &sky) in &reset {
+        for p in &reset {
             let slot = &mut access.slots[access.chunks[p] as usize];
             let chunk = slot.chunk.as_mut().unwrap();
-            chunk.light = Layer::from_sections((0..chunk.light.section_count()).map(|section| {
-                if sky {
-                    return Section::Uniform(0);
-                }
-                match chunk.light.section(section) {
-                    Section::Uniform(value) => Section::Uniform(value & 240),
-                    section => {
-                        Section::from_cells(&std::array::from_fn::<_, SECTION_VOLUME, _>(|i| {
-                            section.get(i) & 240
-                        }))
-                    }
-                }
-            }));
-            slot.changed = true;
+            chunk.light = Layer::filled(0, chunk.light.section_count());
+            slot.changed = hollow_core::coordinates::section_mask(chunk.light.section_count());
         }
         let mut engine = SnapshotLightEngine::default();
-        for (&(x, z), &sky) in &reset {
+        for &(x, z) in &reset {
             let slot = access.chunks[&(x, z)];
             let states = access.chunk(&(x, z)).unwrap().states.clone();
             for section in 0..states.section_count() {
@@ -279,27 +347,24 @@ impl<T: VoxelCell> LightingSnapshots<T> {
                     engine.queue_block_light_increase(pos, emission);
                 }
             }
-            if sky {
-                for dz in 0..16 {
-                    for dx in 0..16 {
-                        engine.check_sky_light_updates(
-                            access,
-                            LightCell {
-                                chunk: slot,
-                                index: (height as u32 - 1) * 256 + dz * 16 + dx,
-                            },
-                        );
-                    }
+            for dz in 0..16 {
+                for dx in 0..16 {
+                    engine.seed_sky(
+                        access,
+                        LightCell {
+                            chunk: slot,
+                            index: (height as u32 - 1) * 256 + dz * 16 + dx,
+                        },
+                    );
                 }
             }
         }
         let edges: BTreeSet<_> = reset
-            .keys()
+            .iter()
             .copied()
             .chain(borders.iter().copied())
             .collect();
         for (x, z) in edges {
-            let sky = reset.get(&(x, z)).copied().unwrap_or(false) || borders.contains(&(x, z));
             for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
                 if !access.chunks.contains_key(&(x + dx, z + dz)) {
                     continue;
@@ -318,7 +383,7 @@ impl<T: VoxelCell> LightingSnapshots<T> {
                             if value & 15 > 0 {
                                 engine.queue_block_light_increase(pos, value & 15);
                             }
-                            if sky && value >> 4 > 0 {
+                            if value >> 4 > 0 {
                                 engine.queue_sky_light_increase(pos, value >> 4);
                             }
                         }
@@ -326,12 +391,20 @@ impl<T: VoxelCell> LightingSnapshots<T> {
                 }
             }
         }
+        for pos in block_changes {
+            engine.invalidate_block(access, pos);
+        }
+        for (chunk, xz) in sky_columns {
+            engine.invalidate_sky_column(access, chunk, xz, height as u32);
+        }
         engine.perform_block_light_updates(access);
         engine.perform_sky_light_updates(access);
         let mut updates = Vec::new();
         for (&(x, z), &id) in &access.chunks {
             let slot = &mut access.slots[id as usize];
-            if std::mem::take(&mut slot.changed) {
+            let changed = std::mem::take(&mut slot.changed);
+            if changed != 0 {
+                slot.chunk.as_mut().unwrap().light.compact_sections(changed);
                 updates.push(LightingUpdate {
                     x,
                     z,

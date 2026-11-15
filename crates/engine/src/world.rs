@@ -92,16 +92,38 @@ impl<T: VoxelCell> VoxelWorld<'_, '_, T> {
                         .get(&chunk)
                         .and_then(|&entity| self.chunks.get(entity).ok());
                 }
-                for y in (min.y..=max.y).rev() {
-                    let cell = IVec3::new(x, y, z);
-                    visit(
-                        cell,
-                        cached_voxels.map(|voxels| {
-                            voxels
-                                .state(local.with_y(y.saturating_sub(self.layout.min_y())))
-                                .unwrap_or(air)
-                        }),
-                    );
+                let mut y = max.y;
+                while y >= min.y {
+                    let low = if !self.layout.contains(y) {
+                        let low = if y >= self.layout.max_y() {
+                            min.y.max(self.layout.max_y())
+                        } else {
+                            min.y
+                        };
+                        for row in (low..=y).rev() {
+                            visit(IVec3::new(x, row, z), cached_voxels.map(|_| air));
+                        }
+                        low
+                    } else {
+                        let relative = y - self.layout.min_y();
+                        let low = min.y.max(self.layout.min_y() + (relative & !15));
+                        let section = cached_voxels
+                            .map(|voxels| voxels.states.section(relative as usize / 16));
+                        for row in (low..=y).rev() {
+                            let index = (((row - self.layout.min_y()) & 15) * 256
+                                + local.z * 16
+                                + local.x) as usize;
+                            visit(
+                                IVec3::new(x, row, z),
+                                section.map(|section| section.get(index)),
+                            );
+                        }
+                        low
+                    };
+                    if low == min.y {
+                        break;
+                    }
+                    y = low - 1;
                 }
             }
         }

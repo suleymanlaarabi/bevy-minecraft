@@ -6,13 +6,12 @@ use crate::{
     content::RegisteredContent,
     world::{ChunkIndex, WorldLayout},
 };
-use bevy_ecs::{prelude::*, system::SystemParam};
+use bevy_ecs::prelude::*;
 use bevy_math::{IVec2, IVec3};
 use bevy_platform::collections::{HashMap, HashSet};
 use bevy_tasks::{Task, futures::check_ready};
 use hollow_core::sections::Layer;
 use hollow_core::{StateId, VoxelCell};
-use std::collections::VecDeque;
 
 /// Chebyshev radius around an edited chunk mirrored into the lighting context: the
 /// relit 3x3 area plus the ring that seeds light across its border.
@@ -31,10 +30,35 @@ pub fn edited_lighting<T: VoxelCell>(
     content: Res<RegisteredContent>,
     mut version: ResMut<LightingVersion>,
     mut block_light: ResMut<BlockLightEdits>,
+    mut state: ResMut<LightingState<T>>,
+    layout: Res<WorldLayout>,
 ) {
     version.0 = version.0.wrapping_add(1);
     let old = content.state(StateId(event.old.id()));
     let new = content.state(StateId(event.new.id()));
+    let (chunk, local) = layout.split(event.position);
+    let journal = state.changes.entry(chunk).or_insert_with(|| LightEdits {
+        count: 0,
+        cells: Some(Vec::new()),
+    });
+    journal.count = journal.count.saturating_add(1);
+    if old.luminance != new.luminance
+        || old.opacity != new.opacity
+        || old.can_occlude() != new.can_occlude()
+        || old.is_solid_render() != new.is_solid_render()
+    {
+        if let Some(entries) = &mut journal.cells {
+            if entries.len() < 4096 {
+                if let Some(index) =
+                    hollow_core::coordinates::column_cell_index(local, layout.section_count())
+                {
+                    entries.push(index as u32);
+                }
+            } else {
+                journal.cells = None;
+            }
+        }
+    }
     if old.luminance != new.luminance || old.opacity != new.opacity {
         block_light.0.insert(event.position);
     }
@@ -55,132 +79,81 @@ pub fn lighting_pending<T: VoxelCell>(
     state.task.is_some() || !state.ready.is_empty() || state.synchronized_version != Some(version.0)
 }
 
-/// One mutable voxel query supplies sequential reads and writes during propagation.
-#[derive(SystemParam)]
-pub struct BlockLight<'w, 's, T: VoxelCell> {
-    layout: Res<'w, WorldLayout>,
-    content: Res<'w, RegisteredContent>,
-    index: Res<'w, ChunkIndex>,
-    chunks: Query<'w, 's, &'static mut ChunkVoxels<T>>,
-    changed: Local<'s, HashMap<IVec2, (u32, bool)>>,
-}
-
-impl<T: VoxelCell> BlockLight<'_, '_, T> {
-    fn sample(&self, position: IVec3) -> Option<(T, u8)> {
-        let (chunk, local) = self.layout.split(position);
-        let voxels = self.chunks.get(*self.index.get(&chunk)?).ok()?;
-        Some((voxels.state(local)?, voxels.render_light_at(local)? & 15))
-    }
-
-    fn set(&mut self, position: IVec3, light: u8) {
-        let (chunk, local) = self.layout.split(position);
-        let Some(index) =
-            hollow_core::coordinates::column_cell_index(local, self.layout.section_count())
-        else {
-            return;
-        };
-        let Some(&entity) = self.index.get(&chunk) else {
-            return;
-        };
-        let Ok(mut voxels) = self.chunks.get_mut(entity) else {
-            return;
-        };
-        if voxels.render_light().get(index) & 15 != light {
-            voxels
-                .bypass_change_detection()
-                .set_block_light(index, light);
-            for offset in std::iter::once(IVec2::ZERO).chain(crate::edits::border_neighbors(local))
-            {
-                let (sections, changed_column) = self.changed.entry(chunk + offset).or_default();
-                *sections |= ChunkVoxels::<T>::sections_around(local.y);
-                *changed_column |= offset == IVec2::ZERO;
-            }
-        }
-    }
-}
-
-/// Remove dependent light first, then refill from surviving sources. Increase
-/// entries store positions, so a later decrease cannot replay an obsolete level.
+/// Resolve the edited neighborhoods once; propagation then uses indexed cells and links.
 pub fn update_block_light<T: VoxelCell>(
     mut commands: Commands,
     mut edits: ResMut<BlockLightEdits>,
-    mut light: BlockLight<T>,
-    mut decrease: Local<VecDeque<(IVec3, u8)>>,
-    mut increase: Local<VecDeque<IVec3>>,
+    layout: Res<WorldLayout>,
+    content: Res<RegisteredContent>,
+    index: Res<ChunkIndex>,
+    mut chunks: Query<&mut ChunkVoxels<T>>,
+    mut relevant: Local<HashSet<IVec2>>,
+    mut changed: Local<HashMap<IVec2, (u32, bool)>>,
+    mut scratch: Local<Option<LightingSnapshots<T>>>,
+    mut engine: Local<super::propagation::SnapshotLightEngine>,
 ) {
-    const SIDES: [IVec3; 6] = [
-        IVec3::X,
-        IVec3::NEG_X,
-        IVec3::Y,
-        IVec3::NEG_Y,
-        IVec3::Z,
-        IVec3::NEG_Z,
-    ];
-    for position in edits.0.drain() {
-        let Some((_, previous)) = light.sample(position) else {
-            continue;
-        };
-        light.set(position, 0);
-        decrease.push_back((position, previous));
-        increase.push_back(position);
-        increase.extend(SIDES.map(|side| position + side));
-    }
-    while let Some((position, previous)) = decrease.pop_front() {
-        for side in SIDES {
-            let neighbor = position + side;
-            let Some((state, value)) = light.sample(neighbor) else {
-                continue;
-            };
-            if value > 0 && value < previous {
-                light.set(neighbor, 0);
-                decrease.push_back((neighbor, value));
-                if light.content.state(StateId(state.id())).luminance > 0 {
-                    increase.push_back(neighbor);
+    let context = scratch.get_or_insert_with(|| {
+        LightingSnapshots::new(layout.min_y(), layout.height(), content.0.clone())
+    });
+    context.prepare(layout.min_y(), layout.height(), content.0.clone());
+    for &position in &edits.0 {
+        let center = layout.split(position).0;
+        for x in -1..=1 {
+            for z in -1..=1 {
+                let position = center + IVec2::new(x, z);
+                if !relevant.insert(position) {
+                    continue;
                 }
-            } else if value > 0 {
-                increase.push_back(neighbor);
+                if let Some(&entity) = index.get(&position)
+                    && let Ok(voxels) = chunks.get(entity)
+                {
+                    context.insert(LightingChunk {
+                        x: position.x,
+                        z: position.y,
+                        states: voxels.states.clone(),
+                        light: voxels.render_light().clone(),
+                        modified: false,
+                        changed_cells: None,
+                    });
+                }
             }
         }
     }
-    while let Some(position) = increase.pop_front() {
-        let Some((state, value)) = light.sample(position) else {
-            continue;
-        };
-        let value = value.max(light.content.state(StateId(state.id())).luminance);
-        light.set(position, value);
-        if value <= 1 {
-            continue;
-        }
-        for side in SIDES {
-            let neighbor = position + side;
-            let Some((state, previous)) = light.sample(neighbor) else {
-                continue;
-            };
-            let propagated =
-                value.saturating_sub(light.content.state(StateId(state.id())).opacity.max(1));
-            if propagated > previous {
-                light.set(neighbor, propagated);
-                increase.push_back(neighbor);
-            }
-        }
-    }
-    // Mark once per affected column, including mesh readers across its borders.
-    let changed = std::mem::take(&mut *light.changed);
-    for (position, (sections, changed_column)) in &changed {
-        if let Some(&entity) = light.index.get(position)
-            && let Ok(mut voxels) = light.chunks.get_mut(entity)
+    relevant.clear();
+    context.block_edits(edits.0.drain(), &mut engine);
+    for (x, z, light, sections) in context.drain() {
+        let position = IVec2::new(x, z);
+        if let Some(&entity) = index.get(&position)
+            && let Ok(mut voxels) = chunks.get_mut(entity)
         {
-            voxels.mark_sections(*sections);
+            voxels.bypass_change_detection().estimate_block_light(light);
+            for (slot, sections) in sections
+                .into_iter()
+                .enumerate()
+                .filter(|(_, mask)| *mask != 0)
+            {
+                let offset = IVec2::new((slot % 3) as i32 - 1, (slot / 3) as i32 - 1);
+                let (mask, own) = changed.entry(position + offset).or_default();
+                *mask |= sections;
+                *own |= slot == 4;
+            }
+        }
+    }
+    context.release_excess();
+    engine.release_excess();
+    for (position, (sections, own)) in changed.drain() {
+        if let Some(&entity) = index.get(&position)
+            && let Ok(mut voxels) = chunks.get_mut(entity)
+        {
+            voxels.mark_sections(sections);
             commands
                 .entity(entity)
                 .try_insert(crate::edits::EditedChunk);
-            if *changed_column {
+            if own {
                 commands.trigger(super::ChunkLightChanged(entity));
             }
         }
     }
-    *light.changed = changed;
-    light.changed.clear();
 }
 
 pub fn added_lighting(_event: On<Add<VoxelChunk>>, mut version: ResMut<LightingVersion>) {
@@ -196,6 +169,11 @@ struct Output<T: VoxelCell> {
     updates: Vec<(IVec2, Layer<u8>)>,
 }
 
+struct LightEdits {
+    count: u64,
+    cells: Option<Vec<u32>>,
+}
+
 #[derive(Resource)]
 pub struct LightingState<T: VoxelCell> {
     context: Option<LightingSnapshots<T>>,
@@ -203,6 +181,7 @@ pub struct LightingState<T: VoxelCell> {
     submitted: HashMap<IVec2, Version>,
     ready: HashMap<IVec2, Layer<u8>>,
     synchronized_version: Option<u64>,
+    changes: HashMap<IVec2, LightEdits>,
 }
 
 impl<T: VoxelCell> LightingState<T> {
@@ -269,6 +248,9 @@ pub fn update_lighting<T: VoxelCell>(
             }
         }
     }
+    state
+        .changes
+        .retain(|position, _| relevant.contains(position) && index.contains_key(position));
     let removed: Vec<_> = state
         .submitted
         .keys()
@@ -293,19 +275,37 @@ pub fn update_lighting<T: VoxelCell>(
             continue;
         }
         // Only shared snapshots cross the ECS thread; expansion belongs to the worker.
-        snapshots.push((
-            *position,
-            states.clone(),
-            voxels.light.clone(),
-            voxels.modified,
-        ));
+        // A partial/missed event stream must fall back to comparing shared sections.
+        let changed_cells = state
+            .changes
+            .remove(position)
+            .and_then(|journal| {
+                let previous = state.submitted.get(position)?;
+                (previous.0 == entity
+                    && voxels.content_revision.checked_sub(previous.1) == Some(journal.count))
+                .then_some(journal.cells)
+                .flatten()
+            })
+            .map(|mut cells| {
+                cells.sort_unstable();
+                cells.dedup();
+                cells
+            });
+        snapshots.push(LightingChunk {
+            x: position.x,
+            z: position.y,
+            states: states.clone(),
+            light: voxels.light.clone(),
+            modified: voxels.modified,
+            changed_cells,
+        });
         state.submitted.insert(*position, version);
     }
     // Keep only results near unsynchronized edits pending. Unrelated edits and
     // streaming must not postpone light that is already valid for display.
     let invalidated: HashSet<_> = snapshots
         .iter()
-        .map(|(position, ..)| *position)
+        .map(|chunk| IVec2::new(chunk.x, chunk.z))
         .chain(removed.iter().copied())
         .flat_map(|position| {
             (-CONTEXT_RADIUS..=CONTEXT_RADIUS).flat_map(move |z| {
@@ -357,16 +357,6 @@ pub fn update_lighting<T: VoxelCell>(
                 let mut context = context.unwrap_or_else(|| {
                     LightingSnapshots::new(layout.min_y(), layout.height(), content)
                 });
-                let snapshots = snapshots
-                    .into_iter()
-                    .map(|(position, states, light, modified)| LightingChunk {
-                        x: position.x,
-                        z: position.y,
-                        states,
-                        light,
-                        modified,
-                    })
-                    .collect::<Vec<_>>();
                 let updates = context
                     .update(snapshots, &removed)
                     .into_iter()
@@ -388,6 +378,7 @@ impl<T: VoxelCell> Default for LightingState<T> {
             submitted: HashMap::default(),
             ready: HashMap::default(),
             synchronized_version: None,
+            changes: HashMap::default(),
         }
     }
 }

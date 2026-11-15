@@ -10,6 +10,7 @@ const ACTIVE: DiagnosticPath = DiagnosticPath::const_new("voxel/cpu_active");
 const PENDING: DiagnosticPath = DiagnosticPath::const_new("voxel/cpu_pending");
 use bevy_tasks::{AsyncComputeTaskPool, Task};
 use std::{
+    collections::BTreeSet,
     future::Future,
     pin::Pin,
     sync::{
@@ -41,51 +42,128 @@ struct Pending {
     distance: u32,
     sequence: u64,
     queued: Instant,
+    age: u32,
     work: Pin<Box<dyn Future<Output = ()> + Send>>,
 }
 
+type Rank = (i32, u32, u64, usize);
 #[derive(Default)]
 struct Queue {
     next: u64,
-    pending: Vec<Pending>,
+    jobs: Vec<Option<Pending>>,
+    free: Vec<usize>,
+    foreground: BTreeSet<Rank>,
+    background: BTreeSet<Rank>,
+    promotions: BTreeSet<(Instant, usize)>,
 }
-
 impl Queue {
-    /// The most urgent job, skipping background jobs once `background_running`
-    /// reaches the limit (one while any foreground job waits).
+    fn ranks(&mut self, background: bool) -> &mut BTreeSet<Rank> {
+        if background {
+            &mut self.background
+        } else {
+            &mut self.foreground
+        }
+    }
+    fn rank(job: &Pending, index: usize) -> Rank {
+        (
+            job.class as i32 - job.age as i32,
+            job.distance,
+            job.sequence,
+            index,
+        )
+    }
+    fn insert(&mut self, job: Pending) -> usize {
+        let index = self.free.pop().unwrap_or_else(|| {
+            self.jobs.push(None);
+            self.jobs.len() - 1
+        });
+        self.ranks(job.class.is_background())
+            .insert(Self::rank(&job, index));
+        self.promotions
+            .insert((job.queued + Duration::from_secs(1), index));
+        self.jobs[index] = Some(job);
+        index
+    }
+    fn remove(&mut self, index: usize) -> Option<Pending> {
+        let job = self.jobs[index].take()?;
+        self.ranks(job.class.is_background())
+            .remove(&Self::rank(&job, index));
+        if job.age < 16 {
+            self.promotions.remove(&(
+                job.queued + Duration::from_secs(u64::from(job.age + 1)),
+                index,
+            ));
+        }
+        self.free.push(index);
+        Some(job)
+    }
     fn pop(&mut self, background_running: usize, background_limit: usize) -> Option<Pending> {
         let now = Instant::now();
-        let (mut foreground, mut background) = (None, None);
-        for (i, job) in self.pending.iter().enumerate() {
-            // Promote one class every second; long-lived distant jobs eventually lead.
-            let age = now.duration_since(job.queued).as_secs().min(16) as i32;
-            let key = (job.class as i32 - age, job.distance, job.sequence);
-            let best = if job.class.is_background() {
-                &mut background
-            } else {
-                &mut foreground
-            };
-            if best.is_none_or(|(_, best)| key < best) {
-                *best = Some((i, key));
+        while let Some(&(when, index)) = self.promotions.first() {
+            if when > now {
+                break;
             }
+            self.promotions.pop_first();
+            let job = self.jobs[index].as_mut().unwrap();
+            let old = Self::rank(job, index);
+            job.age = now.duration_since(job.queued).as_secs().min(16) as u32;
+            let new = Self::rank(job, index);
+            let background = job.class.is_background();
+            if job.age < 16 {
+                self.promotions.insert((
+                    job.queued + Duration::from_secs(u64::from(job.age + 1)),
+                    index,
+                ));
+            }
+            let ranks = self.ranks(background);
+            ranks.remove(&old);
+            ranks.insert(new);
         }
+        let foreground = self.foreground.first().copied();
         let limit = if foreground.is_some() {
             1
         } else {
             background_limit
         };
-        let background = background.filter(|_| background_running < limit);
-        let (best, _) = match (foreground, background) {
-            (Some(foreground), Some(background)) => {
-                if background.1 < foreground.1 {
-                    background
-                } else {
-                    foreground
-                }
-            }
-            (foreground, background) => foreground.or(background)?,
+        let background = self
+            .background
+            .first()
+            .copied()
+            .filter(|_| background_running < limit);
+        let rank = match (foreground, background) {
+            (Some(a), Some(b)) => a.min(b),
+            (a, b) => a.or(b)?,
         };
-        Some(self.pending.swap_remove(best))
+        self.remove(rank.3)
+    }
+    fn len(&self) -> usize {
+        self.foreground.len() + self.background.len()
+    }
+}
+
+// Dropping a waiting Task releases its captured work immediately. The sequence
+// protects a recycled slot if completion and receiver cancellation race.
+struct WaitingJob {
+    queue: Arc<Mutex<Queue>>,
+    index: usize,
+    sequence: u64,
+}
+impl Drop for WaitingJob {
+    fn drop(&mut self) {
+        let removed = {
+            let mut queue = self.queue.lock().unwrap();
+            if queue
+                .jobs
+                .get(self.index)
+                .and_then(Option::as_ref)
+                .is_some_and(|job| job.sequence == self.sequence)
+            {
+                queue.remove(self.index)
+            } else {
+                None
+            }
+        };
+        drop(removed);
     }
 }
 
@@ -147,11 +225,12 @@ impl VoxelTaskBudget {
         let mut queue = self.queue.lock().unwrap();
         let sequence = queue.next;
         queue.next += 1;
-        queue.pending.push(Pending {
+        let index = queue.insert(Pending {
             class,
             distance,
             sequence,
             queued: Instant::now(),
+            age: 0,
             work: Box::pin(async move {
                 if !send.is_closed() {
                     let result = work.await;
@@ -159,8 +238,16 @@ impl VoxelTaskBudget {
                 }
             }),
         });
-        AsyncComputeTaskPool::get()
-            .spawn(async move { receive.recv().await.expect("Voxel task result sender") })
+        let waiting = WaitingJob {
+            queue: self.queue.clone(),
+            index,
+            sequence,
+        };
+        drop(queue);
+        AsyncComputeTaskPool::get().spawn(async move {
+            let _waiting = waiting;
+            receive.recv().await.expect("Voxel task result sender")
+        })
     }
 }
 
@@ -222,7 +309,7 @@ fn dispatch(
             .detach();
     }
     diagnostics.add_measurement(&ACTIVE, || budget.active.load(Ordering::Relaxed) as f64);
-    diagnostics.add_measurement(&PENDING, || queue.pending.len() as f64);
+    diagnostics.add_measurement(&PENDING, || queue.len() as f64);
 }
 
 pub fn configure(app: &mut App) {

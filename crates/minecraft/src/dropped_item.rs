@@ -123,13 +123,13 @@ impl DropMotion {
 
     fn step(
         &mut self,
-        position: &mut FixedPosition,
+        position: &mut Mut<FixedPosition>,
         world: &VoxelWorld,
         terrain: &mut Terrain,
         dt: f32,
         damping: f32,
     ) {
-        position.previous = position.current;
+        position.bypass_change_detection().previous = position.current;
         if self
             .support
             .is_some_and(|support| support == Self::support_revisions(position.current, world))
@@ -146,9 +146,12 @@ impl DropMotion {
         let delta = (self.velocity * dt).as_dvec3();
         terrain.gather_collisions(world, bounds.expanded_towards(delta));
         let correction = terrain.depenetrate(bounds);
-        position.current += correction;
-        let moved = terrain.collide_box(Self::bounds(position.current), delta);
-        position.current += moved;
+        let corrected = position.current + correction;
+        let moved = terrain.collide_box(Self::bounds(corrected), delta);
+        let next = corrected + moved;
+        if position.current != next {
+            position.current = next;
+        }
         let blocked = (moved - delta).abs().cmpgt(DVec3::splat(1e-7));
         if blocked.x {
             self.velocity.x = 0.0;

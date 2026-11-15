@@ -121,6 +121,21 @@ impl<T: Copy + PartialEq> Layer<T> {
         true
     }
 
+    /// Reclaim dense allocations that became uniform, only for touched sections.
+    pub fn compact_sections(&mut self, mask: u32) {
+        for i in 0..self.section_count() {
+            if mask & (1 << i) == 0 {
+                continue;
+            }
+            if let Section::Dense(cells) = self.section(i) {
+                let first = cells[0];
+                if cells.iter().all(|&value| value == first) {
+                    Arc::make_mut(&mut self.0)[i] = Section::Uniform(first);
+                }
+            }
+        }
+    }
+
     /// One bit per section whose cells differ from `other`.
     pub fn changed_sections(&self, other: &Self) -> u32 {
         if Arc::ptr_eq(&self.0, &other.0) {

@@ -34,7 +34,17 @@ pub trait NeighborRules: Resource {
     ) -> Result<Option<Self::Support>, IVec2>;
     fn edits(edit: &Self::Support) -> &[CheckedEdit<Self::Cell>];
 }
-// Readiness is re-evaluated only after membership, terrain or ownership changes.
+#[derive(Resource, Default)]
+pub struct ActivationChanges(bevy_platform::collections::HashSet<IVec2>);
+impl ActivationChanges {
+    fn neighborhood(&mut self, position: IVec2) {
+        for x in -1..=1 {
+            for z in -1..=1 {
+                self.0.insert(position + IVec2::new(x, z));
+            }
+        }
+    }
+}
 pub fn activate<A: Send + Sync + 'static>(
     mut commands: Commands,
     index: Res<ChunkIndex>,
@@ -51,12 +61,43 @@ pub fn activate<A: Send + Sync + 'static>(
     mut waits: ResMut<BoundaryWaits>,
     mut wake_owners: Local<Vec<(IVec2, Entity)>>,
     mut ready_work: Local<Vec<BoundaryWork>>,
+    mut changed: ResMut<ActivationChanges>,
+    mut previous: Local<Option<SimulationRegion>>,
+    active_columns: Query<(), (With<ColumnSimulation>, With<Simulating>)>,
 ) {
-    if !region.is_changed() && !index.is_changed() {
+    if !region.is_changed() && !index.is_changed() && changed.0.is_empty() {
         return;
     }
-    let mut active = 0;
-    for (chunk, owner) in &terrain {
+    if previous.is_none() || (index.is_changed() && changed.0.is_empty()) {
+        changed
+            .0
+            .extend(terrain.iter().map(|(chunk, _)| chunk.position));
+    } else if previous.as_ref() != Some(&*region) {
+        for area in [previous.as_ref().unwrap(), &*region] {
+            if let Some(center) = area.center {
+                let radius = area.radius as i32;
+                for x in -radius..=radius {
+                    for z in -radius..=radius {
+                        let position = center + IVec2::new(x, z);
+                        if previous.as_ref().unwrap().contains(position)
+                            != region.contains(position)
+                        {
+                            changed.0.insert(position);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    *previous = Some(*region);
+    let mut active = active_columns.iter().count();
+    for position in changed.0.drain() {
+        let Some(&entity) = index.get(&position) else {
+            continue;
+        };
+        let Ok((chunk, owner)) = terrain.get(entity) else {
+            continue;
+        };
         let Ok((column, blocks, mobiles, was_active, work)) = columns.get(owner.0) else {
             continue;
         };
@@ -65,10 +106,14 @@ pub fn activate<A: Send + Sync + 'static>(
             && (-1..=1).all(|x| {
                 (-1..=1).all(|z| index.contains_key(&(chunk.position + IVec2::new(x, z))))
             });
-        active += usize::from(ready);
         if was_active == ready {
             continue;
         }
+        active = if ready {
+            active + 1
+        } else {
+            active.saturating_sub(1)
+        };
         for entity in std::iter::once(owner.0)
             .chain(blocks.into_iter().flat_map(|entities| entities.iter()))
             .chain(mobiles.into_iter().flat_map(|entities| entities.iter()))
@@ -177,14 +222,24 @@ pub fn process_neighbors<P: NeighborRules>(
     mut cursor: Local<usize>,
     // Eight coordinate bytes per entry avoid ECS lookups inside sort comparisons.
     mut owners: Local<Vec<((i32, i32), Entity)>>,
+    membership: Query<
+        (),
+        (
+            With<Simulating>,
+            With<ReadyNeighbors>,
+            Or<(Added<Simulating>, Added<ReadyNeighbors>)>,
+        ),
+    >,
 ) {
-    owners.clear();
-    owners.extend(
-        columns
-            .iter()
-            .map(|(entity, column, _)| ((column.position.x, column.position.y), entity)),
-    );
-    owners.sort_unstable_by_key(|&(position, _)| position);
+    if !membership.is_empty() || owners.iter().any(|&(_, entity)| !columns.contains(entity)) {
+        owners.clear();
+        owners.extend(
+            columns
+                .iter()
+                .map(|(entity, column, _)| ((column.position.x, column.position.y), entity)),
+        );
+        owners.sort_unstable_by_key(|&(position, _)| position);
+    }
     if owners.is_empty() {
         return;
     }
@@ -441,16 +496,25 @@ pub fn process_scheduled<P: NeighborRules>(
     mut waits: ResMut<BoundaryWaits>,
     // Store the sort key once rather than fetching the column for each comparison.
     mut order: Local<Vec<((i32, i32), Entity)>>,
+    membership: Query<
+        (),
+        (
+            With<Simulating>,
+            With<ReadyTicks>,
+            Or<(Added<Simulating>, Added<ReadyTicks>)>,
+        ),
+    >,
     mut cursor: Local<usize>,
 ) {
-    order.clear();
-    order.extend(
-        columns
-            .iter()
-            .filter(|(_, _, work)| work.has_due())
-            .map(|(entity, column, _)| ((column.position.x, column.position.y), entity)),
-    );
-    order.sort_unstable_by_key(|&(position, _)| position);
+    if !membership.is_empty() || order.iter().any(|&(_, entity)| !columns.contains(entity)) {
+        order.clear();
+        order.extend(
+            columns
+                .iter()
+                .map(|(entity, column, _)| ((column.position.x, column.position.y), entity)),
+        );
+        order.sort_unstable_by_key(|&(position, _)| position);
+    }
     if order.is_empty() {
         return;
     }
@@ -572,7 +636,26 @@ impl<P: NeighborRules> Plugin for VoxelSimulationPlugin<P> {
         if !app.is_plugin_added::<SimulationPlugin>() {
             app.add_plugins(SimulationPlugin);
         }
-        app.init_resource::<ColumnOwners>()
+        app.init_resource::<ActivationChanges>()
+            .add_observer(
+                |event: On<Insert<LoadedColumn>>,
+                 terrain: Query<&VoxelChunk>,
+                 mut changes: ResMut<ActivationChanges>| {
+                    if let Ok(chunk) = terrain.get(event.entity) {
+                        changes.neighborhood(chunk.position);
+                    }
+                },
+            )
+            .add_observer(
+                |event: On<Remove<VoxelChunk>>,
+                 terrain: Query<&VoxelChunk>,
+                 mut changes: ResMut<ActivationChanges>| {
+                    if let Ok(chunk) = terrain.get(event.entity) {
+                        changes.neighborhood(chunk.position);
+                    }
+                },
+            )
+            .init_resource::<ColumnOwners>()
             .init_resource::<SimulationSeed>()
             .init_resource::<RandomTickRegistry<P::Cell>>()
             .add_systems(

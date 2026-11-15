@@ -152,10 +152,9 @@ impl<T: VoxelCell> ChunkVoxels<T> {
             .set(index, light);
     }
 
-    /// Updates displayed block light without discarding a pending skylight estimate.
-    pub fn set_block_light(&mut self, index: usize, light: u8) {
-        let render = self.render_light.get_or_insert_with(|| self.light.clone());
-        render.set(index, (render.get(index) & 0xf0) | light);
+    /// Publish a synchronous propagation result, preserving its skylight estimates.
+    pub fn estimate_block_light(&mut self, light: Layer<u8>) {
+        self.render_light = Some(light);
     }
 
     /// Replaces authoritative light, clears estimates, and returns visually changed sections.
