@@ -41,13 +41,20 @@ fn follow_system(
     targets: Query<&Transform, Without<Follow>>,
     mut followers: Query<(&Follow, &FollowOffset, &mut Transform)>,
 ) {
-    for (follow, offset, mut transform) in &mut followers {
-        let Ok(target) = targets.get(follow.entity) else {
-            continue;
-        };
-        let translation = target.translation + offset.0;
-        if transform.translation != translation {
-            transform.translation = translation;
+    for (follows, offsets, mut transforms) in followers
+        .contiguous_iter_mut()
+        .expect("Dense follower query")
+    {
+        for (index, (follow, offset)) in follows.iter().zip(offsets).enumerate() {
+            let Ok(target) = targets.get(follow.entity) else {
+                continue;
+            };
+            crate::query::set_field_if_neq(
+                &mut transforms,
+                index,
+                |transform| &mut transform.translation,
+                target.translation + offset.0,
+            );
         }
     }
 }

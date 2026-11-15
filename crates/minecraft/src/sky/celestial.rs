@@ -8,6 +8,7 @@ use bevy::{
     light::{NotShadowCaster, SunDisk},
     prelude::*,
 };
+use hollow_features::query::{set_field_if_neq, set_if_neq};
 use hollow_render::{
     environment::{SkyMaterial, SkyPass, SkySettings},
     shadows::ShadowClipmap,
@@ -31,11 +32,14 @@ pub(super) fn update_background_bounds(
     mut backgrounds: Query<&mut bevy::camera::primitives::Aabb, With<SkyBackground>>,
 ) {
     let center = camera.translation().into();
-    for mut bounds in &mut backgrounds {
+    for mut bounds in backgrounds
+        .contiguous_iter_mut()
+        .expect("Dense sky bounds query")
+    {
         // The vertex shader covers the whole view. Keeping the camera inside its
         // bounds prevents GPU occlusion from treating it as a quad at the origin.
-        if bounds.center != center {
-            bounds.center = center;
+        for index in 0..bounds.len() {
+            set_field_if_neq(&mut bounds, index, |bounds| &mut bounds.center, center);
         }
     }
 }
@@ -163,12 +167,15 @@ pub(super) fn update_sun_disk(
 ) {
     let settings = sun_settings(&sky);
     let shown = settings.direction.y > -settings.direction.w;
-    for mut visibility in &mut disks {
-        visibility.set_if_neq(if shown {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        });
+    let target = if shown {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut visibility in disks.contiguous_iter_mut().expect("Dense sun disk query") {
+        for index in 0..visibility.len() {
+            set_if_neq(&mut visibility, index, target);
+        }
     }
 }
 
@@ -193,18 +200,20 @@ pub(super) fn update_lights(
     >,
 ) {
     let shadows = settings.shadow_quality != crate::settings::ShadowQuality::Off;
-    for (mut light, mut transform, mut visibility, is_sun) in &mut lights {
+    for (mut lights, mut transforms, mut visibility, is_sun) in
+        lights.contiguous_iter_mut().expect("Dense sky light query")
+    {
         let (direction, casts) = if is_sun {
             (sky.sun_light_direction, sky.sun_is_up())
         } else {
             (sky.moon_light_direction, !sky.sun_is_up())
         };
-        transform.set_if_neq(light_transform(direction));
-        visibility.set_if_neq(if direction.y < TWILIGHT_END {
+        let transform = light_transform(direction);
+        let target = if direction.y < TWILIGHT_END {
             Visibility::Hidden
         } else {
             Visibility::Inherited
-        });
+        };
         let height = (direction.y * 5.0 + 0.2).clamp(0.0, 1.0);
         let color = if is_sun {
             Color::srgb(1.0, 0.35 + 0.63 * height, 0.12 + 0.83 * height)
@@ -212,15 +221,23 @@ pub(super) fn update_lights(
             Color::srgb(0.62, 0.72, 1.0)
         };
         let illuminance = if is_sun { SUN_LUX } else { MOON_LUX } * (0.75 * height);
-        if light.color != color {
-            light.color = color;
-        }
-        if light.illuminance != illuminance {
-            light.illuminance = illuminance;
-        }
         let shadow_maps_enabled = shadows && casts;
-        if light.shadow_maps_enabled != shadow_maps_enabled {
-            light.shadow_maps_enabled = shadow_maps_enabled;
+        for index in 0..lights.len() {
+            set_if_neq(&mut transforms, index, transform);
+            set_if_neq(&mut visibility, index, target);
+            set_field_if_neq(&mut lights, index, |light| &mut light.color, color);
+            set_field_if_neq(
+                &mut lights,
+                index,
+                |light| &mut light.illuminance,
+                illuminance,
+            );
+            set_field_if_neq(
+                &mut lights,
+                index,
+                |light| &mut light.shadow_maps_enabled,
+                shadow_maps_enabled,
+            );
         }
     }
 }

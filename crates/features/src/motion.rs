@@ -67,18 +67,23 @@ fn interpolate(
 ) {
     let alpha = time.overstep_fraction();
     interpolation.set_if_neq(InterpolationAlpha(alpha));
-    for (mut position, mut transform) in &mut bodies {
-        if position.externally_moved(&transform) {
-            continue;
-        }
-        let translation = position
-            .previous
-            .lerp(position.current, alpha as f64)
-            .as_vec3();
-        if transform.translation != translation {
-            transform.translation = translation;
-        }
+    for (mut positions, mut transforms) in bodies.contiguous_iter_mut().expect("Dense body query") {
         // Presentation must not dirty gameplay snapshots or spatial ownership queries.
-        position.bypass_change_detection().rendered = Some(translation);
+        for (index, position) in positions.bypass_change_detection().iter_mut().enumerate() {
+            if position.externally_moved(&transforms[index]) {
+                continue;
+            }
+            let translation = position
+                .previous
+                .lerp(position.current, alpha as f64)
+                .as_vec3();
+            crate::query::set_field_if_neq(
+                &mut transforms,
+                index,
+                |transform| &mut transform.translation,
+                translation,
+            );
+            position.rendered = Some(translation);
+        }
     }
 }

@@ -118,7 +118,11 @@ fn keep_scene_output(
     windows: Query<(MainEntity, &ExtractedWindow)>,
     mut attachments: ResMut<ViewTargetAttachments>,
 ) {
-    for camera in &cameras {
+    for camera in cameras
+        .contiguous_iter()
+        .expect("Dense scene camera query")
+        .flatten()
+    {
         let Some(target) = &camera.target else {
             continue;
         };

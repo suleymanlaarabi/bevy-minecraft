@@ -3,5 +3,6 @@ pub mod actors;
 pub mod articulation;
 pub mod cursor;
 pub mod motion;
+pub mod query;
 pub mod slots;
 pub mod spatial;

@@ -7,8 +7,13 @@ use hollow_features::{motion::InterpolationAlpha, spatial::FollowOffset};
 use std::f32::consts::FRAC_PI_2;
 
 pub(crate) fn clear_player_input(mut players: Query<&mut CharacterMovement, With<Player>>) {
-    for mut movement in &mut players {
-        movement.set_if_neq(CharacterMovement::default());
+    for mut movements in players
+        .contiguous_iter_mut()
+        .expect("Dense player input query")
+    {
+        for index in 0..movements.len() {
+            hollow_features::query::set_if_neq(&mut movements, index, CharacterMovement::default());
+        }
     }
 }
 

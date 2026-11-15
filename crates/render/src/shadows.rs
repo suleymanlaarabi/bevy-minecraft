@@ -243,7 +243,11 @@ pub(crate) fn keep_cached_cascades(
     mut cameras: Query<&mut ViewLightEntities>,
     cascades: Query<(&ExtractedView, &LightEntity)>,
 ) {
-    for mut lights in &mut cameras {
+    for lights in cameras
+        .contiguous_iter_mut()
+        .expect("Dense view lights query")
+        .flatten()
+    {
         lights.lights.retain(|&entity| {
             cascades
                 .get(entity)

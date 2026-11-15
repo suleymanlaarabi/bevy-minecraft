@@ -109,50 +109,62 @@ pub(super) fn update_clouds(
         (camera.z / CELL).floor() as i32,
     );
 
-    for (entity, mut layer, mut transform, mut visibility, material) in &mut layers {
-        visibility.set_if_neq(if settings.clouds {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        });
-        if !settings.clouds {
-            layer.building = None;
-            layer.center = None;
-            continue;
-        }
-
-        if let Some(task) = &mut layer.building
-            && let Some((center, built_radius, mesh)) = check_ready(task)
-        {
-            layer.building = None;
-            layer.center = Some(center);
-            layer.radius = built_radius;
-            commands.entity(entity).insert(Mesh3d(meshes.add(mesh)));
-            if let Some(mut material) = materials.get_mut(&material.0) {
-                let end = built_radius as f32 * CELL - REBUILD_MARGIN as f32 * CELL;
-                material.settings.params = Vec4::new(end * 0.7, end, 0.0, 0.0);
+    for (entities, layers, mut transforms, mut visibility, materials_handles) in layers
+        .contiguous_iter_mut()
+        .expect("Dense cloud layer query")
+    {
+        for (index, layer) in layers.into_iter().enumerate() {
+            let target = if settings.clouds {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+            hollow_features::query::set_if_neq(&mut visibility, index, target);
+            if !settings.clouds {
+                layer.building = None;
+                layer.center = None;
+                continue;
             }
-        }
 
-        let stale = layer.center.is_none_or(|center| {
-            (center - wanted).abs().max_element() >= REBUILD_MARGIN || layer.radius != radius
-        });
-        if stale && layer.building.is_none() {
-            let pattern = pattern.0.clone();
-            layer.building = Some(
-                AsyncComputeTaskPool::get()
-                    .spawn(async move { (wanted, radius, cloud_mesh(&pattern, wanted, radius)) }),
-            );
-        }
+            if let Some(task) = &mut layer.building
+                && let Some((center, built_radius, mesh)) = check_ready(task)
+            {
+                layer.building = None;
+                layer.center = Some(center);
+                layer.radius = built_radius;
+                commands
+                    .entity(entities[index])
+                    .insert(Mesh3d(meshes.add(mesh)));
+                if let Some(mut material) = materials.get_mut(&materials_handles[index].0) {
+                    let end = built_radius as f32 * CELL - REBUILD_MARGIN as f32 * CELL;
+                    material.settings.params = Vec4::new(end * 0.7, end, 0.0, 0.0);
+                }
+            }
 
-        // The mesh is built around its own center: place that cell, plus the wind.
-        if let Some(center) = layer.center {
-            let translation = Vec3::new(
-                (center.x as f64 * CELL as f64 + drift) as f32,
-                ALTITUDE,
-                center.y as f32 * CELL,
-            );
-            transform.set_if_neq(Transform::from_translation(translation));
+            let stale = layer.center.is_none_or(|center| {
+                (center - wanted).abs().max_element() >= REBUILD_MARGIN || layer.radius != radius
+            });
+            if stale && layer.building.is_none() {
+                let pattern = pattern.0.clone();
+                layer.building =
+                    Some(AsyncComputeTaskPool::get().spawn(async move {
+                        (wanted, radius, cloud_mesh(&pattern, wanted, radius))
+                    }));
+            }
+
+            // The mesh is built around its own center: place that cell, plus the wind.
+            if let Some(center) = layer.center {
+                let translation = Vec3::new(
+                    (center.x as f64 * CELL as f64 + drift) as f32,
+                    ALTITUDE,
+                    center.y as f32 * CELL,
+                );
+                hollow_features::query::set_if_neq(
+                    &mut transforms,
+                    index,
+                    Transform::from_translation(translation),
+                );
+            }
         }
     }
 }

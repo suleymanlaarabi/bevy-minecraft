@@ -232,32 +232,46 @@ pub(super) fn sync_parts(
         let index = *assets.armor.get(stack.item().id() as usize)?;
         assets.armor_materials.get(index as usize)
     });
-    for (part, mesh, mut material, mut visibility) in &mut parts {
-        if !changed && !mesh.is_added() {
-            continue;
-        }
-        if part.armor {
-            let slot = if part.layer == 1 {
-                if matches!(part.part, 1 | 4 | 5) {
-                    Some(2)
+    for (parts, meshes, mut materials, mut visibility) in parts
+        .contiguous_iter_mut()
+        .expect("Dense skin equipment query")
+    {
+        let (_, ticks) = ContiguousRef::split(meshes);
+        for (index, part) in parts.iter().enumerate() {
+            if !changed && !ticks.added()[index].is_newer_than(ticks.last_run(), ticks.this_run()) {
+                continue;
+            }
+            if part.armor {
+                let slot = if part.layer == 1 {
+                    if matches!(part.part, 1 | 4 | 5) {
+                        Some(2)
+                    } else {
+                        None
+                    }
                 } else {
-                    None
+                    match part.part {
+                        0 => Some(0),
+                        1..=3 => Some(1),
+                        4 | 5 => Some(3),
+                        _ => None,
+                    }
+                };
+                if let Some(handle) = slot.and_then(|slot| armor[slot]) {
+                    if materials[index].0 != *handle {
+                        hollow_features::query::set_if_neq(
+                            &mut materials,
+                            index,
+                            MeshMaterial3d(handle.clone()),
+                        );
+                    }
+                    hollow_features::query::set_if_neq(
+                        &mut visibility,
+                        index,
+                        Visibility::Inherited,
+                    );
+                } else {
+                    hollow_features::query::set_if_neq(&mut visibility, index, Visibility::Hidden);
                 }
-            } else {
-                match part.part {
-                    0 => Some(0),
-                    1..=3 => Some(1),
-                    4 | 5 => Some(3),
-                    _ => None,
-                }
-            };
-            if let Some(handle) = slot.and_then(|slot| armor[slot]) {
-                if material.0 != *handle {
-                    material.0 = handle.clone();
-                }
-                visibility.set_if_neq(Visibility::Inherited);
-            } else {
-                visibility.set_if_neq(Visibility::Hidden);
             }
         }
     }

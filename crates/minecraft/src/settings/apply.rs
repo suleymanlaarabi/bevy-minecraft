@@ -126,11 +126,19 @@ fn apply_graphics_settings(
     let settings = settings.normalized();
     commands.insert_resource_if_neq(settings);
 
-    for mut window in &mut windows {
-        apply_window_settings(&settings, &mut window);
+    for window in windows
+        .contiguous_iter_mut()
+        .expect("Dense window query")
+        .flatten()
+    {
+        apply_window_settings(&settings, window);
     }
-    for (entity, mut projection) in &mut cameras {
-        apply_camera_settings(&settings, entity, &mut projection, &mut commands);
+    for (entity, projection) in cameras
+        .contiguous_iter_mut()
+        .expect("Dense player projection query")
+        .flat_map(|(entities, projections)| entities.iter().copied().zip(projections))
+    {
+        apply_camera_settings(&settings, entity, projection, &mut commands);
     }
     if let (Some(size), Some(mut shadow_map)) = (settings.shadow_quality.map_size(), shadow_map) {
         shadow_map.size = size;

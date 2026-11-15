@@ -47,17 +47,28 @@ pub(super) fn animate_rigs(
     let pointer = window.physical_cursor_position().unwrap_or(center);
     let delta = (pointer - center) / node.size().max(Vec2::ONE);
     let head = Vec2::new(delta.x.atan() * 0.65, delta.y.atan() * 0.55);
-    for (rig, mut transform) in &mut rigs {
-        if rig.preview {
-            transform.set_if_neq(Transform {
-                rotation: Quat::from_rotation_y(-0.22 + head.x * 0.2),
-                ..*transform
-            });
+    for (rigs, mut transforms) in rigs.contiguous_iter_mut().expect("Dense skin rig query") {
+        for (index, rig) in rigs.iter().enumerate() {
+            if rig.preview {
+                let pose = Transform {
+                    rotation: Quat::from_rotation_y(-0.22 + head.x * 0.2),
+                    ..transforms[index]
+                };
+                hollow_features::query::set_if_neq(&mut transforms, index, pose);
+            }
         }
     }
-    for (part, parent, mut transform) in &mut parts {
-        if rigs.get(parent.parent()).is_ok_and(|(rig, _)| rig.preview) {
-            transform.set_if_neq(part_transform(part.part, 0., head, false));
+    for (parts, parents, mut transforms) in
+        parts.contiguous_iter_mut().expect("Dense skin part query")
+    {
+        for (index, (part, parent)) in parts.iter().zip(parents).enumerate() {
+            if rigs.get(parent.parent()).is_ok_and(|(rig, _)| rig.preview) {
+                hollow_features::query::set_if_neq(
+                    &mut transforms,
+                    index,
+                    part_transform(part.part, 0., head, false),
+                );
+            }
         }
     }
 }
@@ -81,28 +92,37 @@ pub(super) fn animate_world(
     let (motion, character, body) = *player;
     let hidden = *view == PlayerView::FirstPerson;
     let speed = motion.velocity.xz().length() as f32;
-    for (mut rig, mut transform, mut visibility) in &mut rigs {
-        if rig.preview {
-            continue;
+    for (rigs, mut transforms, mut visibility) in rigs
+        .contiguous_iter_mut()
+        .expect("Dense world skin rig query")
+    {
+        let (rigs, mut ticks) = ContiguousMut::bypass_change_detection_split(rigs);
+        for (index, rig) in rigs.iter_mut().enumerate() {
+            if rig.preview {
+                continue;
+            }
+            let target = if hidden {
+                Visibility::Hidden
+            } else {
+                Visibility::Inherited
+            };
+            hollow_features::query::set_if_neq(&mut visibility, index, target);
+            if hidden {
+                continue;
+            }
+            if speed > 0. {
+                rig.phase = (rig.phase + time.delta_secs() * speed * 70.).rem_euclid(TAU);
+                let row = u32::try_from(index).expect("Rig index must fit in a table row");
+                ticks.reborrow().slice(row..row + 1).mark_all_as_changed();
+            }
+            let mut pose = Transform::from_xyz(0., -body.origin_height, 0.)
+                .with_rotation(Quat::from_rotation_y(PI));
+            if character.pose == Pose::Swimming {
+                pose.rotation *= Quat::from_rotation_x(PI * 0.5);
+                pose.translation += Vec3::new(0., 0.3, 0.9);
+            }
+            hollow_features::query::set_if_neq(&mut transforms, index, pose);
         }
-        visibility.set_if_neq(if hidden {
-            Visibility::Hidden
-        } else {
-            Visibility::Inherited
-        });
-        if hidden {
-            continue;
-        }
-        if speed > 0. {
-            rig.phase = (rig.phase + time.delta_secs() * speed * 70.).rem_euclid(TAU);
-        }
-        let mut pose = Transform::from_xyz(0., -body.origin_height, 0.)
-            .with_rotation(Quat::from_rotation_y(PI));
-        if character.pose == Pose::Swimming {
-            pose.rotation *= Quat::from_rotation_x(PI * 0.5);
-            pose.translation += Vec3::new(0., 0.3, 0.9);
-        }
-        transform.set_if_neq(pose);
     }
     if hidden {
         return;
@@ -110,17 +130,21 @@ pub(super) fn animate_world(
     let crouching = character.pose == Pose::Crouching;
     let head = Vec2::new(0., -camera.pitch);
     let amplitude = (speed * 3.).min(0.7);
-    for (part, parent, mut part_pose) in &mut parts {
-        let Ok((rig, ..)) = rigs.get(parent.parent()) else {
-            continue;
-        };
-        if !rig.preview {
-            part_pose.set_if_neq(part_transform(
-                part.part,
-                rig.phase.sin() * amplitude,
-                head,
-                crouching,
-            ));
+    for (parts, parents, mut poses) in parts
+        .contiguous_iter_mut()
+        .expect("Dense world skin part query")
+    {
+        for (index, (part, parent)) in parts.iter().zip(parents).enumerate() {
+            let Ok((rig, ..)) = rigs.get(parent.parent()) else {
+                continue;
+            };
+            if !rig.preview {
+                hollow_features::query::set_if_neq(
+                    &mut poses,
+                    index,
+                    part_transform(part.part, rig.phase.sin() * amplitude, head, crouching),
+                );
+            }
         }
     }
 }

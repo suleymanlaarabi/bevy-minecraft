@@ -19,10 +19,18 @@ pub(super) fn cleanup_voxel_world(
     chunks: Query<Entity, With<VoxelChunk>>,
     generations: Query<Entity, With<hollow_engine::streaming::ChunkGeneration<WorldGenerator>>>,
 ) {
-    for entity in &chunks {
+    for &entity in chunks
+        .contiguous_iter()
+        .expect("Dense chunk query")
+        .flatten()
+    {
         unload_chunk(&mut commands, entity);
     }
-    for entity in &generations {
+    for &entity in generations
+        .contiguous_iter()
+        .expect("Dense generation query")
+        .flatten()
+    {
         commands.entity(entity).despawn();
     }
     // Release view demand; active generation retains its reservations until return.

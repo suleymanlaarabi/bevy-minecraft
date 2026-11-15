@@ -212,41 +212,49 @@ fn sort_translucent(
     let mut active = 0;
     let mut applied = 0;
     candidates.clear();
-    for (entity, mesh, transform, visible, _, mut state) in &mut sections {
-        if state.task.is_some()
-            && applied < MAX_SORTS
-            && let Some(output) = state.task.as_mut().and_then(check_ready)
-        {
-            state.task = None;
-            if output.mesh == mesh.0.id() {
-                if let Some(indices) = output.indices {
-                    updates.0.push((output.mesh, indices.clone()));
-                    state.indices = Some(indices);
+    for (entities, meshes, transforms, visibility, _, states) in sections
+        .contiguous_iter_mut()
+        .expect("Dense translucent section query")
+    {
+        // Polling dirties only the active task rows, not every visible section.
+        let (states, mut ticks) = ContiguousMut::bypass_change_detection_split(states);
+        for (index, state) in states.iter_mut().enumerate() {
+            if state.task.is_some() && applied < MAX_SORTS {
+                let row = u32::try_from(index).expect("Section index must fit in a table row");
+                ticks.reborrow().slice(row..row + 1).mark_all_as_changed();
+                if let Some(output) = state.task.as_mut().and_then(check_ready) {
+                    state.task = None;
+                    if output.mesh == meshes[index].0.id() {
+                        if let Some(indices) = output.indices {
+                            updates.0.push((output.mesh, indices.clone()));
+                            state.indices = Some(indices);
+                        }
+                        state.key = Some(output.key);
+                        state.last_sorted = *frame;
+                        applied += 1;
+                    }
                 }
-                state.key = Some(output.key);
-                state.last_sorted = *frame;
-                applied += 1;
             }
-        }
-        if state.task.is_some() {
-            active += 1;
-            continue;
-        }
-        if !visible.get() {
-            continue;
-        }
-        // Section transforms are pure translations.
-        let origin = transform.translation();
-        let local_eye = eye - origin;
-        let key = sort_key(eye, local_eye);
-        if state.key != Some(key) {
-            candidates.push((
-                state.last_sorted,
-                (origin + SECTION_SIZE * 0.5).distance_squared(eye),
-                entity,
-                key,
-                local_eye,
-            ));
+            if state.task.is_some() {
+                active += 1;
+                continue;
+            }
+            if !visibility[index].get() {
+                continue;
+            }
+            // Section transforms are pure translations.
+            let origin = transforms[index].translation();
+            let local_eye = eye - origin;
+            let key = sort_key(eye, local_eye);
+            if state.key != Some(key) {
+                candidates.push((
+                    state.last_sorted,
+                    (origin + SECTION_SIZE * 0.5).distance_squared(eye),
+                    entities[index],
+                    key,
+                    local_eye,
+                ));
+            }
         }
     }
     let available = MAX_SORTS.saturating_sub(active);

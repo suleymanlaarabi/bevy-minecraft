@@ -118,27 +118,34 @@ pub(crate) fn refresh_slots(
     {
         return;
     }
-    for (view, owner, mut border, mut display) in &mut views {
-        border.set_if_neq(BorderColor::all(
-            if view.index < HOTBAR_SIZE && view.index == selection.0 {
-                SELECTED_BORDER
-            } else {
-                SLOT_BORDER
-            },
-        ));
-        let stack = match *owner {
-            super::SlotOwner::Inventory(entity, index) if entity == player => inventory.slot(index),
-            super::SlotOwner::Crafting(entity, index) if entity == player => {
-                grid.slots.get(index).copied().flatten()
-            }
-            super::SlotOwner::Result(entity) if entity == player => result.0,
-            super::SlotOwner::Container(entity, index) => containers
-                .get(entity)
-                .ok()
-                .and_then(|inventory| inventory.slot(index)),
-            _ => None,
-        };
-        display.set_if_neq(super::StackView(stack));
+    for (views, owners, mut borders, mut displays) in views
+        .contiguous_iter_mut()
+        .expect("Dense inventory slot query")
+    {
+        for (index, (view, owner)) in views.iter().zip(owners).enumerate() {
+            let border =
+                BorderColor::all(if view.index < HOTBAR_SIZE && view.index == selection.0 {
+                    SELECTED_BORDER
+                } else {
+                    SLOT_BORDER
+                });
+            hollow_features::query::set_if_neq(&mut borders, index, border);
+            let stack = match *owner {
+                super::SlotOwner::Inventory(entity, index) if entity == player => {
+                    inventory.slot(index)
+                }
+                super::SlotOwner::Crafting(entity, index) if entity == player => {
+                    grid.slots.get(index).copied().flatten()
+                }
+                super::SlotOwner::Result(entity) if entity == player => result.0,
+                super::SlotOwner::Container(entity, index) => containers
+                    .get(entity)
+                    .ok()
+                    .and_then(|inventory| inventory.slot(index)),
+                _ => None,
+            };
+            hollow_features::query::set_if_neq(&mut displays, index, super::StackView(stack));
+        }
     }
 }
 
@@ -153,44 +160,52 @@ pub(crate) fn sync_stack_views(
     >,
     mut counts: Query<(&mut Text, Has<SlotCount>), Or<(With<SlotCount>, With<EmptySlotLabel>)>>,
 ) {
-    for (view, children, slot) in &views {
-        if !view.is_changed() && !block_icons.is_changed() {
-            continue;
-        }
-        let stack = view.0;
-        for &child in children {
-            if let Ok((mut node, mut visibility)) = icons.get_mut(child) {
-                if let Some(stack) = stack {
-                    show_icon(&mut node, &block_icons, stack.item());
-                    visibility.set_if_neq(Visibility::Inherited);
-                } else {
-                    visibility.set_if_neq(Visibility::Hidden);
-                }
+    for (views, children, slots) in views
+        .contiguous_iter()
+        .expect("Dense inventory stack query")
+    {
+        let (views, ticks) = ContiguousRef::split(views);
+        for (index, (view, changed)) in views.iter().zip(ticks.is_changed_iter()).enumerate() {
+            if !changed && !block_icons.is_changed() {
+                continue;
             }
-            if let Ok((mut text, count)) = counts.get_mut(child) {
-                if count {
-                    text.set_if_neq(stack_count(stack));
-                } else {
-                    let label = if stack.is_some() {
-                        ""
+            let stack = view.0;
+            let slot = slots.map(|slots| &slots[index]);
+            for &child in &children[index] {
+                if let Ok((mut node, mut visibility)) = icons.get_mut(child) {
+                    if let Some(stack) = stack {
+                        show_icon(&mut node, &block_icons, stack.item());
+                        visibility.set_if_neq(Visibility::Inherited);
                     } else {
-                        slot.map_or("", |slot| empty_slot_label(slot.index))
-                    };
-                    if text.0 != label {
-                        text.0 = label.into();
+                        visibility.set_if_neq(Visibility::Hidden);
                     }
                 }
-            }
-            if let Ok((mut node, mut visibility)) = durability.get_mut(child) {
-                if let Some(stack) = stack
-                    && stack.damage() > 0
-                    && stack.item().max_damage() > 0
-                {
-                    let fraction = 1.0 - stack.damage() as f32 / stack.item().max_damage() as f32;
-                    node.width = px((super::SLOT_SIZE - 8.0) * fraction);
-                    visibility.set_if_neq(Visibility::Inherited);
-                } else {
-                    visibility.set_if_neq(Visibility::Hidden);
+                if let Ok((mut text, count)) = counts.get_mut(child) {
+                    if count {
+                        text.set_if_neq(stack_count(stack));
+                    } else {
+                        let label = if stack.is_some() {
+                            ""
+                        } else {
+                            slot.map_or("", |slot| empty_slot_label(slot.index))
+                        };
+                        if text.0 != label {
+                            text.0 = label.into();
+                        }
+                    }
+                }
+                if let Ok((mut node, mut visibility)) = durability.get_mut(child) {
+                    if let Some(stack) = stack
+                        && stack.damage() > 0
+                        && stack.item().max_damage() > 0
+                    {
+                        let fraction =
+                            1.0 - stack.damage() as f32 / stack.item().max_damage() as f32;
+                        node.width = px((super::SLOT_SIZE - 8.0) * fraction);
+                        visibility.set_if_neq(Visibility::Inherited);
+                    } else {
+                        visibility.set_if_neq(Visibility::Hidden);
+                    }
                 }
             }
         }

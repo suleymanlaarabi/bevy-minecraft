@@ -65,23 +65,32 @@ pub(super) fn update_night_sky(
     mut star_fields: Query<(&mut Transform, &mut Visibility), (With<Stars>, Without<MoonDisk>)>,
     mut moons: Query<&mut Visibility, With<MoonDisk>>,
 ) {
-    for (mut transform, mut visibility) in &mut star_fields {
+    for (transforms, mut visibility) in star_fields
+        .contiguous_iter_mut()
+        .expect("Dense star field query")
+    {
         // Invisible in full daylight: skip drawing 2600 quads that add nothing.
-        visibility.set_if_neq(if sky.night > 0.0 {
+        let target = if sky.night > 0.0 {
             Visibility::Inherited
         } else {
             Visibility::Hidden
-        });
-        transform.rotation = sky.sky_rotation;
+        };
+        for (index, transform) in transforms.into_iter().enumerate() {
+            hollow_features::query::set_if_neq(&mut visibility, index, target);
+            transform.rotation = sky.sky_rotation;
+        }
     }
     // Fully transparent below the horizon: hidden.
     let shown = moon_settings(&sky).color.w > 0.0;
-    for mut visibility in &mut moons {
-        visibility.set_if_neq(if shown {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        });
+    let target = if shown {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut visibility in moons.contiguous_iter_mut().expect("Dense moon query") {
+        for index in 0..visibility.len() {
+            hollow_features::query::set_if_neq(&mut visibility, index, target);
+        }
     }
 }
 

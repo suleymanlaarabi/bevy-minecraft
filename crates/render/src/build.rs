@@ -174,12 +174,19 @@ pub(crate) fn update_shadow_geometry<C: RenderSource>(
     if !enabled {
         feed.ops.push(SectionOp::ClearPass(4));
     }
-    for (mut voxels, mut sections) in &mut chunks {
+    for (voxels, sections) in chunks
+        .contiguous_iter_mut()
+        .expect("Dense shadow geometry query")
+    {
         if enabled {
-            voxels.mark_sections(sections.built_sections);
+            for (voxels, sections) in voxels.into_iter().zip(sections.iter()) {
+                voxels.mark_sections(sections.built_sections);
+            }
         } else {
-            for section in &mut sections.sections {
-                section.passes &= !(1 << 4);
+            for sections in sections {
+                for section in &mut sections.sections {
+                    section.passes &= !(1 << 4);
+                }
             }
         }
     }

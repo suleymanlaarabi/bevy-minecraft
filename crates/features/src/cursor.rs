@@ -23,10 +23,20 @@ fn sync_cursor(modals: Query<(), With<FreeCursor>>, mut cursors: Query<&mut Curs
     } else {
         CursorGrabMode::Locked
     };
-    for mut cursor in &mut cursors {
-        if cursor.visible != visible || cursor.grab_mode != grab {
-            cursor.visible = visible;
-            cursor.grab_mode = grab;
+    for mut cursors in cursors.contiguous_iter_mut().expect("Dense cursor query") {
+        for index in 0..cursors.len() {
+            crate::query::set_field_if_neq(
+                &mut cursors,
+                index,
+                |cursor| &mut cursor.visible,
+                visible,
+            );
+            crate::query::set_field_if_neq(
+                &mut cursors,
+                index,
+                |cursor| &mut cursor.grab_mode,
+                grab,
+            );
         }
     }
 }

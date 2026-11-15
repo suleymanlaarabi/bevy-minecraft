@@ -576,7 +576,11 @@ fn collect(
     mut tasks: Query<(Entity, &mut GenerationTask)>,
     mut available: MessageWriter<ChunkAvailable>,
 ) {
-    for (entity, mut task) in &mut tasks {
+    for (entity, task) in tasks
+        .contiguous_iter_mut()
+        .expect("Dense generation task query")
+        .flat_map(|(entities, tasks)| entities.iter().copied().zip(tasks))
+    {
         let Some(output) = check_ready(&mut task.task) else {
             continue;
         };

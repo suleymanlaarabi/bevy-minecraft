@@ -298,11 +298,21 @@ fn find(grid: &CraftingGrid) -> Option<RecipeMatch> {
 }
 
 pub(crate) fn refresh_crafting(mut grids: Query<(Ref<CraftingGrid>, &mut CraftingResult)>) {
-    grids.par_iter_mut().for_each(|(grid, mut result)| {
-        if grid.is_changed() {
-            result.set_if_neq(CraftingResult(grid.recipe().map(RecipeMatch::output)));
-        }
-    });
+    grids
+        .contiguous_par_iter_mut()
+        .expect("Dense crafting query")
+        .for_each(|(grids, mut results)| {
+            let (grids, ticks) = ContiguousRef::split(grids);
+            for (index, (grid, changed)) in grids.iter().zip(ticks.is_changed_iter()).enumerate() {
+                if changed {
+                    hollow_features::query::set_if_neq(
+                        &mut results,
+                        index,
+                        CraftingResult(grid.recipe().map(RecipeMatch::output)),
+                    );
+                }
+            }
+        });
 }
 
 #[derive(Clone, Copy)]

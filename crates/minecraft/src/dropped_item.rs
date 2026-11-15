@@ -371,9 +371,14 @@ fn animate_dropped_item_visuals(
     mut visuals: Query<(&DroppedItemVisual, &mut Transform)>,
 ) {
     let seconds = time.elapsed_secs();
-    for (visual, mut transform) in &mut visuals {
-        transform.rotation = Quat::from_rotation_y(seconds * 2.4 + visual.phase);
-        transform.translation.y = (seconds * 2.0 + visual.phase).sin() * 0.03;
+    for (visuals, transforms) in visuals
+        .contiguous_iter_mut()
+        .expect("Dense dropped item visual query")
+    {
+        for (visual, transform) in visuals.iter().zip(transforms) {
+            transform.rotation = Quat::from_rotation_y(seconds * 2.4 + visual.phase);
+            transform.translation.y = (seconds * 2.0 + visual.phase).sin() * 0.03;
+        }
     }
 }
 
@@ -461,11 +466,17 @@ fn sync_drop_visibility(
     rendered: Query<(), With<hollow_render::streaming::RenderRequested>>,
     mut drops: Query<(&crate::simulation::SimulatedIn, &mut Visibility), With<DroppedItem>>,
 ) {
-    for (owner, mut visibility) in &mut drops {
-        visibility.set_if_neq(if rendered.contains(owner.0) {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        });
+    for (owners, mut visibility) in drops
+        .contiguous_iter_mut()
+        .expect("Dense dropped item visibility query")
+    {
+        for (index, owner) in owners.iter().enumerate() {
+            let target = if rendered.contains(owner.0) {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+            hollow_features::query::set_if_neq(&mut visibility, index, target);
+        }
     }
 }

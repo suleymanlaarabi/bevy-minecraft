@@ -139,12 +139,18 @@ fn validate(
     sessions: Query<(Entity, &InventorySession, &FixedPosition, &CraftingGrid)>,
     access: StationAccess,
 ) {
-    for (entity, session, position, grid) in &sessions {
+    for (((entity, session), position), grid) in sessions
+        .contiguous_iter()
+        .expect("Dense inventory session query")
+        .flat_map(|(entities, sessions, positions, grids)| {
+            entities.iter().zip(sessions).zip(positions).zip(grids)
+        })
+    {
         if access
             .layout(Some(session), position.current.as_vec3())
             .is_none_or(|layout| usize::from(layout.crafting_side) != grid.side)
         {
-            commands.entity(entity).remove::<InventorySession>();
+            commands.entity(*entity).remove::<InventorySession>();
         }
     }
 }
@@ -161,7 +167,11 @@ fn session_closed(
 }
 
 fn close_sessions(mut commands: Commands, sessions: Query<Entity, With<InventorySession>>) {
-    for entity in &sessions {
+    for &entity in sessions
+        .contiguous_iter()
+        .expect("Dense inventory session query")
+        .flatten()
+    {
         commands.entity(entity).remove::<InventorySession>();
     }
 }

@@ -444,10 +444,18 @@ fn cancel_breaking(
     mut breaking: Query<&mut BreakingState, With<PlayerCamera>>,
     mut overlays: Query<&mut Visibility, With<BreakingOverlay>>,
 ) {
-    for mut state in &mut breaking {
+    for state in breaking
+        .contiguous_iter_mut()
+        .expect("Dense breaking query")
+        .flatten()
+    {
         state.0 = None;
     }
-    for mut visibility in &mut overlays {
+    for visibility in overlays
+        .contiguous_iter_mut()
+        .expect("Dense breaking overlay query")
+        .flatten()
+    {
         *visibility = Visibility::Hidden;
     }
 }

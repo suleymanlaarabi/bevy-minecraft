@@ -40,13 +40,24 @@ fn sync_gameplay_hud(
         .is_some_and(|state| *state.get() == InventoryState::Open);
     let changed = phase.as_ref().is_some_and(|phase| phase.is_changed())
         || inventory.as_ref().is_some_and(|state| state.is_changed());
-    for (policy, mut visibility) in &mut roots {
-        if changed || policy.is_changed() || visibility.is_added() {
-            visibility.set_if_neq(if playing && !(open && policy.hide_with_inventory) {
-                Visibility::Inherited
-            } else {
-                Visibility::Hidden
-            });
+    for (policies, mut visibility) in roots
+        .contiguous_iter_mut()
+        .expect("Dense gameplay HUD query")
+    {
+        let (policies, ticks) = ContiguousRef::split(policies);
+        for (index, policy) in policies.iter().enumerate() {
+            if changed
+                || ticks.changed()[index].is_newer_than(ticks.last_run(), ticks.this_run())
+                || visibility.added_ticks_slice()[index]
+                    .is_newer_than(visibility.last_run_tick(), visibility.this_run_tick())
+            {
+                let target = if playing && !(open && policy.hide_with_inventory) {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                };
+                hollow_features::query::set_if_neq(&mut visibility, index, target);
+            }
         }
     }
 }

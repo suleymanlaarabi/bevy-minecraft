@@ -2,7 +2,10 @@
 use super::*;
 use crate::player::PlayerCamera;
 use bevy::{camera::CameraProjection, render::render_resource::Extent3d, window::PrimaryWindow};
-use hollow_features::motion::InterpolationAlpha;
+use hollow_features::{
+    motion::InterpolationAlpha,
+    query::{set_field_if_neq, set_if_neq},
+};
 use std::{f32::consts::PI, sync::OnceLock};
 
 const SWING_TICK_DURATION: f32 = 1. / 20.;
@@ -71,7 +74,11 @@ impl ArmSwing {
 }
 
 pub(super) fn cancel_swing(mut swings: Query<&mut ArmSwing>) {
-    for mut swing in &mut swings {
+    for swing in swings
+        .contiguous_iter_mut()
+        .expect("Dense arm swing query")
+        .flatten()
+    {
         *swing = ArmSwing::default();
     }
 }
@@ -157,112 +164,141 @@ pub(super) fn resize_arm_target(
     let full_size = settings
         .render_resolution
         .size(window_size, device.limits().max_texture_dimension_2d);
-    for (mut camera, projection) in &mut cameras {
-        if !camera.is_active {
-            continue;
-        }
-        let mut min = full_size.as_vec2();
-        let mut max = Vec2::ZERO;
-        let mut bounded = false;
-        let mut fallback = false;
-        if let Projection::Perspective(perspective) = projection {
-            let mut perspective = perspective.clone();
-            perspective.aspect_ratio = full_size.x as f32 / full_size.y as f32;
-            let clip_from_view = perspective.get_clip_from_view();
-            for (root, arm, visibility) in &arms {
-                if *visibility == Visibility::Hidden {
-                    continue;
-                }
-                for (mesh, part, parent) in &parts {
-                    if parent.parent() != root {
+    for (mut cameras, projections) in cameras
+        .contiguous_iter_mut()
+        .expect("Dense arm camera query")
+    {
+        for (camera_index, projection) in projections.iter().enumerate() {
+            if !cameras[camera_index].is_active {
+                continue;
+            }
+            let mut min = full_size.as_vec2();
+            let mut max = Vec2::ZERO;
+            let mut bounded = false;
+            let mut fallback = false;
+            if let Projection::Perspective(perspective) = projection {
+                let mut perspective = perspective.clone();
+                perspective.aspect_ratio = full_size.x as f32 / full_size.y as f32;
+                let clip_from_view = perspective.get_clip_from_view();
+                for ((root, arm), visibility) in arms
+                    .contiguous_iter()
+                    .expect("Dense first person root query")
+                    .flat_map(|(roots, arms, visibility)| roots.iter().zip(arms).zip(visibility))
+                {
+                    if *visibility == Visibility::Hidden {
                         continue;
                     }
-                    let Some(bounds) = meshes.get(&mesh.0).and_then(|mesh| mesh.final_aabb) else {
-                        fallback = true;
-                        continue;
-                    };
-                    let clip_from_local = clip_from_view * arm.to_matrix() * part.to_matrix();
-                    let low = bounds.min;
-                    let high = bounds.max;
-                    for corner in 0..8 {
-                        let position = Vec3::new(
-                            if corner & 1 == 0 { low.x } else { high.x },
-                            if corner & 2 == 0 { low.y } else { high.y },
-                            if corner & 4 == 0 { low.z } else { high.z },
-                        );
-                        let clip = clip_from_local * position.extend(1.0);
-                        if !clip.is_finite() || clip.w <= perspective.near {
-                            fallback = true;
+                    for ((mesh, part), parent) in parts
+                        .contiguous_iter()
+                        .expect("Dense first person part query")
+                        .flat_map(|(meshes, parts, parents)| meshes.iter().zip(parts).zip(parents))
+                    {
+                        if parent.parent() != *root {
                             continue;
                         }
-                        let ndc = clip.truncate() / clip.w;
-                        let pixel = (ndc.xy() * Vec2::new(0.5, -0.5) + Vec2::splat(0.5))
-                            * full_size.as_vec2();
-                        min = min.min(pixel);
-                        max = max.max(pixel);
-                        bounded = true;
+                        let Some(bounds) = meshes.get(&mesh.0).and_then(|mesh| mesh.final_aabb)
+                        else {
+                            fallback = true;
+                            continue;
+                        };
+                        let clip_from_local = clip_from_view * arm.to_matrix() * part.to_matrix();
+                        let low = bounds.min;
+                        let high = bounds.max;
+                        for corner in 0..8 {
+                            let position = Vec3::new(
+                                if corner & 1 == 0 { low.x } else { high.x },
+                                if corner & 2 == 0 { low.y } else { high.y },
+                                if corner & 4 == 0 { low.z } else { high.z },
+                            );
+                            let clip = clip_from_local * position.extend(1.0);
+                            if !clip.is_finite() || clip.w <= perspective.near {
+                                fallback = true;
+                                continue;
+                            }
+                            let ndc = clip.truncate() / clip.w;
+                            let pixel = (ndc.xy() * Vec2::new(0.5, -0.5) + Vec2::splat(0.5))
+                                * full_size.as_vec2();
+                            min = min.min(pixel);
+                            max = max.max(pixel);
+                            bounded = true;
+                        }
                     }
                 }
+            } else {
+                fallback = true;
             }
-        } else {
-            fallback = true;
-        }
-        let (mut offset, mut size) = if fallback || !bounded {
-            (Vec2::ZERO, full_size)
-        } else {
-            let low = (((min - Vec2::splat(8.0)) / 64.0).floor() * 64.0)
-                .clamp(Vec2::ZERO, full_size.as_vec2());
-            let high = (((max + Vec2::splat(8.0)) / 64.0).ceil() * 64.0)
-                .clamp(Vec2::ZERO, full_size.as_vec2());
-            (low, (high - low).max(Vec2::ZERO).as_uvec2())
-        };
-        if size.x == 0 || size.y == 0 {
-            camera.is_active = false;
-            for (_, mut visibility) in &mut overlays {
-                visibility.set_if_neq(Visibility::Hidden);
+            let (mut offset, mut size) = if fallback || !bounded {
+                (Vec2::ZERO, full_size)
+            } else {
+                let low = (((min - Vec2::splat(8.0)) / 64.0).floor() * 64.0)
+                    .clamp(Vec2::ZERO, full_size.as_vec2());
+                let high = (((max + Vec2::splat(8.0)) / 64.0).ceil() * 64.0)
+                    .clamp(Vec2::ZERO, full_size.as_vec2());
+                (low, (high - low).max(Vec2::ZERO).as_uvec2())
+            };
+            if size.x == 0 || size.y == 0 {
+                set_field_if_neq(
+                    &mut cameras,
+                    camera_index,
+                    |camera| &mut camera.is_active,
+                    false,
+                );
+                for (_, mut visibility) in overlays
+                    .contiguous_iter_mut()
+                    .expect("Dense arm overlay query")
+                {
+                    for index in 0..visibility.len() {
+                        set_if_neq(&mut visibility, index, Visibility::Hidden);
+                    }
+                }
+                continue;
             }
-            continue;
-        }
-        if !fallback && bounded {
-            if allocation.0 != full_size {
-                *allocation = (full_size, UVec2::ZERO);
+            if !fallback && bounded {
+                if allocation.0 != full_size {
+                    *allocation = (full_size, UVec2::ZERO);
+                }
+                // Keep a high-water allocation through swings. Moving the crop is
+                // cheap; recreating its color/depth textures every 64 pixels is not.
+                allocation.1 = allocation.1.max(size).min(full_size);
+                size = allocation.1;
+                offset = offset.min((full_size - size).as_vec2());
             }
-            // Keep a high-water allocation through swings. Moving the crop is
-            // cheap; recreating its color/depth textures every 64 pixels is not.
-            allocation.1 = allocation.1.max(size).min(full_size);
-            size = allocation.1;
-            offset = offset.min((full_size - size).as_vec2());
-        }
-        let sub_view = bevy::camera::SubCameraView {
-            full_size,
-            offset,
-            size,
-        };
-        if camera.sub_camera_view != Some(sub_view) {
-            camera.sub_camera_view = Some(sub_view);
-        }
-        if images
-            .get(&assets.arm_view)
-            .is_some_and(|image| image.size() != size)
-            && let Some(mut image) = images.get_mut(&assets.arm_view)
-        {
-            image.resize(Extent3d {
-                width: size.x,
-                height: size.y,
-                depth_or_array_layers: 1,
-            });
-        }
-        let scale =
-            window_size.as_vec2() / full_size.as_vec2() / (window.scale_factor() * ui_scale.0);
-        for (mut node, _) in &mut overlays {
-            let (left, top) = (px(offset.x * scale.x), px(offset.y * scale.y));
-            let (width, height) = (px(size.x as f32 * scale.x), px(size.y as f32 * scale.y));
-            if node.left != left || node.top != top || node.width != width || node.height != height
+            let sub_view = bevy::camera::SubCameraView {
+                full_size,
+                offset,
+                size,
+            };
+            set_field_if_neq(
+                &mut cameras,
+                camera_index,
+                |camera| &mut camera.sub_camera_view,
+                Some(sub_view),
+            );
+            if images
+                .get(&assets.arm_view)
+                .is_some_and(|image| image.size() != size)
+                && let Some(mut image) = images.get_mut(&assets.arm_view)
             {
-                node.left = left;
-                node.top = top;
-                node.width = width;
-                node.height = height;
+                image.resize(Extent3d {
+                    width: size.x,
+                    height: size.y,
+                    depth_or_array_layers: 1,
+                });
+            }
+            let scale =
+                window_size.as_vec2() / full_size.as_vec2() / (window.scale_factor() * ui_scale.0);
+            for (mut nodes, _) in overlays
+                .contiguous_iter_mut()
+                .expect("Dense arm overlay query")
+            {
+                let (left, top) = (px(offset.x * scale.x), px(offset.y * scale.y));
+                let (width, height) = (px(size.x as f32 * scale.x), px(size.y as f32 * scale.y));
+                for index in 0..nodes.len() {
+                    set_field_if_neq(&mut nodes, index, |node| &mut node.left, left);
+                    set_field_if_neq(&mut nodes, index, |node| &mut node.top, top);
+                    set_field_if_neq(&mut nodes, index, |node| &mut node.width, width);
+                    set_field_if_neq(&mut nodes, index, |node| &mut node.height, height);
+                }
             }
         }
     }
@@ -286,69 +322,90 @@ pub(super) fn animate_first_person(
 ) {
     // Mesh rig roots and UI image roots are genuinely disjoint entity sets.
     let visible = *state.get() == InventoryState::Closed && *view == PlayerView::FirstPerson;
-    for (mut transform, mut visibility, item) in &mut arms {
-        let shown = visible
-            && if item.is_some() {
-                held.item.is_some()
+    for (mut transforms, mut visibility, items) in arms
+        .contiguous_iter_mut()
+        .expect("Dense first person pose query")
+    {
+        for index in 0..transforms.len() {
+            let item = items.map(|items| &items[index]);
+            let shown = visible
+                && if item.is_some() {
+                    held.item.is_some()
+                } else {
+                    held.item.is_none()
+                };
+            let became_visible = shown && visibility[index] == Visibility::Hidden;
+            let target = if shown {
+                Visibility::Inherited
             } else {
-                held.item.is_none()
+                Visibility::Hidden
             };
-        let became_visible = shown && *visibility == Visibility::Hidden;
-        visibility.set_if_neq(if shown {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        });
-        if shown
-            && (became_visible
-                || swing.is_changed()
-                || interpolation.is_changed()
-                || motion.is_changed()
-                || view.is_changed()
-                || held.is_changed()
-                || using.is_changed()
-                || using.0.is_some()
-                || transform.is_added())
-        {
-            let mut pose = if let Some(item) = item {
-                held_item::pose(swing.progress(), item.equipped, &item.display)
-            } else {
-                let mut pose = first_person_pose(swing.progress());
-                pose.translation.y -= 0.6 * (1. - held.equipped);
-                pose
-            };
-            if let Some(action) = using.0 {
-                let progress = using.progress();
-                let lift = (progress * 5.0).min(1.0);
-                let pulse = ((action.elapsed as f32 + fixed.overstep_fraction()) * 1.7)
-                    .sin()
-                    .abs();
-                pose.translation +=
-                    Vec3::new(-0.35 * lift, 0.25 * lift + pulse * 0.035, 0.1 * lift);
-                pose.rotation *= Quat::from_euler(
-                    EulerRot::XYZ,
-                    -0.35 * lift,
-                    0.3 * lift,
-                    if action.drinking {
-                        0.4 * lift
-                    } else {
-                        pulse * 0.08
-                    },
+            set_if_neq(&mut visibility, index, target);
+            if shown
+                && (became_visible
+                    || swing.is_changed()
+                    || interpolation.is_changed()
+                    || motion.is_changed()
+                    || view.is_changed()
+                    || held.is_changed()
+                    || using.is_changed()
+                    || using.0.is_some()
+                    || transforms.added_ticks_slice()[index]
+                        .is_newer_than(transforms.last_run_tick(), transforms.this_run_tick()))
+            {
+                let mut pose = if let Some(item) = item {
+                    held_item::pose(swing.progress(), item.equipped, &item.display)
+                } else {
+                    let mut pose = first_person_pose(swing.progress());
+                    pose.translation.y -= 0.6 * (1. - held.equipped);
+                    pose
+                };
+                if let Some(action) = using.0 {
+                    let progress = using.progress();
+                    let lift = (progress * 5.0).min(1.0);
+                    let pulse = ((action.elapsed as f32 + fixed.overstep_fraction()) * 1.7)
+                        .sin()
+                        .abs();
+                    pose.translation +=
+                        Vec3::new(-0.35 * lift, 0.25 * lift + pulse * 0.035, 0.1 * lift);
+                    pose.rotation *= Quat::from_euler(
+                        EulerRot::XYZ,
+                        -0.35 * lift,
+                        0.3 * lift,
+                        if action.drinking {
+                            0.4 * lift
+                        } else {
+                            pulse * 0.08
+                        },
+                    );
+                }
+                set_if_neq(
+                    &mut transforms,
+                    index,
+                    crate::player::view_bob::pose(&motion, interpolation.0) * pose,
                 );
             }
-            transform.set_if_neq(crate::player::view_bob::pose(&motion, interpolation.0) * pose);
         }
     }
-    for mut visibility in &mut overlays {
-        visibility.set_if_neq(if visible {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        });
+    let target = if visible {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut visibility in overlays
+        .contiguous_iter_mut()
+        .expect("Dense arm overlay query")
+    {
+        for index in 0..visibility.len() {
+            set_if_neq(&mut visibility, index, target);
+        }
     }
-    for mut camera in &mut cameras {
-        if camera.is_active != visible {
-            camera.is_active = visible;
+    for mut cameras in cameras
+        .contiguous_iter_mut()
+        .expect("Dense arm camera query")
+    {
+        for index in 0..cameras.len() {
+            set_field_if_neq(&mut cameras, index, |camera| &mut camera.is_active, visible);
         }
     }
 }

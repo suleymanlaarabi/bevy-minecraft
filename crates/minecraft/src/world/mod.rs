@@ -827,10 +827,15 @@ fn poll_save(
                 return;
             }
             let revisions: HashMap<_, _> = ack.revisions.into_iter().collect();
-            for (chunk, mut voxels) in &mut chunks {
-                if let Some(&revision) = revisions.get(&chunk.position) {
-                    if revision <= voxels.save_revision {
-                        voxels.bypass_change_detection().saved_revision = revision;
+            for (chunks, mut voxels) in chunks
+                .contiguous_iter_mut()
+                .expect("Dense saved chunk query")
+            {
+                for (chunk, voxels) in chunks.iter().zip(voxels.bypass_change_detection()) {
+                    if let Some(&revision) = revisions.get(&chunk.position) {
+                        if revision <= voxels.save_revision {
+                            voxels.saved_revision = revision;
+                        }
                     }
                 }
             }

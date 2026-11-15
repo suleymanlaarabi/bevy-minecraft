@@ -69,9 +69,12 @@ pub fn activate<A: Send + Sync + 'static>(
         return;
     }
     if previous.is_none() || (index.is_changed() && changed.0.is_empty()) {
-        changed
-            .0
-            .extend(terrain.iter().map(|(chunk, _)| chunk.position));
+        changed.0.extend(
+            terrain
+                .contiguous_iter()
+                .expect("Dense terrain query")
+                .flat_map(|(chunks, _)| chunks.iter().map(|chunk| chunk.position)),
+        );
     } else if previous.as_ref() != Some(&*region) {
         for area in [previous.as_ref().unwrap(), &*region] {
             if let Some(center) = area.center {
@@ -381,7 +384,11 @@ pub fn random_ticks<P: NeighborRules>(
     let Some(handlers) = &registry.handlers else {
         return;
     };
-    for (owner, voxels) in &terrain {
+    for (owner, voxels) in terrain
+        .contiguous_iter()
+        .expect("Dense random tick terrain query")
+        .flat_map(|(owners, voxels)| owners.iter().zip(voxels))
+    {
         let Ok((entity, column, mut work, dirty)) = columns.get_mut(owner.0) else {
             continue;
         };
