@@ -77,6 +77,18 @@ pub(super) fn prepare(component: P, stack: &[P]) -> P {
     }))
 }
 
+impl PointwisePlan {
+    pub(super) const fn input(&self) -> usize {
+        self.input
+    }
+    pub(super) const fn binary(&self) -> Option<(usize, BinaryOperation)> {
+        self.binary
+    }
+    pub(super) fn operations(&self) -> &[Operation] {
+        &self.operations
+    }
+}
+
 impl NoiseFunctionComponentRange for PointwisePlan {
     fn min(&self) -> f32 {
         self.min

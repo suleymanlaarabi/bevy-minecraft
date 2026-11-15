@@ -12,9 +12,10 @@ use bevy_math::IVec2;
 use bevy_tasks::{IoTaskPool, Task, TaskPool, TaskPoolBuilder, futures::check_ready};
 use hollow_engine::tasks::{SchedulingDeadline, VoxelTaskBudget, VoxelTasks, WorkClass};
 use pumpkin_util::world_seed::Seed;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     cmp::Reverse,
-    collections::{BinaryHeap, HashMap, HashSet, VecDeque},
+    collections::{BinaryHeap, VecDeque},
     io,
     sync::{
         Arc, Mutex,
@@ -115,8 +116,8 @@ struct Shared {
     cancelled: AtomicBool,
     view: Mutex<Option<ViewDemand>>,
     requests: Mutex<Vec<Request>>,
-    snapshots: Mutex<HashMap<ChunkPos, ChunkSnapshot>>,
-    entities: Mutex<HashMap<ChunkPos, Entity>>,
+    snapshots: Mutex<FxHashMap<ChunkPos, ChunkSnapshot>>,
+    entities: Mutex<FxHashMap<ChunkPos, Entity>>,
     flush: Mutex<Vec<async_channel::Sender<Result<(), String>>>>,
     paused: AtomicBool,
     loading: AtomicBool,
@@ -248,6 +249,14 @@ impl GenerationSession {
             .get(&ChunkPos::new(position.x, position.y))
             .copied()
     }
+    /// Whether terrain is published here, without cloning its layers.
+    pub fn has_snapshot(&self, position: IVec2) -> bool {
+        self.0
+            .snapshots
+            .lock()
+            .unwrap()
+            .contains_key(&ChunkPos::new(position.x, position.y))
+    }
     pub fn snapshot(&self, position: IVec2) -> Option<ChunkSnapshot> {
         self.0
             .snapshots
@@ -347,8 +356,8 @@ struct FlushCapture {
 }
 struct Runtime {
     session: GenerationSession,
-    entries: HashMap<ChunkPos, Entry>,
-    roots: HashSet<ChunkPos>,
+    entries: FxHashMap<ChunkPos, Entry>,
+    roots: FxHashSet<ChunkPos>,
     root_order: VecDeque<ChunkPos>,
     roots_to_scan: usize,
     view_cursor: usize,
@@ -366,8 +375,8 @@ impl Runtime {
     fn new(session: GenerationSession) -> Self {
         Self {
             session,
-            entries: HashMap::new(),
-            roots: HashSet::new(),
+            entries: FxHashMap::default(),
+            roots: FxHashSet::default(),
             root_order: VecDeque::new(),
             roots_to_scan: 0,
             view_cursor: 0,
@@ -732,12 +741,21 @@ fn collect(
         };
         // Only completions and demand changes wake stage admission. A blocked
         // chunk waits for its neighbors instead of scanning the whole view again.
-        for (position, _) in task.writes.iter().chain(task.reads.iter()) {
-            for dx in -1..=1 {
-                for dz in -1..=1 {
-                    runtime.queue(position.add_raw(dx, dz));
-                }
-            }
+        // Reservations overlap: wake each dilated neighbor once rather than
+        // hashing up to 162 overlapping positions per completed task.
+        let mut wake: Vec<(i32, i32)> = task
+            .writes
+            .iter()
+            .chain(task.reads.iter())
+            .flat_map(|(position, _)| {
+                (-1..=1)
+                    .flat_map(move |dx| (-1..=1).map(move |dz| (position.x + dx, position.y + dz)))
+            })
+            .collect();
+        wake.sort_unstable();
+        wake.dedup();
+        for (x, z) in wake {
+            runtime.queue(ChunkPos::new(x, z));
         }
         if let Err(error) = result {
             if let Some(entry) = runtime.entries.get_mut(&task.position) {

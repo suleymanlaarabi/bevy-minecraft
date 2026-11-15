@@ -1,9 +1,11 @@
 pub mod chunk_density_function;
 pub mod chunk_noise_router;
+pub mod corner_cache;
 pub mod density_function;
 pub mod density_volume;
 pub mod find_top_surface;
 pub mod height_cache;
+pub mod interval;
 pub mod memoized;
 pub mod multi_noise_sampler;
 pub mod pointwise;

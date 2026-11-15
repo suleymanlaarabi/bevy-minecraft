@@ -549,8 +549,17 @@ impl ProtoChunk {
         if local_y < 0 || local_y >= self.height() as i32 {
             return;
         }
-        if !block_state.is_air() {
-            let index = Self::local_position_to_height_map_index(local_x, local_z);
+        let index = Self::local_position_to_height_map_index(local_x, local_z);
+        // Heightmaps only ever rise. A write at or below all four columns, such
+        // as the surface rule's deep stone/deepslate, cannot change them: skip
+        // the movement and leaf-tag tests.
+        if !block_state.is_air()
+            && y as i16
+                > self.flat_surface_height_map[index]
+                    .min(self.flat_ocean_floor_height_map[index])
+                    .min(self.flat_motion_blocking_height_map[index])
+                    .min(self.flat_motion_blocking_no_leaves_height_map[index])
+        {
             let y = y as i16;
             self.maybe_update_surface_height_map(index, y);
             let block = BlockId::from_state_id(block_state.id);
@@ -893,6 +902,22 @@ impl ProtoChunk {
         surface_height_estimate_sampler: &mut SurfaceHeightEstimateSampler,
     ) {
         let volume = *noise_sampler.volume();
+        if !noise_sampler.ore_veins()
+            && volume.is_block_step()
+            && (volume.size_x, volume.size_z) == (16, 16)
+            && (volume.min_block_x, volume.min_block_z) == (self.x * 16, self.z * 16)
+            && volume.min_block_y == i32::from(self.bottom_y)
+            && volume.size_y == usize::from(self.height)
+        {
+            self.populate_noise_tiles(
+                generator,
+                noise_sampler,
+                ore_random_deriver,
+                surface_height_estimate_sampler,
+            );
+            self.prime_heightmaps();
+            return;
+        }
         let densities = noise_sampler.sample_density();
         let has_veins = densities.has_veins();
         self.block_sections
@@ -975,6 +1000,131 @@ impl ProtoChunk {
             .map_or(0, |i| i + 1);
         self.block_sections.truncate(count);
         self.prime_heightmaps();
+    }
+
+    /// Fill a whole chunk from 8x16x8 tiles. Conservative density bounds from
+    /// the interpolation corners prove most tiles entirely solid or open sky;
+    /// only tiles crossing a surface, a cave or an aquifer evaluate per-block
+    /// density, in an L1-sized buffer instead of full-height chunk volumes.
+    fn populate_noise_tiles(
+        &mut self,
+        generator: &super::generator::TerrainGenerator,
+        noise_sampler: &mut ChunkNoiseGenerator,
+        ore_random_deriver: &XoroshiroSplitter,
+        surface_height_estimate_sampler: &mut SurfaceHeightEstimateSampler,
+    ) {
+        use super::noise::router::interval::BlockBounds;
+        // Absorbs rounding of the trilinear blend, beyond the corner range.
+        const MARGIN: f32 = 1.0e-3;
+        const TILE: usize = 8;
+        let volume = *noise_sampler.volume();
+        noise_sampler.prepare_density(Some(&generator.corner_columns));
+        let air_above_y = noise_sampler.air_above_y(surface_height_estimate_sampler);
+        let solid = generator.default_block;
+        let sections = usize::from(self.height) / 16;
+        self.block_sections.clear();
+        self.block_sections
+            .resize_with(sections, || WorkingSection::Uniform(BlockStateId::AIR));
+        let mut density = DensityBuffer::with_len(TILE * 16 * TILE);
+        for section in 0..sections {
+            let min_y = volume.min_block_y + section as i32 * 16;
+            let tile_origin = |tile: usize| ((tile & 1) * TILE, (tile >> 1) * TILE);
+            let fills: [Option<BlockStateId>; 4] = std::array::from_fn(|tile| {
+                let (tx, tz) = tile_origin(tile);
+                let min = [
+                    volume.min_block_x + tx as i32,
+                    min_y,
+                    volume.min_block_z + tz as i32,
+                ];
+                let area = BlockBounds {
+                    min,
+                    max: [
+                        min[0] + TILE as i32 - 1,
+                        min_y + 15,
+                        min[2] + TILE as i32 - 1,
+                    ],
+                };
+                let (lo, hi) = noise_sampler.density_bounds(&area);
+                if lo > MARGIN {
+                    Some(solid.id)
+                } else if hi < -MARGIN && min_y > air_above_y {
+                    Some(BlockStateId::AIR)
+                } else {
+                    None
+                }
+            });
+            if let Some(first) = fills[0]
+                && fills.iter().all(|fill| *fill == Some(first))
+            {
+                self.block_sections[section] = WorkingSection::Uniform(first);
+                continue;
+            }
+            let mut cells = Box::new([BlockStateId::AIR; 4096]);
+            for (tile, fill) in fills.into_iter().enumerate() {
+                let (tx, tz) = tile_origin(tile);
+                if let Some(value) = fill {
+                    for x in tx..tx + TILE {
+                        for y in 0..16 {
+                            let start = x * CHUNK_AREA + y * 16 + tz;
+                            cells[start..start + TILE].fill(value);
+                        }
+                    }
+                    continue;
+                }
+                let tile_volume = DensityVolume::with_block_step(
+                    TILE,
+                    16,
+                    TILE,
+                    volume.min_block_x + tx as i32,
+                    min_y,
+                    volume.min_block_z + tz as i32,
+                );
+                noise_sampler.sample_density_into(&mut density, &tile_volume);
+                for z in 0..TILE {
+                    for x in 0..TILE {
+                        for y in (0..16).rev() {
+                            let value = density[tile_volume.index_unchecked(x, y, z)];
+                            let block_y = min_y + y as i32;
+                            let state = if value > 0.0 {
+                                solid
+                            } else if block_y > air_above_y {
+                                AIR_BLOCK.default_state
+                            } else {
+                                noise_sampler
+                                    .sample_block_state(
+                                        ore_random_deriver,
+                                        &Vector3::new(
+                                            tile_volume.min_block_x + x as i32,
+                                            block_y,
+                                            tile_volume.min_block_z + z as i32,
+                                        ),
+                                        value,
+                                        None,
+                                        surface_height_estimate_sampler,
+                                    )
+                                    .unwrap_or(solid)
+                            };
+                            cells[(tx + x) * CHUNK_AREA + y * 16 + tz + z] = state.id;
+                        }
+                    }
+                }
+            }
+            let first = cells[0];
+            self.block_sections[section] = if cells.iter().all(|&cell| cell == first) {
+                WorkingSection::Uniform(first)
+            } else {
+                WorkingSection::Dense(cells)
+            };
+        }
+        let count = self
+            .block_sections
+            .iter()
+            .rposition(|section| match section {
+                WorkingSection::Uniform(value) => *value != BlockStateId::AIR,
+                WorkingSection::Dense(_) => true,
+            })
+            .map_or(0, |i| i + 1);
+        self.block_sections.truncate(count);
     }
 
     #[must_use]
@@ -1117,15 +1267,23 @@ impl ProtoChunk {
                 let mut stone_depth_above = 0;
                 let mut min = i32::MAX;
                 let mut fluid_height = i32::MIN;
+                // Columns are long runs of one state: resolve its flags once
+                // per run instead of two dependent table loads per block.
+                let mut run = (BlockStateId::AIR, true, false);
                 for y in (min_y as i32..=top_block).rev() {
                     let pos = Vector3::new(x, y, z);
-                    let state = self.get_block_state(&pos).to_state();
-                    if state.is_air() {
+                    let id = self.get_block_state(&pos);
+                    if id != run.0 {
+                        let state = id.to_state();
+                        run = (id, state.is_air(), state.is_liquid());
+                    }
+                    let (_, is_air, is_liquid) = run;
+                    if is_air {
                         stone_depth_above = 0;
                         fluid_height = i32::MIN;
                         continue;
                     }
-                    if state.is_liquid() {
+                    if is_liquid {
                         if fluid_height == i32::MIN {
                             fluid_height = y + 1;
                         }
@@ -1159,7 +1317,7 @@ impl ProtoChunk {
                     let stone_depth_below = y - min + 1;
                     context.init_vertical(stone_depth_above, stone_depth_below, y, fluid_height);
 
-                    if !state.is_air() && !state.is_liquid() {
+                    if !is_air && !is_liquid {
                         let new_state = generator.prepared_surface_rule.apply(
                             self,
                             &mut context,
@@ -1342,7 +1500,9 @@ impl ProtoChunk {
                 let end_x = start_x + 15;
                 let end_z = start_z + 15;
 
-                let radius = 8;
+                // The feature stage only holds its 3x3 write neighborhood; any
+                // farther start reaching this chunk is already in its references.
+                let radius = 1;
                 for dx in -radius..=radius {
                     for dz in -radius..=radius {
                         if dx == 0 && dz == 0 {

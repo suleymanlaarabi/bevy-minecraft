@@ -502,14 +502,42 @@ impl StaticIndependentChunkNoiseFunctionComponentImpl for InterpolatedNoiseSampl
                     let alpha = buffer[index];
                     let block_y = volume.block_y(y);
                     buffer[index] = if alpha == 0.0 {
-                        sample(&self.min_limit_noise, &first, index, block_x, block_y, block_z)
+                        sample(
+                            &self.min_limit_noise,
+                            &first,
+                            index,
+                            block_x,
+                            block_y,
+                            block_z,
+                        )
                     } else if alpha == 1.0 {
-                        sample(&self.max_limit_noise, &second, index, block_x, block_y, block_z)
+                        sample(
+                            &self.max_limit_noise,
+                            &second,
+                            index,
+                            block_x,
+                            block_y,
+                            block_z,
+                        )
                     } else {
                         lerp(
                             alpha,
-                            sample(&self.min_limit_noise, &first, index, block_x, block_y, block_z),
-                            sample(&self.max_limit_noise, &second, index, block_x, block_y, block_z),
+                            sample(
+                                &self.min_limit_noise,
+                                &first,
+                                index,
+                                block_x,
+                                block_y,
+                                block_z,
+                            ),
+                            sample(
+                                &self.max_limit_noise,
+                                &second,
+                                index,
+                                block_x,
+                                block_y,
+                                block_z,
+                            ),
                         )
                     };
                 }

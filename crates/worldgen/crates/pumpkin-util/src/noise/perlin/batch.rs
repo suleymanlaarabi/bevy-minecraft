@@ -76,6 +76,16 @@ pub(super) fn add_to_grid(
             fraction as f32
         };
     }
+    // Coarse Y steps change the lattice floor on most samples, leaving runs
+    // too short for corner reuse. Gather eight independent Y lattice cells
+    // instead; the arithmetic order matches `Corners::lerp` exactly.
+    #[cfg(target_arch = "x86_64")]
+    let gather_columns = volume.size_y >= 8
+        && 2 * (1 + floors[..volume.size_y]
+            .windows(2)
+            .filter(|pair| pair[0] != pair[1])
+            .count())
+            > volume.size_y;
     let mut corners = Corners::zero();
     for z in 0..volume.size_z {
         let z = wrap(f64::from(volume.block_z(z)) * xz_scale) + noise.offset_z;
@@ -92,6 +102,22 @@ pub(super) fn add_to_grid(
             let (column, remaining) = buffer.split_at_mut(volume.size_y);
             buffer = remaining;
             let mut start = 0;
+            #[cfg(target_arch = "x86_64")]
+            if gather_columns {
+                // SAFETY: selected only after runtime AVX2 detection; all slices
+                // cover this column and the kernel processes full lanes only.
+                start = unsafe {
+                    avx::add_column(
+                        noise,
+                        [x0, x1, floor_z],
+                        [relative_x, relative_z, alpha_x, alpha_z, amplitude],
+                        &floors[..volume.size_y],
+                        &relative[..volume.size_y],
+                        &alpha[..volume.size_y],
+                        column,
+                    )
+                };
+            }
             while start < volume.size_y {
                 let mut end = start + 1;
                 while end < volume.size_y && floors[end] == floors[start] {
@@ -287,6 +313,97 @@ mod avx {
                             ax,
                             dot(c.d011_xz, c.g011_y, ym),
                             dot(c.d111_xz, c.g111_y, ym),
+                        ),
+                    ),
+                );
+                let previous = _mm256_loadu_ps(output.as_ptr().add(i));
+                _mm256_storeu_ps(
+                    output.as_mut_ptr().add(i),
+                    _mm256_add_ps(previous, _mm256_mul_ps(amplitude, result)),
+                );
+            }
+            end
+        }
+    }
+
+    /// Add one octave to a column of samples sharing X/Z, eight Y cells at once.
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn add_column(
+        noise: &PerlinNoise,
+        [x0, x1, floor_z]: [i32; 3],
+        [rx, rz, ax, az, amplitude]: [f32; 5],
+        floors: &[i32],
+        relative: &[f32],
+        alpha: &[f32],
+        output: &mut [f32],
+    ) -> usize {
+        // SAFETY: caller provides equally sized slices and AVX2; only complete
+        // eight-lane groups are loaded and stored. Gathers are masked by permute.
+        unsafe {
+            let end = output.len() / 8 * 8;
+            let one = _mm256_set1_epi32(1);
+            let x0 = _mm256_set1_epi32(x0);
+            let x1 = _mm256_set1_epi32(x1);
+            let z0 = _mm256_set1_epi32(floor_z);
+            let z1 = _mm256_set1_epi32(floor_z + 1);
+            let ax = _mm256_set1_ps(ax);
+            let az = _mm256_set1_ps(az);
+            let amplitude = _mm256_set1_ps(amplitude);
+            let rx0 = _mm256_set1_ps(rx);
+            let rx1 = _mm256_set1_ps(rx - 1.0);
+            let rz0 = _mm256_set1_ps(rz);
+            let rz1 = _mm256_set1_ps(rz - 1.0);
+            let table = |values: &[i8; 16]| {
+                _mm256_broadcastsi128_si256(_mm_loadu_si128(values.as_ptr().cast()))
+            };
+            let (gx, gy, gz) = (table(&GX), table(&GY), table(&GZ));
+            // Same operation order as `corners` + `Corners::lerp`:
+            // (gx * rx + gz * rz) + gy * ry.
+            let dot = |hash: __m256i, rx: __m256, ry: __m256, rz: __m256| {
+                let index = _mm256_and_si256(hash, _mm256_set1_epi32(15));
+                let coefficient = |table: __m256i| {
+                    let bytes = _mm256_shuffle_epi8(table, index);
+                    _mm256_cvtepi32_ps(_mm256_srai_epi32::<24>(_mm256_slli_epi32::<24>(bytes)))
+                };
+                _mm256_add_ps(
+                    _mm256_add_ps(
+                        _mm256_mul_ps(coefficient(gx), rx),
+                        _mm256_mul_ps(coefficient(gz), rz),
+                    ),
+                    _mm256_mul_ps(coefficient(gy), ry),
+                )
+            };
+            for i in (0..end).step_by(8) {
+                let iy = _mm256_loadu_si256(floors.as_ptr().add(i).cast());
+                let iy1 = _mm256_add_epi32(iy, one);
+                let xy00 = permute(noise, _mm256_add_epi32(x0, iy));
+                let xy01 = permute(noise, _mm256_add_epi32(x0, iy1));
+                let xy10 = permute(noise, _mm256_add_epi32(x1, iy));
+                let xy11 = permute(noise, _mm256_add_epi32(x1, iy1));
+                let y = _mm256_loadu_ps(relative.as_ptr().add(i));
+                let ym = _mm256_sub_ps(y, _mm256_set1_ps(1.0));
+                let ay = _mm256_loadu_ps(alpha.as_ptr().add(i));
+                let corner = |xy: __m256i, z: __m256i, rx: __m256, ry: __m256, rz: __m256| {
+                    dot(permute(noise, _mm256_add_epi32(xy, z)), rx, ry, rz)
+                };
+                let result = lerp(
+                    az,
+                    lerp(
+                        ay,
+                        lerp(ax, corner(xy00, z0, rx0, y, rz0), corner(xy10, z0, rx1, y, rz0)),
+                        lerp(
+                            ax,
+                            corner(xy01, z0, rx0, ym, rz0),
+                            corner(xy11, z0, rx1, ym, rz0),
+                        ),
+                    ),
+                    lerp(
+                        ay,
+                        lerp(ax, corner(xy00, z1, rx0, y, rz1), corner(xy10, z1, rx1, y, rz1)),
+                        lerp(
+                            ax,
+                            corner(xy01, z1, rx0, ym, rz1),
+                            corner(xy11, z1, rx1, ym, rz1),
                         ),
                     ),
                 );

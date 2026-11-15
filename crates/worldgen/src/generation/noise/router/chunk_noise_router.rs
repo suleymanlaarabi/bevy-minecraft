@@ -236,6 +236,175 @@ impl<'a> ChunkNoiseRouter<'a> {
         }
     }
 
+    /// Evaluate the corner grids of every interpolator below `final_density`
+    /// once for `volume`, so block sub-volumes and bounds reuse them. Columns
+    /// shared with neighboring chunks come from, and go to, `columns`.
+    pub(crate) fn prepare_final_density(
+        &mut self,
+        volume: &DensityVolume,
+        columns: Option<&super::corner_cache::CornerColumnCache>,
+    ) {
+        if let Some(columns) = columns
+            && self.prepare_shared_columns(volume, columns)
+        {
+            return;
+        }
+        for index in 0..=self.final_density {
+            let (before, rest) = self.component_stack.split_at_mut(index);
+            if let ChunkNoiseFunctionComponent::Chunk(
+                ChunkSpecificNoiseFunctionComponent::Interpolated(interpolated),
+            ) = &mut rest[0]
+            {
+                interpolated.prepare(before, volume);
+            }
+        }
+    }
+
+    fn interpolated(&self, index: usize) -> Option<&Interpolated> {
+        match &self.component_stack[index] {
+            ChunkNoiseFunctionComponent::Chunk(
+                ChunkSpecificNoiseFunctionComponent::Interpolated(interpolated),
+            ) => Some(interpolated),
+            _ => None,
+        }
+    }
+
+    /// Assemble every interpolator's corner grid from cached columns, then
+    /// evaluate and publish only the missing ones. Returns `false` when the
+    /// grids cannot be shared: inputs that depend on per-chunk structures, or
+    /// interpolators on different corner grids.
+    fn prepare_shared_columns(
+        &mut self,
+        volume: &DensityVolume,
+        columns: &super::corner_cache::CornerColumnCache,
+    ) -> bool {
+        use super::{corner_cache::ColumnKey, density_volume::DensityBuffer};
+        let beardifier = self
+            .component_stack
+            .iter()
+            .position(|component| {
+                matches!(
+                    component,
+                    ChunkNoiseFunctionComponent::Chunk(
+                        ChunkSpecificNoiseFunctionComponent::Beardifier(_)
+                    )
+                )
+            })
+            .unwrap_or(usize::MAX);
+        let interpolators: Vec<usize> = (0..=self.final_density)
+            .filter(|&index| self.interpolated(index).is_some())
+            .collect();
+        let Some(grid) = interpolators
+            .first()
+            .and_then(|&index| self.interpolated(index))
+            .map(|interpolated| interpolated.corner_volume(volume).0)
+        else {
+            return false;
+        };
+        if !interpolators.iter().all(|&index| {
+            self.interpolated(index).is_some_and(|interpolated| {
+                interpolated.input_index < beardifier
+                    && interpolated.corner_volume(volume).0 == grid
+            })
+        }) {
+            return false;
+        }
+        let height = grid.size_y;
+        let key = |x: usize, z: usize| ColumnKey {
+            x: grid.block_x(x),
+            z: grid.block_z(z),
+            min_y: grid.min_block_y,
+            size_y: height as u32,
+        };
+        let mut grids: Vec<DensityBuffer> = interpolators
+            .iter()
+            .map(|_| DensityBuffer::acquire(&grid))
+            .collect();
+        let mut missing = Vec::new();
+        for z in 0..grid.size_z {
+            for x in 0..grid.size_x {
+                let start = grid.index_unchecked(x, 0, z);
+                if let Some(values) = columns.get(key(x, z)) {
+                    for (corners, values) in grids.iter_mut().zip(values.chunks_exact(height)) {
+                        corners[start..start + height].copy_from_slice(values);
+                    }
+                } else {
+                    missing.push((x, z));
+                }
+            }
+        }
+        let input = |stack: &[ChunkNoiseFunctionComponent], index: usize| match &stack[index] {
+            ChunkNoiseFunctionComponent::Chunk(
+                ChunkSpecificNoiseFunctionComponent::Interpolated(interpolated),
+            ) => interpolated.input_index,
+            _ => unreachable!("collected interpolators"),
+        };
+        if missing.len() == grid.size_x * grid.size_z {
+            // Nothing shared yet: keep the single batched grid evaluation.
+            for (corners, &index) in grids.iter_mut().zip(&interpolators) {
+                let input = input(&self.component_stack, index);
+                ChunkNoiseFunctionComponent::sample_volume_from_stack(
+                    &mut self.component_stack[..=input],
+                    corners,
+                    &grid,
+                );
+            }
+        } else {
+            // Evaluate all interpolators per column so shared subgraph caches
+            // keyed on the column volume are reused between them.
+            let mut column = DensityBuffer::with_len(height);
+            for &(x, z) in &missing {
+                let column_volume = DensityVolume::new(
+                    1,
+                    height,
+                    1,
+                    grid.block_x(x),
+                    grid.min_block_y,
+                    grid.block_z(z),
+                    grid.step_block_x,
+                    grid.step_block_y,
+                    grid.step_block_z,
+                );
+                let start = grid.index_unchecked(x, 0, z);
+                for (corners, &index) in grids.iter_mut().zip(&interpolators) {
+                    let input = input(&self.component_stack, index);
+                    ChunkNoiseFunctionComponent::sample_volume_from_stack(
+                        &mut self.component_stack[..=input],
+                        &mut column,
+                        &column_volume,
+                    );
+                    corners[start..start + height].copy_from_slice(&column);
+                }
+            }
+        }
+        for &(x, z) in &missing {
+            let start = grid.index_unchecked(x, 0, z);
+            let values: std::sync::Arc<[f32]> = grids
+                .iter()
+                .flat_map(|corners| corners[start..start + height].iter().copied())
+                .collect();
+            columns.insert(key(x, z), values);
+        }
+        for (corners, index) in grids.into_iter().zip(interpolators) {
+            if let ChunkNoiseFunctionComponent::Chunk(
+                ChunkSpecificNoiseFunctionComponent::Interpolated(interpolated),
+            ) = &mut self.component_stack[index]
+            {
+                interpolated.set_prepared(grid, corners);
+            }
+        }
+        true
+    }
+
+    /// Conservative bounds of `final_density` inside an inclusive block box.
+    #[must_use]
+    pub(crate) fn final_density_bounds(
+        &self,
+        area: &super::interval::BlockBounds,
+    ) -> super::interval::Bounds {
+        super::interval::bounds(&self.component_stack, self.final_density, area)
+    }
+
     pub(crate) fn reuse_interpolation_corners(&mut self) {
         for component in &mut self.component_stack {
             if let ChunkNoiseFunctionComponent::Chunk(

@@ -53,7 +53,7 @@ impl WorldGenerator {
         self.storage
             .as_ref()
             .is_some_and(|storage| storage.is_edited(position.x, position.y))
-            || self.runtime.snapshot(position).is_some()
+            || self.runtime.has_snapshot(position)
     }
     pub(crate) fn storage_revision(&self, position: IVec2) -> Option<u64> {
         self.storage.as_ref().map_or(Some(0), |database| {

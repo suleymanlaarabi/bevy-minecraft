@@ -125,6 +125,23 @@ impl Beardifier {
         Self::EMPTY
     }
 
+    /// Whether every sample inside the inclusive block box is exactly zero.
+    #[must_use]
+    pub(crate) const fn is_zero_inside(
+        &self,
+        area: &crate::generation::noise::router::interval::BlockBounds,
+    ) -> bool {
+        let Some(affected) = self.affected_box else {
+            return true;
+        };
+        affected.min.x > area.max[0]
+            || affected.max.x < area.min[0]
+            || affected.min.y > area.max[1]
+            || affected.max.y < area.min[1]
+            || affected.min.z > area.max[2]
+            || affected.max.z < area.min[2]
+    }
+
     #[must_use]
     pub fn sample_value_unchecked(&self, block_x: i32, block_y: i32, block_z: i32) -> f32 {
         let mut noise_value = 0.0;

@@ -80,7 +80,15 @@ impl OreFeature {
     ) -> bool {
         let mut placed_blocks_count = 0;
         let bitset_size = (horizontal_size * vertical_size * horizontal_size) as usize;
-        let mut bit_set = vec![false; bitset_size];
+        // Chunks run ~200 ore attempts with blobs of up to ~10K cells: reuse one
+        // per-worker bit set and clear only its used words, instead of
+        // allocating and zeroing a byte per cell on every attempt.
+        thread_local! {
+            static BITS: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let mut bit_set = BITS.take();
+        bit_set.clear();
+        bit_set.resize(bitset_size.div_ceil(64), 0);
         let mut mutable_pos = BlockPos::ZERO;
         let j = self.size;
         let mut ds = vec![0.0; (j * 4) as usize];
@@ -161,10 +169,11 @@ impl OreFeature {
                         let ac = (base_idx + (aa_val - z_bound) * horizontal_size * vertical_size)
                             as usize;
 
-                        if bit_set[ac] {
+                        let (word, mask) = (ac / 64, 1u64 << (ac % 64));
+                        if bit_set[word] & mask != 0 {
                             continue;
                         }
-                        bit_set[ac] = true;
+                        bit_set[word] |= mask;
 
                         mutable_pos.0.x = t_val;
                         mutable_pos.0.y = v_val;
@@ -197,6 +206,7 @@ impl OreFeature {
                 }
             }
         }
+        BITS.set(bit_set);
         placed_blocks_count > 0
     }
 

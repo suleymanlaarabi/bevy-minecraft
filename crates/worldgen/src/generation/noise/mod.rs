@@ -212,6 +212,30 @@ impl<'a> ChunkNoiseGenerator<'a> {
         }
     }
 
+    pub(crate) const fn ore_veins(&self) -> bool {
+        self.ore_veins
+    }
+
+    /// See [`ChunkNoiseRouter::prepare_final_density`].
+    pub(crate) fn prepare_density(
+        &mut self,
+        columns: Option<&router::corner_cache::CornerColumnCache>,
+    ) {
+        let volume = self.volume;
+        self.router.prepare_final_density(&volume, columns);
+    }
+
+    pub(crate) fn density_bounds(
+        &self,
+        area: &router::interval::BlockBounds,
+    ) -> router::interval::Bounds {
+        self.router.final_density_bounds(area)
+    }
+
+    pub(crate) fn sample_density_into(&mut self, buffer: &mut [f32], volume: &DensityVolume) {
+        self.router.final_density_volume(buffer, volume);
+    }
+
     pub fn sample_density(&mut self) -> ChunkDensities {
         let mut density = DensityBuffer::acquire(&self.volume);
         self.router.final_density_volume(&mut density, &self.volume);

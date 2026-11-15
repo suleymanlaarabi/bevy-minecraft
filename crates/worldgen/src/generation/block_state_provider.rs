@@ -332,7 +332,12 @@ fn with_noise_sampler<R>(
             &noise.amplitudes,
             false,
         ));
-        samplers.push((seed, noise.first_octave, noise.amplitudes.clone(), sampler.clone()));
+        samplers.push((
+            seed,
+            noise.first_octave,
+            noise.amplitudes.clone(),
+            sampler.clone(),
+        ));
         sampler
     });
     sample(&sampler)

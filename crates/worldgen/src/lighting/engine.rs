@@ -11,6 +11,39 @@ use pumpkin_util::math::vector3::Vector3;
 use std::collections::VecDeque;
 
 use crate::ProtoChunk;
+use crate::generation::proto_chunk::WorkingSection;
+
+/// Per-state light properties: luminance in the high nibble, and in the low
+/// nibble the light-blocking opacity (occluding states block at least 1).
+/// One dense byte table replaces two dependent `to_state()` loads per voxel.
+fn light_properties() -> &'static [u8] {
+    static TABLE: std::sync::LazyLock<Box<[u8]>> = std::sync::LazyLock::new(|| {
+        (0..BlockStateId::COUNT)
+            .map(|id| {
+                let state = BlockStateId::new(id)
+                    .expect("state id below COUNT")
+                    .to_state();
+                let opacity = if state.can_occlude() {
+                    state.opacity.max(1)
+                } else {
+                    state.opacity
+                };
+                (state.luminance.min(15) << 4) | opacity.min(15)
+            })
+            .collect()
+    });
+    &TABLE
+}
+
+#[inline]
+fn luminance(state: BlockStateId) -> u8 {
+    light_properties()[usize::from(state.as_u16())] >> 4
+}
+
+#[inline]
+fn light_opacity(state: BlockStateId) -> u8 {
+    light_properties()[usize::from(state.as_u16())] & 15
+}
 
 pub trait LightProvider {
     fn get_light(cache: &Cache, pos: BlockPos) -> u8;
@@ -315,16 +348,7 @@ impl<P: LightProvider> LightPropagator<P> {
                         let local_y_proto = ny - min_y;
                         let state_id =
                             c.get_block_state_raw(local_x as i32, local_y_proto, local_z as i32);
-                        let op = if state_id == BlockStateId::AIR {
-                            0
-                        } else {
-                            let s = state_id.to_state();
-                            if s.can_occlude() {
-                                s.opacity.max(1)
-                            } else {
-                                s.opacity
-                            }
-                        };
+                        let op = light_opacity(state_id);
                         let light = P::get_light_proto(c, section_idx, local_x, local_y, local_z);
                         (op, light)
                     }
@@ -333,16 +357,7 @@ impl<P: LightProvider> LightPropagator<P> {
                             .section
                             .get_block_absolute_y(local_x, ny, local_z)
                             .unwrap_or(BlockStateId::AIR);
-                        let op = if state_id == BlockStateId::AIR {
-                            0
-                        } else {
-                            let s = state_id.to_state();
-                            if s.can_occlude() {
-                                s.opacity.max(1)
-                            } else {
-                                s.opacity
-                            }
-                        };
+                        let op = light_opacity(state_id);
                         (op, P::get_light(cache, neighbor_pos))
                     }
                 };
@@ -475,22 +490,21 @@ impl BlockLightPropagator {
 
                 match &mut cache.chunks[chunk_idx] {
                     Chunk::Proto(c) => {
-                        // Sections above the allocated block map are air.
-                        let allocated_height = (c.block_sections.len() * 16) as i32;
-                        for y in min_y..max_y.min(min_y + allocated_height) {
-                            let local_y_proto = y - min_y;
-                            let state_id = c.get_block_state_raw(
-                                local_x as i32,
-                                local_y_proto,
-                                local_z as i32,
-                            );
-                            if state_id == BlockStateId::AIR {
+                        // Sections above the allocated block map are air. A
+                        // uniform section of a non-emitting state has no source.
+                        for (section_idx, section) in c.block_sections.iter().enumerate() {
+                            if let WorkingSection::Uniform(state) = section
+                                && luminance(*state) == 0
+                            {
                                 continue;
                             }
-                            let emission = state_id.to_state().luminance;
-                            if emission > 0 {
-                                let section_idx = (local_y_proto >> 4) as usize;
-                                let local_y = (y & 15) as usize;
+                            for local_y in 0..16 {
+                                let emission =
+                                    luminance(section.get(local_x * 256 + local_y * 16 + local_z));
+                                if emission == 0 {
+                                    continue;
+                                }
+                                let y = min_y + (section_idx * 16 + local_y) as i32;
                                 if section_idx < c.light.block_light.len() {
                                     c.light.block_light[section_idx]
                                         .set(local_x, local_y, local_z, emission);
@@ -515,10 +529,7 @@ impl BlockLightPropagator {
                                 .section
                                 .get_block_absolute_y(local_x, y, local_z)
                                 .unwrap_or(BlockStateId::AIR);
-                            if state_id == BlockStateId::AIR {
-                                continue;
-                            }
-                            let emission = state_id.to_state().luminance;
+                            let emission = luminance(state_id);
                             if emission > 0 {
                                 let section_idx = ((y - min_y) >> 4) as usize;
                                 let local_y = (y & 15) as usize;
@@ -635,16 +646,7 @@ impl SkyLightPropagator {
                                 local_y_proto,
                                 local_z as i32,
                             );
-                            let opacity = if state_id == BlockStateId::AIR {
-                                0
-                            } else {
-                                let s = state_id.to_state();
-                                if s.can_occlude() {
-                                    s.opacity.max(1) as i32
-                                } else {
-                                    s.opacity as i32
-                                }
-                            };
+                            let opacity = i32::from(light_opacity(state_id));
 
                             light = light.saturating_sub(opacity);
                             let light_val = if light <= 0 { 0 } else { light as u8 };
@@ -689,16 +691,7 @@ impl SkyLightPropagator {
                                 .section
                                 .get_block_absolute_y(local_x, y, local_z)
                                 .unwrap_or(BlockStateId::AIR);
-                            let opacity = if state_id == BlockStateId::AIR {
-                                0
-                            } else {
-                                let s = state_id.to_state();
-                                if s.can_occlude() {
-                                    s.opacity.max(1) as i32
-                                } else {
-                                    s.opacity as i32
-                                }
-                            };
+                            let opacity = i32::from(light_opacity(state_id));
 
                             light = light.saturating_sub(opacity);
                             let light_val = if light <= 0 { 0 } else { light as u8 };
@@ -825,11 +818,10 @@ impl LightEngine {
             return;
         }
 
+        // Each pass empties its queues and visited set on entry; clearing
+        // ~110 KiB of visited bits again on exit would only repeat that work.
         self.sky_light.convert_light(cache);
         self.block_light.propagate_light(cache);
-
-        self.block_light.clear();
-        self.sky_light.clear();
     }
 
     pub fn update_block_light(

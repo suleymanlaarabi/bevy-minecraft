@@ -19,6 +19,8 @@ pub struct TerrainGenerator {
         super::noise::router::position_cache::PositionCache<(i32, i32), [i32; 2]>,
     // Each chunk consults the carver biome of its 17x17 chunk neighborhood;
     // sharing those pure samples replaces 289 climate evaluations per chunk.
+    /// Interpolation corner columns shared by adjacent chunks' noise stages.
+    pub(crate) corner_columns: super::noise::router::corner_cache::CornerColumnCache,
     pub(crate) carver_biomes: super::noise::router::position_cache::PositionCache<
         (i32, i32),
         &'static pumpkin_data::chunk::Biome,
@@ -129,6 +131,7 @@ impl TerrainGenerator {
             structure_allowed_biomes,
             structure_heights: super::noise::router::position_cache::PositionCache::default(),
             carver_biomes: super::noise::router::position_cache::PositionCache::default(),
+            corner_columns: super::noise::router::corner_cache::CornerColumnCache::default(),
             enabled_structure_sets,
         }
     }

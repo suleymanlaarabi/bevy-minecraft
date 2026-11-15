@@ -226,6 +226,9 @@ pub struct Interpolated {
     max_value: f32,
     reuse_corners: bool,
     corners: Option<Box<CornerTile>>,
+    /// Corner grid of one chunk volume, evaluated once by [`Self::prepare`] and
+    /// shared by every block sub-volume of that chunk.
+    prepared: Option<(DensityVolume, DensityBuffer)>,
 }
 
 impl Interpolated {
@@ -258,24 +261,118 @@ impl Interpolated {
             max_value,
             reuse_corners: false,
             corners: None,
+            prepared: None,
         }
     }
 
-    const fn is_cell_aligned(&self, volume: &DensityVolume) -> bool {
-        (volume.step_block_x == self.cell_size_xz || volume.size_x == 1)
-            && (volume.step_block_y == self.cell_size_y || volume.size_y == 1)
-            && (volume.step_block_z == self.cell_size_xz || volume.size_z == 1)
-            && volume.min_block_x.rem_euclid(self.cell_size_xz) == 0
-            && volume.min_block_y.rem_euclid(self.cell_size_y) == 0
-            && volume.min_block_z.rem_euclid(self.cell_size_xz) == 0
-    }
-
-    fn sample_with_block_step(
+    /// Evaluate the whole corner grid of `volume` in one batch. Later block
+    /// requests inside `volume` interpolate from it instead of resampling.
+    pub(crate) fn prepare(
         &mut self,
         component_stack: &mut [ChunkNoiseFunctionComponent],
-        buffer: &mut [f32],
         volume: &DensityVolume,
     ) {
+        let (cell_volume, _) = self.corner_volume(volume);
+        let mut corners = DensityBuffer::acquire(&cell_volume);
+        ChunkNoiseFunctionComponent::sample_volume_from_stack(
+            &mut component_stack[..=self.input_index],
+            &mut corners,
+            &cell_volume,
+        );
+        self.prepared = Some((cell_volume, corners));
+    }
+
+    /// Bounds of the interpolated value inside an inclusive block box, from
+    /// the prepared corners of every cell overlapping it.
+    pub(crate) fn corner_bounds(&self, area: &super::interval::BlockBounds) -> Option<(f32, f32)> {
+        let (grid, corners) = self.prepared.as_ref()?;
+        let axis = |min: i32, max: i32, origin: i32, step: i32, size: usize| {
+            let first = (min - origin).div_euclid(step);
+            let last = (max - origin + step - 1).div_euclid(step);
+            (first >= 0 && (last as usize) < size).then_some(first as usize..=last as usize)
+        };
+        let xs = axis(
+            area.min[0],
+            area.max[0],
+            grid.min_block_x,
+            grid.step_block_x,
+            grid.size_x,
+        )?;
+        let ys = axis(
+            area.min[1],
+            area.max[1],
+            grid.min_block_y,
+            grid.step_block_y,
+            grid.size_y,
+        )?;
+        let zs = axis(
+            area.min[2],
+            area.max[2],
+            grid.min_block_z,
+            grid.step_block_z,
+            grid.size_z,
+        )?;
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for z in zs {
+            for x in xs.clone() {
+                let start = grid.index_unchecked(x, *ys.start(), z);
+                for &value in &corners[start..=start + (ys.end() - ys.start())] {
+                    lo = lo.min(value);
+                    hi = hi.max(value);
+                }
+            }
+        }
+        // The nested f32 lerps may round a few ulps past the corner range.
+        // Widen here, before discontinuous range choices consume the bounds.
+        let slack = lo.abs().max(hi.abs()) * 1.0e-5 + 1.0e-6;
+        Some((lo - slack, hi + slack))
+    }
+
+    /// Copy `cell_volume` corners from the prepared grid when it covers them.
+    fn copy_prepared(&self, output: &mut [f32], cell_volume: &DensityVolume) -> bool {
+        let Some((grid, corners)) = &self.prepared else {
+            return false;
+        };
+        if (grid.step_block_x, grid.step_block_y, grid.step_block_z)
+            != (
+                cell_volume.step_block_x,
+                cell_volume.step_block_y,
+                cell_volume.step_block_z,
+            )
+            || grid
+                .index_of_block(
+                    cell_volume.max_block_x(),
+                    cell_volume.max_block_y(),
+                    cell_volume.max_block_z(),
+                )
+                .is_none()
+        {
+            return false;
+        }
+        let Some(origin) = grid.index_of_block(
+            cell_volume.min_block_x,
+            cell_volume.min_block_y,
+            cell_volume.min_block_z,
+        ) else {
+            return false;
+        };
+        for z in 0..cell_volume.size_z {
+            for x in 0..cell_volume.size_x {
+                let source = origin + grid.index_unchecked(x, 0, z);
+                let target = cell_volume.index_unchecked(x, 0, z);
+                output[target..target + cell_volume.size_y]
+                    .copy_from_slice(&corners[source..source + cell_volume.size_y]);
+            }
+        }
+        true
+    }
+
+    /// Install a corner grid assembled outside [`Self::prepare`].
+    pub(crate) fn set_prepared(&mut self, grid: DensityVolume, corners: DensityBuffer) {
+        self.prepared = Some((grid, corners));
+    }
+
+    pub(crate) fn corner_volume(&self, volume: &DensityVolume) -> (DensityVolume, [usize; 3]) {
         let min_cell_x = volume.min_block_x.div_euclid(self.cell_size_xz);
         let min_cell_y = volume.min_block_y.div_euclid(self.cell_size_y);
         let min_cell_z = volume.min_block_z.div_euclid(self.cell_size_xz);
@@ -303,6 +400,25 @@ impl Interpolated {
             self.cell_size_y,
             self.cell_size_xz,
         );
+        (cell_volume, [cell_count_x, cell_count_y, cell_count_z])
+    }
+
+    const fn is_cell_aligned(&self, volume: &DensityVolume) -> bool {
+        (volume.step_block_x == self.cell_size_xz || volume.size_x == 1)
+            && (volume.step_block_y == self.cell_size_y || volume.size_y == 1)
+            && (volume.step_block_z == self.cell_size_xz || volume.size_z == 1)
+            && volume.min_block_x.rem_euclid(self.cell_size_xz) == 0
+            && volume.min_block_y.rem_euclid(self.cell_size_y) == 0
+            && volume.min_block_z.rem_euclid(self.cell_size_xz) == 0
+    }
+
+    fn sample_with_block_step(
+        &mut self,
+        component_stack: &mut [ChunkNoiseFunctionComponent],
+        buffer: &mut [f32],
+        volume: &DensityVolume,
+    ) {
+        let (cell_volume, [cell_count_x, cell_count_y, cell_count_z]) = self.corner_volume(volume);
         let mut corners = DensityBuffer::acquire(&cell_volume);
         // Nested interpolation can request a wider volume. Cache only grids
         // fitting one tile, with at most 32 KiB of f32 data per interpolator.
@@ -319,7 +435,8 @@ impl Interpolated {
                         )
                         .is_some()
             });
-        if let Some(tile) = tile {
+        if self.copy_prepared(&mut corners, &cell_volume) {
+        } else if let Some(tile) = tile {
             if self
                 .corners
                 .as_ref()
@@ -412,18 +529,17 @@ impl Interpolated {
                 let v_0 = lerp(alpha_x, v00, v10);
                 let v_1 = lerp(alpha_x, v01, v11);
                 let value_step = (v_1 - v_0) * self.cell_size_y_inv;
-                let mut value = v_0 + value_step * y0 as f32;
                 let start = volume.index_unchecked(out_x, (cell_out_y + y0) as usize, out_z);
-                for slot in &mut buffer[start..start + (y1 - y0 + 1) as usize] {
-                    *slot = value;
-                    value += value_step;
+                // Independent lanes (no loop-carried sum) let the column vectorize.
+                for (y, slot) in (y0..).zip(&mut buffer[start..start + (y1 - y0 + 1) as usize]) {
+                    *slot = v_0 + value_step * y as f32;
                 }
             }
         }
     }
 
-    // Match the dense kernel's incremental Y rounding, while only computing
-    // requested X/Z columns and never allocating a dense intermediate volume.
+    // Match the dense kernel's Y rounding, while only computing requested
+    // X/Z columns and never allocating a dense intermediate volume.
     fn fill_sparse_cell(
         &self,
         buffer: &mut [f32],
@@ -455,19 +571,9 @@ impl Interpolated {
                 let low = lerp(ax, v00, v10);
                 let high = lerp(ax, v01, v11);
                 let step = (high - low) * self.cell_size_y_inv;
-                let first_y = 0.max(-oy);
-                let mut value = low + step * first_y as f32;
-                let last_y = (ys.end as i32 - 1) * volume.step_block_y - oy;
-                for y in first_y..=last_y {
-                    let relative = oy + y;
-                    if relative % volume.step_block_y == 0 {
-                        buffer[volume.index_unchecked(
-                            x,
-                            (relative / volume.step_block_y) as usize,
-                            z,
-                        )] = value;
-                    }
-                    value += step;
+                for y in ys.clone() {
+                    let in_cell = y as i32 * volume.step_block_y - oy;
+                    buffer[volume.index_unchecked(x, y, z)] = low + step * in_cell as f32;
                 }
             }
         }

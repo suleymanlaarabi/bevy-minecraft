@@ -1,8 +1,6 @@
 use pumpkin_data::block_properties::is_air;
 use pumpkin_data::{Block, BlockDirection, BlockStateId};
 use pumpkin_util::HeightMap;
-use std::collections::HashMap;
-use std::iter;
 use std::sync::LazyLock;
 
 use pumpkin_util::biome::FOLIAGE_NOISE;
@@ -18,9 +16,11 @@ use crate::world::WorldPortalExt;
 
 use super::configured_features::{CONFIGURED_FEATURES, ConfiguredFeature};
 
+// Looked up for every nested placement (e.g. each random-patch try): Fx hashes
+// the enum discriminant with one multiply instead of SipHash.
 pub static PLACED_FEATURES: LazyLock<
-    HashMap<pumpkin_data::placed_feature::PlacedFeature, PlacedFeature>,
-> = LazyLock::new(build_placed_features);
+    rustc_hash::FxHashMap<pumpkin_data::placed_feature::PlacedFeature, PlacedFeature>,
+> = LazyLock::new(|| build_placed_features().into_iter().collect());
 
 pub enum PlacedFeatureWrapper {
     Direct(PlacedFeature),
@@ -140,7 +140,7 @@ fn generate_with_modifiers<T, P, G>(
     generate: &G,
 ) -> bool
 where
-    P: Fn(&T, usize, &mut RandomGenerator, BlockPos) -> Box<dyn Iterator<Item = BlockPos>>,
+    P: Fn(&T, usize, &mut RandomGenerator, BlockPos) -> Positions,
     G: Fn(&mut T, &mut RandomGenerator, BlockPos) -> bool,
 {
     if modifier_index == modifier_count {
@@ -163,6 +163,33 @@ where
         }
     }
     generated
+}
+
+/// Positions produced by one placement modifier, without a heap allocation
+/// for the common empty, single and repeated cases.
+pub enum Positions {
+    Empty,
+    Once(Option<BlockPos>),
+    Repeat(BlockPos, usize),
+    Many(std::vec::IntoIter<BlockPos>),
+}
+
+impl Iterator for Positions {
+    type Item = BlockPos;
+
+    #[inline]
+    fn next(&mut self) -> Option<BlockPos> {
+        match self {
+            Self::Empty => None,
+            Self::Once(pos) => pos.take(),
+            Self::Repeat(pos, count) => {
+                let remaining = count.checked_sub(1)?;
+                *count = remaining;
+                Some(*pos)
+            }
+            Self::Many(positions) => positions.next(),
+        }
+    }
 }
 
 pub enum PlacementModifier {
@@ -195,7 +222,7 @@ impl PlacementModifier {
         feature: pumpkin_data::placed_feature::PlacedFeature,
         random: &mut RandomGenerator,
         pos: BlockPos,
-    ) -> Box<dyn Iterator<Item = BlockPos>> {
+    ) -> Positions {
         match self {
             Self::BlockPredicateFilter(modifier) => {
                 modifier.get_positions(block_registry, chunk, feature, random, pos)
@@ -213,7 +240,7 @@ impl PlacementModifier {
                 modifier.get_positions(block_registry, chunk, feature, random, pos)
             }
             Self::Count(modifier) => modifier.get_positions(random, pos),
-            Self::NoiseBasedCount(modifier) => Box::new(modifier.get_positions(random, pos)),
+            Self::NoiseBasedCount(modifier) => modifier.get_positions(random, pos),
             Self::NoiseThresholdCount(modifier) => modifier.get_positions(random, pos),
             Self::CountOnEveryLayer(modifier) => modifier.get_positions(random, chunk, pos),
             Self::EnvironmentScan(modifier) => modifier.get_positions(chunk, block_registry, pos),
@@ -222,7 +249,7 @@ impl PlacementModifier {
             Self::InSquare(_) => SquarePlacementModifier::get_positions(random, pos),
             Self::RandomOffset(modifier) => modifier.get_positions(random, pos),
             Self::Offset(modifier) => modifier.get_positions(random, pos),
-            Self::FixedPlacement(positions) => Box::new(positions.clone().into_iter()),
+            Self::FixedPlacement(positions) => Positions::Many(positions.clone().into_iter()),
         }
     }
 }
@@ -274,24 +301,24 @@ impl EnvironmentScanPlacementModifier {
         chunk: &T,
         block_registry: &dyn WorldPortalExt,
         pos: BlockPos,
-    ) -> Box<dyn Iterator<Item = BlockPos>> {
+    ) -> Positions {
         let allowed_search_condition = self
             .allowed_search_condition
             .as_ref()
             .unwrap_or(&BlockPredicate::AlwaysTrue);
 
         if !allowed_search_condition.test(block_registry, chunk, &pos) {
-            return Box::new(iter::empty());
+            return Positions::Empty;
         }
         let mut pos = pos;
         for _ in 0..self.max_steps {
             if self.target_condition.test(block_registry, chunk, &pos) {
-                return Box::new(iter::once(pos));
+                return Positions::Once(Some(pos));
             }
             pos = pos.offset(self.direction_of_search.to_offset());
 
             if chunk.out_of_height(pos.0.y as i16) {
-                return Box::new(iter::empty());
+                return Positions::Empty;
             }
 
             if !allowed_search_condition.test(block_registry, chunk, &pos) {
@@ -299,10 +326,10 @@ impl EnvironmentScanPlacementModifier {
             }
         }
         if self.target_condition.test(block_registry, chunk, &pos) {
-            return Box::new(iter::once(pos));
+            return Positions::Once(Some(pos));
         }
 
-        Box::new(iter::empty())
+        Positions::Empty
     }
 }
 
@@ -312,15 +339,11 @@ pub struct RandomOffsetPlacementModifier {
 }
 
 impl RandomOffsetPlacementModifier {
-    pub fn get_positions(
-        &self,
-        random: &mut RandomGenerator,
-        pos: BlockPos,
-    ) -> Box<dyn Iterator<Item = BlockPos>> {
+    pub fn get_positions(&self, random: &mut RandomGenerator, pos: BlockPos) -> Positions {
         let x = pos.0.x + self.xz_spread.get(random);
         let y = pos.0.y + self.y_spread.get(random);
         let z = pos.0.z + self.xz_spread.get(random);
-        Box::new(iter::once(BlockPos(Vector3::new(x, y, z))))
+        Positions::Once(Some(BlockPos(Vector3::new(x, y, z))))
     }
 }
 
@@ -331,15 +354,11 @@ pub struct OffsetPlacementModifier {
 }
 
 impl OffsetPlacementModifier {
-    pub fn get_positions(
-        &self,
-        random: &mut RandomGenerator,
-        pos: BlockPos,
-    ) -> Box<dyn Iterator<Item = BlockPos>> {
+    pub fn get_positions(&self, random: &mut RandomGenerator, pos: BlockPos) -> Positions {
         let x = pos.0.x + self.x.get(random);
         let y = pos.0.y + self.y.get(random);
         let z = pos.0.z + self.z.get(random);
-        Box::new(iter::once(BlockPos(Vector3::new(x, y, z))))
+        Positions::Once(Some(BlockPos(Vector3::new(x, y, z))))
     }
 }
 
@@ -353,7 +372,7 @@ impl CountOnEveryLayerPlacementModifier {
         random: &mut RandomGenerator,
         chunk: &T,
         pos: BlockPos,
-    ) -> Box<dyn Iterator<Item = BlockPos>> {
+    ) -> Positions {
         let mut positions = Vec::new(); // Using a Vec to collect results, analogous to Stream.builder()
         let mut i = 0; // Represents the 'targetY' in findPos
         let mut bl;
@@ -378,7 +397,7 @@ impl CountOnEveryLayerPlacementModifier {
                 break;
             }
         }
-        Box::new(positions.into_iter())
+        Positions::Many(positions.into_iter())
     }
 
     fn find_pos<T: GenerationCache>(chunk: &T, x: i32, y: i32, z: i32, target_y: i32) -> i32 {
@@ -469,13 +488,10 @@ impl ConditionalPlacementModifier for RarityFilterPlacementModifier {
 pub struct SquarePlacementModifier;
 
 impl SquarePlacementModifier {
-    pub fn get_positions(
-        random: &mut RandomGenerator,
-        pos: BlockPos,
-    ) -> Box<dyn Iterator<Item = BlockPos>> {
+    pub fn get_positions(random: &mut RandomGenerator, pos: BlockPos) -> Positions {
         let x = random.next_bounded_i32(16) + pos.0.x;
         let z = random.next_bounded_i32(16) + pos.0.z;
-        Box::new(iter::once(BlockPos(Vector3::new(x, pos.0.y, z))))
+        Positions::Once(Some(BlockPos(Vector3::new(x, pos.0.y, z))))
     }
 }
 
@@ -541,10 +557,10 @@ impl HeightRangePlacementModifier {
         height: u16,
         random: &mut RandomGenerator,
         pos: BlockPos,
-    ) -> Box<dyn Iterator<Item = BlockPos>> {
+    ) -> Positions {
         let mut pos = pos;
         pos.0.y = self.height.get(random, min_y, height);
-        Box::new(iter::once(pos))
+        Positions::Once(Some(pos))
     }
 }
 
@@ -560,25 +576,21 @@ impl HeightmapPlacementModifier {
         _height: u16,
         _random: &mut RandomGenerator,
         pos: BlockPos,
-    ) -> Box<dyn Iterator<Item = BlockPos>> {
+    ) -> Positions {
         let x = pos.0.x;
         let z = pos.0.z;
         let top = chunk.get_top_y(&self.heightmap, x, z);
         if top > min_y as i32 {
-            return Box::new(iter::once(BlockPos(Vector3::new(x, top, z))));
+            return Positions::Once(Some(BlockPos(Vector3::new(x, top, z))));
         }
-        Box::new(iter::empty())
+        Positions::Empty
     }
 }
 
 pub trait CountPlacementModifierBase {
-    fn get_positions(
-        &self,
-        random: &mut RandomGenerator,
-        pos: BlockPos,
-    ) -> Box<dyn Iterator<Item = BlockPos>> {
+    fn get_positions(&self, random: &mut RandomGenerator, pos: BlockPos) -> Positions {
         let count = self.get_count(random, pos).max(0); // Vanilla treats negative counts as 0, but `i32 as usize` in Rust would wrap.
-        Box::new(std::iter::repeat_n(pos, count as usize))
+        Positions::Repeat(pos, count as usize)
     }
 
     fn get_count(&self, random: &mut RandomGenerator, pos: BlockPos) -> i32;
@@ -592,11 +604,11 @@ pub trait ConditionalPlacementModifier {
         feature: pumpkin_data::placed_feature::PlacedFeature,
         random: &mut RandomGenerator,
         pos: BlockPos,
-    ) -> Box<dyn Iterator<Item = BlockPos>> {
+    ) -> Positions {
         if self.should_place(block_registry, feature, chunk, random, pos) {
-            Box::new(iter::once(pos))
+            Positions::Once(Some(pos))
         } else {
-            Box::new(iter::empty())
+            Positions::Empty
         }
     }
 

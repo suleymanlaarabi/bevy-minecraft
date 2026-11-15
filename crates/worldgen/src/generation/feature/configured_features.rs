@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::LazyLock,
-};
+use std::{collections::HashSet, sync::LazyLock};
 
 use pumpkin_util::{math::position::BlockPos, random::RandomGenerator};
 
@@ -82,8 +79,8 @@ use crate::generation::proto_chunk::GenerationCache;
 use crate::world::WorldPortalExt;
 
 pub static CONFIGURED_FEATURES: LazyLock<
-    HashMap<pumpkin_data::configured_feature::ConfiguredFeature, ConfiguredFeature>,
-> = LazyLock::new(build_configured_features);
+    rustc_hash::FxHashMap<pumpkin_data::configured_feature::ConfiguredFeature, ConfiguredFeature>,
+> = LazyLock::new(|| build_configured_features().into_iter().collect());
 
 pub static BONE_MEAL_FEATURES: LazyLock<
     HashSet<pumpkin_data::configured_feature::ConfiguredFeature>,

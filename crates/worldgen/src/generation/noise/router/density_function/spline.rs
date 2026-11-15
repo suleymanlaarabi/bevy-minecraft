@@ -192,13 +192,11 @@ impl Spline {
         let h01 = t * t * (3.0 - 2.0 * t);
         let h11 = t * t * (t - 1.0);
 
-        h00.mul_add(
-            start_value,
-            h10.mul_add(
-                start_derivative * (end_x - start_x),
-                h01.mul_add(end_value, h11 * (end_derivative * (end_x - start_x))),
-            ),
-        )
+        // Plain multiply/add: without a target FMA feature, `mul_add` lowers to
+        // a libm `fmaf` call on every spline segment.
+        h00 * start_value
+            + (h10 * (start_derivative * (end_x - start_x))
+                + (h01 * end_value + h11 * (end_derivative * (end_x - start_x))))
     }
 }
 

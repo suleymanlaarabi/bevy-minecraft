@@ -495,11 +495,8 @@ pub fn test_noise_threshold(
                 &condition.noise,
             )
         });
-        let value = f64::from(sampler.sample(
-            context.block_pos_x as f64,
-            0.0,
-            context.block_pos_z as f64,
-        ));
+        let value =
+            f64::from(sampler.sample(context.block_pos_x as f64, 0.0, context.block_pos_z as f64));
         let entry = &mut context.noise_threshold_samplers[index];
         entry.value = value;
         entry.column = Some(column);
