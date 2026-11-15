@@ -9,7 +9,7 @@ use crate::{
     player::Player,
 };
 use bevy::prelude::*;
-use hollow_features::motion::FixedPosition;
+use bevy_voxel::features::motion::FixedPosition;
 
 pub(crate) const CONTAINER_START: usize = CRAFT_RESULT + 1;
 pub(crate) const MAX_VIEW_SLOTS: usize = CONTAINER_START + CONTAINER_SIZE * 2;

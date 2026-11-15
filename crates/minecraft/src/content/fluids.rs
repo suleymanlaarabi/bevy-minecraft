@@ -1,8 +1,8 @@
 //! Water and lava are content providers using exactly the public fluid API.
 use crate::voxel::{VoxelKind, VoxelState};
 use bevy::{app::PluginGroupBuilder, prelude::*};
-use hollow_core::{BlockId, FluidId, StateId, content::FluidState};
-use hollow_engine::{content::ContentRegistrations, fluids::*};
+use bevy_voxel::core::{BlockId, FluidId, StateId, content::FluidState};
+use bevy_voxel::engine::{content::ContentRegistrations, fluids::*};
 use pumpkin_data::{Property, PropertyKey};
 
 pub struct MinecraftFluidsPlugins;
@@ -95,7 +95,7 @@ impl Plugin for WaterPlugin {
                 native.to_block_id(),
                 pumpkin_data::BlockId::WATER | pumpkin_data::BlockId::BUBBLE_COLUMN
             ) {
-                definition.selection = hollow_core::ShapeId(0);
+                definition.selection = bevy_voxel::core::ShapeId(0);
             }
             if matches!(
                 native.to_block_id(),
@@ -191,7 +191,7 @@ impl Plugin for LavaPlugin {
             .register(profile);
         let mut registrations = app.world_mut().resource_mut::<ContentRegistrations>();
         let builder = registrations.builder();
-        let selection = builder.shape(vec![hollow_core::shape::BlockBox {
+        let selection = builder.shape(vec![bevy_voxel::core::shape::BlockBox {
             min: Vec3::ZERO,
             max: Vec3::ONE,
         }]);

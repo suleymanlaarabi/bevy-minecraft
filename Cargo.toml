@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/core", "crates/minecraft", "crates/engine", "crates/render", "crates/features", "crates/worldgen", "crates/worldgen/crates/*"]
+members = [".", "crates/core", "crates/voxel", "crates/minecraft", "crates/engine", "crates/render", "crates/features", "crates/worldgen", "crates/worldgen/crates/*"]
 resolver = "3"
 
 [package]
@@ -9,12 +9,12 @@ edition = "2024"
 
 [features]
 default = []
-dev = ["hollow-minecraft/dev"]
-trace = ["hollow-minecraft/trace"]
+dev = ["bevy-minecraft/dev"]
+trace = ["bevy-minecraft/trace"]
 
 [dependencies]
 bevy = { version = "0.20", default-features = false, features = ["std"] }
-hollow-minecraft = { path = "crates/minecraft" }
+bevy-minecraft = { path = "crates/minecraft" }
 
 [profile.dev]
 opt-level = 1

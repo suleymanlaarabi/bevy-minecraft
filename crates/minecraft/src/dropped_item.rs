@@ -1,4 +1,5 @@
-use hollow_features::motion::FixedPosition;
+use bevy_voxel::character::{Aabb, CharacterSystems, Terrain};
+use bevy_voxel::features::motion::FixedPosition;
 use std::{collections::HashMap, time::Duration};
 
 use bevy::{
@@ -10,7 +11,6 @@ use bevy::{
 };
 
 use crate::{
-    character::{Aabb, CharacterSystems, Terrain},
     game::GameState,
     inventory::{ItemKind, ItemStack, PlayerInventory},
     voxel::{VoxelAssets, VoxelWorld, chunk_at, render::models},
@@ -98,27 +98,7 @@ impl DropMotion {
 
     fn support_revisions(position: DVec3, world: &VoxelWorld) -> [Option<(Entity, u64)>; 4] {
         let bounds = Self::bounds(position);
-        let min = chunk_at(bounds.min.as_vec3());
-        let max = chunk_at(bounds.max.as_vec3());
-        let first = world.column_revision(min);
-        let x = if min.x == max.x {
-            first
-        } else {
-            world.column_revision(IVec2::new(max.x, min.y))
-        };
-        let z = if min.y == max.y {
-            first
-        } else {
-            world.column_revision(IVec2::new(min.x, max.y))
-        };
-        let last = if min.x == max.x {
-            z
-        } else if min.y == max.y {
-            x
-        } else {
-            world.column_revision(max)
-        };
-        [first, x, z, last]
+        world.region_revisions(bounds.min.as_vec3(), bounds.max.as_vec3())
     }
 
     fn step(
@@ -242,9 +222,9 @@ fn spawn_dropped_item(
         .meshes
         .get_or_insert_with(stack.item(), || {
             meshes.add(match stack.item().block_kind() {
-                Some(kind) => hollow_render::model_mesh::state_geometry(
+                Some(kind) => bevy_voxel::render::model_mesh::state_geometry(
                     &*render_source,
-                    hollow_core::StateId(kind.default_state().id()),
+                    bevy_voxel::core::StateId(kind.default_state().id()),
                     IVec3::ZERO,
                 )
                 .into_mesh(),
@@ -463,7 +443,7 @@ fn collect_dropped_items(
 }
 
 fn sync_drop_visibility(
-    rendered: Query<(), With<hollow_render::streaming::RenderRequested>>,
+    rendered: Query<(), With<bevy_voxel::render::streaming::RenderRequested>>,
     mut drops: Query<(&crate::simulation::SimulatedIn, &mut Visibility), With<DroppedItem>>,
 ) {
     for (owners, mut visibility) in drops
@@ -476,7 +456,7 @@ fn sync_drop_visibility(
             } else {
                 Visibility::Hidden
             };
-            hollow_features::query::set_if_neq(&mut visibility, index, target);
+            bevy_voxel::features::query::set_if_neq(&mut visibility, index, target);
         }
     }
 }

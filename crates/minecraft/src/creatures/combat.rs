@@ -1,12 +1,12 @@
 use super::*;
 use crate::{
-    character::{CharacterBody, CharacterState},
     simulation::{SimulatedIn, Simulating},
     survival::{DamageApplied, DamageRequest, Health},
     voxel::VoxelWorld,
 };
 use bevy::{ecs::system::SystemParam, prelude::*};
-use hollow_features::motion::FixedPosition;
+use bevy_voxel::character::{CharacterBody, CharacterState};
+use bevy_voxel::features::motion::FixedPosition;
 
 #[derive(Component)]
 pub(crate) struct Dying(pub u8);
@@ -48,7 +48,7 @@ impl CreatureCombat<'_, '_> {
             return false;
         };
         let mut ready = true;
-        let obstruction = hollow_engine::raycast::raycast(
+        let obstruction = bevy_voxel::engine::raycast::raycast(
             origin,
             direction,
             3.0,
@@ -86,7 +86,7 @@ impl CreatureCombat<'_, '_> {
                         continue;
                     }
                     let bounds = body.aabb(position.current, state.pose);
-                    let shape = hollow_core::shape::BlockBox {
+                    let shape = bevy_voxel::core::shape::BlockBox {
                         min: bounds.min.as_vec3(),
                         max: bounds.max.as_vec3(),
                     };

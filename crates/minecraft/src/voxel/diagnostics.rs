@@ -1,14 +1,14 @@
 use super::{
-    ChunkVoxels, VoxelChunk, VoxelCommandsExt, VoxelKind, VoxelWorld,
-    streaming::{AwaitingNeighbors, PendingChunks},
+    ChunkVoxels, VoxelChunk, VoxelCommandsExt, VoxelKind, VoxelWorld, streaming::PendingChunks,
 };
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::window::{MonitorSelection, PresentMode, WindowMode};
-use hollow_render::build::{ChunkBuild, ChunkSections};
+use bevy_voxel::character::CharacterMovement;
+use bevy_voxel::render::build::{ChunkBuild, ChunkSections};
+use bevy_voxel::streaming::AwaitingNeighbors;
 
 use crate::{
-    character::CharacterMovement,
     game::GameState,
     player::{Player, PlayerCamera},
 };
@@ -17,7 +17,7 @@ use super::{StreamOffsets, StreamState};
 
 const MAX_FRAME_SAMPLES: usize = 3_600;
 
-pub(crate) use hollow_render::diagnostics::VoxelDiagnostics;
+pub(crate) use bevy_voxel::render::diagnostics::VoxelDiagnostics;
 #[derive(Resource, Default)]
 struct VoxelBenchmark {
     simplified: bool,
@@ -95,7 +95,7 @@ pub(crate) fn register(app: &mut App) {
         .add_systems(
             FixedUpdate,
             benchmark_movement
-                .before(crate::character::CharacterSystems)
+                .before(bevy_voxel::character::CharacterSystems)
                 .run_if(in_state(GameState::Game)),
         );
         if std::env::var_os("HOLLOW_BENCH_HEADLESS").is_some() {
@@ -353,7 +353,13 @@ fn run_voxel_benchmark(
 fn report_voxel_diagnostics(
     time: Res<Time<Real>>,
     mut diagnostics: ResMut<VoxelDiagnostics>,
-    chunks: Query<(&ChunkVoxels, Has<hollow_render::streaming::RenderRequested>), With<VoxelChunk>>,
+    chunks: Query<
+        (
+            &ChunkVoxels,
+            Has<bevy_voxel::render::streaming::RenderRequested>,
+        ),
+        With<VoxelChunk>,
+    >,
     builds: Query<(), With<ChunkBuild>>,
     sections: Query<&ChunkSections>,
     pending: Res<PendingChunks>,
@@ -459,7 +465,7 @@ fn percentile(samples: &[f64], percentile: f64) -> f64 {
 }
 
 fn record_generation(
-    mut events: MessageReader<hollow_engine::streaming::TerrainPublished>,
+    mut events: MessageReader<bevy_voxel::engine::streaming::TerrainPublished>,
     mut diagnostics: ResMut<VoxelDiagnostics>,
 ) {
     for event in events.read() {

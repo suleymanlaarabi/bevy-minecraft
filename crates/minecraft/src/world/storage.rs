@@ -8,8 +8,8 @@ use std::{
     sync::Arc,
 };
 
-use hollow_engine::storage::sqlite::SqliteStore;
-pub(super) use hollow_engine::storage::sqlite::{EncodedColumn, PreparedCheckpoint};
+use bevy_voxel::engine::storage::sqlite::SqliteStore;
+pub(super) use bevy_voxel::engine::storage::sqlite::{EncodedColumn, PreparedCheckpoint};
 fn err(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
 }

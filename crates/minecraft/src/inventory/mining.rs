@@ -1,9 +1,7 @@
 //! Immutable tool/block tables; registry components and tags are resolved before play.
 use super::{ItemKind, ItemStack};
-use crate::{
-    character::CharacterState,
-    voxel::{VoxelKind, VoxelState},
-};
+use crate::voxel::{VoxelKind, VoxelState};
+use bevy_voxel::character::CharacterState;
 use pumpkin_data::{
     data_component_impl::{IDSet, ToolImpl},
     tag::Taggable,

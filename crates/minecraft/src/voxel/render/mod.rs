@@ -4,8 +4,8 @@ pub(crate) mod models;
 mod texture_pack;
 use super::{VoxelKind, VoxelState};
 use bevy::prelude::*;
-use hollow_core::{BlockId, FluidId, StateId};
-use hollow_render::{
+use bevy_voxel::core::{BlockId, FluidId, StateId};
+use bevy_voxel::render::{
     RenderSource,
     environment::{EnvironmentSettings, SkyLighting, ViewEffects},
 };
@@ -13,14 +13,14 @@ pub(crate) use texture_pack::TexturePack;
 pub use texture_pack::TexturePackId;
 #[derive(Resource, Clone)]
 pub struct MinecraftRenderSource {
-    content: hollow_core::content::ContentCatalog,
-    fluids: hollow_engine::fluids::FluidCatalog,
-    cells: &'static [hollow_render::models::CellInfo],
+    content: bevy_voxel::core::content::ContentCatalog,
+    fluids: bevy_voxel::engine::fluids::FluidCatalog,
+    cells: &'static [bevy_voxel::render::models::CellInfo],
 }
 pub fn initialize_source(
     mut commands: Commands,
-    content: Res<hollow_engine::content::RegisteredContent>,
-    fluids: Res<hollow_engine::fluids::FluidCatalog>,
+    content: Res<bevy_voxel::engine::content::RegisteredContent>,
+    fluids: Res<bevy_voxel::engine::fluids::FluidCatalog>,
 ) {
     commands.insert_resource(MinecraftRenderSource {
         content: content.0.clone(),
@@ -30,20 +30,20 @@ pub fn initialize_source(
 }
 impl RenderSource for MinecraftRenderSource {
     type Cell = VoxelState;
-    fn content(&self) -> &hollow_core::content::ContentCatalog {
+    fn content(&self) -> &bevy_voxel::core::content::ContentCatalog {
         &self.content
     }
-    fn fluids(&self) -> &hollow_engine::fluids::FluidCatalog {
+    fn fluids(&self) -> &bevy_voxel::engine::fluids::FluidCatalog {
         &self.fluids
     }
-    fn cell_info(&self, state: StateId) -> hollow_render::models::CellInfo {
+    fn cell_info(&self, state: StateId) -> bevy_voxel::render::models::CellInfo {
         self.cells[state.index()]
     }
     fn visit_quads(
         &self,
         state: StateId,
         world: IVec3,
-        visit: impl FnMut(&hollow_render::models::ModelQuad),
+        visit: impl FnMut(&bevy_voxel::render::models::ModelQuad),
     ) {
         models::visit_quads(
             VoxelState::from_id(state.0).expect("Registered model state"),
@@ -117,5 +117,5 @@ pub fn sync_environment(
     });
 }
 pub(crate) fn terrain_radius(settings: &crate::settings::GraphicsSettings) -> f32 {
-    (settings.effective_view_distance() * hollow_core::coordinates::CHUNK_SIZE as u32) as f32
+    (settings.effective_view_distance() * bevy_voxel::core::coordinates::CHUNK_SIZE as u32) as f32
 }

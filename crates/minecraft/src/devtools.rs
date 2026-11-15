@@ -19,9 +19,9 @@ use bevy::{
         TabList, ValueChange, checkbox_self_update, slider_self_update, tablist_self_update,
     },
 };
+use bevy_voxel::character::Flying;
 
 use crate::{
-    character::Flying,
     game::GameState,
     inventory::InventoryState,
     player::{Player, clear_player_input},
@@ -63,7 +63,7 @@ impl Default for CreatureSpawnStatus {
 }
 
 #[derive(Component, Clone, Copy, Debug, Default)]
-#[require(hollow_features::cursor::FreeCursor)]
+#[require(bevy_voxel::features::cursor::FreeCursor)]
 struct DevPanel;
 
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -403,26 +403,26 @@ fn developer_spawn(
     event: On<DeveloperSpawn>,
     player: Query<
         (
-            &hollow_features::motion::FixedPosition,
-            &crate::character::CharacterBody,
-            &crate::character::CharacterState,
+            &bevy_voxel::features::motion::FixedPosition,
+            &bevy_voxel::character::CharacterBody,
+            &bevy_voxel::character::CharacterState,
             &Transform,
         ),
         With<Player>,
     >,
     creatures: Query<
         (
-            &hollow_features::motion::FixedPosition,
-            &crate::character::CharacterBody,
-            &crate::character::CharacterState,
+            &bevy_voxel::features::motion::FixedPosition,
+            &bevy_voxel::character::CharacterBody,
+            &bevy_voxel::character::CharacterState,
         ),
         With<crate::creatures::Creature>,
     >,
     columns: Res<crate::block_behavior::containers::GameplayColumns>,
     members: Query<&crate::simulation::SimulatedEntities>,
     catalog: Res<crate::creatures::CreatureCatalog>,
-    world: crate::voxel::VoxelWorld,
-    mut terrain: Local<crate::character::Terrain>,
+    world: bevy_voxel::character::CollisionWorld<crate::voxel::VoxelState>,
+    mut terrain: Local<bevy_voxel::character::Terrain>,
     mut status: ResMut<CreatureSpawnStatus>,
     mut commands: Commands,
 ) {
@@ -451,7 +451,7 @@ fn developer_spawn(
                 feet.as_dvec3() + bevy::math::DVec3::Y * profile.body.origin_height as f64;
             let bounds = profile
                 .body
-                .aabb(precise_origin, crate::character::Pose::Standing);
+                .aabb(precise_origin, bevy_voxel::character::Pose::Standing);
             terrain.gather(
                 &world,
                 bounds.expanded_towards(bevy::math::DVec3::NEG_Y * 0.05),

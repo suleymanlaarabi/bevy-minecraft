@@ -47,7 +47,7 @@ pub(crate) fn mining_speed(effects: &ActiveEffects) -> f32 {
 
 impl Plugin for SurvivalPlugin {
     fn build(&self, app: &mut App) {
-        use crate::character::CharacterSystems;
+        use bevy_voxel::character::CharacterSystems;
         app.init_resource::<SurvivalRules>()
             .add_plugins(ItemUsePlugin)
             .add_message::<DamageRequest>()

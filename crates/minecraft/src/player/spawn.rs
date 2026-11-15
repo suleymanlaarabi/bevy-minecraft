@@ -7,7 +7,7 @@ use bevy::{
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
-use hollow_features::spatial::{Follow, FollowOffset};
+use bevy_voxel::features::spatial::{Follow, FollowOffset};
 
 /// Vanilla eyes sit 1.62 above the feet; the player's origin is its box center.
 const PLAYER_EYE_HEIGHT: f32 = 0.72;
@@ -30,7 +30,7 @@ pub(super) struct LoadingMessage;
 pub(super) fn start_spawn_search(
     mut commands: Commands,
     voxel_settings: Option<Res<VoxelSettings>>,
-    budget: Res<hollow_engine::tasks::VoxelTaskBudget>,
+    budget: Res<bevy_voxel::engine::tasks::VoxelTaskBudget>,
     generator: Option<Res<crate::voxel::generation::WorldGenerator>>,
     session: Option<Res<crate::world::WorldSession>>,
 ) {
@@ -118,7 +118,15 @@ pub(super) fn finish_spawn_loading(
     mut messages: Query<&mut Text, With<LoadingMessage>>,
 ) {
     for (entity, transform) in &spawns {
-        let (ready, stage) = loading.progress(transform.translation);
+        use bevy_voxel::render::readiness::Readiness;
+        let progress = loading.progress(transform.translation);
+        let ready = progress == Readiness::Ready;
+        let stage = match progress {
+            Readiness::Demand => "Preparing terrain demand…",
+            Readiness::Terrain => "Loading and generating terrain…",
+            Readiness::Meshes => "Building terrain meshes…",
+            Readiness::Ready => "Ready",
+        };
         for mut text in &mut messages {
             if text.0 != stage {
                 text.0 = stage.into();
@@ -180,7 +188,7 @@ fn spawn_player(
     commands
         .spawn((
             Player,
-            hollow_features::motion::FixedPosition::new(spawn_pos),
+            bevy_voxel::features::motion::FixedPosition::new(spawn_pos),
             survival,
             inventory,
             grid,

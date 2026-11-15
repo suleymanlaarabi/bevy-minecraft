@@ -12,7 +12,7 @@ use bevy::{
     light::{NotShadowCaster, NotShadowReceiver},
     render::render_resource::PrimitiveTopology,
 };
-use hollow_render::{material::ModelMaterial, model_mesh};
+use bevy_voxel::render::{material::ModelMaterial, model_mesh};
 use serde::Deserialize;
 use std::{collections::HashMap, f32::consts::PI};
 
@@ -375,7 +375,7 @@ impl HeldItemAssets {
                 mesh: meshes.add(
                     model_mesh::state_geometry(
                         render_source,
-                        hollow_core::StateId(kind.default_state().id()),
+                        bevy_voxel::core::StateId(kind.default_state().id()),
                         IVec3::ZERO,
                     )
                     .into_mesh(),

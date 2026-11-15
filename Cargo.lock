@@ -432,6 +432,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy-minecraft"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy-voxel",
+ "bytemuck",
+ "directories",
+ "hollow-worldgen",
+ "libc",
+ "pumpkin-data",
+ "pumpkin-util",
+ "ron",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "bevy-settings"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -449,6 +468,17 @@ dependencies = [
  "thiserror 2.0.21",
  "toml",
  "web-sys",
+]
+
+[[package]]
+name = "bevy-voxel"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "hollow-core",
+ "hollow-engine",
+ "hollow-features",
+ "hollow-render",
 ]
 
 [[package]]
@@ -3069,7 +3099,7 @@ name = "hollow"
 version = "0.1.0"
 dependencies = [
  "bevy",
- "hollow-minecraft",
+ "bevy-minecraft",
 ]
 
 [[package]]
@@ -3112,28 +3142,6 @@ dependencies = [
  "bevy_time",
  "bevy_transform",
  "bevy_window",
-]
-
-[[package]]
-name = "hollow-minecraft"
-version = "0.1.0"
-dependencies = [
- "bevy",
- "bytemuck",
- "directories",
- "hollow-core",
- "hollow-engine",
- "hollow-features",
- "hollow-render",
- "hollow-worldgen",
- "libc",
- "pumpkin-data",
- "pumpkin-util",
- "ron",
- "rusqlite",
- "serde",
- "serde_json",
- "uuid",
 ]
 
 [[package]]

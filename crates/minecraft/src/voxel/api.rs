@@ -1,6 +1,6 @@
 use super::{SetVoxel, VoxelKind, VoxelState};
 use bevy::prelude::*;
-pub type VoxelWorld<'w, 's> = hollow_engine::world::VoxelWorld<'w, 's, VoxelState>;
+pub type VoxelWorld<'w, 's> = bevy_voxel::engine::world::VoxelWorld<'w, 's, VoxelState>;
 
 pub trait VoxelCommandsExt {
     /// Queues a world-space voxel edit, generating an unloaded chunk when necessary.

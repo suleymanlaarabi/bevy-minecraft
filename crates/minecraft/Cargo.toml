@@ -1,15 +1,16 @@
 [package]
-name = "hollow-minecraft"
+name = "bevy-minecraft"
 version = "0.1.0"
 edition = "2024"
 
 [features]
 default = []
-dev = ["hollow-render/dev", "bevy/bevy_dev_tools", "bevy/render_dev_tools", "bevy/sysinfo_plugin"]
+dev = ["bevy-voxel/dev", "bevy/bevy_dev_tools", "bevy/render_dev_tools", "bevy/sysinfo_plugin"]
 # Writes a Chrome trace (trace-*.json) with a span per ECS system, main and render world.
 trace = ["bevy/trace_chrome", "bevy/detailed_trace"]
 
 [dependencies]
+bevy-voxel = { path = "../voxel", features = ["render", "sqlite"] }
 bevy = { version = "0.20", default-features = false, features = [
     "std",
     "async_executor",
@@ -39,10 +40,6 @@ bevy = { version = "0.20", default-features = false, features = [
     "default_font",
     "ui_picking",
 ] }
-hollow-render = { path = "../render" }
-hollow-features = { path = "../features" }
-hollow-engine = { path = "../engine", features = ["sqlite"] }
-hollow-core = { path = "../core" }
 hollow-worldgen = { path = "../worldgen" }
 pumpkin-data = { path = "../worldgen/crates/pumpkin-data" }
 pumpkin-util = { path = "../worldgen/crates/pumpkin-util" }

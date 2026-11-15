@@ -1,9 +1,10 @@
 #![allow(clippy::type_complexity)]
 
 use super::{CameraSensitivity, Player, PlayerCamera};
-use crate::character::{CharacterMotion, CharacterMovement};
+use crate::character::CharacterView;
 use bevy::{input::mouse::AccumulatedMouseMotion, prelude::*};
-use hollow_features::{motion::InterpolationAlpha, spatial::FollowOffset};
+use bevy_voxel::character::CharacterMovement;
+use bevy_voxel::features::{motion::InterpolationAlpha, spatial::FollowOffset};
 use std::f32::consts::FRAC_PI_2;
 
 pub(crate) fn clear_player_input(mut players: Query<&mut CharacterMovement, With<Player>>) {
@@ -12,7 +13,11 @@ pub(crate) fn clear_player_input(mut players: Query<&mut CharacterMovement, With
         .expect("Dense player input query")
     {
         for index in 0..movements.len() {
-            hollow_features::query::set_if_neq(&mut movements, index, CharacterMovement::default());
+            bevy_voxel::features::query::set_if_neq(
+                &mut movements,
+                index,
+                CharacterMovement::default(),
+            );
         }
     }
 }
@@ -86,7 +91,7 @@ pub(super) fn player_input(
 pub(super) fn follow_eye_height(
     player: Single<
         (
-            &CharacterMotion,
+            &CharacterView,
             &Transform,
             &crate::survival::DamageState,
             &crate::survival::ActiveEffects,

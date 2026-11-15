@@ -8,10 +8,10 @@ use bevy::{
     prelude::*,
     transform::TransformSystems,
 };
-use hollow_features::{motion::InterpolationAlpha, spatial::FollowSystems};
+use bevy_voxel::features::{motion::InterpolationAlpha, spatial::FollowSystems};
 
 use crate::{
-    character::CharacterMotion,
+    character::CharacterView,
     game::GameState,
     inventory::{InventoryState, ItemKind, ItemStack},
     player::{Player, PlayerCamera},
@@ -53,7 +53,7 @@ struct BreakingOverlay;
 #[derive(Resource)]
 struct BreakingAssets {
     mesh: Handle<Mesh>,
-    materials: [Handle<hollow_render::material::ModelMaterial>; 10],
+    materials: [Handle<bevy_voxel::render::material::ModelMaterial>; 10],
 }
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -90,7 +90,7 @@ fn prepare_breaking_assets(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<hollow_render::material::ModelMaterial>>,
+    mut materials: ResMut<Assets<bevy_voxel::render::material::ModelMaterial>>,
     voxel_assets: Res<crate::voxel::VoxelAssets>,
 ) {
     // Keep a single reusable overlay; changing stages only swaps its material handle.
@@ -149,7 +149,7 @@ fn spawn_breaking_overlay(mut commands: Commands, assets: Res<BreakingAssets>) {
 /// Rays start at the player's eyes: third-person cameras sit behind or in front of them.
 fn update_block_target(
     interpolation: Res<InterpolationAlpha>,
-    player: Single<(&Transform, &CharacterMotion), With<Player>>,
+    player: Single<(&Transform, &CharacterView), With<Player>>,
     camera: Single<(&PlayerCamera, &mut BlockTargetState)>,
     voxel_world: VoxelWorld,
 ) {
@@ -174,12 +174,12 @@ fn update_breaking(
             Entity,
             &mut crate::inventory::PlayerInventory,
             &crate::inventory::HotbarSelection,
-            &crate::character::CharacterState,
+            &bevy_voxel::character::CharacterState,
             &crate::survival::UsingItem,
             &crate::survival::ActiveEffects,
-            &hollow_features::motion::FixedPosition,
-            &crate::character::CharacterBody,
-            &crate::character::CharacterMovement,
+            &bevy_voxel::features::motion::FixedPosition,
+            &bevy_voxel::character::CharacterBody,
+            &bevy_voxel::character::CharacterMovement,
         ),
         With<Player>,
     >,
@@ -307,7 +307,7 @@ fn handle_block_placement(
             Entity,
             &crate::inventory::PlayerInventory,
             &crate::inventory::HotbarSelection,
-            &crate::character::CharacterMovement,
+            &bevy_voxel::character::CharacterMovement,
             &mut crate::survival::UseInput,
         ),
         With<Player>,
@@ -399,7 +399,7 @@ fn sync_breaking_overlay(
         (
             &mut Transform,
             &mut Visibility,
-            &mut MeshMaterial3d<hollow_render::material::ModelMaterial>,
+            &mut MeshMaterial3d<bevy_voxel::render::material::ModelMaterial>,
             &mut Mesh3d,
         ),
         With<BreakingOverlay>,
@@ -417,9 +417,9 @@ fn sync_breaking_overlay(
     visibility.set_if_neq(Visibility::Visible);
     let key = (progress.position, progress.state);
     if *previous != Some(key) {
-        let geometry = hollow_render::model_mesh::state_geometry(
+        let geometry = bevy_voxel::render::model_mesh::state_geometry(
             &*render_source,
-            hollow_core::StateId(progress.state.id()),
+            bevy_voxel::core::StateId(progress.state.id()),
             progress.position,
         )
         .into_mesh();
@@ -485,7 +485,7 @@ fn targeted_state(
     direction: Dir3,
     sample: impl FnMut(IVec3) -> Option<VoxelState>,
 ) -> Option<BlockTarget> {
-    let target = hollow_engine::raycast::raycast(
+    let target = bevy_voxel::engine::raycast::raycast(
         origin,
         direction,
         BLOCK_REACH,

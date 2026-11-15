@@ -1,12 +1,12 @@
 use super::*;
 use crate::{
     block_behavior::containers::GameplayColumn,
-    character::{CharacterMotion, CharacterState},
     simulation::SimulatedIn,
     survival::{ActiveEffects, DamageState, Hazards, Health},
 };
 use bevy::{ecs::system::SystemParam, prelude::*};
-use hollow_features::motion::FixedPosition;
+use bevy_voxel::character::{CharacterMotion, CharacterState};
+use bevy_voxel::features::motion::FixedPosition;
 
 /// Dormant mobile data remains owned by the same gameplay column as block state.
 #[derive(Default)]

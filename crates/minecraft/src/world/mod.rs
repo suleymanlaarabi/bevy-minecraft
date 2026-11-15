@@ -178,7 +178,10 @@ impl Plugin for WorldPlugin {
             .add_systems(OnEnter(WorldSessionPhase::Saving), begin_saving)
             .add_systems(OnEnter(WorldSessionPhase::SaveError), ui::save_error)
             .add_systems(OnEnter(WorldSessionPhase::Playing), resume_session)
-            .add_systems(OnExit(GameState::Game), end_session)
+            .add_systems(
+                OnExit(GameState::Game),
+                end_session.after(bevy_voxel::session::close_session),
+            )
             .add_systems(
                 Update,
                 (poll_browser, ui::refresh_status)
@@ -213,7 +216,10 @@ impl Plugin for WorldPlugin {
     }
 }
 
-fn start_catalog(mut browser: ResMut<Browser>, blocks: Res<hollow_engine::blocks::BlockCatalog>) {
+fn start_catalog(
+    mut browser: ResMut<Browser>,
+    blocks: Res<bevy_voxel::engine::blocks::BlockCatalog>,
+) {
     browser.error = None;
     browser.pending_delete = None;
     browser.rescan();
@@ -226,7 +232,7 @@ fn open_world(
     browser: &mut Browser,
     path: Option<PathBuf>,
     creation: Option<(String, i64, WorldQuality)>,
-    blocks: hollow_engine::blocks::BlockCatalog,
+    blocks: bevy_voxel::engine::blocks::BlockCatalog,
 ) {
     if !browser.idle() {
         return;
@@ -269,7 +275,7 @@ fn open_world(
 pub(crate) fn register_flight_benchmark(app: &mut App) {
     app.add_systems(
         Startup,
-        |mut browser: ResMut<Browser>, blocks: Res<hollow_engine::blocks::BlockCatalog>| {
+        |mut browser: ResMut<Browser>, blocks: Res<bevy_voxel::engine::blocks::BlockCatalog>| {
             open_world(
                 &mut browser,
                 None,
@@ -427,7 +433,7 @@ fn settle_exit(
 fn prepare_session(
     mut commands: Commands,
     generator: Option<Res<WorldGenerator>>,
-    blocks: Res<hollow_engine::blocks::BlockCatalog>,
+    blocks: Res<bevy_voxel::engine::blocks::BlockCatalog>,
     settings: Res<VoxelSettings>,
     session: Option<Res<WorldSession>>,
     mut virtual_time: ResMut<Time<Virtual>>,
@@ -489,8 +495,8 @@ fn poll_storage_errors(
     mut save: ResMut<SaveState>,
     phase: Res<State<WorldSessionPhase>>,
     mut next: ResMut<NextState<WorldSessionPhase>>,
-    session: Res<hollow_engine::session::ActiveSession>,
-    mut terrain_errors: MessageReader<hollow_engine::streaming::TerrainFailure>,
+    session: Res<bevy_voxel::engine::session::ActiveSession>,
+    mut terrain_errors: MessageReader<bevy_voxel::engine::streaming::TerrainFailure>,
 ) {
     let mut errors = generator.take_errors();
     errors.extend(
@@ -516,12 +522,12 @@ fn checkpoint(
     session: Option<Res<WorldSession>>,
     generation: (
         Res<WorldGenerator>,
-        Res<hollow_engine::tasks::VoxelTaskBudget>,
+        Res<bevy_voxel::engine::tasks::VoxelTaskBudget>,
     ),
     players: Query<
         (
             &Transform,
-            &hollow_features::motion::FixedPosition,
+            &bevy_voxel::features::motion::FixedPosition,
             &PlayerInventory,
             &crate::inventory::CraftingGrid,
             &crate::inventory::HotbarSelection,
@@ -714,9 +720,9 @@ fn checkpoint(
     let budget = budget.clone();
     // Autosaves are background work; the exit save blocks the player like loading.
     let class = if saving {
-        hollow_engine::tasks::WorkClass::Loading
+        bevy_voxel::engine::tasks::WorkClass::Loading
     } else {
-        hollow_engine::tasks::WorkClass::Encoding
+        bevy_voxel::engine::tasks::WorkClass::Encoding
     };
     save.in_flight_bytes = captured_bytes;
     save.task = Some(IoTaskPool::get().spawn(async move {

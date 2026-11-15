@@ -42,10 +42,25 @@ pub struct SkyPlugin;
 
 impl Plugin for SkyPlugin {
     fn build(&self, app: &mut App) {
-        // Every sky pass draws with `hollow_render::environment::SkyMaterial`.
+        // Every sky pass draws with `bevy_voxel::render::environment::SkyMaterial`.
         app.init_resource::<TimeOfDay>()
             .init_resource::<SkyState>()
-            .init_resource::<clouds::CloudPattern>()
+            .insert_resource(bevy_voxel::render::sky::CloudPattern {
+                cells: clouds::generate_pattern(),
+                side: clouds::PATTERN,
+            })
+            .insert_resource(bevy_voxel::render::sky::CloudGeometry {
+                cell: clouds::CELL,
+                thickness: 4.0,
+                altitude: 300.0,
+                rebuild_margin: 2,
+            })
+            .init_resource::<bevy_voxel::render::sky::CloudFrame>()
+            .add_plugins(bevy_voxel::render::sky::SkyPresentationPlugin)
+            .configure_sets(
+                Update,
+                bevy_voxel::render::sky::SkyPresentation.in_set(SkySystems::Apply),
+            )
             .configure_sets(
                 Update,
                 (SkySystems::Advance, SkySystems::Apply)
@@ -70,19 +85,12 @@ impl Plugin for SkyPlugin {
             )
             .add_systems(Update, cycle::update_sky_state.in_set(SkySystems::Advance))
             .add_systems(
-                PostUpdate,
-                celestial::update_background_bounds
-                    .after(bevy::transform::TransformSystems::Propagate)
-                    .before(bevy::camera::visibility::VisibilitySystems::CheckVisibility)
-                    .run_if(in_state(GameState::Game)),
-            )
-            .add_systems(
                 Update,
                 (
                     celestial::update_lights,
                     (celestial::update_sun_disk, night::update_night_sky)
                         .run_if(resource_changed::<SkyState>),
-                    clouds::update_clouds,
+                    clouds::update_cloud_frame.before(bevy_voxel::render::sky::SkyPresentation),
                 )
                     .in_set(SkySystems::Apply),
             );

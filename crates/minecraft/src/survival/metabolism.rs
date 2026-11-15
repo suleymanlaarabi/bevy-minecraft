@@ -1,13 +1,11 @@
 use bevy::prelude::*;
-use hollow_features::motion::FixedPosition;
+use bevy_voxel::character::{CharacterActivity, CharacterBody, CharacterState, Locomotion};
+use bevy_voxel::features::motion::FixedPosition;
 use pumpkin_data::{damage::DamageType, effect::StatusEffect as E};
 
 use super::placement::{HazardKind, hazard};
 use super::{ActiveEffects, DamageRequest, Hazards, Health, Nutrition, SurvivalRules, UsingItem};
-use crate::{
-    character::{CharacterActivity, CharacterBody, CharacterState, Locomotion},
-    voxel::VoxelWorld,
-};
+use crate::voxel::VoxelWorld;
 
 pub(super) fn locomotion(
     mut actors: Query<
@@ -17,7 +15,7 @@ pub(super) fn locomotion(
             &ActiveEffects,
             Option<&Nutrition>,
             Option<&UsingItem>,
-            Option<&hollow_features::actors::Decision>,
+            Option<&bevy_voxel::features::actors::Decision>,
             &mut Locomotion,
         ),
         With<crate::simulation::Simulating>,
@@ -37,7 +35,7 @@ pub(super) fn locomotion(
                 slow_falling: effects.level(E::SLOW_FALLING.id) > 0,
             };
             if decision.is_some_and(|decision| {
-                decision.behavior == hollow_features::actors::Behavior::Flee
+                decision.behavior == bevy_voxel::features::actors::Behavior::Flee
             }) {
                 next.speed *= 1.5;
             }
@@ -172,7 +170,7 @@ pub(super) fn hazards(
         let mut fire = false;
         let mut extinguishes = false;
         let mut fluid_damage = 0.0f32;
-        let mut fluid_source = hollow_core::FluidId::NONE;
+        let mut fluid_source = bevy_voxel::core::FluidId::NONE;
         let mut fluid_ignites = false;
         let mut contact = None;
         let min = (feet - Vec3::new(body.half_width + 0.01, 0.01, body.half_width + 0.01))
@@ -191,7 +189,7 @@ pub(super) fn hazards(
                 return;
             };
             let fluid = block.definition().fluid.id;
-            if fluid != hollow_core::FluidId::NONE
+            if fluid != bevy_voxel::core::FluidId::NONE
                 && feet.y
                     < cell.y as f32 + {
                         let covered = world

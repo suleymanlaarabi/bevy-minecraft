@@ -11,17 +11,17 @@ const HEIGHT: usize = CHUNK_HEIGHT as usize;
 pub(crate) struct WorldGenerator {
     pub(crate) runtime: GenerationSession,
     storage: Option<Arc<crate::world::storage::Database>>,
-    blocks: hollow_engine::blocks::BlockCatalog,
+    blocks: bevy_voxel::engine::blocks::BlockCatalog,
 }
 fn index(x: usize, y: usize, z: usize) -> usize {
     x + 16 * (z + 16 * y)
 }
-pub(crate) type ChunkLoad = hollow_engine::streaming::ChunkLoad<
+pub(crate) type ChunkLoad = bevy_voxel::engine::streaming::ChunkLoad<
     super::VoxelState,
     crate::block_behavior::containers::PreparedColumn,
 >;
 impl WorldGenerator {
-    pub(crate) fn new(seed: i64, blocks: hollow_engine::blocks::BlockCatalog) -> Self {
+    pub(crate) fn new(seed: i64, blocks: bevy_voxel::engine::blocks::BlockCatalog) -> Self {
         Self {
             runtime: GenerationSession::new(
                 seed,
@@ -38,7 +38,7 @@ impl WorldGenerator {
         seed: i64,
         quality: crate::world::WorldQuality,
         storage: Arc<crate::world::storage::Database>,
-        blocks: hollow_engine::blocks::BlockCatalog,
+        blocks: bevy_voxel::engine::blocks::BlockCatalog,
     ) -> Self {
         Self {
             runtime: GenerationSession::new(
@@ -78,7 +78,7 @@ impl WorldGenerator {
     pub(crate) async fn loaded_gameplay_chunk(
         &self,
         position: IVec2,
-        budget: hollow_engine::tasks::VoxelTaskBudget,
+        budget: bevy_voxel::engine::tasks::VoxelTaskBudget,
     ) -> ChunkLoad {
         let result = async {
             if self.runtime.is_cancelled() {
@@ -87,7 +87,7 @@ impl WorldGenerator {
             let column = if let Some(storage) = &self.storage {
                 storage.load_column(position.x, position.y)?
             } else {
-                Some(hollow_engine::storage::sqlite::StoredColumn::default())
+                Some(bevy_voxel::engine::storage::sqlite::StoredColumn::default())
             };
             let Some(column) = column else {
                 return Ok(ChunkLoad::Retry);
@@ -97,7 +97,7 @@ impl WorldGenerator {
             }
             let generator = self.clone();
             budget
-                .spawn(hollow_engine::tasks::WorkClass::Loading, 0, async move {
+                .spawn(bevy_voxel::engine::tasks::WorkClass::Loading, 0, async move {
                     if generator.runtime.is_cancelled() {
                         return Ok(ChunkLoad::Missing);
                     }
@@ -138,7 +138,7 @@ impl WorldGenerator {
                                 native.y - min_y,
                                 native.z.rem_euclid(16),
                             );
-                            if let Some(cell) = hollow_core::coordinates::column_cell_index(
+                            if let Some(cell) = bevy_voxel::core::coordinates::column_cell_index(
                                 local,
                                 hollow_worldgen::coordinates::SECTION_COUNT,
                             ) {
@@ -180,7 +180,7 @@ impl WorldGenerator {
 
     pub(crate) async fn try_spawn_position(
         &self,
-        budget: hollow_engine::tasks::VoxelTaskBudget,
+        budget: bevy_voxel::engine::tasks::VoxelTaskBudget,
     ) -> std::io::Result<Vec3> {
         self.runtime.ready().await?;
         // Prefer dry ground near the origin, which can be ocean.
@@ -201,9 +201,11 @@ impl WorldGenerator {
                     }
                     let runtime = self.runtime.clone();
                     let terrain = budget
-                        .spawn(hollow_engine::tasks::WorkClass::Loading, 0, async move {
-                            runtime.probe_terrain(IVec2::new(dx, dz))
-                        })
+                        .spawn(
+                            bevy_voxel::engine::tasks::WorkClass::Loading,
+                            0,
+                            async move { runtime.probe_terrain(IVec2::new(dx, dz)) },
+                        )
                         .await;
                     let terrain = |i: usize| terrain.states.get(i).kind();
                     let Some(ground) = top(&terrain) else {

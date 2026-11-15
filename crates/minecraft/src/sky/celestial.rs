@@ -3,14 +3,10 @@ use super::{
     cycle::{MOON_LUX, SUN_LUX},
 };
 use crate::{game::GameState, settings::GraphicsSettings};
-use bevy::{
-    camera::visibility::{NoFrustumCulling, RenderLayers},
-    light::{NotShadowCaster, SunDisk},
-    prelude::*,
-};
-use hollow_features::query::{set_field_if_neq, set_if_neq};
-use hollow_render::{
-    environment::{SkyMaterial, SkyPass, SkySettings},
+use bevy::{camera::visibility::RenderLayers, light::SunDisk, prelude::*};
+use bevy_voxel::features::query::{set_field_if_neq, set_if_neq};
+use bevy_voxel::render::{
+    environment::{SkyPass, SkySettings},
     shadows::ShadowClipmap,
 };
 
@@ -23,26 +19,7 @@ const SUN_RADIUS: f32 = 0.025;
 /// lower, a light no longer brightens the sky.
 const TWILIGHT_END: f32 = -0.309;
 
-/// A depth-tested background reads the same palette as terrain fog and water.
-#[derive(Component)]
-pub(super) struct SkyBackground;
-
-pub(super) fn update_background_bounds(
-    camera: Single<&GlobalTransform, With<hollow_render::VoxelViewer>>,
-    mut backgrounds: Query<&mut bevy::camera::primitives::Aabb, With<SkyBackground>>,
-) {
-    let center = camera.translation().into();
-    for mut bounds in backgrounds
-        .contiguous_iter_mut()
-        .expect("Dense sky bounds query")
-    {
-        // The vertex shader covers the whole view. Keeping the camera inside its
-        // bounds prevents GPU occlusion from treating it as a quad at the origin.
-        for index in 0..bounds.len() {
-            set_field_if_neq(&mut bounds, index, |bounds| &mut bounds.center, center);
-        }
-    }
-}
+use bevy_voxel::render::sky::{SkyAssets, SkyBackground};
 
 #[derive(Component)]
 pub(super) struct Sun;
@@ -57,7 +34,7 @@ pub(super) struct SkyLight;
 #[derive(Component)]
 pub(super) struct SunDiskMesh;
 
-/// Read through the sky palette ([`hollow_render::environment::SkyLighting`]).
+/// Read through the sky palette ([`bevy_voxel::render::environment::SkyLighting`]).
 pub(crate) fn sun_settings(sky: &SkyState) -> SkySettings {
     let height = (sky.sun_direction.y * 5.0 + 0.2).clamp(0.0, 1.0);
     SkySettings {
@@ -69,44 +46,23 @@ pub(crate) fn sun_settings(sky: &SkyState) -> SkySettings {
     }
 }
 
-pub(super) fn spawn_sky(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<SkyMaterial>>,
-    palette: Res<hollow_render::fog::SkyPalette>,
-    sky: Res<SkyState>,
-) {
-    // One triangle past the screen corners: a two-triangle quad shades its shared
-    // diagonal twice in partially covered 2x2 pixel blocks.
-    let screen = Mesh::new(
-        bevy::mesh::PrimitiveTopology::TriangleList,
-        bevy::asset::RenderAssetUsages::default(),
-    )
-    .with_inserted_attribute(
-        Mesh::ATTRIBUTE_POSITION,
-        vec![[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]],
-    );
+pub(super) fn spawn_sky(mut commands: Commands, mut assets: SkyAssets, sky: Res<SkyState>) {
     commands.spawn((
         SkyBackground,
-        Mesh3d(meshes.add(screen)),
-        MeshMaterial3d(materials.add(SkyMaterial {
-            pass: SkyPass::Background,
-            settings: SkySettings::default(),
-            palette: palette.0.clone(),
-        })),
+        assets.surface(
+            bevy_voxel::render::sky::background_mesh(),
+            SkyPass::Background,
+        ),
         bevy::camera::primitives::Aabb {
             center: bevy::math::Vec3A::ZERO,
             half_extents: bevy::math::Vec3A::ONE,
         },
-        Transform::default(),
-        NoFrustumCulling,
-        NotShadowCaster,
         DespawnOnExit(GameState::Game),
     ));
 
     // Both lights reach the camera's layer and the terrain's shadow layer. Their
     // cascades are the camera-centered shadow clipmap of the voxel renderer.
-    let layers = RenderLayers::from_layers(&[0, hollow_render::visibility::OCCLUDED_LAYER]);
+    let layers = RenderLayers::from_layers(&[0, bevy_voxel::render::visibility::OCCLUDED_LAYER]);
     commands.spawn((
         Sun,
         SkyLight,
@@ -146,15 +102,7 @@ pub(super) fn spawn_sky(
     // Placed at infinity by its vertex shader: no bounding box can cull it.
     commands.spawn((
         SunDiskMesh,
-        Mesh3d(meshes.add(Rectangle::new(2.0, 2.0))),
-        MeshMaterial3d(materials.add(SkyMaterial {
-            pass: SkyPass::Sun,
-            settings: SkySettings::default(),
-            palette: palette.0.clone(),
-        })),
-        Transform::default(),
-        NoFrustumCulling,
-        NotShadowCaster,
+        assets.surface(Rectangle::new(2.0, 2.0).into(), SkyPass::Sun),
         DespawnOnExit(GameState::Game),
     ));
 }

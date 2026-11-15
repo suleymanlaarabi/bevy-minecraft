@@ -32,6 +32,10 @@ pub struct VoxelWorld<'w, 's, T: VoxelCell> {
 }
 
 impl<T: VoxelCell> VoxelWorld<'_, '_, T> {
+    pub fn content(&self) -> &hollow_core::content::ContentCatalog {
+        &self.content
+    }
+
     pub fn layout(&self) -> hollow_core::coordinates::ColumnLayout {
         self.layout.0
     }
@@ -48,6 +52,32 @@ impl<T: VoxelCell> VoxelWorld<'_, '_, T> {
     pub fn column_revision(&self, position: IVec2) -> Option<(Entity, u64)> {
         let entity = *self.index.get(&position)?;
         Some((entity, self.chunks.get(entity).ok()?.content_revision))
+    }
+
+    /// Four column keys for bounded collision regions touching at most two columns per axis.
+    pub fn region_revisions(&self, min: Vec3, max: Vec3) -> [Option<(Entity, u64)>; 4] {
+        let min = chunk_at(min);
+        let max = chunk_at(max);
+        debug_assert!(max.x - min.x <= 1 && max.y - min.y <= 1);
+        let first = self.column_revision(min);
+        let x = if min.x == max.x {
+            first
+        } else {
+            self.column_revision(IVec2::new(max.x, min.y))
+        };
+        let z = if min.y == max.y {
+            first
+        } else {
+            self.column_revision(IVec2::new(min.x, max.y))
+        };
+        let last = if min.x == max.x {
+            z
+        } else if min.y == max.y {
+            x
+        } else {
+            self.column_revision(max)
+        };
+        [first, x, z, last]
     }
 
     /// Visits every cell of an inclusive region, each vertical stack top to bottom.

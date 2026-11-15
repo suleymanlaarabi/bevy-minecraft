@@ -251,7 +251,7 @@ pub(crate) fn spawn_inventory_overlay(
     player: Single<
         (
             Option<&crate::inventory::InventorySession>,
-            &hollow_features::motion::FixedPosition,
+            &bevy_voxel::features::motion::FixedPosition,
         ),
         With<crate::player::Player>,
     >,

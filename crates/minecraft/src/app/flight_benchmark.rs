@@ -1,7 +1,6 @@
 //! Opt-in, rendered exploration measurement: stationary, outbound, return, recovery.
 
 use crate::{
-    character::{CharacterMotion, Flying},
     player::{Player, PlayerCamera},
     settings::{AntiAliasingMode, DisplayMode, GraphicsSettings, ShadowQuality},
     voxel::{ChunkVoxels, VoxelChunk},
@@ -12,9 +11,12 @@ use bevy::{
     window::WindowResolution,
     winit::WinitSettings,
 };
-use hollow_engine::streaming::{PendingChunks, StreamState};
-use hollow_features::motion::{FixedPosition, InterpolatePosition};
-use hollow_render::{build::ChunkBuild, diagnostics::VoxelDiagnostics, streaming::RenderRequested};
+use bevy_voxel::character::{CharacterMotion, Flying};
+use bevy_voxel::engine::streaming::{PendingChunks, StreamState};
+use bevy_voxel::features::motion::{FixedPosition, InterpolatePosition};
+use bevy_voxel::render::{
+    build::ChunkBuild, diagnostics::VoxelDiagnostics, streaming::RenderRequested,
+};
 use std::{
     fs::File,
     io::{BufWriter, Write},

@@ -1,12 +1,10 @@
 //! Voxel domain facade and the shared streaming/rebuild schedule.
 
 mod api;
-mod chunk;
 #[cfg(feature = "dev")]
 mod diagnostics;
 pub(crate) mod edits;
 pub(crate) mod generation;
-mod loading;
 pub(crate) mod render;
 pub(crate) mod rules;
 mod settings;
@@ -16,27 +14,33 @@ pub(crate) mod streaming;
 use crate::{game::GameState, settings::GraphicsSettings};
 pub use api::{VoxelCommandsExt, VoxelWorld};
 use bevy::prelude::*;
-pub use chunk::VoxelViewer;
-pub(crate) use chunk::{ChunkVoxels, VoxelChunk};
-pub use edits::SetVoxel;
-pub use hollow_core::coordinates::chunk_at;
-pub(crate) use hollow_core::coordinates::{CHUNK_SIZE, split_world_position};
-pub(crate) use hollow_engine::streaming::VoxelPipeline;
-use hollow_render::VoxelRenderSystems;
-pub(crate) use hollow_render::assets::VoxelAssets;
-use hollow_render::environment::{
+pub use bevy_voxel::render::VoxelViewer;
+pub(crate) type ChunkVoxels = bevy_voxel::chunk::ChunkVoxels<VoxelState>;
+pub(crate) use bevy_voxel::chunk::VoxelChunk;
+pub use bevy_voxel::core::coordinates::chunk_at;
+pub(crate) use bevy_voxel::core::coordinates::{CHUNK_SIZE, split_world_position};
+pub(crate) use bevy_voxel::engine::streaming::VoxelPipeline;
+use bevy_voxel::render::VoxelRenderSystems;
+pub(crate) use bevy_voxel::render::assets::VoxelAssets;
+use bevy_voxel::render::environment::{
     follow_horizon_skirt, spawn_horizon_skirt, update_camera_environment,
 };
-pub(crate) use hollow_render::{environment::OPEN_AIR_SCATTERING, material::VoxelMaterial};
+pub(crate) use bevy_voxel::render::{environment::OPEN_AIR_SCATTERING, material::VoxelMaterial};
+pub use edits::SetVoxel;
 pub use hollow_worldgen::VoxelKind;
-pub(crate) use loading::VoxelLoading;
+pub(crate) type VoxelLoading<'w, 's> = bevy_voxel::render::readiness::WorldReadiness<
+    'w,
+    's,
+    VoxelState,
+    crate::creatures::ColumnActors,
+>;
 use render::MinecraftRenderSource;
 pub use render::TexturePackId;
 use render::assets::apply_texture_pack;
 pub(crate) use render::assets::prepare_assets;
 pub(crate) use render::{TexturePack, terrain_radius};
 pub use settings::VoxelSettings;
-use streaming::{StreamOffsets, StreamState, cleanup_voxel_world};
+use streaming::{StreamOffsets, StreamState};
 
 pub struct VoxelPlugin {
     settings: VoxelSettings,
@@ -62,14 +66,12 @@ impl Plugin for VoxelPlugin {
         );
 
         app.add_plugins((
-            hollow_engine::VoxelWorldPlugin::<VoxelState>::default(),
+            bevy_voxel::VoxelPlugin::<generation::WorldGenerator>::default(),
             hollow_worldgen::WorldGenerationPlugin,
-            hollow_engine::streaming::StreamingPlugin::<generation::WorldGenerator>::default(),
-            hollow_engine::lighting::VoxelLightingPlugin::<VoxelState>::default(),
-            hollow_render::VoxelRenderPlugin::<MinecraftRenderSource>::default(),
+            bevy_voxel::render::VoxelRenderPlugin::<MinecraftRenderSource>::default(),
         ))
         .insert_resource(self.settings.clone())
-        .insert_resource(hollow_engine::streaming::StreamSettings {
+        .insert_resource(bevy_voxel::engine::streaming::StreamSettings {
             spawn_budget_per_frame: self.settings.spawn_budget_per_frame,
             despawn_budget_per_frame: self.settings.despawn_budget_per_frame,
         })
@@ -91,25 +93,26 @@ impl Plugin for VoxelPlugin {
             PreStartup,
             (validate_layout, render::initialize_source, prepare_assets)
                 .chain()
-                .after(hollow_engine::blocks::FinalizeBlockContent)
-                .after(hollow_render::PrepareVoxelAssets),
+                .after(bevy_voxel::engine::blocks::FinalizeBlockContent)
+                .after(bevy_voxel::render::PrepareVoxelAssets),
         )
         .add_systems(
             Update,
             (streaming::update_demand, streaming::publish_available)
                 .chain()
-                .before(hollow_engine::streaming::VoxelStreamSystems::Demand)
+                .before(bevy_voxel::engine::streaming::VoxelStreamSystems::Demand)
                 .run_if(crate::world::streaming),
         )
         .configure_sets(
             Update,
-            hollow_engine::streaming::VoxelStreamSystems::Demand.run_if(crate::world::streaming),
+            bevy_voxel::engine::streaming::VoxelStreamSystems::Demand
+                .run_if(crate::world::streaming),
         )
         .configure_sets(
             PostUpdate,
             VoxelPipeline
                 .after(crate::player::PlayerInteraction)
-                .before(hollow_engine::tasks::VoxelTasks::Requests)
+                .before(bevy_voxel::engine::tasks::VoxelTasks::Requests)
                 .run_if(crate::world::streaming),
         )
         .configure_sets(
@@ -127,7 +130,11 @@ impl Plugin for VoxelPlugin {
         )
         .add_systems(
             OnEnter(GameState::Game),
-            (hollow_engine::session::open_session, spawn_horizon_skirt).chain(),
+            (
+                bevy_voxel::engine::session::open_session,
+                spawn_horizon_skirt,
+            )
+                .chain(),
         )
         .add_systems(
             PostUpdate,
@@ -138,9 +145,10 @@ impl Plugin for VoxelPlugin {
         .add_systems(
             OnExit(GameState::Game),
             (
-                cleanup_voxel_world,
+                bevy_voxel::streaming::cleanup_world::<generation::WorldGenerator>,
+                streaming::clear_generation_view,
                 streaming::reset_voxel_world,
-                hollow_engine::session::close_session,
+                bevy_voxel::engine::session::close_session,
             )
                 .chain(),
         );
@@ -164,10 +172,10 @@ fn apply_view_distance(
     state.center = None;
 }
 
-fn validate_layout(layout: Res<hollow_engine::world::WorldLayout>) {
+fn validate_layout(layout: Res<bevy_voxel::engine::world::WorldLayout>) {
     assert_eq!(
         layout.0,
-        hollow_core::coordinates::ColumnLayout::default(),
+        bevy_voxel::core::coordinates::ColumnLayout::default(),
         "Minecraft generation requires its native 384-block column layout"
     );
 }

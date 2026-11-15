@@ -1,6 +1,6 @@
 //! One station relationship and access boundary for every inventory screen.
 use bevy::{ecs::system::SystemParam, prelude::*};
-use hollow_features::motion::FixedPosition;
+use bevy_voxel::features::motion::FixedPosition;
 
 use super::{CraftingGrid, InventoryState, access::InventoryAction};
 use crate::block_behavior::{

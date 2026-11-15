@@ -1,13 +1,13 @@
 //! Creature content composes independent actor capabilities over character physics.
 mod behavior;
 mod combat;
-mod navigation;
 pub(crate) mod persistence;
 mod presentation;
 pub(crate) mod spawning;
 
+pub use bevy_voxel::character::{CharacterBody, CharacterShape};
+use bevy_voxel::navigation::VoxelNavigator;
 pub use combat::{CreatureCombat, CreatureCombatPlugin};
-pub use navigation::VoxelNavigator;
 pub use persistence::{ColumnActors, SavedCreature};
 pub(crate) use persistence::{CreatureSnapshots, SavedSpawner};
 pub use spawning::{
@@ -15,13 +15,10 @@ pub use spawning::{
 };
 
 use bevy::prelude::*;
-use hollow_features::actors::{LocomotionAnimation, ThreatMemory};
+use bevy_voxel::features::actors::{LocomotionAnimation, ThreatMemory};
 use pumpkin_data::{attributes::Attributes, entity::EntityType};
 
-use crate::{
-    character::{CharacterBody, CharacterShape},
-    survival::Living,
-};
+use crate::survival::Living;
 
 /// The native registry ID is the only species identity in gameplay and saves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -204,13 +201,26 @@ impl CreatureCatalog {
 pub struct Creature(pub SpeciesId);
 
 #[derive(Component, Default)]
-#[require(VoxelNavigator)]
+#[require(
+    VoxelNavigator,
+    crate::character::GameCharacter,
+    bevy_voxel::features::actors::Decision
+)]
 pub struct Wander;
 #[derive(Component, Default)]
-#[require(VoxelNavigator, ThreatMemory)]
+#[require(
+    VoxelNavigator,
+    ThreatMemory,
+    crate::character::GameCharacter,
+    bevy_voxel::features::actors::Decision
+)]
 pub struct Flee;
 #[derive(Component, Default)]
-#[require(VoxelNavigator)]
+#[require(
+    VoxelNavigator,
+    crate::character::GameCharacter,
+    bevy_voxel::features::actors::Decision
+)]
 pub struct EscapeWater;
 
 fn passive_quadruped(entity: &mut bevy::ecs::system::EntityCommands) {
@@ -253,6 +263,18 @@ impl CreatureRandom {
 pub struct CreaturesPlugin;
 pub struct CreatureBehaviorPlugin;
 pub struct CreatureNavigationPlugin;
+impl Plugin for CreatureNavigationPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(bevy_voxel::navigation::VoxelNavigationPlugin::<
+            crate::voxel::VoxelState,
+            (With<crate::simulation::Simulating>, Without<combat::Dying>),
+        >::default())
+            .configure_sets(
+                FixedUpdate,
+                bevy_voxel::navigation::NavigationSystems.in_set(CreatureSystems::Navigate),
+            );
+    }
+}
 pub struct CreatureSpawningPlugin;
 pub struct CreaturePresentationPlugin;
 pub struct CreaturePersistencePlugin;
@@ -271,7 +293,7 @@ impl Plugin for CreaturesPlugin {
             (
                 CreatureSystems::Spawn.before(CreatureSystems::Decide),
                 CreatureSystems::Decide.before(CreatureSystems::Navigate),
-                CreatureSystems::Navigate.before(crate::character::CharacterSystems),
+                CreatureSystems::Navigate.before(bevy_voxel::character::CharacterSystems),
                 CreatureSystems::Finish.after(crate::survival::SurvivalSystems::Damage),
             )
                 .in_set(crate::simulation::SimulationSystems::Actors),

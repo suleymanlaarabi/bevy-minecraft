@@ -1,39 +1,19 @@
 use super::{ChunkVoxels, VoxelChunk, VoxelViewer, generation::WorldGenerator};
 use bevy::prelude::*;
-use hollow_core::coordinates::chunk_at;
-use hollow_engine::edits::LitEdits;
-pub use hollow_engine::streaming::PendingChunks;
-pub use hollow_engine::streaming::{AwaitingNeighbors, StreamOffsets, StreamState};
-use hollow_render::build::ChunkSections;
+use bevy_voxel::core::coordinates::chunk_at;
+use bevy_voxel::engine::edits::LitEdits;
+pub use bevy_voxel::engine::streaming::PendingChunks;
+pub use bevy_voxel::engine::streaming::{StreamOffsets, StreamState};
+use bevy_voxel::render::build::ChunkSections;
 
 /// Gameplay records being loaded and materialized around shared generated sections.
-pub use hollow_engine::world::ChunkIndex;
-pub(crate) type StoredChunks = hollow_engine::edits::StoredChunks<super::VoxelState>;
+pub use bevy_voxel::engine::world::ChunkIndex;
+pub(crate) type StoredChunks = bevy_voxel::engine::edits::StoredChunks<super::VoxelState>;
 /// Edits aimed at chunks that are neither loaded nor stored, replayed when they spawn.
 /// Generating a chunk just to edit it would block the main thread.
-pub(crate) type PendingEdits = hollow_engine::edits::PendingEdits<super::VoxelState>;
+pub(crate) type PendingEdits = bevy_voxel::engine::edits::PendingEdits<super::VoxelState>;
 
-pub(super) fn cleanup_voxel_world(
-    mut commands: Commands,
-    generator: Option<Res<WorldGenerator>>,
-    chunks: Query<Entity, With<VoxelChunk>>,
-    generations: Query<Entity, With<hollow_engine::streaming::ChunkGeneration<WorldGenerator>>>,
-) {
-    for &entity in chunks
-        .contiguous_iter()
-        .expect("Dense chunk query")
-        .flatten()
-    {
-        unload_chunk(&mut commands, entity);
-    }
-    for &entity in generations
-        .contiguous_iter()
-        .expect("Dense generation query")
-        .flatten()
-    {
-        commands.entity(entity).despawn();
-    }
-    // Release view demand; active generation retains its reservations until return.
+pub(super) fn clear_generation_view(generator: Option<Res<WorldGenerator>>) {
     if let Some(generator) = generator {
         generator.clear_view();
     }
@@ -63,13 +43,13 @@ pub fn update_demand(
     viewer: Single<&GlobalTransform, With<VoxelViewer>>,
     player: Query<
         (
-            &hollow_features::motion::FixedPosition,
+            &bevy_voxel::features::motion::FixedPosition,
             &crate::survival::Health,
         ),
         With<crate::player::Player>,
     >,
     simulation: Res<crate::settings::SimulationSettings>,
-    mut demand: ResMut<hollow_engine::streaming::StreamDemand>,
+    mut demand: ResMut<bevy_voxel::engine::streaming::StreamDemand>,
 ) {
     let center = chunk_at(viewer.translation());
     demand.center = Some(center);
@@ -85,8 +65,8 @@ pub fn update_demand(
 pub fn publish_available(
     mut incoming: MessageReader<hollow_worldgen::runtime::ChunkAvailable>,
     generator: Option<Res<WorldGenerator>>,
-    session: Option<Res<hollow_engine::session::ActiveSession>>,
-    mut outgoing: MessageWriter<hollow_engine::streaming::TerrainAvailable>,
+    session: Option<Res<bevy_voxel::engine::session::ActiveSession>>,
+    mut outgoing: MessageWriter<bevy_voxel::engine::streaming::TerrainAvailable>,
 ) {
     let (Some(generator), Some(session)) = (generator, session) else {
         return;
@@ -95,7 +75,7 @@ pub fn publish_available(
         .read()
         .filter(|event| event.session == generator.runtime.id())
     {
-        outgoing.write(hollow_engine::streaming::TerrainAvailable {
+        outgoing.write(bevy_voxel::engine::streaming::TerrainAvailable {
             session: session.0,
             position: event.position,
         });
@@ -126,7 +106,7 @@ pub struct RetirementPolicy<'w, 's> {
     sections: Query<'w, 's, &'static ChunkSections>,
     creatures: crate::creatures::CreatureSnapshots<'w, 's>,
 }
-impl hollow_engine::streaming::TerrainProvider for WorldGenerator {
+impl bevy_voxel::engine::streaming::TerrainProvider for WorldGenerator {
     type Cell = super::VoxelState;
     type Attachment = crate::block_behavior::containers::PreparedColumn;
     type Policy = RetirementPolicy<'static, 'static>;
@@ -145,9 +125,9 @@ impl hollow_engine::streaming::TerrainProvider for WorldGenerator {
     fn load(
         &self,
         position: IVec2,
-        budget: hollow_engine::tasks::VoxelTaskBudget,
+        budget: bevy_voxel::engine::tasks::VoxelTaskBudget,
     ) -> impl std::future::Future<
-        Output = hollow_engine::streaming::ChunkLoad<Self::Cell, Self::Attachment>,
+        Output = bevy_voxel::engine::streaming::ChunkLoad<Self::Cell, Self::Attachment>,
     > + Send
     + 'static {
         let generator = self.clone();

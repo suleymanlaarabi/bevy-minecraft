@@ -1,13 +1,13 @@
 use super::*;
 use crate::{
     block_behavior::containers::{BlockEntity, GameplayColumn, GameplayColumns},
-    character::{CharacterBody, CharacterState, Pose, Terrain},
     simulation::{GameplayClock, SimulatedEntities, SimulatedIn, Simulating},
     survival::Health,
     voxel::{VoxelKind, VoxelWorld},
 };
 use bevy::{ecs::system::SystemParam, math::DVec3, prelude::*};
-use hollow_features::motion::FixedPosition;
+use bevy_voxel::character::{CharacterBody, CharacterState, Pose, Terrain};
+use bevy_voxel::features::motion::FixedPosition;
 use std::collections::VecDeque;
 
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -90,8 +90,9 @@ struct PopulationRequest {
 #[derive(SystemParam)]
 struct SpawnEnvironment<'w> {
     settings: Res<'w, hollow_worldgen::GenerationSettings>,
-    lighting: Res<'w, hollow_engine::lighting::runtime::LightingState<crate::voxel::VoxelState>>,
-    lighting_version: Res<'w, hollow_engine::lighting::runtime::LightingVersion>,
+    lighting:
+        Res<'w, bevy_voxel::engine::lighting::runtime::LightingState<crate::voxel::VoxelState>>,
+    lighting_version: Res<'w, bevy_voxel::engine::lighting::runtime::LightingVersion>,
 }
 #[derive(SystemParam)]
 struct PopulationControl<'w, 's> {
@@ -162,12 +163,12 @@ impl Plugin for CreatureSpawningPlugin {
             )
             .add_systems(OnExit(crate::game::GameState::Game), clear);
         app.world_mut()
-            .resource_mut::<hollow_engine::blocks::BlockRegistrations>()
+            .resource_mut::<bevy_voxel::engine::blocks::BlockRegistrations>()
             .register(
-                hollow_core::BlockId(
+                bevy_voxel::core::BlockId(
                     VoxelKind::from_native(pumpkin_data::Block::SPAWNER.id).index() as u32,
                 ),
-                hollow_engine::blocks::BlockFactory {
+                bevy_voxel::engine::blocks::BlockFactory {
                     attach: |entity, _| {
                         entity.insert(CreatureSpawner::default());
                     },
@@ -338,7 +339,7 @@ fn process(
     control: PopulationControl,
     mut budget: ResMut<SpawnBudget>,
     catalog: Res<CreatureCatalog>,
-    world: VoxelWorld,
+    world: bevy_voxel::character::CollisionWorld<crate::voxel::VoxelState>,
     columns: Res<GameplayColumns>,
     owners: Query<(&GameplayColumn, Option<&SimulatedEntities>, &ColumnBiomes), With<Simulating>>,
     actors: Query<(&FixedPosition, &CharacterBody, &SpawnSource), With<Creature>>,
@@ -363,7 +364,7 @@ fn process(
     // Four deferred creations are counted immediately; no global population cache.
     let mut reserved = [(
         Entity::PLACEHOLDER,
-        crate::character::Aabb {
+        bevy_voxel::character::Aabb {
             min: DVec3::ZERO,
             max: DVec3::ZERO,
         },

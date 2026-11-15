@@ -206,10 +206,10 @@ pub(super) fn resolve(
 pub(super) fn apply_knockback(
     impact: On<DamageApplied>,
     mut motion: Query<(
-        &mut crate::character::CharacterMotion,
-        &crate::character::CharacterState,
+        &mut bevy_voxel::character::CharacterMotion,
+        &bevy_voxel::character::CharacterState,
     )>,
-    mut movement: Query<&mut crate::character::CharacterMovement>,
+    mut movement: Query<&mut bevy_voxel::character::CharacterMovement>,
 ) {
     if let Ok((mut motion, state)) = motion.get_mut(impact.target) {
         if impact.fatal {
@@ -225,6 +225,6 @@ pub(super) fn apply_knockback(
     if impact.fatal
         && let Ok(mut movement) = movement.get_mut(impact.target)
     {
-        movement.set_if_neq(crate::character::CharacterMovement::default());
+        movement.set_if_neq(bevy_voxel::character::CharacterMovement::default());
     }
 }

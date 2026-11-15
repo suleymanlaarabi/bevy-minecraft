@@ -3,7 +3,7 @@
 use super::texture_pack::{TexturePackId, manifest_keys};
 use crate::voxel::{VoxelKind, VoxelState};
 use bevy::prelude::*;
-use hollow_render::models::{CellInfo, ModelQuad, cell};
+use bevy_voxel::render::models::{CellInfo, ModelQuad, cell};
 use pumpkin_data::{BlockId, Property};
 use serde::Deserialize;
 use serde_json::Value;
@@ -62,7 +62,7 @@ struct Library {
     /// Face slots of greedy cubes, indexed by [`CellInfo::appearance`].
     appearances: Vec<Appearance>,
     texture_layers: Vec<u32>,
-    external: Vec<(hollow_core::ResourceId, u32)>,
+    external: Vec<(bevy_voxel::core::ResourceId, u32)>,
     block_slots: Box<[[u32; 6]]>,
     special_layers: u32,
     animations: Vec<Animation>,
@@ -211,7 +211,7 @@ impl Appearances {
 
 pub(crate) fn translucent_kind(kind: VoxelKind) -> bool {
     hollow_worldgen::content::catalog()
-        .visual(hollow_core::BlockId(kind.0))
+        .visual(bevy_voxel::core::BlockId(kind.0))
         .is_some_and(|v| v.translucent)
         || kind
             .native_id()
@@ -226,7 +226,7 @@ fn base_flags(state: VoxelState) -> u8 {
         flags |= cell::AIR;
     }
     let fluid = state.definition().fluid.id;
-    if fluid != hollow_core::FluidId::NONE
+    if fluid != bevy_voxel::core::FluidId::NONE
         && fluid.0 < (1 << 14)
         && crate::content::fluid_catalog()
             .profile(fluid)
@@ -257,7 +257,7 @@ fn base_flags(state: VoxelState) -> u8 {
 
 fn state_info(state: VoxelState) -> CellInfo {
     let fluid = state.definition().fluid;
-    let visible = fluid.id != hollow_core::FluidId::NONE
+    let visible = fluid.id != bevy_voxel::core::FluidId::NONE
         && crate::content::fluid_catalog()
             .profile(fluid.id)
             .render
@@ -276,7 +276,7 @@ fn state_info(state: VoxelState) -> CellInfo {
 /// Cells without a greedy cube and with something to draw use explicit models.
 fn finish(mut info: CellInfo, state: VoxelState) -> CellInfo {
     if info.flags & (cell::AIR | cell::CUBE | cell::CUTOUT) == 0
-        && (state.definition().fluid.id == hollow_core::FluidId::NONE
+        && (state.definition().fluid.id == bevy_voxel::core::FluidId::NONE
             || state.definition().fluid.embedded)
     {
         info.flags |= cell::MODEL;
@@ -639,7 +639,7 @@ fn augment_content(mut library: Library) -> Library {
         }
     }
     for kind in VoxelKind::all() {
-        if let Some(visual) = content.visual(hollow_core::BlockId(kind.0)) {
+        if let Some(visual) = content.visual(bevy_voxel::core::BlockId(kind.0)) {
             for resource in visual.faces {
                 referenced[resource.index()] = true;
             }
@@ -651,7 +651,7 @@ fn augment_content(mut library: Library) -> Library {
             slots.push(None);
             continue;
         }
-        let id = hollow_core::ResourceId(index as u32);
+        let id = bevy_voxel::core::ResourceId(index as u32);
         let path = content.resource(id);
         let slot = if path.ends_with(".png") {
             let slot = library.textures.len() as u32;
@@ -679,7 +679,7 @@ fn augment_content(mut library: Library) -> Library {
     library.block_slots = VoxelKind::all()
         .filter(|kind| !kind.is_native())
         .map(|kind| {
-            let visual = content.visual(hollow_core::BlockId(kind.0));
+            let visual = content.visual(bevy_voxel::core::BlockId(kind.0));
             std::array::from_fn(|face| {
                 visual
                     .and_then(|v| slots[v.faces[face].index()])
@@ -704,13 +704,17 @@ fn augment_content(mut library: Library) -> Library {
             .filter(|id| *id > 0 && *id < 1 << 14);
         if let Some(appearance) = appearance {
             let mut used = false;
-            for raw in content.block(hollow_core::BlockId(kind.0)).states.clone() {
-                let state = content.state(hollow_core::StateId(raw));
+            for raw in content
+                .block(bevy_voxel::core::BlockId(kind.0))
+                .states
+                .clone()
+            {
+                let state = content.state(bevy_voxel::core::StateId(raw));
                 if state.full_cube
                     && state.opacity == 15
-                    && state.fluid.id == hollow_core::FluidId::NONE
+                    && state.fluid.id == bevy_voxel::core::FluidId::NONE
                     && content
-                        .visual(hollow_core::BlockId(kind.0))
+                        .visual(bevy_voxel::core::BlockId(kind.0))
                         .is_some_and(|v| !v.translucent)
                 {
                     library.cells[raw as usize].appearance = appearance;
@@ -729,7 +733,7 @@ fn augment_content(mut library: Library) -> Library {
     }
     library
 }
-pub(crate) fn external_textures() -> &'static [(hollow_core::ResourceId, u32)] {
+pub(crate) fn external_textures() -> &'static [(bevy_voxel::core::ResourceId, u32)] {
     &library().external
 }
 fn pack_cube(keys: &[bool], kind: VoxelKind) -> bool {
@@ -788,7 +792,7 @@ pub(crate) fn special_layers() -> u32 {
     library().special_layers
 }
 
-pub(crate) fn fluid_texture(family: hollow_core::FluidId, flowing: bool) -> u32 {
+pub(crate) fn fluid_texture(family: bevy_voxel::core::FluidId, flowing: bool) -> u32 {
     static SLOTS: OnceLock<Box<[[u32; 2]]>> = OnceLock::new();
     let slots = SLOTS.get_or_init(|| {
         let content = hollow_worldgen::content::catalog();

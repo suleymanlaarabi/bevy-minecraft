@@ -1,10 +1,8 @@
 //! Bounded placement queries shared by consumption and respawning.
 use bevy::prelude::*;
+use bevy_voxel::character::{Aabb, CharacterBody, Pose};
 
-use crate::{
-    character::{Aabb, CharacterBody, Pose},
-    voxel::{VoxelKind, VoxelWorld},
-};
+use crate::voxel::{VoxelKind, VoxelWorld};
 
 /// Shared contact classification for damage sampling and safe placement.
 #[derive(Clone, Copy)]

@@ -20,7 +20,7 @@ const SELECTED_BORDER: Color = Color::WHITE;
 const PANEL_BG: Color = Color::srgba(0.10, 0.10, 0.11, 0.97);
 
 #[derive(Component, Clone, Default)]
-#[require(hollow_features::cursor::FreeCursor)]
+#[require(bevy_voxel::features::cursor::FreeCursor)]
 struct InventoryOverlay;
 
 #[derive(Component, Clone, Copy, Default)]

@@ -55,7 +55,7 @@ impl Plugin for PlayerPlugin {
             .add_systems(
                 PostUpdate,
                 follow_eye_height
-                    .before(hollow_features::spatial::FollowSystems)
+                    .before(bevy_voxel::features::spatial::FollowSystems)
                     .run_if(crate::world::playing),
             );
         skin::register(app);

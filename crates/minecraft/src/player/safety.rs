@@ -10,7 +10,7 @@ pub(super) fn register(app: &mut App) {
     app.add_systems(
         FixedUpdate,
         recover_player
-            .before(crate::character::CharacterSystems)
+            .before(bevy_voxel::character::CharacterSystems)
             .run_if(crate::world::playing),
     );
 }
@@ -21,7 +21,7 @@ fn recover_player(
         (
             &mut Transform,
             &mut PlayerCheckpoint,
-            &crate::character::CharacterState,
+            &bevy_voxel::character::CharacterState,
         ),
         With<Player>,
     >,

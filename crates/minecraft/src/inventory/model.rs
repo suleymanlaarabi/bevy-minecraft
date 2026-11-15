@@ -203,7 +203,7 @@ impl ItemStack {
     }
 }
 
-pub use hollow_features::slots::DragMode;
+pub use bevy_voxel::features::slots::DragMode;
 
 #[derive(Component, Clone, Debug, PartialEq, Eq)]
 pub struct PlayerInventory {
@@ -372,12 +372,12 @@ impl HotbarSelection {
     }
 }
 
-impl hollow_features::slots::StackItem for ItemKind {
+impl bevy_voxel::features::slots::StackItem for ItemKind {
     fn max_stack_size(self) -> u8 {
         self.max_stack_size()
     }
 }
-impl hollow_features::slots::Stack for ItemStack {
+impl bevy_voxel::features::slots::Stack for ItemStack {
     type Item = ItemKind;
     fn item(self) -> ItemKind {
         self.item()

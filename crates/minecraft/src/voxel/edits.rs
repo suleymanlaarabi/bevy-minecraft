@@ -2,13 +2,14 @@
 
 use super::{ChunkVoxels, VoxelState};
 use bevy::prelude::*;
-use hollow_core::coordinates::CHUNK_SIZE;
+use bevy_voxel::core::coordinates::CHUNK_SIZE;
 
-pub use hollow_engine::edits::EditedChunk;
-pub type SetVoxel = hollow_engine::edits::SetVoxel<VoxelState>;
-pub type BlockChanged = hollow_engine::edits::BlockChanged<VoxelState>;
-pub type CheckedEdit = hollow_engine::edits::CheckedEdit<VoxelState>;
-pub(crate) type VoxelEditWorld<'w, 's> = hollow_engine::edits::VoxelEditWorld<'w, 's, VoxelState>;
+pub use bevy_voxel::engine::edits::EditedChunk;
+pub type SetVoxel = bevy_voxel::engine::edits::SetVoxel<VoxelState>;
+pub type BlockChanged = bevy_voxel::engine::edits::BlockChanged<VoxelState>;
+pub type CheckedEdit = bevy_voxel::engine::edits::CheckedEdit<VoxelState>;
+pub(crate) type VoxelEditWorld<'w, 's> =
+    bevy_voxel::engine::edits::VoxelEditWorld<'w, 's, VoxelState>;
 
 /// Neighbor work belongs to the Minecraft simulation, after a terrain commit.
 pub(crate) fn enqueue_neighbors(
@@ -42,7 +43,7 @@ pub(crate) fn edit_batch(
     mut inventories: Query<(
         &mut crate::inventory::PlayerInventory,
         &crate::inventory::HotbarSelection,
-        &crate::character::CharacterState,
+        &bevy_voxel::character::CharacterState,
     )>,
     mut random: ResMut<crate::block_behavior::loot::LootRandom>,
 ) {
@@ -247,8 +248,8 @@ fn collect_border_connections(
         {
             continue;
         }
-        let base = section as i32 * hollow_core::coordinates::SECTION_HEIGHT;
-        for y in base..base + hollow_core::coordinates::SECTION_HEIGHT {
+        let base = section as i32 * bevy_voxel::core::coordinates::SECTION_HEIGHT;
+        for y in base..base + bevy_voxel::core::coordinates::SECTION_HEIGHT {
             for along in 0..CHUNK_SIZE {
                 let mut local = IVec3::new(along, y, along);
                 local[axis] = edge;

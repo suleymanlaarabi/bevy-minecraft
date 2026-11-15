@@ -1,12 +1,6 @@
 use crate::voxel::VoxelKind;
 use bevy::{
-    asset::RenderAssetUsages,
-    image::{
-        ImageAddressMode, ImageArrayLayout, ImageFilterMode, ImageLoaderSettings, ImageSampler,
-        ImageSamplerDescriptor,
-    },
-    prelude::*,
-    render::storage::ShaderBuffer,
+    asset::RenderAssetUsages, image::ImageSampler, prelude::*, render::storage::ShaderBuffer,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -16,7 +10,7 @@ fn default_texture_layers() -> u32 {
 }
 
 #[derive(Component, Reflect, Clone, Copy, Debug, PartialEq, Eq)]
-#[type_path = "hollow_minecraft::voxel::material"]
+#[type_path = "bevy_minecraft::voxel::material"]
 pub enum TexturePackId {
     Vanilla,
     Faithful,
@@ -133,7 +127,7 @@ fn resolve(blocks: &[Option<BlockTextureConfig>], kind: VoxelKind) -> Option<Blo
     let state = kind.default_state();
     let fluid = state.definition().fluid.id;
     if state.is_air()
-        || (fluid != hollow_core::FluidId::NONE
+        || (fluid != bevy_voxel::core::FluidId::NONE
             && crate::content::fluid_catalog()
                 .profile(fluid)
                 .render
@@ -152,7 +146,9 @@ fn resolve(blocks: &[Option<BlockTextureConfig>], kind: VoxelKind) -> Option<Blo
         }
         source = fallback;
     };
-    if source != kind && (TINTED_FALLBACKS.contains(&kind) || fluid != hollow_core::FluidId::NONE) {
+    if source != kind
+        && (TINTED_FALLBACKS.contains(&kind) || fluid != bevy_voxel::core::FluidId::NONE)
+    {
         let [r, g, b, _] = kind.color();
         let [base_r, base_g, base_b, _] = source.color();
         let tint = (
@@ -293,14 +289,7 @@ impl TexturePack {
             }
         }
         image.texture_descriptor.size.depth_or_array_layers = layers;
-        image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-            address_mode_u: ImageAddressMode::Repeat,
-            address_mode_v: ImageAddressMode::Repeat,
-            mag_filter: ImageFilterMode::Nearest,
-            min_filter: ImageFilterMode::Nearest,
-            mipmap_filter: ImageFilterMode::Linear,
-            ..default()
-        });
+        image.sampler = bevy_voxel::render::assets::block_sampler();
         images.add(image)
     }
     fn config(&self, kind: VoxelKind) -> Option<&BlockTextureConfig> {
@@ -466,23 +455,4 @@ impl TexturePack {
     }
 }
 
-pub(crate) fn block_texture(asset_server: &AssetServer, path: &str, layers: u32) -> Handle<Image> {
-    asset_server
-        .load_builder()
-        .with_settings(move |settings: &mut ImageLoaderSettings| {
-            // Bevy rejects a one-tile array layout. Single-layer images keep
-            // their pixels intact and receive an explicit array view on load.
-            settings.array_layout =
-                (layers > 1).then_some(ImageArrayLayout::RowCount { rows: layers });
-            settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-                address_mode_u: ImageAddressMode::Repeat,
-                address_mode_v: ImageAddressMode::Repeat,
-                mag_filter: ImageFilterMode::Nearest,
-                min_filter: ImageFilterMode::Nearest,
-                // Blends between the levels of `block_mipmaps`, so no mip seams show.
-                mipmap_filter: ImageFilterMode::Linear,
-                ..default()
-            });
-        })
-        .load(path.to_owned())
-}
+pub(crate) use bevy_voxel::render::assets::load_block_texture as block_texture;

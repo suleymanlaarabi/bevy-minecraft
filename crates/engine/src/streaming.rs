@@ -576,3 +576,20 @@ fn reset_stream(
     };
     *demand = Default::default();
 }
+
+/// Release terrain through the provider so application unload observers capture saves first.
+pub fn cleanup_world<P: TerrainProvider>(
+    mut commands: Commands,
+    provider: Option<Res<P>>,
+    chunks: Query<Entity, With<VoxelChunk>>,
+    generations: Query<Entity, With<ChunkGeneration<P>>>,
+) {
+    for entity in &chunks {
+        if let Some(provider) = &provider {
+            provider.release(&mut commands, entity);
+        }
+    }
+    for entity in &generations {
+        commands.entity(entity).despawn();
+    }
+}

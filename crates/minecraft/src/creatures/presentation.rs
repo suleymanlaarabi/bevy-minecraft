@@ -1,9 +1,5 @@
 use super::*;
-use crate::{
-    character::{CharacterActivity, CharacterMovement, CharacterState},
-    simulation::Simulating,
-    survival::DamageState,
-};
+use crate::{simulation::Simulating, survival::DamageState};
 use bevy::{
     camera::primitives::{Aabb, MeshAabb},
     mesh::MeshTag,
@@ -13,7 +9,8 @@ use bevy::{
     shader::ShaderRef,
     transform::TransformSystems,
 };
-use hollow_features::{actors::LocomotionAnimation, motion::FixedPosition};
+use bevy_voxel::character::{CharacterActivity, CharacterMovement, CharacterState};
+use bevy_voxel::features::{actors::LocomotionAnimation, motion::FixedPosition};
 
 type QuadrupedMaterial = ExtendedMaterial<StandardMaterial, QuadrupedExtension>;
 
@@ -22,10 +19,10 @@ struct QuadrupedExtension {}
 
 impl MaterialExtension for QuadrupedExtension {
     fn vertex_shader() -> ShaderRef {
-        "embedded://hollow_minecraft/creatures/quadruped.wesl".into()
+        "embedded://bevy_minecraft/creatures/quadruped.wesl".into()
     }
     fn prepass_vertex_shader() -> ShaderRef {
-        "embedded://hollow_minecraft/creatures/quadruped_prepass.wesl".into()
+        "embedded://bevy_minecraft/creatures/quadruped_prepass.wesl".into()
     }
     fn deferred_vertex_shader() -> ShaderRef {
         Self::prepass_vertex_shader()
@@ -56,7 +53,7 @@ impl Plugin for CreaturePresentationPlugin {
             .add_systems(
                 FixedUpdate,
                 (sample_animation, sample_audio)
-                    .after(crate::character::CharacterSystems)
+                    .after(bevy_voxel::character::CharacterSystems)
                     .in_set(crate::simulation::SimulationSystems::Actors),
             )
             .add_systems(
@@ -391,7 +388,7 @@ fn animate(
     assets: Res<RigAssets>,
     catalog: Res<CreatureCatalog>,
     time: Res<Time>,
-    interpolation: Res<hollow_features::motion::InterpolationAlpha>,
+    interpolation: Res<bevy_voxel::features::motion::InterpolationAlpha>,
     mut actors: Query<
         (
             &Creature,

@@ -34,7 +34,7 @@ pub(super) struct FormSubmit;
 #[derive(Component, Clone, Default)]
 pub(super) struct BrowserStatus;
 #[derive(Component, Clone, Default)]
-#[require(hollow_features::cursor::FreeCursor)]
+#[require(bevy_voxel::features::cursor::FreeCursor)]
 pub(super) struct SaveOverlay;
 #[derive(Component, Clone, Default)]
 pub(super) struct SaveStatus;
@@ -284,7 +284,7 @@ fn select_world(
     event: On<ValueChange<Entity>>,
     rows: Query<&WorldRow>,
     mut browser: ResMut<Browser>,
-    blocks: Res<hollow_engine::blocks::BlockCatalog>,
+    blocks: Res<bevy_voxel::engine::blocks::BlockCatalog>,
 ) {
     let Ok(row) = rows.get(event.value) else {
         return;
@@ -345,7 +345,7 @@ fn submit(
     _: On<Activate>,
     inputs: Query<(&Field, &Text)>,
     mut browser: ResMut<Browser>,
-    blocks: Res<hollow_engine::blocks::BlockCatalog>,
+    blocks: Res<bevy_voxel::engine::blocks::BlockCatalog>,
 ) {
     let (name, seed) = match form(&inputs) {
         Ok(v) => v,

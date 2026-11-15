@@ -258,19 +258,23 @@ pub(super) fn sync_parts(
                 };
                 if let Some(handle) = slot.and_then(|slot| armor[slot]) {
                     if materials[index].0 != *handle {
-                        hollow_features::query::set_if_neq(
+                        bevy_voxel::features::query::set_if_neq(
                             &mut materials,
                             index,
                             MeshMaterial3d(handle.clone()),
                         );
                     }
-                    hollow_features::query::set_if_neq(
+                    bevy_voxel::features::query::set_if_neq(
                         &mut visibility,
                         index,
                         Visibility::Inherited,
                     );
                 } else {
-                    hollow_features::query::set_if_neq(&mut visibility, index, Visibility::Hidden);
+                    bevy_voxel::features::query::set_if_neq(
+                        &mut visibility,
+                        index,
+                        Visibility::Hidden,
+                    );
                 }
             }
         }

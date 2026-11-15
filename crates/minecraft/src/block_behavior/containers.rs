@@ -6,7 +6,7 @@ use crate::{
     voxel::{ChunkVoxels, VoxelState, VoxelWorld},
 };
 use bevy::{ecs::system::SystemParam, prelude::*};
-use hollow_features::motion::FixedPosition;
+use bevy_voxel::features::motion::FixedPosition;
 use std::io;
 
 pub(crate) const CONTAINER_SIZE: usize = 27;
@@ -29,10 +29,10 @@ pub(crate) struct ManualOpen;
 pub(crate) struct Door;
 #[derive(Component, Default)]
 pub(crate) struct Gate;
-pub use hollow_engine::blocks::{
+pub use bevy_voxel::engine::blocks::{
     BlockEntities, BlockEntity, BlockLookup, BlockOf, Dormant, LoadedColumn, LoadedTerrain,
 };
-pub type BlockState = hollow_engine::blocks::BlockState<VoxelState>;
+pub type BlockState = bevy_voxel::engine::blocks::BlockState<VoxelState>;
 #[derive(Component)]
 #[relationship(relationship_target = ChestPartners)]
 pub(crate) struct PairedWith(pub Entity);
@@ -46,10 +46,11 @@ pub(crate) struct TopologyDirty;
 #[component(storage = "SparseSet")]
 pub(crate) struct AvailableContainer;
 
-pub use hollow_engine::blocks::ColumnOwners as GameplayColumns;
-pub type GameplayColumn = hollow_engine::simulation::ColumnData<crate::creatures::ColumnActors>;
+pub use bevy_voxel::engine::blocks::ColumnOwners as GameplayColumns;
+pub type GameplayColumn =
+    bevy_voxel::engine::simulation::ColumnData<crate::creatures::ColumnActors>;
 pub(crate) fn column(world: &mut World, position: IVec2) -> Entity {
-    let entity = hollow_engine::blocks::column(world, position);
+    let entity = bevy_voxel::engine::blocks::column(world, position);
     if world.get::<GameplayColumn>(entity).is_none() {
         world.entity_mut(entity).insert(GameplayColumn {
             position,
@@ -67,14 +68,14 @@ impl Plugin for ChestPlugin {
     fn build(&self, app: &mut App) {
         let mut registrations = app
             .world_mut()
-            .resource_mut::<hollow_engine::blocks::BlockRegistrations>();
+            .resource_mut::<bevy_voxel::engine::blocks::BlockRegistrations>();
         for kind in crate::voxel::VoxelKind::ALL
             .into_iter()
             .filter(|kind| profile(*kind).chest)
         {
             registrations.register(
-                hollow_core::BlockId(kind.index() as u32),
-                hollow_engine::blocks::BlockFactory {
+                bevy_voxel::core::BlockId(kind.index() as u32),
+                bevy_voxel::engine::blocks::BlockFactory {
                     attach: |entity, _| {
                         entity.insert((Chest, TopologyDirty, super::visuals::PrepareView));
                     },
@@ -130,15 +131,15 @@ impl PreparedColumn {
     pub fn discover(
         voxels: &ChunkVoxels,
         chunk: IVec2,
-        catalog: &hollow_engine::blocks::BlockCatalog,
+        catalog: &bevy_voxel::engine::blocks::BlockCatalog,
     ) -> Self {
-        use hollow_core::coordinates::{CHUNK_SIZE, SECTION_HEIGHT};
+        use bevy_voxel::core::coordinates::{CHUNK_SIZE, SECTION_HEIGHT};
         use hollow_worldgen::coordinates::SECTION_COUNT;
         let mut result = Self::default();
         let origin = IVec3::new(chunk.x * CHUNK_SIZE, 0, chunk.y * CHUNK_SIZE);
         for section in 0..SECTION_COUNT {
             if !voxels.states.section(section).any(|state| {
-                catalog.materialized(hollow_core::BlockId(state.kind().index() as u32))
+                catalog.materialized(bevy_voxel::core::BlockId(state.kind().index() as u32))
             }) {
                 continue;
             }
@@ -150,7 +151,7 @@ impl PreparedColumn {
                             .state(local)
                             .map(|state| state.kind())
                             .is_some_and(|kind| {
-                                catalog.materialized(hollow_core::BlockId(kind.index() as u32))
+                                catalog.materialized(bevy_voxel::core::BlockId(kind.index() as u32))
                             })
                         {
                             result.entries.push((
@@ -302,21 +303,23 @@ pub(crate) fn spawn_for_chunk(
             world.entity_mut(owner).insert(prepared.simulation);
             // A shared clone keeps the resource available to factory-triggered observers.
             let catalog = world
-                .resource::<hollow_engine::blocks::BlockCatalog>()
+                .resource::<bevy_voxel::engine::blocks::BlockCatalog>()
                 .clone();
             for (position, state, inventory) in prepared.entries {
-                let entity = hollow_engine::blocks::materialized_block(world, owner, position);
-                hollow_engine::blocks::classify(world, entity, state, &catalog);
+                let entity = bevy_voxel::engine::blocks::materialized_block(world, owner, position);
+                bevy_voxel::engine::blocks::classify(world, entity, state, &catalog);
                 if profile(state.kind()).chest {
                     world.entity_mut(entity).insert(inventory);
                 }
             }
-            let layout = world.resource::<hollow_engine::world::WorldLayout>().0;
+            let layout = world.resource::<bevy_voxel::engine::world::WorldLayout>().0;
             for saved in prepared.spawners {
-                let cell =
-                    hollow_engine::blocks::local_index(IVec3::from_array(saved.position), layout);
+                let cell = bevy_voxel::engine::blocks::local_index(
+                    IVec3::from_array(saved.position),
+                    layout,
+                );
                 let entity = world
-                    .get::<hollow_engine::blocks::ColumnBlocks>(owner)
+                    .get::<bevy_voxel::engine::blocks::ColumnBlocks>(owner)
                     .and_then(|blocks| blocks.cells.get(&cell))
                     .copied()
                     .expect("Discovered spawner block");
@@ -404,7 +407,7 @@ pub(crate) fn loaded(
 
 pub(crate) fn changed(
     event: On<crate::voxel::edits::BlockChanged>,
-    catalog: Res<hollow_engine::blocks::BlockCatalog>,
+    catalog: Res<bevy_voxel::engine::blocks::BlockCatalog>,
     lookup: BlockLookup,
     chests: Query<(), With<Chest>>,
     inventories: Query<&ContainerInventory>,
@@ -427,8 +430,9 @@ pub(crate) fn changed(
         }
     }
     let new = event.new;
-    let materialized = catalog.materialized(hollow_core::BlockId(new.kind().index() as u32));
-    if !materialized && !catalog.materialized(hollow_core::BlockId(event.old.kind().index() as u32))
+    let materialized = catalog.materialized(bevy_voxel::core::BlockId(new.kind().index() as u32));
+    if !materialized
+        && !catalog.materialized(bevy_voxel::core::BlockId(event.old.kind().index() as u32))
     {
         return;
     }
@@ -459,7 +463,7 @@ pub(crate) fn changed(
     let catalog = catalog.clone();
     commands.queue(move |world: &mut World| {
         let owner = column(world, coordinate);
-        let entity = hollow_engine::blocks::materialized_block(world, owner, position);
+        let entity = bevy_voxel::engine::blocks::materialized_block(world, owner, position);
         if container_changed {
             world
                 .get_mut::<GameplayColumn>(owner)
@@ -469,7 +473,7 @@ pub(crate) fn changed(
                 .entity_mut(entity)
                 .remove::<(Chest, ContainerInventory)>();
         }
-        hollow_engine::blocks::classify(world, entity, new, &catalog);
+        bevy_voxel::engine::blocks::classify(world, entity, new, &catalog);
         if loaded {
             world.entity_mut(entity).remove::<Dormant>();
         }

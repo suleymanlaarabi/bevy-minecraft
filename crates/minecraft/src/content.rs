@@ -1,7 +1,7 @@
 //! Content providers compose through the engine registration API.
 pub mod fluids;
 use bevy::prelude::*;
-use hollow_engine::content::{
+use bevy_voxel::engine::content::{
     ContentPlugin, ContentRegistrations, FreezeContent, RegisteredContent,
 };
 
@@ -15,13 +15,13 @@ impl Plugin for MinecraftContentPlugin {
         .add_systems(
             PreStartup,
             bind.after(FreezeContent)
-                .before(hollow_engine::blocks::FinalizeBlockContent),
+                .before(bevy_voxel::engine::blocks::FinalizeBlockContent),
         )
         .add_systems(
             PreStartup,
             bind_fluids
-                .after(hollow_engine::fluids::FreezeFluids)
-                .before(hollow_engine::blocks::FinalizeBlockContent),
+                .after(bevy_voxel::engine::fluids::FreezeFluids)
+                .before(bevy_voxel::engine::blocks::FinalizeBlockContent),
         );
     }
 }
@@ -30,21 +30,24 @@ fn bind(content: Res<RegisteredContent>) {
 }
 
 struct FluidAdapter {
-    catalog: hollow_engine::fluids::FluidCatalog,
+    catalog: bevy_voxel::engine::fluids::FluidCatalog,
     // DamageRequest retains static definitions; this process-lived import adapter
     // owns one resolved definition per fluid, never one per actor or contact.
     sources: Box<[pumpkin_data::damage::DamageType]>,
 }
 static FLUIDS: std::sync::OnceLock<FluidAdapter> = std::sync::OnceLock::new();
-pub fn fluid_catalog() -> &'static hollow_engine::fluids::FluidCatalog {
+pub fn fluid_catalog() -> &'static bevy_voxel::engine::fluids::FluidCatalog {
     &FLUIDS.get().expect("Fluids not finalized").catalog
 }
 pub(crate) fn fluid_damage_source(
-    fluid: hollow_core::FluidId,
+    fluid: bevy_voxel::core::FluidId,
 ) -> &'static pumpkin_data::damage::DamageType {
     &FLUIDS.get().expect("Fluids not finalized").sources[fluid.index() - 1]
 }
-fn bind_fluids(fluids: Res<hollow_engine::fluids::FluidCatalog>, content: Res<RegisteredContent>) {
+fn bind_fluids(
+    fluids: Res<bevy_voxel::engine::fluids::FluidCatalog>,
+    content: Res<RegisteredContent>,
+) {
     use pumpkin_data::damage::DamageType;
     let sources = fluids
         .profiles()

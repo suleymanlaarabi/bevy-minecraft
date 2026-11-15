@@ -1,0 +1,18 @@
+[package]
+name = "bevy-voxel"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+render = ["dep:hollow-render"]
+sqlite = ["hollow-engine/sqlite"]
+content-ron = ["hollow-engine/content-ron"]
+dev = ["hollow-render?/dev"]
+
+[dependencies]
+bevy = { version = "0.20", default-features = false, features = ["std", "async_executor", "multi_threaded", "bevy_asset"] }
+hollow-core = { path = "../core" }
+hollow-engine = { path = "../engine" }
+hollow-features = { path = "../features" }
+hollow-render = { path = "../render", optional = true }

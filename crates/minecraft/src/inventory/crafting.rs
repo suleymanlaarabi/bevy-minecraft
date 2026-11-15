@@ -305,7 +305,7 @@ pub(crate) fn refresh_crafting(mut grids: Query<(Ref<CraftingGrid>, &mut Craftin
             let (grids, ticks) = ContiguousRef::split(grids);
             for (index, (grid, changed)) in grids.iter().zip(ticks.is_changed_iter()).enumerate() {
                 if changed {
-                    hollow_features::query::set_if_neq(
+                    bevy_voxel::features::query::set_if_neq(
                         &mut results,
                         index,
                         CraftingResult(grid.recipe().map(RecipeMatch::output)),

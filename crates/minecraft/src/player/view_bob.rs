@@ -1,9 +1,9 @@
 //! Minecraft Java 26.3 GameRenderer.bobView, expressed as a view-space transform.
-use crate::character::CharacterMotion;
+use crate::character::CharacterView;
 use bevy::prelude::*;
 use std::f32::consts::PI;
 
-pub(super) fn pose(motion: &CharacterMotion, alpha: f32) -> Transform {
+pub(super) fn pose(motion: &CharacterView, alpha: f32) -> Transform {
     let (distance, bob) = motion.walking_animation(alpha);
     let phase = distance * PI;
     let (sin, cos) = phase.sin_cos();

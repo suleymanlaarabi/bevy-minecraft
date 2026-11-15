@@ -1,13 +1,7 @@
 use super::SkyState;
 use crate::game::GameState;
-use bevy::{
-    asset::RenderAssetUsages,
-    camera::visibility::NoFrustumCulling,
-    light::NotShadowCaster,
-    mesh::{Indices, PrimitiveTopology},
-    prelude::*,
-};
-use hollow_render::environment::{SkyMaterial, SkyPass, SkySettings};
+use bevy::prelude::*;
+use bevy_voxel::render::environment::{SkyPass, SkySettings};
 
 const STAR_COUNT: u32 = 2600;
 /// A slightly larger companion to the sun, with room to see its surface and phases.
@@ -23,37 +17,20 @@ pub(super) struct MoonDisk;
 
 pub(super) fn spawn_night_sky(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<SkyMaterial>>,
-    palette: Res<hollow_render::fog::SkyPalette>,
+    mut assets: bevy_voxel::render::sky::SkyAssets,
     sky: Res<SkyState>,
 ) {
     // Both are placed at infinity by their vertex shaders: their transforms only
     // turn the star field, and no bounding box can cull them.
     commands.spawn((
         Stars,
-        Mesh3d(meshes.add(star_mesh())),
-        MeshMaterial3d(materials.add(SkyMaterial {
-            pass: SkyPass::Stars,
-            settings: SkySettings::default(),
-            palette: palette.0.clone(),
-        })),
+        assets.surface(star_mesh(), SkyPass::Stars),
         Transform::from_rotation(sky.sky_rotation),
-        NoFrustumCulling,
-        NotShadowCaster,
         DespawnOnExit(GameState::Game),
     ));
     commands.spawn((
         MoonDisk,
-        Mesh3d(meshes.add(Rectangle::new(2.0, 2.0))),
-        MeshMaterial3d(materials.add(SkyMaterial {
-            pass: SkyPass::Moon,
-            settings: SkySettings::default(),
-            palette: palette.0.clone(),
-        })),
-        Transform::default(),
-        NoFrustumCulling,
-        NotShadowCaster,
+        assets.surface(Rectangle::new(2.0, 2.0).into(), SkyPass::Moon),
         DespawnOnExit(GameState::Game),
     ));
 }
@@ -76,7 +53,7 @@ pub(super) fn update_night_sky(
             Visibility::Hidden
         };
         for (index, transform) in transforms.into_iter().enumerate() {
-            hollow_features::query::set_if_neq(&mut visibility, index, target);
+            bevy_voxel::features::query::set_if_neq(&mut visibility, index, target);
             transform.rotation = sky.sky_rotation;
         }
     }
@@ -89,12 +66,12 @@ pub(super) fn update_night_sky(
     };
     for mut visibility in moons.contiguous_iter_mut().expect("Dense moon query") {
         for index in 0..visibility.len() {
-            hollow_features::query::set_if_neq(&mut visibility, index, target);
+            bevy_voxel::features::query::set_if_neq(&mut visibility, index, target);
         }
     }
 }
 
-/// Read through the sky palette ([`hollow_render::environment::SkyLighting`]).
+/// Read through the sky palette ([`bevy_voxel::render::environment::SkyLighting`]).
 pub(crate) fn moon_settings(sky: &SkyState) -> SkySettings {
     let direction = sky.moon_direction;
     // Dimmed and reddened by the long path through the air near the horizon,
@@ -119,12 +96,7 @@ pub(crate) fn moon_settings(sky: &SkyState) -> SkySettings {
 /// faint end like the real sky. Seeded: every world sees the same constellations.
 fn star_mesh() -> Mesh {
     let mut random = SplitMix(0x5eed_57a2);
-    let count = STAR_COUNT as usize;
-    let mut positions = Vec::with_capacity(count * 4);
-    let mut uvs = Vec::with_capacity(count * 4);
-    let mut colors = Vec::with_capacity(count * 4);
-    let mut indices = Vec::with_capacity(count * 6);
-    for star in 0..STAR_COUNT {
+    bevy_voxel::render::sky::star_mesh((0..STAR_COUNT).map(|_| {
         // Uniform on the sphere.
         let z = random.next() * 2.0 - 1.0;
         let angle = random.next() * std::f32::consts::TAU;
@@ -141,24 +113,12 @@ fn star_mesh() -> Mesh {
             brightness * (1.0 - 0.3 * warmth),
             random.next(),
         ];
-        let (tangent, bitangent) = center.any_orthonormal_pair();
-        for (u, v) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-            positions.push((center + (tangent * u + bitangent * v) * size).to_array());
-            uvs.push([u, v]);
-            colors.push(color);
+        bevy_voxel::render::sky::Star {
+            center,
+            size,
+            color,
         }
-        let base = star * 4;
-        // The camera sees the inside of the sphere: wind each face inward.
-        indices.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
-    }
-    Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD,
-    )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
-    .with_inserted_indices(Indices::U32(indices))
+    }))
 }
 
 /// A tiny deterministic generator for the star field and the cloud pattern.

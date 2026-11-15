@@ -35,7 +35,7 @@ pub(crate) fn bind_slots(
         (
             Entity,
             Option<&crate::inventory::InventorySession>,
-            &hollow_features::motion::FixedPosition,
+            &bevy_voxel::features::motion::FixedPosition,
         ),
         With<Player>,
     >,
@@ -129,7 +129,7 @@ pub(crate) fn refresh_slots(
                 } else {
                     SLOT_BORDER
                 });
-            hollow_features::query::set_if_neq(&mut borders, index, border);
+            bevy_voxel::features::query::set_if_neq(&mut borders, index, border);
             let stack = match *owner {
                 super::SlotOwner::Inventory(entity, index) if entity == player => {
                     inventory.slot(index)
@@ -144,7 +144,7 @@ pub(crate) fn refresh_slots(
                     .and_then(|inventory| inventory.slot(index)),
                 _ => None,
             };
-            hollow_features::query::set_if_neq(&mut displays, index, super::StackView(stack));
+            bevy_voxel::features::query::set_if_neq(&mut displays, index, super::StackView(stack));
         }
     }
 }

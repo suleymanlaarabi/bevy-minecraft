@@ -10,10 +10,10 @@ use crate::inventory::StationViewers;
 use crate::voxel::{VoxelState, VoxelWorld, render::models};
 use bevy::ecs::{entity::EntityHashSet, system::SystemParam};
 use bevy::{mesh::MeshTag, prelude::*};
-use hollow_features::articulation::{
+use bevy_voxel::features::articulation::{
     Easing, JointAnimation, JointClip, JointMotion, SetJointTarget,
 };
-use hollow_render::{material::ModelMaterial, model_mesh::ModelGeometry, models::ModelQuad};
+use bevy_voxel::render::{material::ModelMaterial, model_mesh::ModelGeometry, models::ModelQuad};
 
 const VIEW_BUDGET: usize = 64;
 const LIGHT_BUDGET: usize = 256;
@@ -36,16 +36,16 @@ struct ViewOf(pub Entity);
 #[relationship_target(relationship = ViewOf, linked_spawn)]
 struct BlockViews(Vec<Entity>);
 #[derive(Component)]
-#[component(storage = "SparseSet", on_add = hollow_engine::work::enqueue::<Self>)]
+#[component(storage = "SparseSet", on_add = bevy_voxel::engine::work::enqueue::<Self>)]
 pub(crate) struct PrepareView;
 #[derive(Component, Default)]
-#[component(storage = "SparseSet", on_add = hollow_engine::work::enqueue::<Self>)]
+#[component(storage = "SparseSet", on_add = bevy_voxel::engine::work::enqueue::<Self>)]
 struct Relight {
     offset: usize,
     rerun: bool,
 }
-type ViewQueue = hollow_engine::work::EntityWork<PrepareView>;
-type LightQueue = hollow_engine::work::EntityWork<Relight>;
+type ViewQueue = bevy_voxel::engine::work::EntityWork<PrepareView>;
+type LightQueue = bevy_voxel::engine::work::EntityWork<Relight>;
 #[derive(Component, Default)]
 pub(crate) struct InstanceLight(u32);
 
@@ -95,7 +95,7 @@ pub(crate) fn register(app: &mut App) {
                 update_lighting.after(prepare_views),
                 update_open_lids
                     .after(prepare_views)
-                    .before(hollow_features::articulation::ArticulationSystems),
+                    .before(bevy_voxel::features::articulation::ArticulationSystems),
             )
                 .in_set(super::GameplaySystems::Presentation)
                 .before(bevy::transform::TransformSystems::Propagate)
@@ -121,7 +121,7 @@ fn chunk_departed(
     }
 }
 fn light_changed(
-    event: On<hollow_engine::lighting::ChunkLightChanged>,
+    event: On<bevy_voxel::engine::lighting::ChunkLightChanged>,
     chunks: Query<&crate::voxel::VoxelChunk>,
     mut invalidation: LightInvalidation,
 ) {
@@ -132,7 +132,7 @@ fn light_changed(
 fn box_geometry(lo: Vec3, hi: Vec3, offset: Vec3) -> ModelGeometry {
     let mut result = ModelGeometry::default();
     let kind = crate::voxel::VoxelKind::from_key("chest").expect("chest registry");
-    for face in (hollow_core::shape::BlockBox { min: lo, max: hi }).faces() {
+    for face in (bevy_voxel::core::shape::BlockBox { min: lo, max: hi }).faces() {
         result.quad(
             &ModelQuad {
                 positions: face.positions.map(|position| position.to_array()),
@@ -228,7 +228,7 @@ fn prepare_views(
         (With<PrepareView>, Without<Dormant>),
     >,
     columns: Query<&LoadedTerrain>,
-    rendered: Query<(), With<hollow_render::streaming::RenderRequested>>,
+    rendered: Query<(), With<bevy_voxel::render::streaming::RenderRequested>>,
     views: Query<&ChestView>,
     world: VoxelWorld,
     mut cache: ResMut<ChestMeshes>,
@@ -430,7 +430,7 @@ fn clear_updates(mut views: ResMut<ViewQueue>, mut lights: ResMut<LightQueue>) {
 }
 
 fn render_requested(
-    event: On<Add<hollow_render::streaming::RenderRequested>>,
+    event: On<Add<bevy_voxel::render::streaming::RenderRequested>>,
     terrain: Query<&super::containers::LoadedColumn>,
     blocks: Query<&BlockEntities>,
     chests: Query<(), With<super::containers::Chest>>,

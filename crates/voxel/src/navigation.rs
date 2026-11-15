@@ -1,20 +1,20 @@
-use super::*;
-use crate::{
-    character::{Aabb, CharacterBody, CharacterMovement, CharacterState, Terrain},
-    simulation::{GameplayClock, Simulating},
+//! Bounded voxel navigation with shared collision and revision probes.
+use crate::character::{
+    Aabb, CharacterBody, CharacterMovement, CharacterState, CollisionWorld, Terrain,
 };
-use bevy::{math::DVec3, prelude::*};
+use bevy::{ecs::query::ArchetypeFilter, math::DVec3, prelude::*};
+use hollow_core::VoxelCell;
+use hollow_engine::simulation::{GameplayClock, Simulating, SimulationDiagnostics};
 use hollow_features::{
-    actors::{Behavior, Decision, Navigation, NavigationStatus, PathHandle},
+    actors::{Navigation, NavigationStatus, PathHandle},
     motion::FixedPosition,
 };
-use std::collections::VecDeque;
-
+use std::{collections::VecDeque, marker::PhantomData};
 /// Opt into the voxel provider independently of species and decision policy.
 #[derive(Component, Default)]
 #[require(
-    crate::character::GameCharacter,
-    Decision,
+    crate::character::VoxelCharacter,
+    NavigationCapabilities,
     Navigation,
     SegmentValidation
 )]
@@ -61,7 +61,7 @@ struct Search {
     destination: Vec3,
     origin: IVec3,
     goal: IVec3,
-    escape: bool,
+    capabilities: NavigationCapabilities,
     nodes: Box<[Node]>,
     open: Vec<u16>,
     visited: usize,
@@ -76,7 +76,7 @@ impl Default for Search {
             destination: Vec3::ZERO,
             origin: IVec3::ZERO,
             goal: IVec3::ZERO,
-            escape: false,
+            capabilities: NavigationCapabilities::default(),
             nodes: Box::default(),
             open: Vec::new(),
             visited: 0,
@@ -129,7 +129,7 @@ impl Search {
     }
     fn priority(&self, index: u16) -> u32 {
         let p = self.position(index);
-        let h = if self.escape {
+        let h = if self.capabilities.seek_dry {
             0
         } else {
             (p.x - self.goal.x).unsigned_abs() + (p.z - self.goal.z).unsigned_abs()
@@ -187,7 +187,13 @@ impl Search {
         }
         Some(result)
     }
-    fn begin(&mut self, entity: Entity, feet: Vec3, destination: Vec3, escape: bool) {
+    fn begin(
+        &mut self,
+        entity: Entity,
+        feet: Vec3,
+        destination: Vec3,
+        capabilities: NavigationCapabilities,
+    ) {
         self.entity = Some(entity);
         self.completed = None;
         self.destination = destination;
@@ -197,7 +203,7 @@ impl Search {
             .floor()
             .as_ivec3()
             .clamp(self.origin, self.origin + IVec3::new(32, 16, 32));
-        self.escape = escape;
+        self.capabilities = capabilities;
         self.generation = self.generation.wrapping_add(1);
         if self.generation == 0 {
             self.nodes.fill(Node::default());
@@ -245,7 +251,7 @@ struct PathSlot {
 
 /// Slots retain bounded buffers across routes and use a dense numeric handle.
 #[derive(Resource, Default)]
-pub(crate) struct PathPool {
+pub struct PathPool {
     slots: Vec<PathSlot>,
     free: Vec<u32>,
 }
@@ -295,43 +301,26 @@ fn release_removed_navigation(
 /// One validated segment avoids collecting unchanged voxel shapes every tick.
 /// Four column revision keys and two endpoints cost about 128 bytes per navigator.
 #[derive(Component, Default)]
-pub(crate) struct SegmentValidation {
+pub struct SegmentValidation {
     from: Vec3,
     to: Vec3,
     revisions: [Option<(Entity, u64)>; 4],
     valid: bool,
-    escape: bool,
+    capabilities: NavigationCapabilities,
     blocked_ticks: u8,
     jump_cooldown: u8,
     queued: bool,
 }
 fn revisions(
-    world: &crate::voxel::VoxelWorld,
+    world: &CollisionWorld<impl VoxelCell>,
     from: Vec3,
     to: Vec3,
     body: &CharacterBody,
 ) -> [Option<(Entity, u64)>; 4] {
-    let min = crate::voxel::chunk_at(from.min(to) - Vec3::splat(body.half_width));
-    let max = crate::voxel::chunk_at(from.max(to) + Vec3::splat(body.half_width));
-    let a = world.column_revision(min);
-    let x = if min.x == max.x {
-        a
-    } else {
-        world.column_revision(IVec2::new(max.x, min.y))
-    };
-    let z = if min.y == max.y {
-        a
-    } else {
-        world.column_revision(IVec2::new(min.x, max.y))
-    };
-    let last = if min.x == max.x {
-        z
-    } else if min.y == max.y {
-        x
-    } else {
-        world.column_revision(max)
-    };
-    [a, x, z, last]
+    world.region_revisions(
+        from.min(to) - Vec3::splat(body.half_width),
+        from.max(to) + Vec3::splat(body.half_width),
+    )
 }
 const _: () =
     assert!(SEARCH_SLOTS * (CELLS * std::mem::size_of::<Node>() + MAX_NODES * 2) < 4 * 1024 * 1024);
@@ -342,6 +331,7 @@ struct Searches([Search; SEARCH_SLOTS]);
 struct SearchQueue(VecDeque<(Entity, u64)>);
 
 fn clear_searches(
+    _: On<hollow_engine::session::SessionClosed>,
     mut queue: ResMut<SearchQueue>,
     mut searches: ResMut<Searches>,
     mut pool: ResMut<PathPool>,
@@ -359,15 +349,12 @@ impl Default for Searches {
     }
 }
 #[derive(Resource, Default)]
-pub(crate) struct NavigationBudget {
+pub struct NavigationBudget {
     expansions: usize,
     follow_probes: usize,
     search_probes: usize,
 }
-fn reset(
-    mut budget: ResMut<NavigationBudget>,
-    mut diagnostics: ResMut<crate::simulation::SimulationDiagnostics>,
-) {
+fn reset(mut budget: ResMut<NavigationBudget>, mut diagnostics: ResMut<SimulationDiagnostics>) {
     diagnostics.navigation_expansions = 0;
     diagnostics.navigation_probes = 0;
     budget.expansions = EXPANSIONS;
@@ -377,7 +364,7 @@ fn reset(
 
 /// Charge the exact cells visited by Terrain (including its fence support row).
 fn gather(
-    world: &crate::voxel::VoxelWorld,
+    world: &CollisionWorld<impl VoxelCell>,
     terrain: &mut Terrain,
     feet: DVec3,
     body: &CharacterBody,
@@ -419,7 +406,7 @@ struct SearchProgress {
 /// Each search owns its scratch space; workers only read the shared voxel world.
 fn advance_search(
     search: &mut Search,
-    world: &crate::voxel::VoxelWorld,
+    world: &CollisionWorld<impl VoxelCell>,
     body: CharacterBody,
     expansion_limit: usize,
     probe_limit: usize,
@@ -454,8 +441,8 @@ fn advance_search(
             from + DVec3::Y * body.origin_height as f64,
             crate::character::Pose::Standing,
         ));
-        if (search.escape && dry)
-            || (!search.escape
+        if (search.capabilities.seek_dry && dry)
+            || (!search.capabilities.seek_dry
                 && (p.x - search.goal.x).abs() + (p.z - search.goal.z).abs() <= 1
                 && (p.y - search.goal.y).abs() <= 3)
         {
@@ -465,7 +452,13 @@ fn advance_search(
         }
         for direction in DIRECTIONS {
             let target = from + direction.as_dvec3();
-            let Some((y, wet)) = terrain.navigation_step(from, target, &body, search.escape) else {
+            let Some((y, wet)) = terrain.navigation_step(
+                from,
+                target,
+                &body,
+                search.capabilities.swimming,
+                &world.fluids,
+            ) else {
                 continue;
             };
             let Some(index) = search.index(target.with_y(y).floor().as_ivec3()) else {
@@ -504,21 +497,40 @@ fn advance_search(
     }
 }
 
-impl Plugin for CreatureNavigationPlugin {
+#[derive(Component, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NavigationCapabilities {
+    pub swimming: bool,
+    pub seek_dry: bool,
+}
+
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NavigationSystems;
+
+pub struct VoxelNavigationPlugin<T: VoxelCell, F: ArchetypeFilter + 'static = With<Simulating>>(
+    PhantomData<(T, fn() -> F)>,
+);
+impl<T: VoxelCell, F: ArchetypeFilter + 'static> Default for VoxelNavigationPlugin<T, F> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
+impl<T: VoxelCell, F: ArchetypeFilter + 'static> Plugin for VoxelNavigationPlugin<T, F> {
     fn build(&self, app: &mut App) {
         app.init_resource::<Searches>()
             .init_resource::<SearchQueue>()
             .init_resource::<PathPool>()
             .init_resource::<NavigationBudget>()
             .add_observer(release_removed_navigation)
-            .add_systems(OnExit(crate::game::GameState::Game), clear_searches)
+            .add_observer(clear_searches)
             .add_systems(
                 RunFixedMainLoop,
                 reset.in_set(bevy::app::RunFixedMainLoopSystems::BeforeFixedMainLoop),
             )
             .add_systems(
                 FixedUpdate,
-                (follow, search).chain().in_set(CreatureSystems::Navigate),
+                (follow::<T, F>, search::<T, F>)
+                    .chain()
+                    .in_set(NavigationSystems),
             );
     }
 }
@@ -531,8 +543,8 @@ fn fail(navigation: &mut Navigation, tick: u64, pool: &mut PathPool) {
     navigation.retry_tick = tick + 20;
 }
 
-fn follow(
-    world: crate::voxel::VoxelWorld,
+fn follow<T: VoxelCell, F: ArchetypeFilter>(
+    world: CollisionWorld<T>,
     clock: Res<GameplayClock>,
     mut budget: ResMut<NavigationBudget>,
     mut pool: ResMut<PathPool>,
@@ -542,19 +554,15 @@ fn follow(
             &FixedPosition,
             &CharacterBody,
             &CharacterState,
-            &Decision,
+            &NavigationCapabilities,
             &mut Navigation,
             &mut CharacterMovement,
             &mut SegmentValidation,
         ),
-        (
-            With<VoxelNavigator>,
-            With<Simulating>,
-            Without<super::combat::Dying>,
-        ),
+        (With<VoxelNavigator>, With<Simulating>, F),
     >,
 ) {
-    for (position, body, state, decision, mut navigation, mut movement, mut validation) in
+    for (position, body, state, capability, mut navigation, mut movement, mut validation) in
         &mut actors
     {
         if navigation.status != NavigationStatus::Following
@@ -614,7 +622,7 @@ fn follow(
                 let corridor = validation.from + delta * t.clamp(0.0, 1.0);
                 let unchanged = validation.valid
                     && validation.to == target
-                    && validation.escape == (decision.behavior == Behavior::EscapeWater)
+                    && validation.capabilities == *capability
                     && (current - corridor).with_y(0.0).length_squared() < 0.09
                     && (current.y - validation.from.y).abs() < 3.1
                     && validation.revisions == revisions(&world, validation.from, target, body);
@@ -629,7 +637,8 @@ fn follow(
                                 feet,
                                 target.as_dvec3(),
                                 body,
-                                decision.behavior == Behavior::EscapeWater,
+                                capability.swimming,
+                                &world.fluids,
                             )
                             .is_some_and(|(y, _)| {
                                 (y + body.origin_height as f64 - target.y as f64).abs() < 0.1
@@ -639,12 +648,11 @@ fn follow(
                     validation.to = target;
                     validation.revisions = revisions(&world, current, target, body);
                     validation.valid = true;
-                    validation.escape = decision.behavior == Behavior::EscapeWater;
+                    validation.capabilities = *capability;
                 }
                 if valid || (close && !state.on_ground && !state.in_fluid) {
                     next.direction = (target - current).with_y(0.0).normalize_or_zero();
                     next.look_direction = next.direction;
-                    // Animals flee faster, but do not use the player's sprint-jump boost.
                     if target.y > current.y + body.step_height as f32
                         && state.on_ground
                         && validation.jump_cooldown == 0
@@ -666,39 +674,36 @@ type NavigatorState = (
     Entity,
     &'static FixedPosition,
     &'static CharacterBody,
-    &'static Decision,
+    &'static NavigationCapabilities,
     &'static mut Navigation,
     &'static mut SegmentValidation,
     Has<Simulating>,
-    Has<super::combat::Dying>,
 );
 
-fn search(
-    world: crate::voxel::VoxelWorld,
+fn search<T: VoxelCell, F: ArchetypeFilter>(
+    world: CollisionWorld<T>,
     clock: Res<GameplayClock>,
     mut budget: ResMut<NavigationBudget>,
     mut searches: ResMut<Searches>,
     mut queue: ResMut<SearchQueue>,
     mut pool: ResMut<PathPool>,
-    mut diagnostics: ResMut<crate::simulation::SimulationDiagnostics>,
+    mut diagnostics: ResMut<SimulationDiagnostics>,
     mut queries: ParamSet<(
         Query<
             Entity,
             (
                 With<VoxelNavigator>,
-                Or<(Changed<Navigation>, Changed<Decision>, Added<Simulating>)>,
+                Or<(
+                    Changed<Navigation>,
+                    Changed<NavigationCapabilities>,
+                    Added<Simulating>,
+                )>,
             ),
         >,
         Query<NavigatorState, With<VoxelNavigator>>,
-        Query<
-            &'static Navigation,
-            (
-                With<VoxelNavigator>,
-                With<Simulating>,
-                Without<super::combat::Dying>,
-            ),
-        >,
+        Query<&'static Navigation, (With<VoxelNavigator>, With<Simulating>, F)>,
     )>,
+    eligible: Query<(), F>,
     mut candidates: Local<Vec<Entity>>,
     mut overflow: Local<bool>,
 ) {
@@ -712,16 +717,15 @@ fn search(
     *overflow = false;
     for search in &mut searches.0 {
         if let Some(entity) = search.entity {
-            let valid =
-                actors
-                    .get(entity)
-                    .is_ok_and(|(_, _, _, decision, nav, _, active, dying)| {
-                        active
-                            && !dying
-                            && nav.status == NavigationStatus::Pending
-                            && nav.destination == Some(search.destination)
-                            && search.escape == (decision.behavior == Behavior::EscapeWater)
-                    });
+            let valid = actors
+                .get(entity)
+                .is_ok_and(|(_, _, _, capability, nav, _, active)| {
+                    active
+                        && eligible.contains(entity)
+                        && nav.status == NavigationStatus::Pending
+                        && nav.destination == Some(search.destination)
+                        && search.capabilities == *capability
+                });
             if !valid {
                 search.entity = None;
                 candidates.push(entity);
@@ -731,12 +735,11 @@ fn search(
     // The component flag deduplicates requests without a second spatial index.
     // Stale entries are discarded when dequeued; a bound prevents unbounded churn.
     for entity in candidates.iter().copied() {
-        let Ok((_, _, _, _, navigation, mut validation, active, dying)) = actors.get_mut(entity)
-        else {
+        let Ok((_, _, _, _, navigation, mut validation, active)) = actors.get_mut(entity) else {
             continue;
         };
         if !active
-            || dying
+            || !eligible.contains(entity)
             || navigation.status != NavigationStatus::Pending
             || validation.queued
             || searches.0.iter().any(|s| s.entity == Some(entity))
@@ -754,14 +757,14 @@ fn search(
         let Some((entity, _)) = queue.0.pop_front() else {
             break;
         };
-        let Ok((_, position, body, decision, navigation, mut validation, active, dying)) =
+        let Ok((_, position, body, capability, navigation, mut validation, active)) =
             actors.get_mut(entity)
         else {
             continue;
         };
         validation.queued = false;
         if active
-            && !dying
+            && eligible.contains(entity)
             && navigation.status == NavigationStatus::Pending
             && let Some(destination) = navigation.destination
         {
@@ -769,7 +772,7 @@ fn search(
                 entity,
                 position.current.as_vec3() - Vec3::Y * body.origin_height,
                 destination - Vec3::Y * body.origin_height,
-                decision.behavior == Behavior::EscapeWater,
+                *capability,
             );
             // Keep controller-space destination for cancellation comparison.
             slot.destination = destination;
@@ -781,7 +784,7 @@ fn search(
             actors
                 .get(entity)
                 .ok()
-                .map(|(_, _, body, _, _, _, _, _)| *body)
+                .map(|(_, _, body, _, _, _, _)| *body)
         })
     });
     let active = bodies.iter().filter(|body| body.is_some()).count();
@@ -826,7 +829,7 @@ fn search(
         budget.expansions -= progress.expansions;
         budget.search_probes -= progress.probes;
         diagnostics.navigation_expansions += progress.expansions;
-        let Ok((_, _, body, _, mut navigation, _, _, _)) = actors.get_mut(progress.entity) else {
+        let Ok((_, _, body, _, mut navigation, _, _)) = actors.get_mut(progress.entity) else {
             search.entity = None;
             continue;
         };

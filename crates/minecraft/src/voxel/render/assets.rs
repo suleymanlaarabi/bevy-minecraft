@@ -1,8 +1,8 @@
 use super::texture_pack::TexturePack;
 use bevy::prelude::*;
 use bevy::render::storage::ShaderBuffer;
-use hollow_render::assets::VoxelAssets;
-use hollow_render::material::{
+use bevy_voxel::render::assets::{MaterialTextures, RenderAssetStores, VoxelAssets};
+use bevy_voxel::render::material::{
     ModelBlend, ModelMaterial, VoxelCutoutMaterial, VoxelMaterial, WaterMaterial,
 };
 
@@ -10,12 +10,8 @@ pub(crate) fn prepare_assets(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     settings: Option<Res<crate::settings::GraphicsSettings>>,
-    fog: Res<hollow_render::fog::SkyPalette>,
-    mut voxel_materials: ResMut<Assets<VoxelMaterial>>,
-    mut cutout_materials: ResMut<Assets<VoxelCutoutMaterial>>,
-    mut model_materials: ResMut<Assets<ModelMaterial>>,
-    mut buffers: ResMut<Assets<ShaderBuffer>>,
-    mut images: ResMut<Assets<Image>>,
+    fog: Res<bevy_voxel::render::fog::SkyPalette>,
+    mut stores: RenderAssetStores,
 ) {
     let pack = TexturePack::load(
         settings
@@ -24,47 +20,24 @@ pub(crate) fn prepare_assets(
                 settings.texture_pack
             }),
     );
-    let blocks = pack.load_texture(&asset_server, &mut images);
-    let faces = buffers.add(pack.cube_face_buffer());
-    let model_faces = buffers.add(pack.model_face_buffer());
-    let vanilla_models = pack.vanilla_models();
-    let animations = buffers.add(pack.animation_buffer());
-    let special = pack.special_texture(&asset_server);
-    let water = prepare_water(&asset_server, pack.surface_water(), &fog);
-    commands.insert_resource(pack);
-    let mut model = |blend| {
-        model_materials.add(ModelMaterial::new(
-            blocks.clone(),
-            model_faces.clone(),
-            &water,
-            blend,
-            special.clone(),
-            animations.clone(),
-        ))
+    let blocks = pack.load_texture(&asset_server, &mut stores.images);
+    let textures = MaterialTextures {
+        blocks,
+        faces: stores.buffers.add(pack.cube_face_buffer()),
+        model_faces: stores.buffers.add(pack.model_face_buffer()),
+        animations: stores.buffers.add(pack.animation_buffer()),
+        special: pack.special_texture(&asset_server),
+        water: prepare_water(&asset_server, pack.surface_water(), &fog),
+        opaque: opaque_blend(pack.vanilla_models()),
     };
-    commands.insert_resource(VoxelAssets {
-        models: model(opaque_blend(vanilla_models)),
-        models_cutout: model(ModelBlend::Cutout),
-        translucent: model(ModelBlend::Translucent),
-        cutout: cutout_materials.add(VoxelCutoutMaterial {
-            blocks: blocks.clone(),
-            faces: faces.clone(),
-            animations: animations.clone(),
-            fog: fog.0.clone(),
-        }),
-        terrain: voxel_materials.add(VoxelMaterial {
-            blocks,
-            faces,
-            animations,
-            fog: fog.0.clone(),
-        }),
-    });
+    commands.insert_resource(pack);
+    commands.insert_resource(stores.prepare(textures, &fog));
 }
 
 pub(crate) fn apply_texture_pack(
     _insert: On<Insert<crate::settings::GraphicsSettings>>,
     settings: Res<crate::settings::GraphicsSettings>,
-    fog: Res<hollow_render::fog::SkyPalette>,
+    fog: Res<bevy_voxel::render::fog::SkyPalette>,
     asset_server: Res<AssetServer>,
     mut texture_pack: Option<ResMut<TexturePack>>,
     voxel_assets: Option<Res<VoxelAssets>>,
@@ -126,7 +99,7 @@ fn opaque_blend(vanilla_models: bool) -> ModelBlend {
 fn prepare_water(
     asset_server: &AssetServer,
     surface: bool,
-    fog: &hollow_render::fog::SkyPalette,
+    fog: &bevy_voxel::render::fog::SkyPalette,
 ) -> WaterMaterial {
     let path = "voxel/packs/vanilla/water_still.png";
     let texture = (!surface && crate::asset_directory().join(path).is_file())

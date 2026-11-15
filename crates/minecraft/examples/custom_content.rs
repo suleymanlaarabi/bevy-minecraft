@@ -1,19 +1,19 @@
 //! Compile-only example composition. F8 places a source above the player's feet.
 use bevy::prelude::*;
-use hollow_core::{
-    StateId,
-    content::{BlockSpec, BlockVisual, PropertySpec, StateDefinition},
-};
-use hollow_engine::{
-    content::ContentRegistrations,
-    fluids::{FlowControl, FluidAccess, FluidFog, FluidProfile, FluidRegistrations, FluidRender},
-};
-use hollow_minecraft::{
+use bevy_minecraft::{
     app::HollowPlugin,
     block_behavior::BlockUse,
     inventory::InventoryStation,
     player::Player,
     voxel::{SetVoxel, VoxelState},
+};
+use bevy_voxel::core::{
+    StateId,
+    content::{BlockSpec, BlockVisual, PropertySpec, StateDefinition},
+};
+use bevy_voxel::engine::{
+    content::ContentRegistrations,
+    fluids::{FlowControl, FluidAccess, FluidFog, FluidProfile, FluidRegistrations, FluidRender},
 };
 
 #[derive(Resource)]
@@ -66,7 +66,7 @@ impl Plugin for ResinPlugin {
                     .resource_mut::<FluidRegistrations>()
                     .register_simple(content, block, profile, 8);
                 let source = content.blocks[block.index()].default_state;
-                let shape = content.shape(vec![hollow_core::shape::BlockBox {
+                let shape = content.shape(vec![bevy_voxel::core::shape::BlockBox {
                     min: Vec3::ZERO,
                     max: Vec3::ONE,
                 }]);
@@ -102,12 +102,12 @@ impl Plugin for ResinPlugin {
                 // This block composes the same crafting/session capability as a workbench.
                 // No block-specific interaction observer, validation, or UI system is needed.
                 world
-                    .resource_mut::<hollow_engine::blocks::BlockRegistrations>()
+                    .resource_mut::<bevy_voxel::engine::blocks::BlockRegistrations>()
                     .register_bundle::<InventoryStation>(solid, true);
                 // A second capability can react to the same use without changing
                 // the crafting station or its observer.
                 world
-                    .resource_mut::<hollow_engine::blocks::BlockRegistrations>()
+                    .resource_mut::<bevy_voxel::engine::blocks::BlockRegistrations>()
                     .register_bundle::<ResinInteraction>(solid, true);
                 let solid_state = content.blocks[solid.index()].default_state;
                 let cured_state = StateId(solid_state.0 + 1);

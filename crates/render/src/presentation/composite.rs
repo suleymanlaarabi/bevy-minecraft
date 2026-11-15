@@ -55,7 +55,7 @@ pub(super) fn register(app: &mut App) {
         .resource_mut::<Assets<Shader>>()
         .add(Shader::from_wgsl(
             include_str!("composite.wgsl"),
-            "hollow/settings/composite.wgsl",
+            "hollow_render/presentation/composite.wgsl",
         ));
     let Some(render) = app.get_sub_app_mut(RenderApp) else {
         return;

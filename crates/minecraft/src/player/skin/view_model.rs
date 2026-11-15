@@ -2,7 +2,7 @@
 use super::*;
 use crate::player::PlayerCamera;
 use bevy::{camera::CameraProjection, render::render_resource::Extent3d, window::PrimaryWindow};
-use hollow_features::{
+use bevy_voxel::features::{
     motion::InterpolationAlpha,
     query::{set_field_if_neq, set_if_neq},
 };
@@ -161,9 +161,9 @@ pub(super) fn resize_arm_target(
     mut allocation: Local<(UVec2, UVec2)>,
 ) {
     let window_size = window.physical_size().max(UVec2::ONE);
-    let full_size = settings
-        .render_resolution
-        .size(window_size, device.limits().max_texture_dimension_2d);
+    let full_size =
+        bevy_voxel::render::presentation::SceneResolution(settings.render_resolution.height())
+            .size(window_size, device.limits().max_texture_dimension_2d);
     for (mut cameras, projections) in cameras
         .contiguous_iter_mut()
         .expect("Dense arm camera query")
@@ -308,7 +308,7 @@ pub(super) fn animate_first_person(
     state: Res<State<InventoryState>>,
     view: Res<PlayerView>,
     swing: Single<Ref<ArmSwing>, With<PlayerCamera>>,
-    motion: Single<Ref<crate::character::CharacterMotion>, With<crate::player::Player>>,
+    motion: Single<Ref<crate::character::CharacterView>, With<crate::player::Player>>,
     held: Single<Ref<HeldItem>>,
     using: Single<Ref<crate::survival::UsingItem>, With<crate::player::Player>>,
     fixed: Res<Time<Fixed>>,

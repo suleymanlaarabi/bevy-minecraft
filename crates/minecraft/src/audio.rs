@@ -1,5 +1,6 @@
 //! Shared vanilla sound bank: registry-indexed block profiles and weighted variants.
-use hollow_features::motion::FixedPosition;
+use bevy_voxel::character::{CharacterActivity, CharacterBody, CharacterMovement, CharacterState};
+use bevy_voxel::features::motion::FixedPosition;
 use std::collections::HashMap;
 
 use bevy::{
@@ -11,7 +12,6 @@ pub(crate) use pumpkin_data::sound::Sound as SoundId;
 use serde::Deserialize;
 
 use crate::{
-    character::{CharacterActivity, CharacterBody, CharacterMovement, CharacterState},
     game::GameState,
     player::{Player, PlayerCamera},
     voxel::{VoxelKind, VoxelWorld},
@@ -29,7 +29,7 @@ impl Plugin for GameAudioPlugin {
             .add_systems(
                 FixedUpdate,
                 movement_audio
-                    .after(crate::character::CharacterSystems)
+                    .after(bevy_voxel::character::CharacterSystems)
                     .run_if(crate::world::playing)
                     .run_if(crate::player::alive)
                     .run_if(not(resource_exists::<crate::simulation::SimulationPaused>)),
@@ -308,7 +308,7 @@ fn movement_audio(
             &CharacterMovement,
             &CharacterActivity,
             &mut MovementAudio,
-            Has<crate::character::Flying>,
+            Has<bevy_voxel::character::Flying>,
         ),
         With<Player>,
     >,

@@ -10,7 +10,7 @@ pub(super) const VIEW_DISTANCE_MIN: u32 = 4;
 pub(super) const VIEW_DISTANCE_MAX: u32 = 32;
 
 #[derive(Component, Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[type_path = "hollow_minecraft::settings"]
+#[type_path = "bevy_minecraft::settings"]
 pub enum AntiAliasingMode {
     Off,
     Fxaa,
@@ -32,7 +32,7 @@ impl AntiAliasingMode {
 }
 
 #[derive(Component, Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[type_path = "hollow_minecraft::settings"]
+#[type_path = "bevy_minecraft::settings"]
 pub enum ShadowQuality {
     Off,
     Low,
@@ -53,7 +53,7 @@ impl ShadowQuality {
 }
 
 #[derive(Component, Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[type_path = "hollow_minecraft::settings"]
+#[type_path = "bevy_minecraft::settings"]
 pub enum DisplayMode {
     Windowed,
     #[default]
@@ -61,7 +61,7 @@ pub enum DisplayMode {
 }
 
 #[derive(Component, Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[type_path = "hollow_minecraft::settings"]
+#[type_path = "bevy_minecraft::settings"]
 pub enum RenderResolution {
     #[default]
     Native,
@@ -74,29 +74,15 @@ pub enum RenderResolution {
 }
 
 impl RenderResolution {
-    /// Keep the window's aspect ratio, including ultrawide and portrait displays.
-    pub(crate) fn size(self, window: UVec2, max_dimension: u32) -> UVec2 {
-        let window = window.max(UVec2::ONE);
-        let height = match self {
-            Self::Native => return window,
-            Self::R480p => 480,
-            Self::R720p => 720,
-            Self::R900p => 900,
-            Self::R1080p => 1080,
-            Self::R1440p => 1440,
-            Self::R2160p => 2160,
-        };
-        let width = (u64::from(window.x) * u64::from(height) + u64::from(window.y) / 2)
-            / u64::from(window.y);
-        // Very wide, short windows can otherwise exceed the GPU's texture limit.
-        let limit = u64::from(max_dimension.max(1));
-        if width > limit {
-            UVec2::new(
-                limit as u32,
-                (u64::from(height) * limit / width).max(1) as u32,
-            )
-        } else {
-            UVec2::new(width.max(1) as u32, height)
+    pub(crate) fn height(self) -> Option<u32> {
+        match self {
+            Self::Native => None,
+            Self::R480p => Some(480),
+            Self::R720p => Some(720),
+            Self::R900p => Some(900),
+            Self::R1080p => Some(1080),
+            Self::R1440p => Some(1440),
+            Self::R2160p => Some(2160),
         }
     }
 }
@@ -105,7 +91,7 @@ impl RenderResolution {
 #[component(immutable)]
 #[reflect(Resource, SettingsGroup, Default)]
 #[settings_group(group = "graphics")]
-#[type_path = "hollow_minecraft::settings"]
+#[type_path = "bevy_minecraft::settings"]
 pub struct GraphicsSettings {
     pub anti_aliasing: AntiAliasingMode,
     pub vsync: bool,
@@ -176,7 +162,7 @@ pub(super) fn normalized_fov(value: f32) -> f32 {
 #[component(immutable)]
 #[reflect(Resource, SettingsGroup, Default)]
 #[settings_group(group = "simulation")]
-#[type_path = "hollow_minecraft::settings"]
+#[type_path = "bevy_minecraft::settings"]
 pub struct SimulationSettings {
     pub simulation_distance: u32,
 }

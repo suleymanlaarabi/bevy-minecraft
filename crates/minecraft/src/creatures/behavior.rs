@@ -1,11 +1,11 @@
 use super::*;
 use crate::{
-    character::CharacterState,
     simulation::{GameplayClock, Simulating},
     survival::DamageApplied,
 };
 use bevy::prelude::*;
-use hollow_features::{
+use bevy_voxel::character::CharacterState;
+use bevy_voxel::features::{
     actors::{Behavior, Decision, Navigation, NavigationStatus, ThreatMemory},
     motion::FixedPosition,
 };
@@ -72,6 +72,7 @@ fn decide(
             &mut Decision,
             Option<&ThreatMemory>,
             &mut Navigation,
+            &mut bevy_voxel::navigation::NavigationCapabilities,
             Has<Wander>,
             Has<Flee>,
             Has<EscapeWater>,
@@ -85,7 +86,18 @@ fn decide(
 ) {
     let seed = session.settings().seed as u64;
     actors.par_iter_mut().for_each(
-        |(entity, position, state, mut decision, threat, mut navigation, wander, flee, escape)| {
+        |(
+            entity,
+            position,
+            state,
+            mut decision,
+            threat,
+            mut navigation,
+            mut capabilities,
+            wander,
+            flee,
+            escape,
+        )| {
             let water = escape
                 && state.in_swimmable_fluid
                 && (!state.on_ground || state.eyes_in_swimmable_fluid);
@@ -117,6 +129,11 @@ fn decide(
             };
             let changed = decision.behavior != desired;
             decision.behavior = desired;
+            let swimming = desired == Behavior::EscapeWater;
+            capabilities.set_if_neq(bevy_voxel::navigation::NavigationCapabilities {
+                swimming,
+                seek_dry: swimming,
+            });
             if desired == Behavior::Idle {
                 navigation.set_destination(None);
             } else if desired == Behavior::Flee {

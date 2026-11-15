@@ -1,27 +1,30 @@
-//! Readiness of the streamed spawn area before the player enters the world.
-use hollow_render::build::{ChunkBuild, ChunkSections, NeedsChunkBuild};
-
-use super::{
-    ChunkVoxels,
-    streaming::{AwaitingNeighbors, ChunkIndex, StreamOffsets},
-};
+//! Structured readiness of a streamed area, without application loading text.
+use crate::build::{ChunkBuild, ChunkSections, NeedsChunkBuild};
 use bevy::{ecs::system::SystemParam, prelude::*};
-use hollow_core::coordinates::chunk_at;
+use hollow_core::{VoxelCell, coordinates::chunk_at};
+use hollow_engine::{
+    blocks::LoadedColumn,
+    chunk::ChunkVoxels,
+    simulation::ColumnData,
+    streaming::{AwaitingNeighbors, StreamOffsets, StreamState},
+    world::ChunkIndex,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Readiness {
+    Demand,
+    Terrain,
+    Meshes,
+    Ready,
+}
 
 #[derive(SystemParam)]
-pub(crate) struct VoxelLoading<'w, 's> {
+pub struct WorldReadiness<'w, 's, T: VoxelCell, A: Send + Sync + 'static> {
     index: Res<'w, ChunkIndex>,
     offsets: Res<'w, StreamOffsets>,
-    stream: Res<'w, super::streaming::StreamState>,
-    chunks: Query<
-        'w,
-        's,
-        (
-            &'static ChunkVoxels,
-            &'static crate::block_behavior::containers::LoadedColumn,
-        ),
-    >,
-    gameplay: Query<'w, 's, &'static crate::block_behavior::containers::GameplayColumn>,
+    stream: Res<'w, StreamState>,
+    chunks: Query<'w, 's, (&'static ChunkVoxels<T>, &'static LoadedColumn)>,
+    gameplay: Query<'w, 's, &'static ColumnData<A>>,
     rendered: Query<
         'w,
         's,
@@ -35,11 +38,11 @@ pub(crate) struct VoxelLoading<'w, 's> {
     >,
 }
 
-impl VoxelLoading<'_, '_> {
-    pub(crate) fn progress(&self, position: Vec3) -> (bool, &'static str) {
+impl<T: VoxelCell, A: Send + Sync + 'static> WorldReadiness<'_, '_, T, A> {
+    pub fn progress(&self, position: Vec3) -> Readiness {
         let center = chunk_at(position);
         if self.stream.center != Some(center) {
-            return (false, "Preparing terrain demand…");
+            return Readiness::Demand;
         }
         let render_squared = (self.offsets.render_radius * self.offsets.render_radius) as i32;
         let (mut terrain, mut meshes) = (true, true);
@@ -67,11 +70,11 @@ impl VoxelLoading<'_, '_> {
             }
         }
         if self.stream.data.is_empty() || !terrain {
-            (false, "Loading and generating terrain…")
+            Readiness::Terrain
         } else if !meshes {
-            (false, "Building terrain meshes…")
+            Readiness::Meshes
         } else {
-            (true, "Ready")
+            Readiness::Ready
         }
     }
 }

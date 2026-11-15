@@ -56,7 +56,7 @@ fn sync_gameplay_hud(
                 } else {
                     Visibility::Hidden
                 };
-                hollow_features::query::set_if_neq(&mut visibility, index, target);
+                bevy_voxel::features::query::set_if_neq(&mut visibility, index, target);
             }
         }
     }
@@ -75,11 +75,11 @@ impl Plugin for GamePlugin {
                 crate::block_behavior::BlockBehaviorPlugins,
                 PlayerPlugin,
                 GameMenuPlugin,
-                hollow_features::motion::FixedPositionPlugin,
+                bevy_voxel::features::motion::FixedPositionPlugin,
                 CharacterPlugin,
                 crate::survival::SurvivalPlugin,
-                hollow_features::spatial::FollowPlugin,
-                hollow_features::cursor::CursorCapturePlugin,
+                bevy_voxel::features::spatial::FollowPlugin,
+                bevy_voxel::features::cursor::CursorCapturePlugin,
                 DroppedItemPlugin,
                 SkyPlugin,
                 DevToolsPlugin,
@@ -87,7 +87,8 @@ impl Plugin for GamePlugin {
             .add_plugins(crate::creatures::CreaturesPlugin)
             .configure_sets(
                 RunFixedMainLoop,
-                hollow_features::motion::InterpolatePosition.run_if(crate::simulation::running),
+                bevy_voxel::features::motion::InterpolatePosition
+                    .run_if(crate::simulation::running),
             )
             .add_systems(
                 PostUpdate,
@@ -110,7 +111,7 @@ fn setup_menu_environment(
     commands.spawn((
         Camera2d,
         IsDefaultUiCamera,
-        hollow_features::cursor::FreeCursor,
+        bevy_voxel::features::cursor::FreeCursor,
         DespawnOnExit(*state.get()),
     ));
 

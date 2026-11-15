@@ -1,9 +1,6 @@
 use super::interaction;
 use crate::{
-    character::{AutoJump, GameCharacter},
-    game::GameState,
-    inventory::PlayerInventory,
-    voxel::VoxelViewer,
+    character::GameCharacter, game::GameState, inventory::PlayerInventory, voxel::VoxelViewer,
 };
 use bevy::{
     camera::Exposure,
@@ -12,6 +9,7 @@ use bevy::{
     pbr::{DistanceFog, FogFalloff},
     prelude::*,
 };
+use bevy_voxel::character::AutoJump;
 
 #[derive(Component, Default, Debug, Clone)]
 #[require(

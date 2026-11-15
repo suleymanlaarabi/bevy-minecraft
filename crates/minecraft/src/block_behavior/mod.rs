@@ -26,8 +26,8 @@ pub struct BlockBehaviorPlugins;
 impl PluginGroup for BlockBehaviorPlugins {
     fn build(self) -> bevy::app::PluginGroupBuilder {
         bevy::app::PluginGroupBuilder::start::<Self>()
-            .add(hollow_engine::blocks::BlockRegistryPlugin)
-            .add(hollow_features::articulation::ArticulationPlugin)
+            .add(bevy_voxel::engine::blocks::BlockRegistryPlugin)
+            .add(bevy_voxel::features::articulation::ArticulationPlugin)
             .add(BlockLifecyclePlugin)
             .add(containers::ChestPlugin)
             .add(workbench::WorkbenchPlugin)
@@ -54,7 +54,7 @@ impl Plugin for BlockLifecyclePlugin {
             .add_systems(
                 PreStartup,
                 (catalog::initialize, loot::initialize)
-                    .after(hollow_engine::blocks::FinalizeBlockContent),
+                    .after(bevy_voxel::engine::blocks::FinalizeBlockContent),
             )
             .add_observer(containers::changed)
             .add_observer(containers::loaded)

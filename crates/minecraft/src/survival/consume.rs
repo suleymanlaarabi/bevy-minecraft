@@ -1,13 +1,13 @@
 use crate::inventory::catalog::ConsumeAction;
 use bevy::{ecs::query::QueryFilter, prelude::*};
-use hollow_features::motion::FixedPosition;
+use bevy_voxel::character::{CharacterBody, CharacterMotion, CharacterState};
+use bevy_voxel::features::motion::FixedPosition;
 
 use super::{
     ActiveEffects, Hazards, Health, ItemUse, Nutrition, SurvivalRandom, UseInput, UsingItem,
 };
 use crate::{
     audio::{Sound, SoundId},
-    character::{CharacterBody, CharacterMotion, CharacterState},
     dropped_item::DroppedItemCommandsExt,
     inventory::{ItemStack, OFFHAND_SLOT, PlayerInventory},
     voxel::VoxelWorld,

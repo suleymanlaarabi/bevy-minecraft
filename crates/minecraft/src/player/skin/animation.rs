@@ -1,11 +1,9 @@
 //! Pose skin parts without changing their geometry or texture data.
 use super::mesh::PIXEL;
 use super::*;
-use crate::{
-    character::{CharacterBody, CharacterMotion, CharacterState, Pose},
-    player::{Player, PlayerCamera},
-};
+use crate::player::{Player, PlayerCamera};
 use bevy::window::PrimaryWindow;
+use bevy_voxel::character::{CharacterBody, CharacterMotion, CharacterState, Pose};
 use std::f32::consts::{PI, TAU};
 
 fn part_transform(part: u8, swing: f32, head: Vec2, crouch: bool) -> Transform {
@@ -54,7 +52,7 @@ pub(super) fn animate_rigs(
                     rotation: Quat::from_rotation_y(-0.22 + head.x * 0.2),
                     ..transforms[index]
                 };
-                hollow_features::query::set_if_neq(&mut transforms, index, pose);
+                bevy_voxel::features::query::set_if_neq(&mut transforms, index, pose);
             }
         }
     }
@@ -63,7 +61,7 @@ pub(super) fn animate_rigs(
     {
         for (index, (part, parent)) in parts.iter().zip(parents).enumerate() {
             if rigs.get(parent.parent()).is_ok_and(|(rig, _)| rig.preview) {
-                hollow_features::query::set_if_neq(
+                bevy_voxel::features::query::set_if_neq(
                     &mut transforms,
                     index,
                     part_transform(part.part, 0., head, false),
@@ -106,7 +104,7 @@ pub(super) fn animate_world(
             } else {
                 Visibility::Inherited
             };
-            hollow_features::query::set_if_neq(&mut visibility, index, target);
+            bevy_voxel::features::query::set_if_neq(&mut visibility, index, target);
             if hidden {
                 continue;
             }
@@ -121,7 +119,7 @@ pub(super) fn animate_world(
                 pose.rotation *= Quat::from_rotation_x(PI * 0.5);
                 pose.translation += Vec3::new(0., 0.3, 0.9);
             }
-            hollow_features::query::set_if_neq(&mut transforms, index, pose);
+            bevy_voxel::features::query::set_if_neq(&mut transforms, index, pose);
         }
     }
     if hidden {
@@ -139,7 +137,7 @@ pub(super) fn animate_world(
                 continue;
             };
             if !rig.preview {
-                hollow_features::query::set_if_neq(
+                bevy_voxel::features::query::set_if_neq(
                     &mut poses,
                     index,
                     part_transform(part.part, rig.phase.sin() * amplitude, head, crouching),

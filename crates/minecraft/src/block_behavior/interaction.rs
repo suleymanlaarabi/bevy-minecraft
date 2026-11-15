@@ -4,14 +4,15 @@ use super::{
     containers::{BlockEntity, BlockLookup, BlockState, Door, Dormant, Gate, ManualOpen},
 };
 use crate::{
-    character::{Aabb, CharacterBody, CharacterState, GameCharacter},
+    character::GameCharacter,
     voxel::{
         VoxelState, VoxelWorld,
         edits::{CheckedEdit, EditBatch},
     },
 };
 use bevy::{ecs::system::SystemParam, prelude::*};
-use hollow_features::motion::FixedPosition;
+use bevy_voxel::character::{Aabb, CharacterBody, CharacterState};
+use bevy_voxel::features::motion::FixedPosition;
 use pumpkin_data::Property as P;
 
 #[derive(EntityEvent)]
@@ -24,7 +25,7 @@ pub struct BlockUse {
 #[derive(SystemParam)]
 pub(crate) struct BlockTargets<'w, 's> {
     lookup: BlockLookup<'w, 's>,
-    catalog: Res<'w, hollow_engine::blocks::BlockCatalog>,
+    catalog: Res<'w, bevy_voxel::engine::blocks::BlockCatalog>,
     usable: Query<'w, 's, &'static BlockState, Without<Dormant>>,
 }
 impl BlockTargets<'_, '_> {
@@ -32,7 +33,7 @@ impl BlockTargets<'_, '_> {
         let entity = self.lookup.entity(position)?;
         let state = self.usable.get(entity).ok()?;
         self.catalog
-            .interactive(hollow_core::BlockId(state.0.kind().index() as u32))
+            .interactive(bevy_voxel::core::BlockId(state.0.kind().index() as u32))
             .then_some(entity)
     }
 }
@@ -130,12 +131,12 @@ impl Plugin for ManualOpeningPlugin {
         use super::catalog::{Opening, profile};
         let mut registrations = app
             .world_mut()
-            .resource_mut::<hollow_engine::blocks::BlockRegistrations>();
+            .resource_mut::<bevy_voxel::engine::blocks::BlockRegistrations>();
         for kind in crate::voxel::VoxelKind::ALL
             .into_iter()
             .filter(|kind| profile(*kind).manual)
         {
-            let block = hollow_core::BlockId(kind.index() as u32);
+            let block = bevy_voxel::core::BlockId(kind.index() as u32);
             match profile(kind).opening {
                 Opening::Door => registrations.register_bundle::<(ManualOpen, Door)>(block, true),
                 Opening::Gate => registrations.register_bundle::<(ManualOpen, Gate)>(block, true),

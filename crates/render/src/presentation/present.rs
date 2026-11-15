@@ -18,6 +18,7 @@ use bevy::{
     },
     ecs::{entity::EntityHashMap, schedule::ScheduleCleanupPolicy},
     prelude::*,
+    render::extract_component::{ExtractComponent, ExtractComponentPlugin},
     render::{
         Render, RenderApp, RenderStartup, RenderSystems,
         camera::ExtractedCamera,
@@ -45,7 +46,13 @@ struct DirectPresentation {
     views: EntityHashMap<CachedRenderPipelineId>,
 }
 
+/// Opt in when no later pass needs the tonemapped main texture.
+#[derive(Component, Clone, Copy, ExtractComponent)]
+#[extract_app(RenderApp)]
+pub struct DirectPresent;
+
 pub(super) fn register(app: &mut App) {
+    app.add_plugins(ExtractComponentPlugin::<DirectPresent>::default());
     let Some(render) = app.get_sub_app_mut(RenderApp) else {
         return;
     };
@@ -127,16 +134,19 @@ fn presents_directly(view: Res<CurrentView>, direct: Res<DirectPresentation>) ->
 fn select_presentation(
     mut direct: ResMut<DirectPresentation>,
     cache: Res<PipelineCache>,
-    cameras: Query<(
-        Entity,
-        &ExtractedCamera,
-        &ExtractedView,
-        &ViewTarget,
-        &Tonemapping,
-        Option<&DebandDither>,
-        Has<Fxaa>,
-        Option<&UiCameraView>,
-    )>,
+    cameras: Query<
+        (
+            Entity,
+            &ExtractedCamera,
+            &ExtractedView,
+            &ViewTarget,
+            &Tonemapping,
+            Option<&DebandDither>,
+            Has<Fxaa>,
+            Option<&UiCameraView>,
+        ),
+        With<DirectPresent>,
+    >,
     mut ui_views: Query<&mut ExtractedView, Without<ExtractedCamera>>,
 ) {
     let direct = &mut *direct;
@@ -237,17 +247,25 @@ fn tonemapping_descriptor<'a>(
 }
 
 /// Bindings of the tonemapping shader: view uniforms, scene, tonemapping LUT.
-type Bound = (BufferId, TextureViewId, TextureViewId, CachedRenderPipelineId);
+type Bound = (
+    BufferId,
+    TextureViewId,
+    TextureViewId,
+    CachedRenderPipelineId,
+);
 
 #[allow(clippy::too_many_arguments)]
 fn present(
     world: &World,
-    view: ViewQuery<(
-        &ViewUniformOffset,
-        &ViewTarget,
-        &Tonemapping,
-        Option<&UiCameraView>,
-    )>,
+    view: ViewQuery<
+        (
+            &ViewUniformOffset,
+            &ViewTarget,
+            &Tonemapping,
+            Option<&UiCameraView>,
+        ),
+        With<DirectPresent>,
+    >,
     ui_views: Query<&ExtractedView>,
     ui_phases: Res<ViewSortedRenderPhases<TransparentUi>>,
     direct: Res<DirectPresentation>,

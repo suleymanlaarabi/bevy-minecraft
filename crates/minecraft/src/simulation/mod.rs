@@ -1,5 +1,5 @@
 //! Fixed gameplay time, spatial activation and shared per-frame work limits.
-use hollow_features::motion::FixedPosition;
+use bevy_voxel::features::motion::FixedPosition;
 mod work;
 pub(crate) use work::*;
 
@@ -9,10 +9,11 @@ use crate::{
     settings::SimulationSettings,
     voxel::{VoxelChunk, chunk_at},
 };
-use bevy::{ecs::query::QueryFilter, prelude::*};
+use bevy::prelude::*;
+use bevy_voxel::spatial::update_mobile_owners;
 use std::time::Duration;
 
-pub use hollow_engine::simulation::*;
+pub use bevy_voxel::engine::simulation::*;
 pub(crate) const MAX_PENDING_WRITE_BYTES: usize = 16 * 1024 * 1024;
 // Retired owners retain half; capture/codec buffers reserve six MiB, leaving
 // two MiB for bounded candidate/index bookkeeping and serialization headers.
@@ -23,7 +24,7 @@ pub(crate) const MAX_CAPTURE_BYTES: usize = MAX_PENDING_WRITE_BYTES / 2 - 2 * 10
 pub struct GameplaySimulationPlugin;
 impl Plugin for GameplaySimulationPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(hollow_engine::simulation::runtime::VoxelSimulationPlugin::<
+        app.add_plugins(bevy_voxel::engine::simulation::runtime::VoxelSimulationPlugin::<
             MinecraftRules,
         >::default())
             .insert_resource(MinecraftRules)
@@ -51,21 +52,21 @@ impl Plugin for GameplaySimulationPlugin {
                 FixedUpdate,
                 (
                     sync_region,
-                    update_mobile_owners::<()>.run_if(resource_changed::<GameplayColumns>),
-                    update_mobile_owners::<Changed<FixedPosition>>
+                    update_mobile_owners::<crate::creatures::ColumnActors, crate::creatures::Creature, ()>.run_if(resource_changed::<GameplayColumns>),
+                    update_mobile_owners::<crate::creatures::ColumnActors, crate::creatures::Creature, Changed<FixedPosition>>
                         .run_if(not(resource_changed::<GameplayColumns>)),
                 )
                     .chain()
                     .in_set(SimulationSystems::Activation)
                     .before(
-                        hollow_engine::simulation::runtime::activate::<
+                        bevy_voxel::engine::simulation::runtime::activate::<
                             crate::creatures::ColumnActors,
                         >,
                     ),
             )
             .add_systems(
                 FixedUpdate,
-                update_mobile_owners::<Changed<FixedPosition>>.in_set(SimulationSystems::Finalize),
+                update_mobile_owners::<crate::creatures::ColumnActors, crate::creatures::Creature, Changed<FixedPosition>>.in_set(SimulationSystems::Finalize),
             )
             .add_observer(displaced)
             .add_observer(unload)
@@ -92,7 +93,7 @@ fn sync_region(
     settings: Res<SimulationSettings>,
     voxel: Res<crate::voxel::VoxelSettings>,
     mut region: ResMut<SimulationRegion>,
-    mut seed: ResMut<hollow_engine::simulation::SimulationSeed>,
+    mut seed: ResMut<bevy_voxel::engine::simulation::SimulationSeed>,
 ) {
     region.set_if_neq(SimulationRegion {
         center: player
@@ -103,61 +104,6 @@ fn sync_region(
     });
     if seed.0 != voxel.seed {
         seed.0 = voxel.seed;
-    }
-}
-
-fn update_mobile_owners<F: QueryFilter>(
-    mut commands: Commands,
-    columns: Res<GameplayColumns>,
-    mut owners: Query<&mut GameplayColumn>,
-    active: Query<(), With<Simulating>>,
-    mobiles: Query<
-        (
-            Entity,
-            &FixedPosition,
-            Option<&SimulatedIn>,
-            Has<Simulating>,
-            Has<crate::creatures::Creature>,
-        ),
-        F,
-    >,
-) {
-    for (entity, position, previous, was_active, creature) in &mobiles {
-        let chunk = chunk_at(position.current.as_vec3());
-        let owner = if let Some(previous) = previous
-            && owners
-                .get(previous.0)
-                .is_ok_and(|column| column.position == chunk)
-        {
-            Some(previous.0)
-        } else {
-            columns.get(&chunk).copied()
-        };
-        let changed_owner = owner != previous.map(|previous| previous.0);
-        let is_active = owner.is_some_and(|owner| active.contains(owner));
-        if !changed_owner && was_active == is_active {
-            continue;
-        }
-        if changed_owner && creature {
-            for owner in [previous.map(|p| p.0), owner].into_iter().flatten() {
-                if let Ok(mut column) = owners.get_mut(owner) {
-                    column.revision += 1;
-                }
-            }
-        }
-        let mut mobile = commands.entity(entity);
-        if changed_owner {
-            if let Some(owner) = owner {
-                mobile.insert(SimulatedIn(owner));
-            } else {
-                mobile.remove::<SimulatedIn>();
-            }
-        }
-        if is_active {
-            mobile.insert(Simulating);
-        } else {
-            mobile.remove::<Simulating>();
-        }
     }
 }
 
@@ -210,7 +156,7 @@ fn unload(
     };
     commands
         .entity(owner.0)
-        .remove::<(Simulating, hollow_render::streaming::RenderRequested)>();
+        .remove::<(Simulating, bevy_voxel::render::streaming::RenderRequested)>();
     let Ok((mut work, mobiles, blocks)) = columns.get_mut(owner.0) else {
         return;
     };

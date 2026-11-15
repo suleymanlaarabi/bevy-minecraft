@@ -108,8 +108,8 @@ fn finish_respawn(
     mut players: Query<
         (
             &mut Transform,
-            &mut hollow_features::motion::FixedPosition,
-            &crate::character::CharacterBody,
+            &mut bevy_voxel::features::motion::FixedPosition,
+            &bevy_voxel::character::CharacterBody,
             &RespawnPoint,
         ),
         (With<Player>, Without<RespawnLoader>),
@@ -122,7 +122,7 @@ fn finish_respawn(
             .xz()
             .distance_squared(position.translation.xz())
             > 16.0
-            || !loading.progress(view_position).0
+            || loading.progress(view_position) != bevy_voxel::render::readiness::Readiness::Ready
         {
             continue;
         }
@@ -144,8 +144,9 @@ fn finish_respawn(
                 respawn: point.clone(),
                 ..default()
             },
-            crate::character::CharacterMotion::default(),
-            crate::character::CharacterState::default(),
+            bevy_voxel::character::CharacterMotion::default(),
+            crate::character::CharacterView::default(),
+            bevy_voxel::character::CharacterState::default(),
             UsingItem::default(),
         ));
     }

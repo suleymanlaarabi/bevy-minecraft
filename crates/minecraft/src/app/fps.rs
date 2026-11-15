@@ -14,8 +14,7 @@ pub(super) struct FpsCounterPlugin;
 
 impl Plugin for FpsCounterPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn)
-            .add_systems(Update, update);
+        app.add_systems(Startup, spawn).add_systems(Update, update);
     }
 }
 

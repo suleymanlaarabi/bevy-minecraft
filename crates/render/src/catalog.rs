@@ -1,9 +1,9 @@
 //! Standard rendering from frozen numeric catalogs. Importer-owned names never enter mesh loops.
 use crate::{
     RenderSource,
-    assets::VoxelAssets,
+    assets::{MaterialTextures, VoxelAssets},
     fog::SkyPalette,
-    material::{ModelBlend, ModelMaterial, VoxelCutoutMaterial, VoxelMaterial, WaterMaterial},
+    material::{ModelBlend, WaterMaterial},
     models::{CellInfo, ModelQuad, cell},
 };
 use bevy::{
@@ -31,14 +31,7 @@ struct RenderData {
 /// Only explicitly registered visual resources are interpreted as terrain textures.
 /// The caller owns image loading; this preparation step runs once before streaming.
 pub struct RenderTextures<I: ExactSizeIterator<Item = io::Result<(ResourceId, Image)>>>(pub I);
-#[derive(bevy::ecs::system::SystemParam)]
-pub struct RenderAssetStores<'w> {
-    pub images: ResMut<'w, Assets<Image>>,
-    pub buffers: ResMut<'w, Assets<ShaderBuffer>>,
-    pub terrain: ResMut<'w, Assets<VoxelMaterial>>,
-    pub cutout: ResMut<'w, Assets<VoxelCutoutMaterial>>,
-    pub models: ResMut<'w, Assets<ModelMaterial>>,
-}
+pub use crate::assets::RenderAssetStores;
 impl CatalogRenderSource {
     pub fn prepare(
         content: ContentCatalog,
@@ -210,34 +203,18 @@ impl CatalogRenderSource {
             RenderAssetUsages::RENDER_WORLD,
         ));
         let water = WaterMaterial::new(None, 0, 0.0, false, fog);
-        let models = [
-            ModelBlend::Opaque,
-            ModelBlend::Cutout,
-            ModelBlend::Translucent,
-        ]
-        .map(|blend| {
-            stores.models.add(ModelMaterial::new(
-                blocks.clone(),
-                model_faces.clone(),
-                &water,
-                blend,
-                None,
-                animations.clone(),
-            ))
-        });
-        let [models, models_cutout, translucent] = models;
-        let cutout = stores.cutout.add(VoxelCutoutMaterial {
-            blocks: blocks.clone(),
-            faces: faces.clone(),
-            animations: animations.clone(),
-            fog: fog.0.clone(),
-        });
-        let terrain = stores.terrain.add(VoxelMaterial {
-            blocks,
-            faces,
-            animations,
-            fog: fog.0.clone(),
-        });
+        let assets = stores.prepare(
+            MaterialTextures {
+                blocks,
+                faces,
+                model_faces,
+                animations,
+                special: None,
+                water,
+                opaque: ModelBlend::Opaque,
+            },
+            fog,
+        );
         let entity_blocks = vec![false; content.block_count()].into_boxed_slice();
         Ok((
             Self(Arc::new(RenderData {
@@ -248,13 +225,7 @@ impl CatalogRenderSource {
                 layers: layers.into(),
                 opaque: opaque.into(),
             })),
-            VoxelAssets {
-                terrain,
-                cutout,
-                models,
-                models_cutout,
-                translucent,
-            },
+            assets,
         ))
     }
     /// Configure entity-rendered blocks before sharing this source with mesh jobs.

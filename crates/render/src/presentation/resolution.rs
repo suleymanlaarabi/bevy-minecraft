@@ -8,11 +8,31 @@ use bevy::{
     window::{PrimaryWindow, WindowResized},
 };
 
-use super::{
-    GraphicsSettings,
-    composite::{SceneCompositor, SceneSource},
-};
-use crate::player::PlayerCamera;
+use super::composite::{SceneCompositor, SceneSource};
+
+/// Opt a scene camera into aspect-preserving presentation at the requested height.
+#[derive(Component, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SceneResolution(pub Option<u32>);
+impl SceneResolution {
+    pub fn size(self, window: UVec2, max_dimension: u32) -> UVec2 {
+        let window = window.max(UVec2::ONE);
+        let Some(height) = self.0 else {
+            return window;
+        };
+        let height = height.max(1).min(max_dimension.max(1));
+        let width = (u64::from(window.x) * u64::from(height) + u64::from(window.y) / 2)
+            / u64::from(window.y);
+        let limit = u64::from(max_dimension.max(1));
+        if width > limit {
+            UVec2::new(
+                limit as u32,
+                (u64::from(height) * limit / width).max(1) as u32,
+            )
+        } else {
+            UVec2::new(width.max(1) as u32, height)
+        }
+    }
+}
 
 #[derive(Component)]
 struct RenderSurface {
@@ -25,25 +45,20 @@ pub(super) fn register(app: &mut App) {
     app.add_systems(
         PostUpdate,
         sync_resolution.before(CameraUpdateSystems).run_if(
-            resource_changed::<GraphicsSettings>
-                .or_else(on_message::<WindowResized>)
-                .or_else(any_match_filter::<Added<PlayerCamera>>),
+            on_message::<WindowResized>.or_else(any_match_filter::<Changed<SceneResolution>>),
         ),
     );
 }
 
 fn sync_resolution(
-    settings: Res<GraphicsSettings>,
     window: Single<&Window, With<PrimaryWindow>>,
-    mut cameras: Query<
-        (
-            Entity,
-            &mut Camera,
-            &mut RenderTarget,
-            Option<&RenderSurface>,
-        ),
-        With<PlayerCamera>,
-    >,
+    mut cameras: Query<(
+        Entity,
+        &SceneResolution,
+        &mut Camera,
+        &mut RenderTarget,
+        Option<&RenderSurface>,
+    )>,
     mut images: ResMut<Assets<Image>>,
     device: Res<RenderDevice>,
     mut commands: Commands,
@@ -52,10 +67,8 @@ fn sync_resolution(
     if window_size.x == 0 || window_size.y == 0 {
         return;
     }
-    let size = settings
-        .render_resolution
-        .size(window_size, device.limits().max_texture_dimension_2d);
-    for (entity, mut camera, mut target, surface) in &mut cameras {
+    for (entity, resolution, mut camera, mut target, surface) in &mut cameras {
+        let size = resolution.size(window_size, device.limits().max_texture_dimension_2d);
         if size == window_size {
             if let Some(surface) = surface {
                 *target = RenderTarget::default();

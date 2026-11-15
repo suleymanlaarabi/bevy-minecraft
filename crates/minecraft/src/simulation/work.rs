@@ -6,7 +6,7 @@ use crate::voxel::{
 use bevy::prelude::*;
 #[derive(Resource)]
 pub(crate) struct MinecraftRules;
-impl hollow_engine::simulation::runtime::NeighborRules for MinecraftRules {
+impl bevy_voxel::engine::simulation::runtime::NeighborRules for MinecraftRules {
     type Cell = VoxelState;
     type Application = crate::creatures::ColumnActors;
     type Support = EditBatch;
@@ -31,9 +31,9 @@ impl hollow_engine::simulation::runtime::NeighborRules for MinecraftRules {
     }
 }
 pub(crate) type NeighborUpdates<'w, 's> =
-    hollow_engine::simulation::runtime::NeighborUpdates<'w, 's, VoxelState>;
+    bevy_voxel::engine::simulation::runtime::NeighborUpdates<'w, 's, VoxelState>;
 pub fn displaced(
-    event: On<hollow_engine::simulation::runtime::FluidDisplaced<VoxelState>>,
+    event: On<bevy_voxel::engine::simulation::runtime::FluidDisplaced<VoxelState>>,
     mut commands: Commands,
     mut random: ResMut<crate::block_behavior::loot::LootRandom>,
 ) {
