@@ -2,7 +2,7 @@
 use crate::{
     VoxelCell,
     coordinates::SECTION_VOLUME,
-    sections::{Layer, Section, SectionValue},
+    sections::{Layer, Palette, Section, SectionValue},
 };
 use std::{io, sync::Arc};
 
@@ -24,6 +24,8 @@ fn section_bytes<T>(section: &Section<T>, width: usize) -> usize {
         Section::Uniform(_) => width,
         Section::Narrow { .. } => 4 + 2 * SECTION_VOLUME,
         Section::Dense(_) => width * SECTION_VOLUME,
+        Section::Palette4(p) => 2 + usize::from(p.len) * width + p.indices.len(),
+        Section::Palette8(p) => 2 + usize::from(p.len) * width + p.indices.len(),
     }
 }
 fn encode_section<T: SectionValue>(section: &Section<T>, width: usize, bytes: &mut Vec<u8>) {
@@ -31,6 +33,8 @@ fn encode_section<T: SectionValue>(section: &Section<T>, width: usize, bytes: &m
     bytes.resize(start + section_bytes(section, width), 0);
     let out = &mut bytes[start..];
     match section {
+        Section::Palette4(p) => encode_palette(p, width, 3, out),
+        Section::Palette8(p) => encode_palette(p, width, 4, out),
         Section::Uniform(value) => out[1..].copy_from_slice(&value.bits().to_le_bytes()[..width]),
         Section::Narrow { prefix, cells } => {
             out[0] = 2;
@@ -47,6 +51,58 @@ fn encode_section<T: SectionValue>(section: &Section<T>, width: usize, bytes: &m
         }
     }
 }
+fn encode_palette<T: SectionValue, const N: usize, const BYTES: usize>(
+    palette: &Palette<T, N, BYTES>,
+    width: usize,
+    tag: u8,
+    out: &mut [u8],
+) {
+    out[0] = tag;
+    out[1..3].copy_from_slice(&palette.len.to_le_bytes());
+    let end = 3 + usize::from(palette.len) * width;
+    for (out, value) in out[3..end].chunks_exact_mut(width).zip(&palette.values) {
+        out.copy_from_slice(&value.bits().to_le_bytes()[..width]);
+    }
+    out[end..].copy_from_slice(&palette.indices);
+}
+fn decode_palette<T: SectionValue, const N: usize, const BYTES: usize>(
+    bytes: &mut &[u8],
+    read: impl Fn(&mut &[u8]) -> io::Result<T>,
+) -> io::Result<Arc<Palette<T, N, BYTES>>> {
+    let len = u16::from_le_bytes(take(bytes, 2)?.try_into().unwrap());
+    if len == 0 || usize::from(len) > N {
+        return Err(invalid());
+    }
+    let mut values = [read(bytes)?; N];
+    for value in &mut values[1..usize::from(len)] {
+        *value = read(bytes)?;
+    }
+    let indices: [u8; BYTES] = take(bytes, BYTES)?.try_into().unwrap();
+    let mut used = [false; N];
+    for &byte in &indices {
+        let first = usize::from(if N == 16 { byte & 15 } else { byte });
+        if first >= usize::from(len) {
+            return Err(invalid());
+        }
+        used[first] = true;
+        if N == 16 {
+            let second = usize::from(byte >> 4);
+            if second >= usize::from(len) {
+                return Err(invalid());
+            }
+            used[second] = true;
+        }
+    }
+    // Section predicates scan the palette, so every declared entry must occur.
+    if used[..usize::from(len)].contains(&false) {
+        return Err(invalid());
+    }
+    Ok(Arc::new(Palette {
+        values,
+        len,
+        indices,
+    }))
+}
 fn decode_section<T: SectionValue>(
     bytes: &mut &[u8],
     width: usize,
@@ -59,24 +115,27 @@ fn decode_section<T: SectionValue>(
     };
     match take(bytes, 1)?[0] {
         0 => Ok(Section::Uniform(read(bytes)?)),
+        3 => Ok(Section::Palette4(decode_palette(bytes, read)?)),
+        4 => Ok(Section::Palette8(decode_palette(bytes, read)?)),
         1 => {
-            let mut cells = Arc::new([read(bytes)?; SECTION_VOLUME]);
-            for cell in &mut Arc::get_mut(&mut cells).unwrap()[1..] {
+            let mut cells = [read(bytes)?; SECTION_VOLUME];
+            for cell in &mut cells[1..] {
                 *cell = read(bytes)?;
             }
-            Ok(Section::Dense(cells))
+            Ok(Section::from_cells(&cells))
         }
         2 if T::NARROW => {
             let prefix = u32::from_le_bytes(take(bytes, 4)?.try_into().unwrap());
             if prefix & 0xffff != 0 {
                 return Err(invalid());
             }
-            let mut cells = Arc::new([0; SECTION_VOLUME]);
-            for cell in Arc::get_mut(&mut cells).unwrap() {
-                *cell = u16::from_le_bytes(take(bytes, 2)?.try_into().unwrap());
-                decode(prefix | u32::from(*cell))?;
+            let first = u16::from_le_bytes(take(bytes, 2)?.try_into().unwrap());
+            let mut cells = [decode(prefix | u32::from(first))?; SECTION_VOLUME];
+            for cell in &mut cells[1..] {
+                let low = u16::from_le_bytes(take(bytes, 2)?.try_into().unwrap());
+                *cell = decode(prefix | u32::from(low))?;
             }
-            Ok(Section::Narrow { prefix, cells })
+            Ok(Section::from_cells(&cells))
         }
         _ => Err(invalid()),
     }

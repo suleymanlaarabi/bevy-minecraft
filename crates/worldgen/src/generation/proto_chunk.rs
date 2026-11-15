@@ -140,12 +140,45 @@ impl FluidLevelSamplerImpl for StandardChunkFluidLevelSampler {
     }
 }
 
+/// Mutable generation storage has no reference counting or palette lookup on writes.
+pub(crate) enum WorkingSection {
+    Uniform(BlockStateId),
+    Dense(Box<[BlockStateId; 4096]>),
+}
+impl WorkingSection {
+    #[inline]
+    pub(crate) fn get(&self, index: usize) -> BlockStateId {
+        match self {
+            Self::Uniform(value) => *value,
+            Self::Dense(cells) => cells[index],
+        }
+    }
+    #[inline]
+    fn set(&mut self, index: usize, value: BlockStateId) {
+        match self {
+            Self::Uniform(fill) if *fill == value => {}
+            Self::Uniform(fill) => {
+                let mut cells = Box::new([*fill; 4096]);
+                cells[index] = value;
+                *self = Self::Dense(cells);
+            }
+            Self::Dense(cells) => cells[index] = value,
+        }
+    }
+    pub(crate) fn any(&self, predicate: impl Fn(BlockStateId) -> bool) -> bool {
+        match self {
+            Self::Uniform(value) => predicate(*value),
+            Self::Dense(cells) => cells.iter().copied().any(predicate),
+        }
+    }
+}
+
 pub struct ProtoChunk {
     pub x: i32,
     pub z: i32,
     pub default_block: &'static BlockState,
     biome_mixer_seed: i64,
-    pub(crate) flat_block_map: Vec<BlockStateId>,
+    pub(crate) block_sections: Vec<WorkingSection>,
     // Heights computed by aquifers are reused by the following surface stage.
     pub(crate) surface_estimates: FxHashMap<u64, i32>,
     pub flat_biome_map: Box<[u8]>,
@@ -230,7 +263,7 @@ impl ProtoChunk {
             z,
             default_block,
             biome_mixer_seed,
-            flat_block_map: Vec::new(),
+            block_sections: Vec::new(),
             surface_estimates: FxHashMap::default(),
             flat_biome_map: vec![
                 Biome::PLAINS.id;
@@ -351,7 +384,7 @@ impl ProtoChunk {
     pub fn prime_heightmaps(&mut self) {
         let bottom_y = self.generation_bottom_y() as i32;
         // Sections above the allocated block map are air and cannot hold a top block.
-        let allocated_height = (self.flat_block_map.len() / CHUNK_AREA) as i32;
+        let allocated_height = (self.block_sections.len() * 16) as i32;
         let top_y = bottom_y + (self.generation_height() as i32).min(allocated_height) - 1;
         let default_y = (self.bottom_y() as i32 - 1) as i16;
 
@@ -370,9 +403,7 @@ impl ProtoChunk {
 
                 for y in (bottom_y..=top_y).rev() {
                     let block_index = Self::local_pos_to_block_index(lx, y - bottom_y, lz);
-                    let Some(&state_id) = self.flat_block_map.get(block_index) else {
-                        continue;
-                    };
+                    let state_id = self.block_sections[block_index / 4096].get(block_index % 4096);
                     let state = state_id.to_state();
                     if !state.is_air() {
                         if !surface_found {
@@ -488,10 +519,11 @@ impl ProtoChunk {
     #[must_use]
     pub fn get_block_state_raw(&self, x: i32, y: i32, z: i32) -> BlockStateId {
         debug_assert!((0..i32::from(self.height())).contains(&y));
-        self.flat_block_map
-            .get(Self::local_pos_to_block_index(x, y, z))
-            .copied()
-            .unwrap_or(BlockStateId::AIR)
+        self.block_sections
+            .get(y as usize / 16)
+            .map_or(BlockStateId::AIR, |section| {
+                section.get(Self::local_pos_to_block_index(x, y, z) % 4096)
+            })
     }
 
     #[inline]
@@ -533,16 +565,15 @@ impl ProtoChunk {
         }
 
         let index = Self::local_pos_to_block_index(local_x, local_y, local_z);
-        if index >= self.flat_block_map.len() {
+        if index / 4096 >= self.block_sections.len() {
             if block_state.id == BlockStateId::AIR {
                 return;
             }
-            let section_end = ((local_y as usize >> 4) + 1) * crate::coordinates::SECTION_VOLUME;
-            self.flat_block_map
-                .reserve_exact(section_end - self.flat_block_map.len());
-            self.flat_block_map.resize(section_end, BlockStateId::AIR);
+            self.block_sections.resize_with(index / 4096 + 1, || {
+                WorkingSection::Uniform(BlockStateId::AIR)
+            });
         }
-        self.flat_block_map[index] = block_state.id;
+        self.block_sections[index / 4096].set(index % 4096, block_state.id);
     }
 
     #[inline]
@@ -755,10 +786,10 @@ impl ProtoChunk {
         // A constant default-material rule cannot change this chunk. The
         // generator also proved that pillar/iceberg biomes are unreachable.
         if generator.identity_surface
-            && self
-                .flat_block_map
-                .iter()
-                .all(|&state| state == BlockStateId::AIR || state == generator.default_block.id)
+            && self.block_sections.iter().all(|section| {
+                !section
+                    .any(|state| state != BlockStateId::AIR && state != generator.default_block.id)
+            })
         {
             self.surface_estimates = FxHashMap::default();
             self.stage = StagedChunkEnum::Surface;
@@ -859,6 +890,27 @@ impl ProtoChunk {
         let volume = *noise_sampler.volume();
         let densities = noise_sampler.sample_density();
         let has_veins = densities.has_veins();
+        self.block_sections
+            .resize_with(usize::from(self.height) / 16, || {
+                WorkingSection::Uniform(BlockStateId::AIR)
+            });
+        let mut initialized = u32::MAX;
+        if volume.size_x == 16
+            && volume.size_z == 16
+            && volume.step_block_x == 1
+            && volume.step_block_y == 1
+            && volume.step_block_z == 1
+            && volume.min_block_x == self.x * 16
+            && volume.min_block_z == self.z * 16
+        {
+            let min = volume.min_block_y - i32::from(self.bottom_y);
+            let end = min + volume.size_y as i32;
+            for section in 0..self.block_sections.len() {
+                if section as i32 * 16 >= min && (section as i32 + 1) * 16 <= end {
+                    initialized &= !(1 << section);
+                }
+            }
+        }
         // Open sky is most of the volume; it needs no aquifer evaluation.
         let air_above_y = noise_sampler.air_above_y(surface_height_estimate_sampler);
         // Initial terrain owns the entire block volume. Updating four heightmaps
@@ -894,19 +946,29 @@ impl ProtoChunk {
                     if (0..i32::from(self.height)).contains(&local_y) {
                         let index =
                             Self::local_pos_to_block_index(block_x & 15, local_y, block_z & 15);
-                        if index >= self.flat_block_map.len() {
-                            if block_state.id == BlockStateId::AIR {
-                                continue;
-                            }
-                            let section_end =
-                                ((local_y as usize >> 4) + 1) * crate::coordinates::SECTION_VOLUME;
-                            self.flat_block_map.resize(section_end, BlockStateId::AIR);
+                        let section = index / 4096;
+                        let value = block_state.id;
+                        if initialized & (1 << section) == 0 {
+                            // Noise owns and fills every cell of this section before any
+                            // reader runs. Seed it from the first value: uniform stone/air
+                            // needs neither a dense allocation nor 4096 redundant stores.
+                            self.block_sections[section] = WorkingSection::Uniform(value);
+                            initialized |= 1 << section;
                         }
-                        self.flat_block_map[index] = block_state.id;
+                        self.block_sections[section].set(index % 4096, value);
                     }
                 }
             }
         }
+        let count = self
+            .block_sections
+            .iter()
+            .rposition(|section| match section {
+                WorkingSection::Uniform(value) => *value != BlockStateId::AIR,
+                WorkingSection::Dense(_) => true,
+            })
+            .map_or(0, |i| i + 1);
+        self.block_sections.truncate(count);
         self.prime_heightmaps();
     }
 

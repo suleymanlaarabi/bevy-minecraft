@@ -469,6 +469,27 @@ impl StaticChunkNoiseFunctionComponentImpl for Lerp {
         buffer: &mut [f32],
         volume: &DensityVolume,
     ) {
+        if let super::super::chunk_noise_router::ChunkNoiseFunctionComponent::Independent(
+            super::super::proto_noise_router::IndependentProtoNoiseFunctionComponent::Constant(
+                alpha,
+            ),
+        ) = &component_stack[self.alpha_index]
+        {
+            let alpha = alpha.min();
+            if alpha == 0.0 || alpha == 1.0 {
+                let input = if alpha == 0.0 {
+                    self.first_index
+                } else {
+                    self.second_index
+                };
+                ChunkNoiseFunctionComponent::sample_volume_from_stack(
+                    &mut component_stack[..=input],
+                    buffer,
+                    volume,
+                );
+                return;
+            }
+        }
         ChunkNoiseFunctionComponent::sample_volume_from_stack(
             &mut component_stack[..=self.alpha_index],
             buffer,

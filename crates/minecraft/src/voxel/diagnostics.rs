@@ -66,7 +66,10 @@ pub(crate) fn register(app: &mut App) {
     if report {
         app.add_systems(
             Update,
-            report_voxel_diagnostics
+            (
+                report_voxel_diagnostics.after(record_voxel_frame),
+                report_memory,
+            )
                 .after(record_voxel_frame)
                 .run_if(in_state(GameState::Game)),
         );
@@ -471,4 +474,136 @@ fn record_generation(
     for event in events.read() {
         diagnostics.record_generation(event.elapsed);
     }
+}
+
+#[derive(Default)]
+struct MemoryHistory {
+    last: Option<std::time::Instant>,
+    peak_rss: usize,
+    peak_known: usize,
+    allocations: bevy_voxel::core::sections::AllocationCensus,
+}
+fn report_memory(world: &mut World, mut history: Local<MemoryHistory>) {
+    use bevy_voxel::render::diagnostics::memory::{
+        MemoryProbe, ecs_memory, queued_payload_bytes, sample_due,
+    };
+    if !sample_due(&mut history.last) {
+        return;
+    }
+    history.allocations.clear();
+    let census = &mut history.allocations;
+    let generation = hollow_worldgen::runtime::memory_census(world, census);
+    for voxels in world.query::<&ChunkVoxels>().iter(world) {
+        voxels.census(census);
+    }
+    if let Some(stored) = world.get_resource::<super::streaming::StoredChunks>() {
+        for voxels in stored.values() {
+            voxels.census(census);
+        }
+    }
+    if let Some(light) = world
+        .get_resource::<bevy_voxel::engine::lighting::runtime::LightingState<super::VoxelState>>()
+    {
+        light.census(census);
+    }
+    for data in world
+        .query::<&bevy_voxel::render::model_mesh::SortData>()
+        .iter(world)
+    {
+        data.census(census);
+    }
+    for mesh in world
+        .query::<&bevy_voxel::render::uploads::PendingMesh>()
+        .iter(world)
+    {
+        if let Some((data, _)) = &mesh.sort {
+            data.census(census);
+        }
+    }
+    let shared = census.bytes;
+    let section_records: usize = world
+        .query::<&ChunkSections>()
+        .iter(world)
+        .map(|sections| std::mem::size_of_val(sections.sections.as_ref()))
+        .sum();
+    let queued: usize = world
+        .query::<&ChunkBuild>()
+        .iter(world)
+        .map(ChunkBuild::ready_payload_bytes)
+        .sum();
+    let images: usize = world.get_resource::<Assets<Image>>().map_or(0, |images| {
+        images
+            .iter()
+            .map(|(_, image)| image.data.as_ref().map_or(0, Vec::capacity))
+            .sum()
+    });
+    let mesh_payload: usize = world.get_resource::<Assets<Mesh>>().map_or(0, |meshes| {
+        meshes
+            .iter()
+            .map(|(_, mesh)| {
+                mesh.attributes()
+                    .map(|(_, values)| values.get_bytes().len())
+                    .sum::<usize>()
+                    + mesh.indices().map_or(0, |indices| match indices {
+                        bevy::mesh::Indices::U16(values) => values.capacity() * 2,
+                        bevy::mesh::Indices::U32(values) => values.capacity() * 4,
+                    })
+            })
+            .sum()
+    });
+    let main_ecs = ecs_memory(world);
+    let render = world
+        .get_resource::<MemoryProbe>()
+        .map(|probe| probe.0.lock().unwrap().clone())
+        .unwrap_or_default();
+    let queued_payload = queued + queued_payload_bytes(world);
+    let mesher_scratch = bevy_voxel::render::meshing::scratch_bytes();
+    let known = shared
+        + mesher_scratch
+        + section_records
+        + generation.working_bytes
+        + generation.density_bytes[0]
+        + generation.density_bytes[1]
+        + queued_payload
+        + images
+        + mesh_payload
+        + main_ecs.table_reserved
+        + main_ecs.sparse_live_lower_bound
+        + render.ecs.table_reserved
+        + render.ecs.sparse_live_lower_bound
+        + render.cpu_payload;
+    let resident = process_memory();
+    history.peak_rss = history.peak_rss.max(resident[0].unwrap_or(0));
+    history.peak_known = history.peak_known.max(known);
+    // Logical allocations and resident pages are different quantities. The residual
+    // also includes allocator slack, driver mappings, opaque task captures and catalogs.
+    info!(rss_bytes = ?resident[0], anonymous_rss_bytes = ?resident[1], file_pss_bytes = ?resident[2], shared_pss_bytes = ?resident[3],
+        peak_rss_bytes = history.peak_rss, known_allocation_bytes = known, peak_known_bytes = history.peak_known,
+        rss_minus_known_estimate = ?resident[0].map(|rss| rss as i128 - known as i128),
+        ecs_main = ?main_ecs, ecs_render = ?render.ecs,
+        shared_allocation_bytes = shared, mesher_scratch_bytes = mesher_scratch, generation = ?generation, section_records_bytes = section_records,
+        image_bytes = images, mesh_payload_bytes = mesh_payload, queued_geometry_payload_bytes = queued_payload,
+        gpu_arena_live_bytes = render.arena_live, gpu_arena_reserved_bytes = render.arena_reserved,
+        "memory census: byte counts; sparse ECS and geometry are lower bounds; GPU bytes are separate");
+}
+fn process_memory() -> [Option<usize>; 4] {
+    let mut result = [None; 4];
+    #[cfg(target_os = "linux")]
+    if let Ok(smaps) = std::fs::read_to_string("/proc/self/smaps_rollup") {
+        for line in smaps.lines() {
+            let mut words = line.split_whitespace();
+            let index = match words.next() {
+                Some("Rss:") => 0,
+                Some("Anonymous:") => 1,
+                Some("Pss_File:") => 2,
+                Some("Pss_Shmem:") => 3,
+                _ => continue,
+            };
+            result[index] = words
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .and_then(|kib| kib.checked_mul(1024));
+        }
+    }
+    result
 }

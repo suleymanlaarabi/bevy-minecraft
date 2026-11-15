@@ -67,28 +67,17 @@ impl ChunkSnapshot {
             }
             // Working sections are stored X/Y/Z; published ones Y/Z/X. Unallocated
             // and single-state sections (sky, deep stone) need no transposition.
-            let start = local_y as usize / 16 * 4096;
-            let Some(source) = chunk.flat_block_map.get(start..start + 4096) else {
+            let Some(source) = chunk.block_sections.get(local_y as usize / 16) else {
                 return Section::Uniform(voxel(BlockStateId::AIR));
             };
-            let first = source[0];
-            if source.iter().all(|&state| state == first) {
-                return Section::Uniform(voxel(first));
+            if let crate::generation::proto_chunk::WorkingSection::Uniform(value) = source {
+                return Section::Uniform(voxel(*value));
             }
-            // Native IDs are already validated u16 values. Transpose directly into
-            // shared narrow storage, without a full-width intermediate or registry reads.
-            let mut cells = [first.as_u16(); 4096];
-            for (x, plane) in source.chunks_exact(256).enumerate() {
-                for (y, row) in plane.chunks_exact(16).enumerate() {
-                    for (z, &state) in row.iter().enumerate() {
-                        cells[y * 256 + z * 16 + x] = state.as_u16();
-                    }
-                }
-            }
-            Section::Narrow {
-                prefix: 0,
-                cells: std::sync::Arc::new(cells),
-            }
+            let cells: [_; 4096] = std::array::from_fn(|i| {
+                let (x, y, z) = (i & 15, i >> 8, (i >> 4) & 15);
+                voxel(source.get(x * 256 + y * 16 + z))
+            });
+            Section::from_cells(&cells)
         }));
         Self {
             chunk_x,
@@ -96,7 +85,7 @@ impl ChunkSnapshot {
             min_y,
             height,
             states,
-            biomes: chunk.flat_biome_map.clone().into(),
+            biomes: std::sync::Arc::from(chunk.flat_biome_map.as_ref()),
             light: lighting::working_sections(&chunk.light, height as usize / 16),
             fluid_ticks: chunk
                 .fluid_ticks

@@ -172,6 +172,21 @@ impl<T: VoxelCell> SnapshotAccess<T> {
 }
 
 impl<T: VoxelCell> LightingSnapshots<T> {
+    pub fn census(&self, census: &mut hollow_core::sections::AllocationCensus) {
+        census.bytes += self.access.slots.capacity() * size_of::<LightingSlot<T>>()
+            + self.access.free.capacity() * size_of::<u32>();
+        for slot in &self.access.slots {
+            if let Some(chunk) = &slot.chunk {
+                chunk.states.census(census);
+                chunk.light.census(census);
+                census.bytes += chunk
+                    .changed_cells
+                    .as_ref()
+                    .map_or(0, |cells| cells.capacity() * size_of::<u32>());
+            }
+        }
+    }
+
     pub fn new(min_y: i32, height: i32, content: ContentCatalog) -> Self {
         assert!(
             height > 0 && height as u64 * 256 <= u64::from(u32::MAX),

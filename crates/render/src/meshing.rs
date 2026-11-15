@@ -299,6 +299,7 @@ impl Default for SectionSummary {
 pub struct Padded {
     dimensions: [i32; 3],
     samples: Vec<Sample>,
+    palette_samples: Vec<Sample>,
     summary: SectionSummary,
     // Three orientations, with cube/cutout/occluder bits packed in each row.
     // Shared by terrain and shadow meshing; retained in the thread's scratch buffer.
@@ -320,6 +321,19 @@ impl Padded {
         self.samples.clear();
         self.samples
             .reserve((PADDED_SIZE * PADDED_SIZE * (SECTION_HEIGHT + 2)) as usize);
+        self.palette_samples.clear();
+        let paletted = if let Some(values) = neighborhood.center().states.section(section).palette()
+        {
+            self.palette_samples.extend(
+                values
+                    .iter()
+                    .map(|value| Sample::state(&neighborhood.source, StateId(value.id()), 0)),
+            );
+            true
+        } else {
+            false
+        };
+        let mut row_samples = [ABOVE_WORLD; CHUNK_SIZE as usize];
         let mut light = [0; CHUNK_SIZE as usize];
         let mut states = [C::Cell::air(); CHUNK_SIZE as usize];
         let build_connectivity = neighborhood.cached_connectivity[section].is_none();
@@ -333,17 +347,23 @@ impl Padded {
                     .then(|| neighborhood.columns[1 + 3 * slot(z)].as_ref())
                     .flatten();
                 if let Some(column) = column {
-                    let section = (y / SECTION_HEIGHT) as usize;
+                    let layer = (y / SECTION_HEIGHT) as usize;
                     let start = column_index(0, y, z) % SECTION_VOLUME;
-                    column.light.section(section).copy_cells(start, &mut light);
-                    column
-                        .states
-                        .section(section)
-                        .copy_cells(start, &mut states);
-                    self.samples
-                        .extend(states.iter().zip(&light).map(|(&id, &light)| {
-                            Sample::state(&neighborhood.source, StateId(id.id()), light)
-                        }));
+                    column.light.section(layer).copy_cells(start, &mut light);
+                    let states_section = column.states.section(layer);
+                    if paletted && layer == section && (0..CHUNK_SIZE).contains(&z) {
+                        states_section.copy_palette(start, &mut row_samples, &self.palette_samples);
+                        for (sample, &light) in row_samples.iter_mut().zip(&light) {
+                            sample.light = light;
+                        }
+                        self.samples.extend_from_slice(&row_samples);
+                    } else {
+                        states_section.copy_cells(start, &mut states);
+                        self.samples
+                            .extend(states.iter().zip(&light).map(|(&id, &light)| {
+                                Sample::state(&neighborhood.source, StateId(id.id()), light)
+                            }));
+                    }
                 } else {
                     self.samples
                         .extend((0..CHUNK_SIZE).map(|x| neighborhood.sample(IVec3::new(x, y, z))));
@@ -413,6 +433,8 @@ struct Scratch {
     model_depths: Vec<u8>,
     visited: [u64; 64],
     flood_stack: Vec<u16>,
+    #[cfg(feature = "dev")]
+    accounted: usize,
 }
 
 impl Default for Scratch {
@@ -425,6 +447,44 @@ impl Default for Scratch {
             model_depths: Vec::new(),
             visited: [0; 64],
             flood_stack: Vec::new(),
+            #[cfg(feature = "dev")]
+            accounted: 0,
+        }
+    }
+}
+
+#[cfg(feature = "dev")]
+static SCRATCH_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(feature = "dev")]
+pub fn scratch_bytes() -> usize {
+    SCRATCH_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+}
+#[cfg(feature = "dev")]
+impl Scratch {
+    fn record_memory(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let bytes = size_of::<Self>()
+            + self.padded.samples.capacity() * size_of::<Sample>()
+            + self.padded.palette_samples.capacity() * size_of::<Sample>()
+            + self.padded.rows.capacity() * size_of::<u64>()
+            + self.faces.capacity() * size_of::<Option<LitFace>>()
+            + self.water.capacity() * size_of::<Option<(LitFace, bool)>>()
+            + self.depths.capacity()
+            + self.model_depths.capacity()
+            + self.flood_stack.capacity() * size_of::<u16>();
+        if bytes >= self.accounted {
+            SCRATCH_BYTES.fetch_add(bytes - self.accounted, Relaxed);
+        } else {
+            SCRATCH_BYTES.fetch_sub(self.accounted - bytes, Relaxed);
+        }
+        self.accounted = bytes;
+    }
+}
+#[cfg(feature = "dev")]
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if self.accounted != 0 {
+            SCRATCH_BYTES.fetch_sub(self.accounted, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
@@ -819,7 +879,7 @@ pub fn build_sections<C: RenderSource>(
     sections: u32,
     shadows_enabled: bool,
 ) -> Vec<SectionMeshes> {
-    SCRATCH.with_borrow_mut(|scratch| {
+    let result = SCRATCH.with_borrow_mut(|scratch| {
         let Scratch {
             padded,
             faces,
@@ -828,6 +888,7 @@ pub fn build_sections<C: RenderSource>(
             model_depths,
             visited,
             flood_stack,
+            ..
         } = scratch;
         (0..neighborhood.layout.section_count())
             .filter(|section| sections & (1 << section) != 0)
@@ -943,7 +1004,12 @@ pub fn build_sections<C: RenderSource>(
                 }
             })
             .collect()
-    })
+    });
+    #[cfg(feature = "dev")]
+    if crate::diagnostics::memory::MemoryProbe::enabled() {
+        SCRATCH.with_borrow_mut(Scratch::record_memory);
+    }
+    result
 }
 
 /// Cull whole padded rows before reading materials or calculating corner light.

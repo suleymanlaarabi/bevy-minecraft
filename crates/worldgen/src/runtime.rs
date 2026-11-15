@@ -1205,3 +1205,71 @@ fn spawn_store(
     });
     runtime.spawn(commands, position, writes, Vec::new(), task);
 }
+
+/// Inspected allocations only: running task captures and native structure caches remain unattributed.
+#[cfg(feature = "dev")]
+#[derive(Default, Debug)]
+pub struct GenerationMemory {
+    pub working_bytes: usize,
+    pub shared_bytes: usize,
+    pub in_flight: usize,
+    pub density_bytes: [usize; 3],
+}
+#[cfg(feature = "dev")]
+pub fn memory_census(
+    world: &World,
+    census: &mut hollow_core::sections::AllocationCensus,
+) -> GenerationMemory {
+    use crate::generation::proto_chunk::WorkingSection;
+    let mut memory = GenerationMemory {
+        density_bytes: crate::generation::noise::router::density_volume::memory_bytes(),
+        ..Default::default()
+    };
+    let before = census.bytes;
+    if let Some(graph) = world.get_resource::<GenerationGraph>() {
+        for runtime in &graph.0 {
+            memory.in_flight += runtime.active;
+            for entry in runtime.entries.values() {
+                match entry.chunk.as_ref() {
+                    Some(Chunk::Proto(chunk)) => {
+                        memory.working_bytes += size_of::<ProtoChunk>()
+                            + chunk.block_sections.capacity() * size_of::<WorkingSection>()
+                            + size_of_val(chunk.flat_biome_map.as_ref())
+                            + chunk.fluid_ticks.capacity()
+                                * size_of::<
+                                    crate::tick::ScheduledTick<&'static pumpkin_data::fluid::Fluid>,
+                                >();
+                        for section in &chunk.block_sections {
+                            if let WorkingSection::Dense(cells) = section {
+                                memory.working_bytes += size_of_val(cells.as_ref());
+                            }
+                        }
+                        for channel in [&chunk.light.sky_light, &chunk.light.block_light] {
+                            memory.working_bytes += size_of_val(channel.as_ref());
+                            for section in channel.iter() {
+                                if let crate::chunk::format::LightContainer::Full(cells) = section {
+                                    memory.working_bytes += cells.len();
+                                }
+                            }
+                        }
+                    }
+                    Some(Chunk::Complete(chunk)) if census.shared(chunk) => {
+                        chunk.section.states.read().unwrap().census(census);
+                        chunk.light.lock().unwrap().census(census);
+                        census.shared(&chunk.section.biomes);
+                        census.shared(&chunk.fluid_ticks);
+                    }
+                    _ => {}
+                }
+            }
+            for snapshot in runtime.session.0.snapshots.lock().unwrap().values() {
+                snapshot.states.census(census);
+                snapshot.light.census(census);
+                census.shared(&snapshot.biomes);
+                census.shared(&snapshot.fluid_ticks);
+            }
+        }
+    }
+    memory.shared_bytes = census.bytes - before;
+    memory
+}

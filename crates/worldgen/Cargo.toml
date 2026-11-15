@@ -10,6 +10,9 @@ categories = ["game-development"]
 publish = false
 
 
+[features]
+dev = []
+
 [dependencies]
 hollow-engine = { path = "../engine" }
 hollow-core = { path = "../core" }

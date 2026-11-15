@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 default = []
-dev = ["bevy-voxel/dev", "bevy/bevy_dev_tools", "bevy/render_dev_tools", "bevy/sysinfo_plugin"]
+dev = ["bevy-voxel/dev", "hollow-worldgen/dev", "bevy/bevy_dev_tools", "bevy/render_dev_tools", "bevy/sysinfo_plugin"]
 # Writes a Chrome trace (trace-*.json) with a span per ECS system, main and render world.
 trace = ["bevy/trace_chrome", "bevy/detailed_trace"]
 

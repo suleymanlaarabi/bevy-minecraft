@@ -476,7 +476,7 @@ impl BlockLightPropagator {
                 match &mut cache.chunks[chunk_idx] {
                     Chunk::Proto(c) => {
                         // Sections above the allocated block map are air.
-                        let allocated_height = (c.flat_block_map.len() / 256) as i32;
+                        let allocated_height = (c.block_sections.len() * 16) as i32;
                         for y in min_y..max_y.min(min_y + allocated_height) {
                             let local_y_proto = y - min_y;
                             let state_id = c.get_block_state_raw(

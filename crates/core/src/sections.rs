@@ -1,7 +1,7 @@
-//! Uniform and directly indexed section layers with copy-on-write snapshots.
+//! Uniform, paletted and directly indexed sections with copy-on-write snapshots.
 
 use super::{VoxelCell, coordinates::SECTION_VOLUME};
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 /// Lossless numeric storage; compact IDs are reconstructed without registry lookups.
 pub trait SectionValue: Copy + PartialEq {
@@ -32,6 +32,63 @@ impl SectionValue for u8 {
     }
 }
 
+/// Palette and indices share one allocation. The unused palette tail repeats its first value.
+#[derive(Clone, Debug)]
+pub struct Palette<T, const N: usize, const BYTES: usize> {
+    pub(crate) values: [T; N],
+    pub(crate) len: u16,
+    pub(crate) indices: [u8; BYTES],
+}
+impl<T: Copy, const N: usize, const BYTES: usize> Palette<T, N, BYTES> {
+    #[inline]
+    fn index(&self, index: usize) -> usize {
+        if N == 16 {
+            usize::from((self.indices[index / 2] >> ((index & 1) * 4)) & 15)
+        } else {
+            usize::from(self.indices[index])
+        }
+    }
+    #[inline]
+    fn get(&self, index: usize) -> T {
+        self.values[self.index(index)]
+    }
+    fn copy_mapped<U: Copy>(&self, start: usize, out: &mut [U], values: &[U]) {
+        for (index, out) in (start..).zip(out) {
+            *out = values[self.index(index)];
+        }
+    }
+}
+
+fn arc_bytes<T: ?Sized>(value: &T) -> usize {
+    let alignment = align_of_val(value).max(align_of::<usize>());
+    ((2 * size_of::<usize>()).next_multiple_of(align_of_val(value)) + size_of_val(value))
+        .next_multiple_of(alignment)
+}
+
+/// Allocation identities are tracked only when an explicit memory census is requested.
+#[derive(Default)]
+pub struct AllocationCensus {
+    seen: HashSet<usize>,
+    pub bytes: usize,
+}
+impl AllocationCensus {
+    pub fn clear(&mut self) {
+        self.seen.clear();
+        self.bytes = 0;
+    }
+
+    pub fn shared<T: ?Sized>(&mut self, allocation: &Arc<T>) -> bool {
+        if !self
+            .seen
+            .insert(Arc::as_ptr(allocation) as *const () as usize)
+        {
+            return false;
+        }
+        self.bytes += arc_bytes(allocation.as_ref());
+        true
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Section<T> {
     Uniform(T),
@@ -41,6 +98,8 @@ pub enum Section<T> {
         cells: Arc<[u16; SECTION_VOLUME]>,
     },
     Dense(Arc<[T; SECTION_VOLUME]>),
+    Palette4(Arc<Palette<T, 16, { SECTION_VOLUME / 2 }>>),
+    Palette8(Arc<Palette<T, 256, SECTION_VOLUME>>),
 }
 
 impl<T: SectionValue> Section<T> {
@@ -50,15 +109,66 @@ impl<T: SectionValue> Section<T> {
         if cells.iter().all(|&cell| cell == first) {
             return Self::Uniform(first);
         }
-        let prefix = first.bits() & 0xffff_0000;
-        if T::NARROW && cells.iter().all(|cell| cell.bits() & 0xffff_0000 == prefix) {
-            Self::Narrow {
-                prefix,
-                cells: Arc::new(std::array::from_fn(|i| cells[i].bits() as u16)),
-            }
-        } else {
-            Self::Dense(Arc::new(cells.try_into().expect("one section of cells")))
+        if let Some(palette) = Self::paletted(cells) {
+            return palette;
         }
+        Self::direct(cells.try_into().expect("one section of cells"))
+    }
+
+    fn paletted(cells: &[T]) -> Option<Self> {
+        // A bounded stack index avoids one hash-map allocation per published section.
+        // Eight-bit cells only benefit from the four-bit representation.
+        let limit = if size_of::<T>() == 1 { 16 } else { 256 };
+        let mut slots = [u16::MAX; 512];
+        let mut values = [cells[0]; 256];
+        let mut len = 0usize;
+        let mut indices = [0u8; SECTION_VOLUME];
+        for (&value, index) in cells.iter().zip(&mut indices) {
+            let mut slot = (value.bits().wrapping_mul(0x9e37_79b9) >> 23) as usize;
+            while slots[slot] != u16::MAX && values[slots[slot] as usize] != value {
+                slot = (slot + 1) & 511;
+            }
+            if slots[slot] == u16::MAX {
+                if len == limit {
+                    return None;
+                }
+                values[len] = value;
+                slots[slot] = len as u16;
+                len += 1;
+            }
+            *index = slots[slot] as u8;
+        }
+        if len <= 16 {
+            Some(Self::Palette4(Arc::new(Palette {
+                values: std::array::from_fn(|i| values[i]),
+                len: len as u16,
+                indices: std::array::from_fn(|i| indices[i * 2] | indices[i * 2 + 1] << 4),
+            })))
+        } else {
+            Some(Self::Palette8(Arc::new(Palette {
+                values,
+                len: len as u16,
+                indices,
+            })))
+        }
+    }
+
+    pub fn palette(&self) -> Option<&[T]> {
+        match self {
+            Self::Palette4(p) => Some(&p.values[..usize::from(p.len)]),
+            Self::Palette8(p) => Some(&p.values[..usize::from(p.len)]),
+            _ => None,
+        }
+    }
+
+    /// Map a published palette once, then decode rows without a catalog lookup per voxel.
+    pub fn copy_palette<U: Copy>(&self, start: usize, out: &mut [U], values: &[U]) -> bool {
+        match self {
+            Self::Palette4(p) => p.copy_mapped(start, out, values),
+            Self::Palette8(p) => p.copy_mapped(start, out, values),
+            _ => return false,
+        }
+        true
     }
 
     #[inline]
@@ -68,6 +178,8 @@ impl<T: SectionValue> Section<T> {
             Self::Uniform(value) => *value,
             Self::Narrow { prefix, cells } => T::from_bits(*prefix | u32::from(cells[index])),
             Self::Dense(cells) => cells[index],
+            Self::Palette4(p) => p.get(index),
+            Self::Palette8(p) => p.get(index),
         }
     }
 
@@ -91,6 +203,8 @@ impl<T: SectionValue> Section<T> {
                 }
             }
             Self::Dense(cells) => out.copy_from_slice(&cells[start..start + out.len()]),
+            Self::Palette4(p) => p.copy_mapped(start, out, &p.values),
+            Self::Palette8(p) => p.copy_mapped(start, out, &p.values),
         }
     }
 
@@ -101,6 +215,14 @@ impl<T: SectionValue> Section<T> {
                 .iter()
                 .any(|&cell| predicate(T::from_bits(*prefix | u32::from(cell)))),
             Self::Dense(cells) => cells.iter().any(|&cell| predicate(cell)),
+            Self::Palette4(p) => p.values[..usize::from(p.len)]
+                .iter()
+                .copied()
+                .any(predicate),
+            Self::Palette8(p) => p.values[..usize::from(p.len)]
+                .iter()
+                .copied()
+                .any(predicate),
         }
     }
 
@@ -108,8 +230,10 @@ impl<T: SectionValue> Section<T> {
         size_of::<Self>()
             + match self {
                 Self::Uniform(_) => 0,
-                Self::Narrow { .. } => 16 + SECTION_VOLUME * size_of::<u16>(),
-                Self::Dense(_) => 16 + SECTION_VOLUME * size_of::<T>(),
+                Self::Narrow { cells, .. } => arc_bytes(cells.as_ref()),
+                Self::Dense(cells) => arc_bytes(cells.as_ref()),
+                Self::Palette4(p) => arc_bytes(p.as_ref()),
+                Self::Palette8(p) => arc_bytes(p.as_ref()),
             }
     }
 
@@ -138,6 +262,43 @@ impl<T: SectionValue> Section<T> {
                 *self = Self::Dense(wide);
             }
             Self::Dense(cells) => Arc::make_mut(cells)[index] = value,
+            Self::Palette4(_) | Self::Palette8(_) => {
+                // Promote once on mutation; propagation and edits keep direct indexed writes.
+                let mut cells = std::array::from_fn::<_, SECTION_VOLUME, _>(|i| self.get(i));
+                cells[index] = value;
+                *self = Self::direct(&cells);
+            }
+        }
+    }
+
+    fn narrow(cells: &[T; SECTION_VOLUME]) -> Option<Self> {
+        let prefix = cells[0].bits() & 0xffff_0000;
+        (T::NARROW && cells.iter().all(|cell| cell.bits() & 0xffff_0000 == prefix)).then(|| {
+            Self::Narrow {
+                prefix,
+                cells: Arc::new(std::array::from_fn(|i| cells[i].bits() as u16)),
+            }
+        })
+    }
+    fn direct(cells: &[T; SECTION_VOLUME]) -> Self {
+        Self::narrow(cells).unwrap_or_else(|| Self::Dense(Arc::new(*cells)))
+    }
+
+    pub fn census(&self, census: &mut AllocationCensus) {
+        match self {
+            Self::Uniform(_) => {}
+            Self::Narrow { cells, .. } => {
+                census.shared(cells);
+            }
+            Self::Dense(cells) => {
+                census.shared(cells);
+            }
+            Self::Palette4(p) => {
+                census.shared(p);
+            }
+            Self::Palette8(p) => {
+                census.shared(p);
+            }
         }
     }
 
@@ -156,6 +317,8 @@ impl<T: SectionValue> Section<T> {
                 },
             ) => a == b && Arc::ptr_eq(ac, bc),
             (Self::Dense(a), Self::Dense(b)) => Arc::ptr_eq(a, b),
+            (Self::Palette4(a), Self::Palette4(b)) => Arc::ptr_eq(a, b),
+            (Self::Palette8(a), Self::Palette8(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -182,31 +345,24 @@ impl<T: SectionValue> Section<T> {
     }
 
     fn compacted(&self) -> Option<Self> {
-        match self {
-            Self::Uniform(_) => None,
-            Self::Narrow { prefix, cells } => {
-                let first = cells[0];
-                cells
-                    .iter()
-                    .all(|&cell| cell == first)
-                    .then(|| Self::Uniform(T::from_bits(*prefix | u32::from(first))))
-            }
-            Self::Dense(cells) => {
-                let first = cells[0];
-                let prefix = first.bits() & 0xffff_0000;
-                if cells.iter().all(|&cell| cell == first) {
-                    Some(Self::Uniform(first))
-                } else if T::NARROW && cells.iter().all(|cell| cell.bits() & 0xffff_0000 == prefix)
-                {
-                    Some(Self::Narrow {
-                        prefix,
-                        cells: Arc::new(std::array::from_fn(|i| cells[i].bits() as u16)),
-                    })
-                } else {
-                    None
-                }
-            }
+        if matches!(
+            self,
+            Self::Uniform(_) | Self::Palette4(_) | Self::Palette8(_)
+        ) {
+            return None;
         }
+        let mut cells = [self.get(0); SECTION_VOLUME];
+        self.copy_cells(0, &mut cells);
+        if cells.iter().all(|&cell| cell == cells[0]) {
+            return Some(Self::Uniform(cells[0]));
+        }
+        Self::paletted(&cells).or_else(|| {
+            if matches!(self, Self::Dense(_)) && T::NARROW {
+                Self::narrow(&cells)
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -241,6 +397,13 @@ impl<T: SectionValue> Layer<T> {
     }
     pub fn retained_bytes(&self) -> usize {
         16 + self.0.iter().map(Section::retained_bytes).sum::<usize>()
+    }
+    pub fn census(&self, census: &mut AllocationCensus) {
+        if census.shared(&self.0) {
+            for section in self.0.iter() {
+                section.census(census);
+            }
+        }
     }
     pub fn set(&mut self, index: usize, value: T) -> bool {
         if self.get(index) == value {

@@ -185,6 +185,15 @@ pub struct LightingState<T: VoxelCell> {
 }
 
 impl<T: VoxelCell> LightingState<T> {
+    pub fn census(&self, census: &mut hollow_core::sections::AllocationCensus) {
+        if let Some(context) = &self.context {
+            context.census(census);
+        }
+        for light in self.ready.values() {
+            light.census(census);
+        }
+    }
+
     /// Light outside the edit neighborhoods submitted to the worker is already authoritative.
     pub fn is_settled(&self, position: IVec2, version: &LightingVersion) -> bool {
         !self.submitted.contains_key(&position)

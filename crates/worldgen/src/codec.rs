@@ -60,7 +60,7 @@ impl WorkingPayload {
                 chunk.flat_motion_blocking_no_leaves_height_map.to_vec(),
             ],
             surface_estimates,
-            block_count: chunk.flat_block_map.len(),
+            block_count: chunk.block_sections.len() * 4096,
             block_entities: chunk.pending_block_entities.iter().map(nbt).collect(),
             structure_entities: chunk.pending_structure_entities.iter().map(nbt).collect(),
             structure_starts,
@@ -276,14 +276,22 @@ pub(crate) fn decode_generated(
         })
         .collect::<io::Result<_>>()?;
     let mut chunk = crate::ProtoChunk::new(position.x, position.y, generator);
-    if metadata.block_count != 0 {
-        chunk.flat_block_map = (0..metadata.block_count)
-            .map(|i| {
-                let (x, y, z) = ((i % 4096) / 256, (i / 4096) * 16 + (i % 256) / 16, i % 16);
-                terrain.states.get(y * 256 + z * 16 + x).native_id()
-            })
-            .collect();
-    }
+    chunk.block_sections = (0..metadata.block_count / 4096)
+        .map(|section| {
+            use crate::generation::proto_chunk::WorkingSection;
+            if let Some(value) = terrain.states.section(section).uniform() {
+                WorkingSection::Uniform(value.native_id())
+            } else {
+                WorkingSection::Dense(Box::new(std::array::from_fn(|i| {
+                    let (x, y, z) = (i / 256, (i / 16) & 15, i & 15);
+                    terrain
+                        .states
+                        .get(section * 4096 + y * 256 + z * 16 + x)
+                        .native_id()
+                })))
+            }
+        })
+        .collect();
     chunk.flat_biome_map = header.biomes.into_boxed_slice();
     let heights: Vec<[i16; 256]> = metadata
         .heights

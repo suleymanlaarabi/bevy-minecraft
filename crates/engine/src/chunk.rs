@@ -55,6 +55,14 @@ impl<T: VoxelCell> ChunkVoxels<T> {
             + self.render_light.as_ref().map_or(0, Layer::retained_bytes)
     }
 
+    pub fn census(&self, census: &mut hollow_core::sections::AllocationCensus) {
+        self.states.census(census);
+        self.light.census(census);
+        if let Some(light) = &self.render_light {
+            light.census(census);
+        }
+    }
+
     /// Save workers retain authoritative data only, without presentation estimates.
     pub fn save_snapshot(&self) -> Self {
         Self {

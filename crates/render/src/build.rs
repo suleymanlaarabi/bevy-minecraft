@@ -100,6 +100,20 @@ pub struct ChunkBuild {
     shadows_enabled: bool,
 }
 
+impl ChunkBuild {
+    #[cfg(feature = "dev")]
+    pub fn ready_payload_bytes(&self) -> usize {
+        self.ready.as_ref().map_or(0, |output| {
+            output
+                .sections
+                .as_slice()
+                .iter()
+                .map(|section| section.bytes)
+                .sum()
+        })
+    }
+}
+
 /// Concurrent mesh tasks: enough to fill the compute pool without hoarding stale work.
 fn max_pending_builds() -> usize {
     2 * AsyncComputeTaskPool::get().thread_num().max(1)

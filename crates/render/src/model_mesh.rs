@@ -252,6 +252,11 @@ struct SortQuad {
 #[derive(Clone, Component)]
 pub struct SortData(Arc<[SortQuad]>);
 impl SortData {
+    #[cfg(feature = "dev")]
+    pub fn census(&self, census: &mut hollow_core::sections::AllocationCensus) {
+        census.shared(&self.0);
+    }
+
     /// Order blocks first, then their faces: a water face must never jump in
     /// front of ice in a nearer block merely because their face centers differ.
     pub fn indices(&self, eye: Vec3) -> Vec<u32> {

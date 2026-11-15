@@ -151,6 +151,22 @@ pub(crate) struct SectionFeed {
 #[derive(Resource)]
 struct SectionIds([MainEntity; RANGES]);
 
+impl SectionFeed {
+    #[cfg(feature = "dev")]
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.ops.capacity() * size_of::<SectionOp>()
+            + self
+                .ops
+                .iter()
+                .map(|op| match op {
+                    SectionOp::Replace { geometry, .. } => {
+                        geometry.iter().flatten().map(PassGeometry::bytes).sum()
+                    }
+                    _ => 0,
+                })
+                .sum::<usize>()
+    }
+}
 pub(crate) struct SectionsPlugin;
 impl Plugin for SectionsPlugin {
     fn build(&self, app: &mut App) {
@@ -166,9 +182,21 @@ impl Plugin for SectionsPlugin {
         );
         app.add_plugins(ExtractComponentPlugin::<VoxelViewer>::default());
         bevy::shader::load_shader_library!(app, "shaders/section_transform.wesl");
+        #[cfg(feature = "dev")]
+        let memory = crate::diagnostics::memory::MemoryProbe::enabled().then(|| {
+            let memory = crate::diagnostics::memory::MemoryProbe::default();
+            app.insert_resource(memory.clone());
+            memory
+        });
         let Some(render) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
+        #[cfg(feature = "dev")]
+        if let Some(memory) = memory {
+            render
+                .insert_resource(memory)
+                .add_systems(Render, record_memory.after(prepare_sections));
+        }
         render
             .init_resource::<SectionFeed>()
             .init_resource::<SpecializedMeshPipelines<SectionSpecializer>>()
@@ -1472,5 +1500,40 @@ impl<I: PhaseItem, const P: usize> RenderCommand<I> for DrawSections<P> {
             }
         }
         RenderCommandResult::Success
+    }
+}
+
+#[cfg(feature = "dev")]
+fn record_memory(world: &mut World, mut last: Local<Option<std::time::Instant>>) {
+    use crate::diagnostics::memory::{MemoryProbe, RenderMemory, ecs_memory, sample_due};
+    if !sample_due(&mut last) {
+        return;
+    }
+    let mut snapshot = RenderMemory {
+        ecs: ecs_memory(world),
+        ..Default::default()
+    };
+    if let Some(gpu) = world.get_resource::<SectionGpu>() {
+        for arena in &gpu.arenas {
+            for buffer in [&arena.vertices, &arena.indices] {
+                snapshot.arena_reserved += buffer.buffer.size();
+                snapshot.arena_live += buffer.end
+                    - buffer
+                        .free
+                        .iter()
+                        .map(|(start, end)| end - start)
+                        .sum::<u64>();
+            }
+        }
+        snapshot.cpu_payload += gpu.slots.capacity() * size_of::<Option<Slot>>()
+            + gpu.cull.capacity() * size_of::<Cull>()
+            + gpu.origin_data.capacity() * size_of::<[f32; 4]>()
+            + gpu.free.capacity() * size_of::<usize>();
+    }
+    if let Some(feed) = world.get_resource::<SectionFeed>() {
+        snapshot.cpu_payload += feed.retained_bytes();
+    }
+    if let Some(probe) = world.get_resource::<MemoryProbe>() {
+        *probe.0.lock().unwrap() = snapshot;
     }
 }

@@ -29,8 +29,8 @@ fn unload_chunk(commands: &mut Commands, entity: Entity) {
     let mut entity = commands.entity(entity);
     // Observers capture edits before identity and ownership relationships disappear.
     entity.remove::<ChunkVoxels>();
-    entity.remove::<VoxelChunk>();
     entity.remove::<(
+        VoxelChunk,
         hollow_worldgen::runtime::ChunkRetention,
         crate::block_behavior::containers::LoadedColumn,
         LitEdits,

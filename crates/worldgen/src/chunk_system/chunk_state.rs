@@ -160,7 +160,7 @@ impl Chunk {
                 count: dimension.height as usize / 16,
                 min_y: dimension.min_y,
                 states: std::sync::RwLock::new(snapshot.states),
-                biomes: proto.flat_biome_map.into(),
+                biomes: snapshot.biomes,
             },
             heightmap: Mutex::new(heightmaps),
             light: Mutex::new(snapshot.light),
