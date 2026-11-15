@@ -1,10 +1,7 @@
 use bevy::{
     camera::{CameraOutputMode, CameraUpdateSystems, RenderTarget, visibility::RenderLayers},
     prelude::*,
-    render::{
-        render_resource::{Extent3d, TextureFormat},
-        renderer::RenderDevice,
-    },
+    render::renderer::RenderDevice,
     window::{PrimaryWindow, WindowResized},
 };
 
@@ -36,7 +33,6 @@ impl SceneResolution {
 
 #[derive(Component)]
 struct RenderSurface {
-    image: Handle<Image>,
     compositor: Entity,
 }
 
@@ -59,7 +55,6 @@ fn sync_resolution(
         &mut RenderTarget,
         Option<&RenderSurface>,
     )>,
-    mut images: ResMut<Assets<Image>>,
     device: Res<RenderDevice>,
     mut commands: Commands,
 ) {
@@ -81,17 +76,9 @@ fn sync_resolution(
             }
             continue;
         }
-        if let Some(surface) = surface {
-            if images
-                .get(&surface.image)
-                .is_some_and(|image| image.size() != size)
-                && let Some(mut image) = images.get_mut(&surface.image)
-            {
-                image.resize(Extent3d {
-                    width: size.x,
-                    height: size.y,
-                    depth_or_array_layers: 1,
-                });
+        if surface.is_some() {
+            if !matches!(*target, RenderTarget::None { size: current } if current == size) {
+                *target = RenderTarget::None { size };
             }
             continue;
         }
@@ -99,15 +86,6 @@ fn sync_resolution(
         if !matches!(*target, RenderTarget::Window(_)) {
             continue;
         }
-        // The image only gives the scene camera its resolution: the compositor
-        // samples the camera's main texture itself (see `composite`), so the
-        // camera skips writing its output here.
-        let image = images.add(Image::new_target_texture(
-            size.x,
-            size.y,
-            TextureFormat::Rgba8UnormSrgb,
-            None,
-        ));
         // Only scaled rendering needs a second camera. HUD and hand overlays remain
         // in window coordinates; native rendering keeps its existing direct path.
         let compositor = commands
@@ -124,11 +102,11 @@ fn sync_resolution(
                 ChildOf(entity),
             ))
             .id();
-        *target = RenderTarget::Image(image.clone().into());
+        *target = RenderTarget::None { size };
         camera.output_mode = CameraOutputMode::Skip;
         commands
             .entity(entity)
             .remove::<IsDefaultUiCamera>()
-            .insert((RenderSurface { image, compositor }, SceneSource));
+            .insert((RenderSurface { compositor }, SceneSource));
     }
 }

@@ -59,8 +59,14 @@ impl Plugin for DevelopmentPlugin {
     }
 }
 
-fn dev_diagnostics_autoplay(mut next_state: ResMut<NextState<GameState>>) {
-    if std::env::var_os("HOLLOW_DIAGNOSTICS_AUTOPLAY").is_some() {
-        next_state.set(GameState::Game);
+fn dev_diagnostics_autoplay(
+    mut next_state: ResMut<NextState<GameState>>,
+    mut settings: ResMut<crate::voxel::VoxelSettings>,
+) {
+    if std::env::var_os("HOLLOW_VOXEL_BENCH").is_some()
+        && let Ok(seed) = std::env::var("HOLLOW_BENCH_SEED")
+    {
+        settings.seed = seed.parse().expect("HOLLOW_BENCH_SEED must be an i64");
     }
+    next_state.set(GameState::Game);
 }

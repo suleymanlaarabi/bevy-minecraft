@@ -1,6 +1,8 @@
 use crate::generation::structure::placement::GlobalStructureCache;
 use std::sync::{Arc, LazyLock, Mutex};
 
+use crate::VoxelState;
+use hollow_core::{VoxelCell, sections::Section};
 use pumpkin_data::block_properties::is_air;
 use pumpkin_data::chunk::DoublePerlinNoiseParameters;
 use pumpkin_data::fluid::{Fluid, FluidState};
@@ -144,6 +146,7 @@ impl FluidLevelSamplerImpl for StandardChunkFluidLevelSampler {
 pub(crate) enum WorkingSection {
     Uniform(BlockStateId),
     Dense(Box<[BlockStateId; 4096]>),
+    Compact(Section<VoxelState>),
 }
 impl WorkingSection {
     #[inline]
@@ -151,6 +154,7 @@ impl WorkingSection {
         match self {
             Self::Uniform(value) => *value,
             Self::Dense(cells) => cells[index],
+            Self::Compact(cells) => cells.get(index).native_id(),
         }
     }
     #[inline]
@@ -163,12 +167,46 @@ impl WorkingSection {
                 *self = Self::Dense(cells);
             }
             Self::Dense(cells) => cells[index] = value,
+            Self::Compact(_) => {
+                self.resume();
+                self.set(index, value);
+            }
         }
     }
     pub(crate) fn any(&self, predicate: impl Fn(BlockStateId) -> bool) -> bool {
         match self {
             Self::Uniform(value) => predicate(*value),
             Self::Dense(cells) => cells.iter().copied().any(predicate),
+            Self::Compact(cells) => cells
+                .palette()
+                .expect("Compact working palette")
+                .iter()
+                .map(|state| state.native_id())
+                .any(predicate),
+        }
+    }
+
+    pub(crate) fn compact(&mut self) {
+        let Self::Dense(cells) = self else { return };
+        let compact = Section::from_cells(
+            &cells.map(|id| VoxelState::from_storage_id(u32::from(id.as_u16()))),
+        );
+        if let Some(value) = compact.uniform() {
+            *self = Self::Uniform(value.native_id());
+        } else if compact.palette().is_some() {
+            *self = Self::Compact(compact);
+        }
+    }
+
+    pub(crate) fn resume(&mut self) {
+        if let Self::Compact(cells) = self {
+            let mut palette = [BlockStateId::AIR; 256];
+            for (value, state) in palette.iter_mut().zip(cells.palette().unwrap()) {
+                *value = state.native_id();
+            }
+            let mut dense = Box::new([BlockStateId::AIR; 4096]);
+            assert!(cells.copy_palette(0, dense.as_mut_slice(), &palette));
+            *self = Self::Dense(dense);
         }
     }
 }
@@ -995,7 +1033,7 @@ impl ProtoChunk {
             .iter()
             .rposition(|section| match section {
                 WorkingSection::Uniform(value) => *value != BlockStateId::AIR,
-                WorkingSection::Dense(_) => true,
+                WorkingSection::Dense(_) | WorkingSection::Compact(_) => true,
             })
             .map_or(0, |i| i + 1);
         self.block_sections.truncate(count);
@@ -1121,7 +1159,7 @@ impl ProtoChunk {
             .iter()
             .rposition(|section| match section {
                 WorkingSection::Uniform(value) => *value != BlockStateId::AIR,
-                WorkingSection::Dense(_) => true,
+                WorkingSection::Dense(_) | WorkingSection::Compact(_) => true,
             })
             .map_or(0, |i| i + 1);
         self.block_sections.truncate(count);

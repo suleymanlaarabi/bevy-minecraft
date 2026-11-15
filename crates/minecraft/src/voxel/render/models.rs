@@ -32,7 +32,7 @@ struct Animation {
 }
 #[derive(Clone)]
 struct Weighted {
-    quads: Arc<[ModelQuad]>,
+    quads: Arc<[QuadId]>,
     weight: u32,
 }
 struct Group {
@@ -43,9 +43,51 @@ struct Group {
 struct Recipe {
     groups: Vec<Group>,
     /// Common deterministic recipes bypass hashing and weighted selection.
-    fixed: Option<Arc<[ModelQuad]>>,
+    fixed: Option<Arc<[QuadId]>>,
     /// A resolved empty model is deliberately invisible, never a fallback cube.
     resolved: bool,
+}
+
+#[derive(Clone, Copy)]
+struct QuadId(u32);
+
+#[derive(Default)]
+struct QuadCatalog {
+    quads: Vec<ModelQuad>,
+    ids: HashMap<[u32; 28], QuadId>,
+}
+impl QuadCatalog {
+    fn index(&mut self, quads: impl IntoIterator<Item = ModelQuad>) -> Arc<[QuadId]> {
+        quads
+            .into_iter()
+            .map(|quad| {
+                let mut key = [0; 28];
+                for (word, value) in key.iter_mut().zip(
+                    quad.positions
+                        .into_iter()
+                        .flatten()
+                        .chain(quad.normal)
+                        .chain(quad.uv.into_iter().flatten()),
+                ) {
+                    *word = value.to_bits();
+                }
+                key[23] = quad.texture;
+                key[24..27].copy_from_slice(&quad.cull.map(|value| value as u32));
+                key[27] = u32::from(quad.tinted)
+                    | u32::from(quad.translucent) << 1
+                    | u32::from(quad.shade_up) << 2
+                    | u32::from(quad.effect) << 8
+                    | u32::from(quad.light_emission) << 16;
+                *self.ids.entry(key).or_insert_with(|| {
+                    let id = QuadId(
+                        u32::try_from(self.quads.len()).expect("Model quad catalog fits u32"),
+                    );
+                    self.quads.push(quad);
+                    id
+                })
+            })
+            .collect()
+    }
 }
 pub(crate) struct ChestParts {
     pub body: Arc<[ModelQuad]>,
@@ -55,6 +97,7 @@ pub(crate) struct ChestParts {
 struct Library {
     chests: Option<[ChestParts; 3]>,
     recipes: Box<[Recipe]>,
+    quads: Box<[ModelQuad]>,
     textures: Vec<String>,
     opaque_textures: Vec<bool>,
     /// Mesher classification of every state, read once per cell.
@@ -67,6 +110,34 @@ struct Library {
     special_layers: u32,
     animations: Vec<Animation>,
     animated_layers: Box<[bool; 2048]>,
+}
+
+#[cfg(feature = "dev")]
+pub(crate) fn memory_census(
+    census: &mut bevy_voxel::core::sections::AllocationCensus,
+) -> (usize, usize, usize) {
+    let library = library();
+    let before = census.bytes;
+    census.bytes += std::mem::size_of_val(library.quads.as_ref())
+        + std::mem::size_of_val(library.recipes.as_ref());
+    let mut references = 0;
+    for recipe in &library.recipes {
+        census.bytes += recipe.groups.capacity() * size_of::<Group>();
+        for group in &recipe.groups {
+            census.bytes += group.choices.capacity() * size_of::<Weighted>();
+        }
+        for quads in recipe.fixed.iter().chain(
+            recipe
+                .groups
+                .iter()
+                .flat_map(|group| group.choices.iter().map(|choice| &choice.quads)),
+        ) {
+            if census.shared(quads) {
+                references += quads.len();
+            }
+        }
+    }
+    (census.bytes - before, library.quads.len(), references)
 }
 
 /// One face of a greedy cube: a model face-table slot, whether the block tint
@@ -115,7 +186,7 @@ fn block_uv(position: Vec3, axis: usize) -> Vec2 {
 
 /// Six full, culled, axis-aligned faces whose UVs are a whole-texture dihedral
 /// map of block UVs: exactly what greedy terrain draws.
-fn cube_faces(quads: &[ModelQuad]) -> Option<[CubeFace; 6]> {
+fn cube_faces<'a>(quads: impl ExactSizeIterator<Item = &'a ModelQuad>) -> Option<[CubeFace; 6]> {
     if quads.len() != 6 {
         return None;
     }
@@ -259,43 +330,45 @@ fn canonical_uv(p: Vec3, n: Vec3) -> Vec2 {
         Vec2::new(1.0 - p.x, 1.0 - p.y)
     }
 }
-fn rotated(source: &[ModelQuad], x: f32, y: f32, uvlock: bool) -> Arc<[ModelQuad]> {
+fn rotated(
+    source: &[ModelQuad],
+    x: f32,
+    y: f32,
+    uvlock: bool,
+) -> impl ExactSizeIterator<Item = ModelQuad> {
     let rotation = Quat::from_rotation_y(-y.to_radians()) * Quat::from_rotation_x(-x.to_radians());
-    source
-        .iter()
-        .map(|q| {
-            let mut out = q.clone();
-            let normal = rotation * Vec3::from_array(q.normal);
-            out.normal = normal.to_array();
-            out.cull = (rotation * IVec3::from_array(q.cull).as_vec3())
-                .round()
-                .as_ivec3()
-                .to_array();
-            out.positions = q.positions.map(|p| {
-                (rotation * (Vec3::from_array(p) - Vec3::splat(0.5)) + Vec3::splat(0.5)).to_array()
-            });
-            if uvlock {
-                let old = q
-                    .positions
-                    .map(|p| canonical_uv(Vec3::from_array(p), Vec3::from_array(q.normal)));
-                let du = old[1] - old[0];
-                let dv = old[3] - old[0];
-                let determinant = du.x * dv.y - dv.x * du.y;
-                if determinant.abs() > 1e-6 {
-                    out.uv = out.positions.map(|p| {
-                        let p = canonical_uv(Vec3::from_array(p), normal) - old[0];
-                        let u = (p.x * dv.y - p.y * dv.x) / determinant;
-                        let v = (du.x * p.y - du.y * p.x) / determinant;
-                        (Vec2::from_array(q.uv[0])
-                            + (Vec2::from_array(q.uv[1]) - Vec2::from_array(q.uv[0])) * u
-                            + (Vec2::from_array(q.uv[3]) - Vec2::from_array(q.uv[0])) * v)
-                            .to_array()
-                    });
-                }
+    source.iter().map(move |q| {
+        let mut out = q.clone();
+        let normal = rotation * Vec3::from_array(q.normal);
+        out.normal = normal.to_array();
+        out.cull = (rotation * IVec3::from_array(q.cull).as_vec3())
+            .round()
+            .as_ivec3()
+            .to_array();
+        out.positions = q.positions.map(|p| {
+            (rotation * (Vec3::from_array(p) - Vec3::splat(0.5)) + Vec3::splat(0.5)).to_array()
+        });
+        if uvlock {
+            let old = q
+                .positions
+                .map(|p| canonical_uv(Vec3::from_array(p), Vec3::from_array(q.normal)));
+            let du = old[1] - old[0];
+            let dv = old[3] - old[0];
+            let determinant = du.x * dv.y - dv.x * du.y;
+            if determinant.abs() > 1e-6 {
+                out.uv = out.positions.map(|p| {
+                    let p = canonical_uv(Vec3::from_array(p), normal) - old[0];
+                    let u = (p.x * dv.y - p.y * dv.x) / determinant;
+                    let v = (du.x * p.y - du.y * p.x) / determinant;
+                    (Vec2::from_array(q.uv[0])
+                        + (Vec2::from_array(q.uv[1]) - Vec2::from_array(q.uv[0])) * u
+                        + (Vec2::from_array(q.uv[3]) - Vec2::from_array(q.uv[0])) * v)
+                        .to_array()
+                });
             }
-            out
-        })
-        .collect()
+        }
+        out
+    })
 }
 /// Text conditions are compiled once at the model import boundary.
 enum Condition {
@@ -483,8 +556,9 @@ fn library() -> &'static Library {
             ["body", "lid"].map(|part| model_ids[&format!("hollow:chest/{half}/{part}")])
         });
         drop(model_ids);
-        let mut rotations = HashMap::<(usize, i32, i32, bool), Arc<[ModelQuad]>>::new();
-        let mut assemblies = HashMap::<Vec<usize>, Arc<[ModelQuad]>>::new();
+        let mut catalog = QuadCatalog::default();
+        let mut rotations = HashMap::<(usize, i32, i32, bool), Arc<[QuadId]>>::new();
+        let mut assemblies = HashMap::<Vec<usize>, Arc<[QuadId]>>::new();
         let mut missing = std::collections::HashSet::new();
         for raw in 0..VoxelState::count() as u32 {
             let Some(state) = VoxelState::from_id(raw) else {
@@ -522,12 +596,12 @@ fn library() -> &'static Library {
                     let quads = rotations
                         .entry((model, application.x, application.y, application.uvlock))
                         .or_insert_with(|| {
-                            rotated(
+                            catalog.index(rotated(
                                 &models[model],
                                 application.x as f32,
                                 application.y as f32,
                                 application.uvlock,
-                            )
+                            ))
                         })
                         .clone();
                     if !quads.is_empty() {
@@ -554,7 +628,9 @@ fn library() -> &'static Library {
             let mut info = state_info(state);
             let model_faces = match recipe.groups.as_slice() {
                 [group] => {
-                    let mut faces = group.choices.iter().map(|model| cube_faces(&model.quads));
+                    let mut faces = group.choices.iter().map(|model| {
+                        cube_faces(model.quads.iter().map(|id| &catalog.quads[id.0 as usize]))
+                    });
                     faces
                         .next()
                         .flatten()
@@ -595,7 +671,7 @@ fn library() -> &'static Library {
                 let key = recipe
                     .groups
                     .iter()
-                    .map(|group| Arc::as_ptr(&group.choices[0].quads) as *const ModelQuad as usize)
+                    .map(|group| Arc::as_ptr(&group.choices[0].quads) as *const QuadId as usize)
                     .collect::<Vec<_>>();
                 recipe.fixed = Some(
                     assemblies
@@ -636,9 +712,13 @@ fn library() -> &'static Library {
                 pivot: Vec3::from_array(imported.chest_pivots[i]),
             }
         });
+        drop(rotations);
+        drop(assemblies);
+        drop(models);
         augment_content(Library {
             chests: Some(chests),
             recipes: recipes.into(),
+            quads: catalog.quads.into(),
             textures: imported.textures,
             opaque_textures: imported.opaque_textures,
             cells: cells.into(),
@@ -878,10 +958,11 @@ pub(crate) fn animation_table() -> Vec<[u32; 4]> {
     table
 }
 pub(crate) fn visit_quads(state: VoxelState, world: IVec3, mut visit: impl FnMut(&ModelQuad)) {
-    let recipe = &library().recipes[state.id() as usize];
+    let library = library();
+    let recipe = &library.recipes[state.id() as usize];
     if let Some(quads) = &recipe.fixed {
-        for q in quads.iter() {
-            visit(q);
+        for &QuadId(id) in quads.iter() {
+            visit(&library.quads[id as usize]);
         }
         return;
     }
@@ -910,8 +991,8 @@ pub(crate) fn visit_quads(state: VoxelState, world: IVec3, mut visit: impl FnMut
                 }
             })
             .unwrap();
-        for q in model.quads.iter() {
-            visit(q);
+        for &QuadId(id) in model.quads.iter() {
+            visit(&library.quads[id as usize]);
         }
     }
 }

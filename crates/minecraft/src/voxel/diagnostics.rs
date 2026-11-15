@@ -81,26 +81,27 @@ pub(crate) fn register(app: &mut App) {
         );
     }
     if benchmark {
-        app.insert_resource(VoxelBenchmark {
-            simplified: std::env::var_os("HOLLOW_VOXEL_BENCH_SIMPLIFIED").is_some(),
-            ..default()
-        })
-        .add_systems(OnExit(GameState::Game), reset_voxel_benchmark)
-        .add_systems(
-            Update,
-            (configure_voxel_benchmark, run_voxel_benchmark)
-                .chain()
-                .after(record_voxel_frame)
-                .run_if(in_state(GameState::Game))
-                // The player spawns once its spawn point search finishes.
-                .run_if(any_with_component::<PlayerCamera>),
-        )
-        .add_systems(
-            FixedUpdate,
-            benchmark_movement
-                .before(bevy_voxel::character::CharacterSystems)
-                .run_if(in_state(GameState::Game)),
-        );
+        app.insert_resource(bevy::winit::WinitSettings::continuous())
+            .insert_resource(VoxelBenchmark {
+                simplified: std::env::var_os("HOLLOW_VOXEL_BENCH_SIMPLIFIED").is_some(),
+                ..default()
+            })
+            .add_systems(OnExit(GameState::Game), reset_voxel_benchmark)
+            .add_systems(
+                Update,
+                (configure_voxel_benchmark, run_voxel_benchmark)
+                    .chain()
+                    .after(record_voxel_frame)
+                    .run_if(in_state(GameState::Game))
+                    // The player spawns once its spawn point search finishes.
+                    .run_if(any_with_component::<PlayerCamera>),
+            )
+            .add_systems(
+                FixedUpdate,
+                benchmark_movement
+                    .before(bevy_voxel::character::CharacterSystems)
+                    .run_if(in_state(GameState::Game)),
+            );
         if std::env::var_os("HOLLOW_BENCH_HEADLESS").is_some() {
             app.add_systems(
                 PostUpdate,
@@ -126,8 +127,13 @@ fn capture_debug_frame(
         return;
     };
     info!("debug capture: camera at {:?}", transform.translation());
+    let screenshot = if std::env::var_os("HOLLOW_BENCH_HEADLESS").is_some() {
+        bevy::render::view::screenshot::Screenshot(target.clone())
+    } else {
+        bevy::render::view::screenshot::Screenshot::primary_window()
+    };
     commands
-        .spawn(bevy::render::view::screenshot::Screenshot(target.clone()))
+        .spawn(screenshot)
         .observe(bevy::render::view::screenshot::save_to_disk(
             std::path::PathBuf::from(path),
         ));
@@ -520,6 +526,7 @@ fn report_memory(world: &mut World, mut history: Local<MemoryHistory>) {
             data.census(census);
         }
     }
+    let model_catalog = super::render::models::memory_census(census);
     let shared = census.bytes;
     let section_records: usize = world
         .query::<&ChunkSections>()
@@ -534,20 +541,28 @@ fn report_memory(world: &mut World, mut history: Local<MemoryHistory>) {
     let images: usize = world.get_resource::<Assets<Image>>().map_or(0, |images| {
         images
             .iter()
-            .map(|(_, image)| image.data.as_ref().map_or(0, Vec::capacity))
+            .map(|(id, image)| {
+                let bytes = image.data.as_ref().map_or(0, Vec::capacity);
+                if bytes >= 1 << 20 {
+                    info!(?id, size = ?image.texture_descriptor.size, usage = ?image.asset_usage,
+                        bytes, "memory census: retained CPU image");
+                }
+                bytes
+            })
             .sum()
     });
     let mesh_payload: usize = world.get_resource::<Assets<Mesh>>().map_or(0, |meshes| {
         meshes
             .iter()
             .map(|(_, mesh)| {
-                mesh.attributes()
-                    .map(|(_, values)| values.get_bytes().len())
-                    .sum::<usize>()
-                    + mesh.indices().map_or(0, |indices| match indices {
-                        bevy::mesh::Indices::U16(values) => values.capacity() * 2,
-                        bevy::mesh::Indices::U32(values) => values.capacity() * 4,
-                    })
+                mesh.try_attributes().map_or(0, |attributes| {
+                    attributes
+                        .map(|(_, values)| values.get_bytes().len())
+                        .sum::<usize>()
+                }) + mesh.try_indices().map_or(0, |indices| match indices {
+                    bevy::mesh::Indices::U16(values) => values.capacity() * 2,
+                    bevy::mesh::Indices::U32(values) => values.capacity() * 4,
+                })
             })
             .sum()
     });
@@ -574,6 +589,18 @@ fn report_memory(world: &mut World, mut history: Local<MemoryHistory>) {
         + render.ecs.sparse_live_lower_bound
         + render.cpu_payload;
     let resident = process_memory();
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: mallinfo2 takes no pointers and only snapshots allocator counters.
+        let allocator = unsafe { libc::mallinfo2() };
+        info!(
+            arena_bytes = allocator.arena,
+            live_arena_bytes = allocator.uordblks,
+            free_arena_bytes = allocator.fordblks,
+            mmap_bytes = allocator.hblkhd,
+            "memory census: glibc allocator; mapped bytes may be nonresident"
+        );
+    }
     history.peak_rss = history.peak_rss.max(resident[0].unwrap_or(0));
     history.peak_known = history.peak_known.max(known);
     // Logical allocations and resident pages are different quantities. The residual
@@ -582,7 +609,7 @@ fn report_memory(world: &mut World, mut history: Local<MemoryHistory>) {
         peak_rss_bytes = history.peak_rss, known_allocation_bytes = known, peak_known_bytes = history.peak_known,
         rss_minus_known_estimate = ?resident[0].map(|rss| rss as i128 - known as i128),
         ecs_main = ?main_ecs, ecs_render = ?render.ecs,
-        shared_allocation_bytes = shared, mesher_scratch_bytes = mesher_scratch, generation = ?generation, section_records_bytes = section_records,
+        shared_allocation_bytes = shared, model_catalog = ?model_catalog, mesher_scratch_bytes = mesher_scratch, generation = ?generation, section_records_bytes = section_records,
         image_bytes = images, mesh_payload_bytes = mesh_payload, queued_geometry_payload_bytes = queued_payload,
         gpu_arena_live_bytes = render.arena_live, gpu_arena_reserved_bytes = render.arena_reserved,
         "memory census: allocation lower bounds; task captures, native structure caches, catalogs and driver memory remain unattributed; GPU bytes are separate");

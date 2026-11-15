@@ -21,6 +21,11 @@ pub(super) fn setup(
         TextureFormat::Rgba8UnormSrgb,
         None,
     ));
+    for target in [&assets.preview, &assets.arm_view] {
+        let mut image = images.get_mut(target).unwrap();
+        image.data = None;
+        image.copy_on_resize = false;
+    }
     assets.classic = mesh::skin_parts(&mut meshes);
     assets.source = crate::load_nearest(&server, "skin.png");
     assets.base = materials.add(StandardMaterial {

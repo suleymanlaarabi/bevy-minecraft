@@ -6,20 +6,15 @@ use bevy::{
     prelude::*,
     render::{
         Render, RenderApp, RenderStartup, RenderSystems,
-        camera::{ExtractedCamera, NormalizedRenderTargetExt},
+        camera::ExtractedCamera,
         extract_component::{ExtractComponent, ExtractComponentPlugin},
-        render_asset::RenderAssets,
         render_resource::{
             binding_types::{sampler, texture_2d},
             *,
         },
         renderer::{RenderContext, RenderDevice, ViewQuery},
-        sync_world::MainEntity,
-        texture::{GpuImage, ManualTextureViews, OutputColorAttachment},
-        view::{
-            ExtractedWindow, ViewTarget, ViewTargetAttachments, prepare_view_attachments,
-            prepare_view_targets,
-        },
+        texture::OutputColorAttachment,
+        view::{ViewTarget, ViewTargetAttachments, prepare_view_attachments, prepare_view_targets},
     },
 };
 
@@ -42,6 +37,7 @@ struct CompositePipeline {
     sampler: Sampler,
     vertex: VertexState,
     shader: Handle<Shader>,
+    output: TextureView,
     pipeline: Option<(TextureFormat, CachedRenderPipelineId)>,
 }
 
@@ -105,6 +101,21 @@ fn init_pipeline(
         }),
         vertex: fullscreen.to_vertex_state(),
         shader: shader.0.clone(),
+        // Bevy retains a cleared scene ViewTarget only with an output attachment.
+        // CameraOutputMode::Skip never writes it: one pixel replaces a full-size
+        // output texture and its CPU pixels without changing the scene targets.
+        output: device
+            .create_texture(&TextureDescriptor {
+                label: Some("unused scene output"),
+                size: Extent3d::default(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rgba8UnormSrgb,
+                usage: TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&TextureViewDescriptor::default()),
         pipeline: None,
     });
 }
@@ -113,9 +124,7 @@ fn init_pipeline(
 /// camera skips its output, so its target is registered here to keep it rendering.
 fn keep_scene_output(
     cameras: Query<&ExtractedCamera, With<SceneSource>>,
-    images: Res<RenderAssets<GpuImage>>,
-    manual: Res<ManualTextureViews>,
-    windows: Query<(MainEntity, &ExtractedWindow)>,
+    composite: Res<CompositePipeline>,
     mut attachments: ResMut<ViewTargetAttachments>,
 ) {
     for camera in cameras
@@ -126,16 +135,9 @@ fn keep_scene_output(
         let Some(target) = &camera.target else {
             continue;
         };
-        if attachments.contains_key(target) {
-            continue;
-        }
-        if let Some((view, format)) = target
-            .get_texture_view(&windows, &images, &manual)
-            .cloned()
-            .zip(target.get_texture_view_format(&windows, &images, &manual))
-        {
-            attachments.insert(target.clone(), OutputColorAttachment::new(view, format));
-        }
+        attachments.entry(target.clone()).or_insert_with(|| {
+            OutputColorAttachment::new(composite.output.clone(), TextureFormat::Rgba8UnormSrgb)
+        });
     }
 }
 

@@ -1073,6 +1073,7 @@ fn schedule(
                                 None,
                                 target,
                                 0,
+                                [target; 9],
                             )
                         })
                         .await
@@ -1137,6 +1138,7 @@ fn schedule(
             }
             let mut reads = Vec::new();
             let mut writes = Vec::new();
+            let mut targets = [Stage::Full; 9];
             for dx in -read_radius..=read_radius {
                 for dz in -read_radius..=read_radius {
                     let p = position.add_raw(dx, dz);
@@ -1144,6 +1146,7 @@ fn schedule(
                     if dx.abs().max(dz.abs()) <= write_radius {
                         entry.writing = true;
                         writes.push((p, entry.revision));
+                        targets[cache.chunks.len()] = entry.target();
                         cache.chunks.push(entry.chunk.take().unwrap());
                     } else {
                         entry.readers += 1;
@@ -1160,6 +1163,7 @@ fn schedule(
                     Some(stage),
                     target,
                     read_radius,
+                    targets,
                 )
             });
             runtime.spawn(&mut commands, position, writes, reads, task);
@@ -1175,11 +1179,19 @@ fn generate(
     first: Option<Stage>,
     target: Stage,
     read_radius: i32,
+    targets: [Stage; 9],
 ) -> Output {
     let mut stage = first.unwrap_or(Stage::Empty);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let generator = session.generator();
         let (mut cache, saved) = prepare(&generator)?;
+        for chunk in &mut cache.chunks {
+            if let Chunk::Proto(chunk) = chunk {
+                for section in &mut chunk.block_sections {
+                    section.resume();
+                }
+            }
+        }
         let center = (cache.size * cache.size / 2) as usize;
         let stored_stage = cache.chunks[center].get_stage_id();
         stage = first.unwrap_or_else(|| Stage::from(cache.chunks[center].get_stage_id()));
@@ -1213,6 +1225,18 @@ fn generate(
                 break;
             }
             stage = next;
+        }
+        // Only a column parked at its requested stage is compressed. Active
+        // generation keeps direct dense reads/writes, including neighbor writes.
+        for (chunk, target) in cache.chunks.iter_mut().zip(targets) {
+            if let Chunk::Proto(chunk) = chunk
+                && target != Stage::None
+                && chunk.stage >= target
+            {
+                for section in &mut chunk.block_sections {
+                    section.compact();
+                }
+            }
         }
         let snapshot = match &cache.chunks[center] {
             Chunk::Complete(data) if !session.is_cancelled() => Some(data.snapshot()),
@@ -1377,8 +1401,10 @@ fn census_chunk(chunk: &Chunk, census: &mut hollow_core::sections::AllocationCen
                     .map(nbt_bytes)
                     .sum::<usize>();
             for section in &chunk.block_sections {
-                if let WorkingSection::Dense(cells) = section {
-                    working += size_of_val(cells.as_ref());
+                match section {
+                    WorkingSection::Dense(cells) => working += size_of_val(cells.as_ref()),
+                    WorkingSection::Compact(cells) => cells.census(census),
+                    WorkingSection::Uniform(_) => {}
                 }
             }
             for channel in [&chunk.light.sky_light, &chunk.light.block_light] {
