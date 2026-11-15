@@ -5,81 +5,7 @@ use bevy::{
 use serde::Deserialize;
 use std::collections::HashMap;
 
-fn default_texture_layers() -> u32 {
-    9
-}
-
-#[derive(Component, Reflect, Clone, Copy, Debug, PartialEq, Eq)]
-#[type_path = "bevy_minecraft::voxel::material"]
-pub enum TexturePackId {
-    Vanilla,
-    Faithful,
-    Replete,
-    Meadow,
-    Twilight,
-}
-
-impl TexturePackId {
-    pub const fn all() -> [Self; 5] {
-        [
-            Self::Vanilla,
-            Self::Faithful,
-            Self::Replete,
-            Self::Meadow,
-            Self::Twilight,
-        ]
-    }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Vanilla => "Minecraft",
-            Self::Faithful => "Faithful 32x",
-            Self::Replete => "Replete",
-            Self::Meadow => "Meadow",
-            Self::Twilight => "Twilight",
-        }
-    }
-
-    /// Vanilla textures are not redistributable: they exist only after running
-    /// scripts/import_vanilla.py. Every other pack ships with the game.
-    pub fn is_available(self) -> bool {
-        self != Self::Vanilla
-            || crate::asset_directory()
-                .join(format!("voxel/packs/{}/blocks_array.png", self.directory()))
-                .is_file()
-    }
-
-    const fn directory(self) -> &'static str {
-        match self {
-            Self::Vanilla => "vanilla",
-            Self::Faithful => "faithful",
-            Self::Replete => "replete",
-            Self::Meadow => "meadow",
-            Self::Twilight => "twilight",
-        }
-    }
-
-    const fn manifest_source(self) -> &'static str {
-        match self {
-            Self::Vanilla => include_str!("../../../../../assets/voxel/packs/vanilla/pack.ron"),
-            Self::Faithful => include_str!("../../../../../assets/voxel/packs/faithful/pack.ron"),
-            Self::Replete => include_str!("../../../../../assets/voxel/packs/replete/pack.ron"),
-            Self::Meadow => include_str!("../../../../../assets/voxel/packs/meadow/pack.ron"),
-            Self::Twilight => include_str!("../../../../../assets/voxel/packs/twilight/pack.ron"),
-        }
-    }
-}
-
-/// Minecraft textures when imported, otherwise the bundled Faithful pack.
-impl Default for TexturePackId {
-    fn default() -> Self {
-        if Self::Vanilla.is_available() {
-            Self::Vanilla
-        } else {
-            Self::Faithful
-        }
-    }
-}
+const BLOCK_TEXTURE_PATH: &str = "voxel/packs/vanilla/blocks_array.png";
 
 fn white() -> (f32, f32, f32) {
     (1.0, 1.0, 1.0)
@@ -102,20 +28,14 @@ struct BlockTextureConfig {
 type BlockTextures = HashMap<String, BlockTextureConfig>;
 
 #[derive(Debug, Deserialize)]
-struct TexturePackManifest {
-    name: String,
-    texture: String,
-    #[serde(default = "default_texture_layers")]
+struct TextureManifest {
     layers: u32,
     blocks: BlockTextures,
 }
 
-#[derive(Resource, Clone, Debug)]
-pub(crate) struct TexturePack {
-    /// Pack actually loaded, after any fallback.
-    id: TexturePackId,
-    pub(crate) texture_path: String,
-    pub(crate) layers: u32,
+#[derive(Resource, Debug)]
+pub(crate) struct MinecraftTextures {
+    layers: u32,
     /// Fallbacks resolved at load, indexed by `VoxelKind as usize`; `None` when not opaque.
     blocks: Box<[Option<BlockTextureConfig>]>,
 }
@@ -161,14 +81,14 @@ fn resolve(blocks: &[Option<BlockTextureConfig>], kind: VoxelKind) -> Option<Blo
     Some(config)
 }
 
-impl TexturePackManifest {
+impl TextureManifest {
     fn resolved_blocks(&self) -> Result<Box<[Option<BlockTextureConfig>]>, String> {
         let mut blocks = vec![None; VoxelKind::count()];
         for (name, &config) in &self.blocks {
             let kind = VoxelKind::from_key(name)
-                .ok_or_else(|| format!("Unknown texture pack block: {name}"))?;
+                .ok_or_else(|| format!("Unknown Minecraft texture block: {name}"))?;
             if blocks[kind.index()].replace(config).is_some() {
-                return Err(format!("Duplicate texture pack block: {name}"));
+                return Err(format!("Duplicate Minecraft texture block: {name}"));
             }
         }
         if blocks[VoxelKind::Stone.index()].is_none() {
@@ -179,46 +99,38 @@ impl TexturePackManifest {
 }
 
 /// Native block identities present in a validated manifest.
-pub(crate) fn manifest_keys(id: TexturePackId) -> Box<[bool]> {
-    let manifest: TexturePackManifest =
-        ron::from_str(id.manifest_source()).expect("Invalid texture pack manifest");
+pub(crate) fn manifest_keys() -> Box<[bool]> {
+    let manifest: TextureManifest = ron::from_str(include_str!(
+        "../../../../../assets/voxel/packs/vanilla/pack.ron"
+    ))
+    .expect("Invalid Minecraft texture manifest");
     manifest
         .resolved_blocks()
-        .expect("Invalid texture pack identities")
+        .expect("Invalid Minecraft texture identities")
         .iter()
         .map(Option::is_some)
         .collect()
 }
 
-impl TexturePack {
-    pub(crate) fn load(id: TexturePackId) -> Self {
-        Self::try_load(id).unwrap_or_else(|error| {
-            // Vanilla textures are not redistributable: they exist only after
-            // running scripts/import_vanilla.py.
-            warn!("Unable to load texture pack {}: {error}", id.label());
-            // Bundled and checked by tests: no filesystem access can make this fail.
-            Self::try_load(TexturePackId::Faithful)
-                .expect("the built-in Faithful texture pack must be valid")
-        })
-    }
-
-    fn try_load(id: TexturePackId) -> Result<Self, String> {
-        let manifest = ron::from_str::<TexturePackManifest>(id.manifest_source())
-            .map_err(|error| error.to_string())?;
-        let blocks = manifest.resolved_blocks()?;
-        let texture_path = format!("voxel/packs/{}/{}", id.directory(), manifest.texture);
-        if !id.is_available() {
-            return Err(format!("missing {texture_path}"));
-        }
-        debug!("Loaded texture pack {} ({})", id.label(), manifest.name);
-        Ok(Self {
-            id,
-            texture_path,
+impl MinecraftTextures {
+    pub(crate) fn load() -> Self {
+        assert!(
+            crate::asset_directory().join(BLOCK_TEXTURE_PATH).is_file(),
+            "Missing Minecraft textures; run scripts/import_vanilla.py"
+        );
+        let manifest: TextureManifest = ron::from_str(include_str!(
+            "../../../../../assets/voxel/packs/vanilla/pack.ron"
+        ))
+        .expect("Invalid Minecraft texture manifest");
+        let blocks = manifest
+            .resolved_blocks()
+            .expect("Invalid Minecraft texture identities");
+        Self {
             layers: manifest.layers,
             blocks: VoxelKind::all()
                 .map(|kind| resolve(&blocks, kind))
                 .collect(),
-        })
+        }
     }
 
     pub(crate) fn load_texture(
@@ -230,9 +142,9 @@ impl TexturePack {
         use bevy::render::render_resource::TextureFormat;
         let external = super::models::external_textures();
         if external.is_empty() {
-            return block_texture(server, &self.texture_path, self.layers);
+            return block_texture(server, BLOCK_TEXTURE_PATH, self.layers);
         }
-        // Packing is initialization/pack-switch work, never performed by mesh workers.
+        // Packing is initialization work, never performed by mesh workers.
         // One shared array avoids a texture/material allocation per custom block.
         let decode = |path: &str| {
             let bytes = std::fs::read(crate::asset_directory().join(path))
@@ -254,7 +166,7 @@ impl TexturePack {
                     .expect("Content image must support RGBA8")
             }
         };
-        let mut image = decode(&self.texture_path);
+        let mut image = decode(BLOCK_TEXTURE_PATH);
         let width = image.width();
         let height = image.height() / self.layers;
         assert_eq!(
@@ -277,7 +189,7 @@ impl TexturePack {
         for (resource, _) in external {
             let source = decode(hollow_worldgen::content::catalog().resource(*resource));
             let data = source.data.as_ref().unwrap();
-            // Nearest sampling matches the pack's voxel textures. Source dimensions
+            // Nearest sampling matches Minecraft voxel textures. Source dimensions
             // are normalized once, so custom content can use a different resolution.
             for y in 0..height {
                 for x in 0..width {
@@ -344,56 +256,37 @@ impl TexturePack {
                     }
                     let [r, g, b] = self.texture_tint(kind, axis, positive);
                     let layer = self.texture_layer(kind, axis, positive);
-                    let layer = if self.vanilla_models() {
-                        super::models::animated_layer(layer)
-                    } else {
-                        layer
-                    };
+                    let layer = super::models::animated_layer(layer);
                     [r, g, b, layer as f32]
                 })
             })
             .collect()
     }
 
-    /// Whether model texture slots map one to one onto this pack's layers. Other
-    /// packs remap them, so the vanilla opacity of a slot says nothing.
-    pub(crate) fn vanilla_models(&self) -> bool {
-        self.id == TexturePackId::Vanilla
-    }
-
     /// Water samples the block array only when both imported fluid textures exist.
     pub(crate) fn surface_water(&self) -> bool {
-        self.vanilla_models()
-            && ["water_still", "water_flow"].into_iter().all(|name| {
-                super::models::texture_names()
-                    .iter()
-                    .any(|texture| texture == name)
-            })
+        ["water_still", "water_flow"].into_iter().all(|name| {
+            super::models::texture_names()
+                .iter()
+                .any(|texture| texture == name)
+        })
     }
 
     pub(crate) fn model_face_table(&self) -> Vec<[f32; 4]> {
-        let vanilla = self.vanilla_models();
-        let mut table = super::models::texture_names()
-            .iter()
-            .enumerate()
-            .map(|(index, name)| {
-                if let Some(offset) = super::models::external_textures()
-                    .iter()
-                    .position(|(_, slot)| *slot as usize == index)
-                {
-                    return [1.0, 1.0, 1.0, (self.layers + offset as u32) as f32];
-                }
-                if vanilla {
-                    return [1.0, 1.0, 1.0, super::models::texture_layer(index) as f32];
-                }
-                let kind = VoxelKind::from_key(name)
-                    .or_else(|| name.strip_suffix("_top").and_then(VoxelKind::from_key))
-                    .or_else(|| name.strip_suffix("_side").and_then(VoxelKind::from_key))
-                    .unwrap_or(VoxelKind::Stone);
-                let axis = if name.ends_with("_top") { 1 } else { 0 };
-                [1.0, 1.0, 1.0, self.texture_layer(kind, axis, true) as f32]
-            })
-            .collect::<Vec<_>>();
+        let texture_count = super::models::texture_names().len();
+        let external = super::models::external_textures();
+        let mut table =
+            Vec::with_capacity(texture_count + VoxelKind::count() * 3 + super::models::TINTS.len());
+        // Custom image slots are appended after the imported Minecraft slots.
+        table.extend(
+            (0..texture_count - external.len())
+                .map(|index| [1.0, 1.0, 1.0, super::models::texture_layer(index) as f32]),
+        );
+        table.resize(texture_count, [0.0; 4]);
+        for (offset, &(_, slot)) in external.iter().enumerate() {
+            let layer = self.layers + u32::try_from(offset).expect("Too many external images");
+            table[slot as usize] = [1.0, 1.0, 1.0, layer as f32];
+        }
         table.extend(self.face_table());
         // Tint palette, read from the end of the table by `model_vertex.wesl`.
         table.extend(super::models::TINTS.map(|[r, g, b]| [r, g, b, 0.0]));
@@ -410,17 +303,15 @@ impl TexturePack {
 
     /// Both material families share one immutable animation descriptor buffer.
     pub(crate) fn animation_buffer(&self) -> ShaderBuffer {
-        let table = if self.vanilla_models() {
-            super::models::animation_table()
-        } else {
-            vec![[0_u32; 4]]
-        };
-        ShaderBuffer::new(table, RenderAssetUsages::RENDER_WORLD)
+        ShaderBuffer::new(
+            super::models::animation_table(),
+            RenderAssetUsages::RENDER_WORLD,
+        )
     }
 
     pub(crate) fn special_texture(&self, server: &AssetServer) -> Option<Handle<Image>> {
         let layers = super::models::special_layers();
-        (self.vanilla_models() && layers != 0)
+        (layers != 0)
             .then(|| block_texture(server, "voxel/packs/vanilla/special_array.png", layers))
     }
 

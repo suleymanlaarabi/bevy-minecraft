@@ -9,7 +9,7 @@ use crate::{
 use bevy_app::{App, Plugin, PostUpdate};
 use bevy_ecs::prelude::*;
 use bevy_math::IVec2;
-use bevy_tasks::{IoTaskPool, Task, futures::check_ready};
+use bevy_tasks::{IoTaskPool, Task, TaskPool, TaskPoolBuilder, futures::check_ready};
 use hollow_engine::tasks::{SchedulingDeadline, VoxelTaskBudget, VoxelTasks, WorkClass};
 use pumpkin_util::world_seed::Seed;
 use std::{
@@ -27,6 +27,55 @@ use std::{
 pub struct GenerationSettings {
     pub seed: i64,
     pub dimension: Dimension,
+}
+
+/// Dedicated terrain workers, typically on otherwise idle efficiency cores.
+/// Without this resource, generation shares the voxel task budget.
+#[derive(Resource, Clone)]
+pub struct GenerationPool {
+    pool: Arc<TaskPool>,
+    threads: usize,
+}
+impl GenerationPool {
+    pub fn new(threads: usize, on_thread_spawn: impl Fn() + Send + Sync + 'static) -> Self {
+        let threads = threads.max(1);
+        Self {
+            pool: Arc::new(
+                TaskPoolBuilder::new()
+                    .num_threads(threads)
+                    .thread_name("Terrain generation".into())
+                    .on_thread_spawn(on_thread_spawn)
+                    .build(),
+            ),
+            threads,
+        }
+    }
+}
+
+/// Generation compute goes to the dedicated pool when one exists.
+#[derive(Clone)]
+struct Workers {
+    budget: VoxelTaskBudget,
+    pool: Option<GenerationPool>,
+}
+impl Workers {
+    fn count(&self) -> usize {
+        self.pool
+            .as_ref()
+            .map_or_else(|| self.budget.worker_count(), |pool| pool.threads)
+    }
+    fn spawn<T: Send + 'static>(
+        &self,
+        class: WorkClass,
+        distance: u32,
+        work: impl Future<Output = T> + Send + 'static,
+    ) -> Task<T> {
+        match &self.pool {
+            // Admission below already orders requests by distance and bounds them.
+            Some(pool) => pool.pool.spawn(work),
+            None => self.budget.spawn(class, distance, work),
+        }
+    }
 }
 
 /// The game retains this column while its presentation or gameplay data is loaded.
@@ -725,9 +774,14 @@ fn schedule(
     mut commands: Commands,
     mut graph: ResMut<GenerationGraph>,
     budget: Res<VoxelTaskBudget>,
+    pool: Option<Res<GenerationPool>>,
     retained: Query<(), With<ChunkRetention>>,
     mut deadline: ResMut<SchedulingDeadline>,
 ) {
+    let workers = Workers {
+        budget: budget.clone(),
+        pool: pool.map(|pool| pool.clone()),
+    };
     let started = Instant::now();
     deadline.until = started
         + deadline
@@ -743,7 +797,7 @@ fn schedule(
         if runtime.session.0.generator.get().is_none() {
             if runtime.active == 0 {
                 let settings = runtime.session.settings().clone();
-                let task = budget.spawn(WorkClass::Loading, 0, async move {
+                let task = workers.spawn(WorkClass::Loading, 0, async move {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let generator = TerrainGenerator::new(
                             Seed(settings.seed as u64),
@@ -813,11 +867,11 @@ fn schedule(
             continue;
         }
         if !runtime.trim_in_flight
-            && runtime.active < budget.worker_count()
+            && runtime.active < workers.count()
             && let Some((center, radius)) = runtime.trim_pending.take()
         {
             let session = runtime.session.clone();
-            let task = budget.spawn(WorkClass::Streaming, 0, async move {
+            let task = workers.spawn(WorkClass::Streaming, 0, async move {
                 if !session.is_cancelled() {
                     session
                         .generator()
@@ -856,7 +910,7 @@ fn schedule(
                         && runtime.session.0.storage.is_some()
                         && entry.saved_revision != Some(entry.revision)
                     {
-                        if runtime.active < budget.worker_count() {
+                        if runtime.active < workers.count() {
                             entry.writing = true;
                             evicted_writes.push((position, entry.revision));
                             evicted.push((position, entry.chunk.take().unwrap()));
@@ -894,7 +948,7 @@ fn schedule(
         }
         // I/O and completed results do not occupy CPU workers. Keep a bounded
         // second wave admitted so workers can refill between Bevy frames.
-        while Instant::now() < deadline.until && runtime.active < budget.worker_count() * 2 {
+        while Instant::now() < deadline.until && runtime.active < workers.count() * 2 {
             let Some(Reverse((distance, x, z))) = runtime.ready.pop() else {
                 break;
             };
@@ -913,7 +967,7 @@ fn schedule(
                 let target = entry.target();
                 let session = runtime.session.clone();
                 let generator_session = session.clone();
-                let decode_budget = budget.clone();
+                let decode_workers = workers.clone();
                 let task = IoTaskPool::get().spawn(async move {
                     let result = (|| -> Result<_, String> {
                         if session.is_cancelled() {
@@ -931,7 +985,7 @@ fn schedule(
                         }
                         Ok(stored.and_then(|mut chunks| chunks.pop()).flatten())
                     })();
-                    decode_budget
+                    decode_workers
                         .spawn(generator_session.work_class(), distance, async move {
                             generate(
                                 &generator_session,
@@ -1033,7 +1087,7 @@ fn schedule(
                 }
             }
             let session = runtime.session.clone();
-            let task = budget.spawn(session.work_class(), distance, async move {
+            let task = workers.spawn(session.work_class(), distance, async move {
                 generate(
                     &session,
                     position,

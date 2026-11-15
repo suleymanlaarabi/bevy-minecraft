@@ -1,6 +1,6 @@
 //! Baked vanilla models. All JSON, property matching and rotations happen once;
 //! mesh workers only index shared, immutable quad lists.
-use super::texture_pack::{TexturePackId, manifest_keys};
+use super::textures::manifest_keys;
 use crate::voxel::{VoxelKind, VoxelState};
 use bevy::prelude::*;
 use bevy_voxel::render::models::{CellInfo, ModelQuad, cell};
@@ -444,42 +444,37 @@ impl BlockModel {
 fn library() -> &'static Library {
     static LIBRARY: OnceLock<Library> = OnceLock::new();
     LIBRARY.get_or_init(|| {
-        let imported = match std::fs::read(crate::asset_directory().join("voxel/packs/vanilla/models.json")) {
-            Ok(bytes) => {
-                let data: Imported = serde_json::from_slice(&bytes).expect("Invalid vanilla model cache; regenerate it with scripts/import_vanilla.py");
-                Some(data)
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => panic!("Cannot read vanilla model cache: {error}"),
-        };
-        let mut recipes = (0..VoxelState::count() as u32).map(|_| Recipe::default()).collect::<Vec<_>>();
+        let bytes = std::fs::read(crate::asset_directory().join("voxel/packs/vanilla/models.json"))
+            .expect("Missing Minecraft model cache; run scripts/import_vanilla.py");
+        let imported: Imported = serde_json::from_slice(&bytes)
+            .expect("Invalid Minecraft model cache; regenerate it with scripts/import_vanilla.py");
+        let mut recipes = (0..VoxelState::count() as u32)
+            .map(|_| Recipe::default())
+            .collect::<Vec<_>>();
         let mut cells = vec![CellInfo::default(); VoxelState::count()];
         let mut appearances = Appearances::default();
-        let pack_keys = manifest_keys(TexturePackId::Vanilla);
-        let Some(imported) = imported else {
-            warn!("Vanilla models unavailable: using shape-based models; run scripts/import_vanilla.py");
-            for raw in 0..VoxelState::count() as u32 {
-                let Some(state) = VoxelState::from_id(raw) else { continue; };
-                let mut info = state_info(state);
-                if state.is_opaque_cube() && pack_cube(&pack_keys, state.kind()) {
-                    info.appearance = appearances.id(pack_faces(state.kind(), 0), state.kind());
-                    info.flags |= cell::CUBE;
-                }
-                cells[raw as usize] = finish(info, state);
-            }
-            return augment_content(Library { chests: None, recipes: recipes.into(), cells: cells.into(), appearances: appearances.list, textures: Vec::new(), opaque_textures: Vec::new(), texture_layers: Vec::new(), special_layers: 0, animations: Vec::new(), animated_layers: Box::new([false; 2048]), external: Vec::new(), block_slots: Box::new([]) });
-        };
-        let model_ids: HashMap<_, _> = imported.models.keys().enumerate().map(|(index, name)| (name.clone(), index)).collect();
+        let pack_keys = manifest_keys();
+        let model_ids: HashMap<_, _> = imported
+            .models
+            .keys()
+            .enumerate()
+            .map(|(index, name)| (name.clone(), index))
+            .collect();
         let models: Vec<_> = {
             let mut models = vec![Vec::new(); model_ids.len()];
-            for (name, quads) in imported.models { models[model_ids[&name]] = quads; }
+            for (name, quads) in imported.models {
+                models[model_ids[&name]] = quads;
+            }
             models
         };
         let mut blocks: Vec<Option<BlockModel>> = (0..VoxelKind::count()).map(|_| None).collect();
         for (name, value) in imported.blocks {
             // Vanilla also ships blockstate files for these two entities.
-            if matches!(name.as_str(), "item_frame" | "glow_item_frame") { continue; }
-            let kind = VoxelKind::from_key(&name).unwrap_or_else(|| panic!("Unknown imported model block: {name}"));
+            if matches!(name.as_str(), "item_frame" | "glow_item_frame") {
+                continue;
+            }
+            let kind = VoxelKind::from_key(&name)
+                .unwrap_or_else(|| panic!("Unknown imported model block: {name}"));
             let slot = &mut blocks[kind.index()];
             assert!(slot.is_none(), "Duplicate imported block identity");
             *slot = Some(BlockModel::compile(value, &model_ids));
@@ -492,30 +487,61 @@ fn library() -> &'static Library {
         let mut assemblies = HashMap::<Vec<usize>, Arc<[ModelQuad]>>::new();
         let mut missing = std::collections::HashSet::new();
         for raw in 0..VoxelState::count() as u32 {
-            let Some(state) = VoxelState::from_id(raw) else { continue; };
+            let Some(state) = VoxelState::from_id(raw) else {
+                continue;
+            };
             let kind = state.kind();
             let Some(block) = blocks[kind.index()].as_ref() else {
                 missing.insert(kind);
                 cells[raw as usize] = finish(state_info(state), state);
                 continue;
             };
-            let applications = block.variants.iter().find(|part| part.condition.matches(state))
-                .into_iter().chain(block.multipart.iter().filter(|part| part.condition.matches(state)));
+            let applications = block
+                .variants
+                .iter()
+                .find(|part| part.condition.matches(state))
+                .into_iter()
+                .chain(
+                    block
+                        .multipart
+                        .iter()
+                        .filter(|part| part.condition.matches(state)),
+                );
             let recipe = &mut recipes[raw as usize];
             let mut selected_model = false;
             let mut missing_model = false;
             for part in applications {
                 let mut group = Vec::new();
                 for application in &part.applications {
-                    let Some(model) = application.model else { missing.insert(kind); missing_model = true; continue; };
+                    let Some(model) = application.model else {
+                        missing.insert(kind);
+                        missing_model = true;
+                        continue;
+                    };
                     selected_model = true;
-                    let quads = rotations.entry((model, application.x, application.y, application.uvlock)).or_insert_with(|| rotated(&models[model], application.x as f32, application.y as f32, application.uvlock)).clone();
+                    let quads = rotations
+                        .entry((model, application.x, application.y, application.uvlock))
+                        .or_insert_with(|| {
+                            rotated(
+                                &models[model],
+                                application.x as f32,
+                                application.y as f32,
+                                application.uvlock,
+                            )
+                        })
+                        .clone();
                     if !quads.is_empty() {
-                        group.push(Weighted { quads, weight: application.weight });
+                        group.push(Weighted {
+                            quads,
+                            weight: application.weight,
+                        });
                     }
                 }
                 if !group.is_empty() {
-                    recipe.groups.push(Group { total: group.iter().map(|m| u64::from(m.weight)).sum(), choices: group });
+                    recipe.groups.push(Group {
+                        total: group.iter().map(|m| u64::from(m.weight)).sum(),
+                        choices: group,
+                    });
                 }
             }
             recipe.resolved = selected_model && !missing_model;
@@ -529,11 +555,16 @@ fn library() -> &'static Library {
             let model_faces = match recipe.groups.as_slice() {
                 [group] => {
                     let mut faces = group.choices.iter().map(|model| cube_faces(&model.quads));
-                    faces.next().flatten().filter(|first| faces.all(|other| other == Some(*first)))
+                    faces
+                        .next()
+                        .flatten()
+                        .filter(|first| faces.all(|other| other == Some(*first)))
                 }
                 _ => None,
             };
-            if state == kind.default_state() && kind.is_opaque() && pack_cube(&pack_keys, kind)
+            if state == kind.default_state()
+                && kind.is_opaque()
+                && pack_cube(&pack_keys, kind)
                 && !recipe.groups.is_empty()
             {
                 info.appearance = appearances.id(pack_faces(kind, imported.textures.len()), kind);
@@ -558,28 +589,67 @@ fn library() -> &'static Library {
             } else {
                 finish(info, state)
             };
-            if !recipe.groups.is_empty() && recipe.groups.iter().all(|group| group.choices.len() == 1) {
-                let key = recipe.groups.iter().map(|group| Arc::as_ptr(&group.choices[0].quads) as *const ModelQuad as usize).collect::<Vec<_>>();
-                recipe.fixed = Some(assemblies.entry(key).or_insert_with(|| {
-                    if recipe.groups.len() == 1 { recipe.groups[0].choices[0].quads.clone() }
-                    else { recipe.groups.iter().flat_map(|group| group.choices[0].quads.iter().cloned()).collect() }
-                }).clone());
+            if !recipe.groups.is_empty()
+                && recipe.groups.iter().all(|group| group.choices.len() == 1)
+            {
+                let key = recipe
+                    .groups
+                    .iter()
+                    .map(|group| Arc::as_ptr(&group.choices[0].quads) as *const ModelQuad as usize)
+                    .collect::<Vec<_>>();
+                recipe.fixed = Some(
+                    assemblies
+                        .entry(key)
+                        .or_insert_with(|| {
+                            if recipe.groups.len() == 1 {
+                                recipe.groups[0].choices[0].quads.clone()
+                            } else {
+                                recipe
+                                    .groups
+                                    .iter()
+                                    .flat_map(|group| group.choices[0].quads.iter().cloned())
+                                    .collect()
+                            }
+                        })
+                        .clone(),
+                );
                 recipe.groups.clear();
                 recipe.groups.shrink_to_fit();
             }
         }
-        if !missing.is_empty() { warn!("{} vanilla model families unavailable", missing.len()); }
+        if !missing.is_empty() {
+            warn!("{} vanilla model families unavailable", missing.len());
+        }
         let mut animated_layers = Box::new([false; 2048]);
-        for animation in &imported.animations { animated_layers[animation.layer as usize] = true; }
+        for animation in &imported.animations {
+            animated_layers[animation.layer as usize] = true;
+        }
         let chests = ["single", "left", "right"].map(|half| {
-            let i = match half { "left" => 1, "right" => 2, _ => 0 };
+            let i = match half {
+                "left" => 1,
+                "right" => 2,
+                _ => 0,
+            };
             ChestParts {
                 body: models[chest_models[i][0]].clone().into(),
                 lid: models[chest_models[i][1]].clone().into(),
                 pivot: Vec3::from_array(imported.chest_pivots[i]),
             }
         });
-        augment_content(Library { chests: Some(chests), recipes: recipes.into(), textures: imported.textures, opaque_textures: imported.opaque_textures, cells: cells.into(), appearances: appearances.list, texture_layers: imported.texture_layers, special_layers: imported.special_layers, animations: imported.animations, animated_layers, external: Vec::new(), block_slots: Box::new([]) })
+        augment_content(Library {
+            chests: Some(chests),
+            recipes: recipes.into(),
+            textures: imported.textures,
+            opaque_textures: imported.opaque_textures,
+            cells: cells.into(),
+            appearances: appearances.list,
+            texture_layers: imported.texture_layers,
+            special_layers: imported.special_layers,
+            animations: imported.animations,
+            animated_layers,
+            external: Vec::new(),
+            block_slots: Box::new([]),
+        })
     })
 }
 /// Resolve custom asset names once, before any mesh task is scheduled.
@@ -692,7 +762,7 @@ pub(crate) fn external_textures() -> &'static [(bevy_voxel::core::ResourceId, u3
     &library().external
 }
 fn pack_cube(keys: &[bool], kind: VoxelKind) -> bool {
-    // These keys already have the exact top/side/bottom mapping in all packs.
+    // These keys already have the exact Minecraft top/side/bottom mapping.
     // Logs with an explicit axis use the model path, as do slabs and farmland.
     kind.is_native()
         && !matches!(

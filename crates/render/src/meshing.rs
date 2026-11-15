@@ -20,7 +20,7 @@ use std::cell::RefCell;
 ///   corner column depth (4 bits) and the lowered surface flag (1 bit) above them.
 ///
 /// UVs, normals, tints and texture layers are derived on the GPU, so a vertex is
-/// 8 bytes instead of 56 and meshes do not depend on the texture pack.
+/// 8 bytes instead of 56; appearances are resolved through shared face tables.
 pub const ATTRIBUTE_VOXEL: MeshVertexAttribute =
     MeshVertexAttribute::new("Voxel", 0x766f_7865_6c5f_7631, VertexFormat::Uint32x2);
 

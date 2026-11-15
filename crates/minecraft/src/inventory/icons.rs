@@ -1,7 +1,7 @@
 //! Inventory models are rasterized once per texture revision, off the ECS thread.
 use crate::{
     inventory::ItemKind,
-    voxel::{TexturePack, VoxelAssets, VoxelKind, VoxelMaterial, render::models},
+    voxel::{MinecraftTextures, VoxelAssets, VoxelKind, VoxelMaterial, render::models},
 };
 use bevy::{
     asset::RenderAssetUsages,
@@ -182,7 +182,7 @@ pub(crate) fn render_block_icons(
     voxel_assets: Res<VoxelAssets>,
     materials: Res<Assets<VoxelMaterial>>,
     model_materials: Res<Assets<bevy_voxel::render::material::ModelMaterial>>,
-    texture_pack: Res<TexturePack>,
+    textures: Res<MinecraftTextures>,
     render_source: Res<crate::voxel::render::MinecraftRenderSource>,
     mut images: ResMut<Assets<Image>>,
 ) {
@@ -241,7 +241,7 @@ pub(crate) fn render_block_icons(
         .filter(|image| image.data.is_some())
         .cloned();
     let blocks = blocks.clone();
-    let table = texture_pack.model_face_table();
+    let table = textures.model_face_table();
     let revision = icons.revision;
     let render_source = render_source.clone();
     icons.task = Some(AsyncComputeTaskPool::get().spawn(async move {

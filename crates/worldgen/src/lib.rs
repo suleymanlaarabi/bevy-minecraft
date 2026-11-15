@@ -26,6 +26,6 @@ pub mod codec;
 
 pub mod runtime;
 
-pub use runtime::{GenerationSession, GenerationSettings, WorldGenerationPlugin};
+pub use runtime::{GenerationPool, GenerationSession, GenerationSettings, WorldGenerationPlugin};
 
 pub mod content;

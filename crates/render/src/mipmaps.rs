@@ -112,8 +112,8 @@ pub struct MipmapJob {
     task: Task<Option<(Vec<u8>, u32)>>,
 }
 
-/// Gives the terrain's block texture its mip chain once it loads, including after a
-/// texture pack switch. Runs on image or material asset events, and while a job runs.
+/// Gives the terrain's block texture its mip chain once it loads.
+/// Runs on image or material asset events, and while a job runs.
 pub fn generate_block_mipmaps(
     budget: Res<hollow_engine::tasks::VoxelTaskBudget>,
     mut commands: Commands,
@@ -133,7 +133,7 @@ pub fn generate_block_mipmaps(
             return;
         };
         commands.remove_resource::<MipmapJob>();
-        // A pack switch during the job leaves the result unused: the new texture is
+        // A texture replacement during the job leaves the result unused: the image is
         // picked up below. Checked before `get_mut`, which re-uploads the image.
         if job.image == source
             && let Some((data, levels)) = mipmapped

@@ -1,7 +1,7 @@
 //! Minecraft import providers and translation of game presentation policy.
 pub(super) mod assets;
 pub(crate) mod models;
-mod texture_pack;
+mod textures;
 use super::{VoxelKind, VoxelState};
 use bevy::prelude::*;
 use bevy_voxel::core::{BlockId, FluidId, StateId};
@@ -9,8 +9,7 @@ use bevy_voxel::render::{
     RenderSource,
     environment::{EnvironmentSettings, SkyLighting, ViewEffects},
 };
-pub(crate) use texture_pack::TexturePack;
-pub use texture_pack::TexturePackId;
+pub(crate) use textures::MinecraftTextures;
 #[derive(Resource, Clone)]
 pub struct MinecraftRenderSource {
     content: bevy_voxel::core::content::ContentCatalog,

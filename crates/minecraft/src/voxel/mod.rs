@@ -35,10 +35,8 @@ pub(crate) type VoxelLoading<'w, 's> = bevy_voxel::render::readiness::WorldReadi
     crate::creatures::ColumnActors,
 >;
 use render::MinecraftRenderSource;
-pub use render::TexturePackId;
-use render::assets::apply_texture_pack;
 pub(crate) use render::assets::prepare_assets;
-pub(crate) use render::{TexturePack, terrain_radius};
+pub(crate) use render::{MinecraftTextures, terrain_radius};
 pub use settings::VoxelSettings;
 use streaming::{StreamOffsets, StreamState};
 
@@ -78,7 +76,6 @@ impl Plugin for VoxelPlugin {
         .insert_resource(StreamOffsets::new(view_distance))
         .init_resource::<edits::ConnectionBorders>()
         .add_observer(apply_view_distance)
-        .add_observer(apply_texture_pack)
         .add_observer(edits::enqueue_neighbors)
         .add_observer(edits::edit_batch)
         .add_observer(edits::queue_connection_border)

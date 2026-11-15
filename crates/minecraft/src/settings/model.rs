@@ -1,4 +1,3 @@
-use crate::voxel::TexturePackId;
 use bevy::{
     prelude::*,
     settings::{ReflectSettingsGroup, SettingsGroup},
@@ -102,7 +101,6 @@ pub struct GraphicsSettings {
     pub clouds: bool,
     pub damage_camera_motion: bool,
     pub gameplay_volume: f32,
-    pub texture_pack: TexturePackId,
     pub field_of_view: f32,
     pub view_distance: u32,
     pub display_mode: DisplayMode,
@@ -119,7 +117,6 @@ impl Default for GraphicsSettings {
             clouds: true,
             damage_camera_motion: true,
             gameplay_volume: 60.0,
-            texture_pack: TexturePackId::default(),
             field_of_view: 85.0,
             view_distance: 14,
             display_mode: DisplayMode::BorderlessFullscreen,
@@ -137,9 +134,6 @@ impl GraphicsSettings {
         } else {
             60.0
         };
-        if !self.texture_pack.is_available() {
-            self.texture_pack = TexturePackId::Faithful;
-        }
         self
     }
 

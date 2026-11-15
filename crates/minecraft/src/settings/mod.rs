@@ -4,7 +4,7 @@ mod apply;
 mod model;
 mod ui;
 
-use crate::{game::GameState, voxel::TexturePackId};
+use crate::game::GameState;
 use bevy::{input::common_conditions::input_just_pressed, prelude::*, settings::SettingsPlugin};
 use ui::spawn_settings_page;
 
@@ -27,7 +27,6 @@ impl Plugin for GameSettingsPlugin {
             .register_type::<ShadowQuality>()
             .register_type::<DisplayMode>()
             .register_type::<RenderResolution>()
-            .register_type::<TexturePackId>()
             .register_type::<GraphicsSettings>()
             .register_type::<SimulationSettings>();
         apply::register(app);

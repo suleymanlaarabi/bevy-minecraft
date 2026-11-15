@@ -68,7 +68,7 @@ impl Plugin for InventoryPlugin {
                 Update,
                 icons::render_block_icons.run_if(
                     resource_exists::<crate::voxel::VoxelAssets>
-                        .and_then(resource_exists::<crate::voxel::TexturePack>),
+                        .and_then(resource_exists::<crate::voxel::MinecraftTextures>),
                 ),
             )
             .add_systems(OnExit(GameState::Game), reset_inventory_cursor)

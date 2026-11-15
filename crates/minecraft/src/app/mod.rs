@@ -96,6 +96,19 @@ impl Plugin for HollowPlugin {
             VoxelPlugin::default(),
             GamePlugin,
         ));
+        // Terrain generation runs on the efficiency cores, which frame and voxel
+        // workers leave idle; meshing and lighting keep the performance-core pool.
+        #[cfg(target_os = "linux")]
+        if let Some(threads) = cpu_set("/sys/devices/cpu_atom/cpus")
+            // SAFETY: `CPU_COUNT` only reads the mask.
+            .map(|set| unsafe { libc::CPU_COUNT(&set) } as usize)
+            .filter(|&threads| threads > 0)
+        {
+            app.insert_resource(hollow_worldgen::GenerationPool::new(threads, || {
+                background_priority();
+                pin_to_cpus("/sys/devices/cpu_atom/cpus");
+            }));
+        }
         #[cfg(feature = "dev")]
         app.add_plugins(dev::DevelopmentPlugin);
         #[cfg(not(feature = "dev"))]
@@ -157,28 +170,26 @@ pub(crate) fn cpu_light_clustering(
 fn voxel_worker_start() {
     background_priority();
     #[cfg(target_os = "linux")]
-    pin_to_performance_cpus();
+    pin_to_cpus("/sys/devices/cpu_core/cpus");
 }
 
 #[cfg(target_os = "linux")]
-fn pin_to_performance_cpus() {
-    use std::sync::OnceLock;
-    static PERFORMANCE_CPUS: OnceLock<Option<libc::cpu_set_t>> = OnceLock::new();
-    let Some(set) = PERFORMANCE_CPUS.get_or_init(performance_cpu_set) else {
+fn pin_to_cpus(list: &str) {
+    let Some(set) = cpu_set(list) else {
         return;
     };
     // SAFETY: `sched_setaffinity` with pid 0 applies to the calling thread and only reads
     // the mask. A failure (for example a restricted container) keeps the default placement.
     unsafe {
-        libc::sched_setaffinity(0, core::mem::size_of::<libc::cpu_set_t>(), set);
+        libc::sched_setaffinity(0, core::mem::size_of::<libc::cpu_set_t>(), &set);
     }
 }
 
-/// CPU mask of the performance cores, from the per-core-type CPU lists that hybrid Intel
+/// CPU mask of one core type, from the per-core-type CPU lists that hybrid Intel
 /// kernels expose. Machines without them yield `None` and keep the scheduler's placement.
 #[cfg(target_os = "linux")]
-fn performance_cpu_set() -> Option<libc::cpu_set_t> {
-    let list = std::fs::read_to_string("/sys/devices/cpu_core/cpus").ok()?;
+fn cpu_set(path: &str) -> Option<libc::cpu_set_t> {
+    let list = std::fs::read_to_string(path).ok()?;
     // SAFETY: an all-zero `cpu_set_t` is a valid empty mask.
     let mut set: libc::cpu_set_t = unsafe { core::mem::zeroed() };
     for range in list.trim().split(',') {

@@ -12,14 +12,14 @@ use bevy::{
     shader::ShaderRef,
 };
 
-/// Terrain in the packed `ATTRIBUTE_VOXEL` format, textured from the pack's array.
+/// Terrain in the packed `ATTRIBUTE_VOXEL` format, textured from a shared array.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 #[type_path = "hollow_render::material"]
 pub struct VoxelMaterial {
     #[texture(0, dimension = "2d_array")]
     #[sampler(1)]
     pub blocks: Handle<Image>,
-    /// [`super::texture_pack::TexturePack::cube_face_buffer`]: switching packs swaps it without remeshing.
+    /// Face appearances indexed by the packed mesh attributes.
     #[storage(2, read_only)]
     pub faces: Handle<ShaderBuffer>,
     #[storage(10, read_only)]
@@ -299,10 +299,6 @@ pub enum ModelBlend {
 }
 
 impl ModelMaterial {
-    pub fn set_water(&mut self, water: &WaterMaterial) {
-        self.water = water.settings;
-        self.still = water.still.clone();
-    }
     pub fn new(
         blocks: Handle<Image>,
         faces: Handle<ShaderBuffer>,

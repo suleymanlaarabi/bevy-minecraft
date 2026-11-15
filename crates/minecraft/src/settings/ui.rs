@@ -16,7 +16,7 @@ use bevy::{
     },
 };
 
-use crate::{game::GameState, voxel::TexturePackId};
+use crate::game::GameState;
 
 use super::model::{FOV_MAX, FOV_MIN, VIEW_DISTANCE_MAX, VIEW_DISTANCE_MIN, normalized_fov};
 use super::{
@@ -126,14 +126,6 @@ pub(crate) fn settings_panel(
                     @setting_row("Bloom", toggle_control(settings.bloom, |settings, value| settings.bloom = value))
                     --
                     @setting_row("Clouds", toggle_control(settings.clouds, |settings, value| settings.clouds = value))
-                    --
-                    @setting_row("Texture Pack", choice_control(settings.texture_pack, [
-                        ("Minecraft", TexturePackId::Vanilla),
-                        ("Faithful 32x", TexturePackId::Faithful),
-                        ("Replete", TexturePackId::Replete),
-                        ("Meadow", TexturePackId::Meadow),
-                        ("Twilight", TexturePackId::Twilight),
-                    ], |settings, value| settings.texture_pack = value))
                     --
                     @setting_row("Field of View", fov_control(settings.field_of_view))
                     --
