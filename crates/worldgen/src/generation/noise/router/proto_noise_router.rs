@@ -238,6 +238,19 @@ pub enum ProtoNoiseFunctionComponent {
     PassThrough(PassThrough),
 }
 
+impl ProtoNoiseFunctionComponent {
+    pub(super) fn column_y(&self) -> Option<i32> {
+        match self {
+            Self::Dependent(DependentProtoNoiseFunctionComponent::Slice(slice))
+                if matches!(slice.axis, pumpkin_data::noise_router::Axis::Y) =>
+            {
+                Some(slice.coordinate)
+            }
+            _ => None,
+        }
+    }
+}
+
 impl NoiseFunctionComponentRange for ProtoNoiseFunctionComponent {
     #[inline]
     fn min(&self) -> f32 {

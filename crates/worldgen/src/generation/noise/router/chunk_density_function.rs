@@ -35,6 +35,7 @@ pub struct Cache {
     volume: Option<DensityVolume>,
     buffer: Option<DensityBuffer>,
     value_key: Option<Vector3<i32>>,
+    column_y: Option<i32>,
     value: f32,
     min_value: f32,
     max_value: f32,
@@ -42,12 +43,20 @@ pub struct Cache {
 
 impl Cache {
     #[must_use]
-    pub const fn new(input_index: usize, min_value: f32, max_value: f32) -> Self {
+    pub const fn new(
+        input_index: usize,
+        column_y: Option<i32>,
+        min_value: f32,
+        max_value: f32,
+    ) -> Self {
+        // Slice(Y) is independent of the requested Y. Canonicalize both point
+        // keys and volume storage instead of reevaluating every vertical step.
         Self {
             input_index,
             volume: None,
             buffer: None,
             value_key: None,
+            column_y,
             value: 0.0,
             min_value,
             max_value,
@@ -73,6 +82,7 @@ impl MutableChunkNoiseFunctionComponentImpl for Cache {
         component_stack: &mut [ChunkNoiseFunctionComponent],
         pos: &Vector3<i32>,
     ) -> f32 {
+        let pos = &Vector3::new(pos.x, self.column_y.unwrap_or(pos.y), pos.z);
         if self.value_key == Some(*pos) {
             return self.value;
         }
@@ -96,19 +106,31 @@ impl MutableChunkNoiseFunctionComponentImpl for Cache {
         buffer: &mut [f32],
         volume: &DensityVolume,
     ) {
-        if self.volume.as_ref() != Some(volume) || self.buffer.is_none() {
+        let input_volume = self.column_y.map_or(*volume, |y| DensityVolume {
+            size_y: 1,
+            min_block_y: y,
+            step_block_y: 1,
+            ..*volume
+        });
+        if self.volume.as_ref() != Some(&input_volume) || self.buffer.is_none() {
             self.buffer = None;
-            let mut cached = DensityBuffer::acquire(volume);
+            let mut cached = DensityBuffer::acquire(&input_volume);
             ChunkNoiseFunctionComponent::sample_volume_from_stack(
                 &mut component_stack[..=self.input_index],
                 &mut cached,
-                volume,
+                &input_volume,
             );
-            self.volume = Some(*volume);
+            self.volume = Some(input_volume);
             self.buffer = Some(cached);
         }
         if let Some(cached) = &self.buffer {
-            buffer.copy_from_slice(cached);
+            if self.column_y.is_some() {
+                for (column, value) in buffer.chunks_exact_mut(volume.size_y).zip(cached.iter()) {
+                    column.fill(*value);
+                }
+            } else {
+                buffer.copy_from_slice(cached);
+            }
         }
     }
 }

@@ -1,4 +1,3 @@
-use pumpkin_data::noise_router::WrapperType;
 use pumpkin_util::math::vector3::Vector3;
 
 use crate::{
@@ -7,13 +6,9 @@ use crate::{
 };
 
 use super::{
-    chunk_density_function::{Cache, ChunkSpecificNoiseFunctionComponent},
-    chunk_noise_router::ChunkNoiseFunctionComponent,
-    density_function::{NoiseFunctionComponentRange, PassThrough},
+    chunk_noise_router::{ChunkNoiseFunctionComponent, ChunkNoiseRouter},
     density_volume::{DensityBuffer, DensityVolume},
-    proto_noise_router::{
-        BEARDIFIER_ZERO_CONSTANT, ProtoMultiNoiseRouter, ProtoNoiseFunctionComponent,
-    },
+    proto_noise_router::ProtoMultiNoiseRouter,
 };
 
 pub struct MultiNoiseSampler<'a> {
@@ -27,6 +22,7 @@ pub struct MultiNoiseSampler<'a> {
     component_stack: Box<[ChunkNoiseFunctionComponent<'a>]>,
     volume: Option<DensityVolume>,
     buffers: Option<[DensityBuffer; 6]>,
+    column_y: [Option<i32>; 6],
 }
 
 impl<'a> MultiNoiseSampler<'a> {
@@ -39,12 +35,20 @@ impl<'a> MultiNoiseSampler<'a> {
             self.depth,
             self.ridges,
         ];
-        let buffers = indices.map(|index| {
-            let mut buffer = DensityBuffer::acquire(&volume);
+        let buffers = std::array::from_fn(|field| {
+            // Five Overworld climate fields are planes; keep only their X/Z
+            // samples instead of duplicating them throughout the chunk height.
+            let input_volume = self.column_y[field].map_or(volume, |y| DensityVolume {
+                size_y: 1,
+                min_block_y: y,
+                step_block_y: 1,
+                ..volume
+            });
+            let mut buffer = DensityBuffer::acquire(&input_volume);
             ChunkNoiseFunctionComponent::sample_volume_from_stack(
-                &mut self.component_stack[..=index],
+                &mut self.component_stack[..=indices[field]],
                 &mut buffer,
-                &volume,
+                &input_volume,
             );
             buffer
         });
@@ -60,13 +64,23 @@ impl<'a> MultiNoiseSampler<'a> {
         if let (Some(volume), Some(buffers)) = (&self.volume, &self.buffers)
             && let Some(index) = volume.index_of_block(block_x, block_y, block_z)
         {
+            let column = index / volume.size_y;
+            let sample = |field: usize| {
+                to_long(
+                    buffers[field][if self.column_y[field].is_some() {
+                        column
+                    } else {
+                        index
+                    }],
+                )
+            };
             return NoiseValuePoint {
-                temperature: to_long(buffers[0][index]),
-                humidity: to_long(buffers[1][index]),
-                continentalness: to_long(buffers[2][index]),
-                erosion: to_long(buffers[3][index]),
-                depth: to_long(buffers[4][index]),
-                weirdness: to_long(buffers[5][index]),
+                temperature: sample(0),
+                humidity: sample(1),
+                continentalness: sample(2),
+                erosion: sample(3),
+                depth: sample(4),
+                weirdness: sample(5),
             };
         }
 
@@ -123,52 +137,6 @@ impl<'a> MultiNoiseSampler<'a> {
 
     #[must_use]
     pub fn generate(base: &'a ProtoMultiNoiseRouter) -> Self {
-        // TODO: It seems kind of wasteful to iter over all components (even those we dont need
-        // because they're for chunk population), but this is the best I've got for now.
-        // (Should we traverse the functions and update the indices?)
-        let mut component_stack =
-            Vec::<ChunkNoiseFunctionComponent>::with_capacity(base.full_component_stack.len());
-        for base_component in &base.full_component_stack {
-            let chunk_component = match base_component {
-                ProtoNoiseFunctionComponent::Dependent(dependent) => {
-                    ChunkNoiseFunctionComponent::from_dependent(dependent)
-                }
-                ProtoNoiseFunctionComponent::Independent(independent) => {
-                    ChunkNoiseFunctionComponent::Independent(independent)
-                }
-                ProtoNoiseFunctionComponent::PassThrough(pass_through) => {
-                    ChunkNoiseFunctionComponent::PassThrough(pass_through.clone())
-                }
-                ProtoNoiseFunctionComponent::Beardifier(_) => {
-                    ChunkNoiseFunctionComponent::Independent(&BEARDIFIER_ZERO_CONSTANT)
-                }
-                ProtoNoiseFunctionComponent::Wrapper(wrapper) => {
-                    //NOTE: Due to our previous invariant with the proto-function, it is guaranteed
-                    // that the wrapped function is already on the stack
-                    let min_value = component_stack[wrapper.input_index].min();
-                    let max_value = component_stack[wrapper.input_index].max();
-
-                    match wrapper.wrapper_type {
-                        WrapperType::Cache => ChunkNoiseFunctionComponent::Chunk(
-                            ChunkSpecificNoiseFunctionComponent::Cache(Cache::new(
-                                wrapper.input_index,
-                                min_value,
-                                max_value,
-                            )),
-                        ),
-                        WrapperType::Interpolated { .. } => {
-                            ChunkNoiseFunctionComponent::PassThrough(PassThrough::new(
-                                wrapper.input_index,
-                                min_value,
-                                max_value,
-                            ))
-                        }
-                    }
-                }
-            };
-            component_stack.push(chunk_component);
-        }
-
         Self {
             temperature: base.temperature,
             humidity: base.vegetation,
@@ -176,9 +144,18 @@ impl<'a> MultiNoiseSampler<'a> {
             depth: base.depth,
             erosion: base.erosion,
             ridges: base.ridges,
-            component_stack: component_stack.into_boxed_slice(),
+            component_stack: ChunkNoiseRouter::generate_stack(&base.full_component_stack, None),
             volume: None,
             buffers: None,
+            column_y: [
+                base.temperature,
+                base.vegetation,
+                base.continents,
+                base.erosion,
+                base.depth,
+                base.ridges,
+            ]
+            .map(|index| base.full_component_stack[index].column_y()),
         }
     }
 }

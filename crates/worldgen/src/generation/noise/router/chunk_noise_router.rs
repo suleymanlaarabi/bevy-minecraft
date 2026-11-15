@@ -11,8 +11,8 @@ use super::{
     },
     density_volume::DensityVolume,
     proto_noise_router::{
-        DependentProtoNoiseFunctionComponent, IndependentProtoNoiseFunctionComponent,
-        ProtoNoiseFunctionComponent, ProtoNoiseRouter,
+        BEARDIFIER_ZERO_CONSTANT, DependentProtoNoiseFunctionComponent,
+        IndependentProtoNoiseFunctionComponent, ProtoNoiseFunctionComponent, ProtoNoiseRouter,
     },
 };
 
@@ -252,15 +252,13 @@ impl<'a> ChunkNoiseRouter<'a> {
         &mut self.component_stack
     }
 
-    #[must_use]
-    pub fn generate(
-        base: &'a ProtoNoiseRouter,
-        build_options: &ChunkNoiseFunctionBuilderOptions,
-    ) -> Self {
-        let mut component_stack =
-            Vec::<ChunkNoiseFunctionComponent>::with_capacity(base.full_component_stack.len());
+    pub(super) fn generate_stack(
+        base: &'a [ProtoNoiseFunctionComponent],
+        build_options: Option<&ChunkNoiseFunctionBuilderOptions>,
+    ) -> Box<[ChunkNoiseFunctionComponent<'a>]> {
+        let mut component_stack = Vec::<ChunkNoiseFunctionComponent>::with_capacity(base.len());
 
-        for base_component in &base.full_component_stack {
+        for base_component in base {
             let chunk_component = match base_component {
                 ProtoNoiseFunctionComponent::Dependent(dependent) => {
                     ChunkNoiseFunctionComponent::from_dependent(dependent)
@@ -271,18 +269,28 @@ impl<'a> ChunkNoiseRouter<'a> {
                 ProtoNoiseFunctionComponent::PassThrough(pass_through) => {
                     ChunkNoiseFunctionComponent::PassThrough(pass_through.clone())
                 }
-                ProtoNoiseFunctionComponent::Beardifier(_) => ChunkNoiseFunctionComponent::Chunk(
-                    ChunkSpecificNoiseFunctionComponent::Beardifier(Beardifier::new(
-                        build_options.beardifier_structures.clone(),
-                        build_options.beardifier_junctions.clone(),
-                        build_options.affected_box,
-                    )),
-                ),
+                ProtoNoiseFunctionComponent::Beardifier(_) => match build_options {
+                    Some(options) => ChunkNoiseFunctionComponent::Chunk(
+                        ChunkSpecificNoiseFunctionComponent::Beardifier(Beardifier::new(
+                            options.beardifier_structures.clone(),
+                            options.beardifier_junctions.clone(),
+                            options.affected_box,
+                        )),
+                    ),
+                    None => ChunkNoiseFunctionComponent::Independent(&BEARDIFIER_ZERO_CONSTANT),
+                },
                 ProtoNoiseFunctionComponent::Wrapper(wrapper) => {
                     let min_value = component_stack[wrapper.input_index].min();
                     let max_value = component_stack[wrapper.input_index].max();
 
                     match wrapper.wrapper_type {
+                        WrapperType::Interpolated { .. } if build_options.is_none() => {
+                            ChunkNoiseFunctionComponent::PassThrough(PassThrough::new(
+                                wrapper.input_index,
+                                min_value,
+                                max_value,
+                            ))
+                        }
                         WrapperType::Interpolated {
                             cell_size_xz,
                             cell_size_y,
@@ -298,6 +306,7 @@ impl<'a> ChunkNoiseRouter<'a> {
                         WrapperType::Cache => ChunkNoiseFunctionComponent::Chunk(
                             ChunkSpecificNoiseFunctionComponent::Cache(Cache::new(
                                 wrapper.input_index,
+                                base[wrapper.input_index].column_y(),
                                 min_value,
                                 max_value,
                             )),
@@ -307,7 +316,14 @@ impl<'a> ChunkNoiseRouter<'a> {
             };
             component_stack.push(chunk_component);
         }
+        component_stack.into_boxed_slice()
+    }
 
+    #[must_use]
+    pub fn generate(
+        base: &'a ProtoNoiseRouter,
+        build_options: &ChunkNoiseFunctionBuilderOptions,
+    ) -> Self {
         Self {
             barrier_noise: base.barrier_noise,
             fluid_level_floodedness_noise: base.fluid_level_floodedness_noise,
@@ -319,7 +335,7 @@ impl<'a> ChunkNoiseRouter<'a> {
             vein_toggle: base.vein_toggle,
             vein_ridged: base.vein_ridged,
             vein_gap: base.vein_gap,
-            component_stack: component_stack.into_boxed_slice(),
+            component_stack: Self::generate_stack(&base.full_component_stack, Some(build_options)),
         }
     }
 }

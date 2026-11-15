@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::LazyLock;
 
 use pumpkin_data::chunk::Biome;
@@ -103,67 +103,73 @@ const END_BIOMES: &[&Biome] = &[
     &Biome::END_BARRENS,
 ];
 
-static OVERWORLD_FEATURES_PER_STEP: LazyLock<Vec<Vec<PlacedFeature>>> =
-    LazyLock::new(|| sort_features_per_step(OVERWORLD_BIOMES));
-static OVERWORLD_BIOME_IDS: LazyLock<HashSet<u8>> =
-    LazyLock::new(|| OVERWORLD_BIOMES.iter().map(|biome| biome.id).collect());
+type BiomeMask = [u64; 4];
 
-static NETHER_FEATURES_PER_STEP: LazyLock<Vec<Vec<PlacedFeature>>> =
-    LazyLock::new(|| sort_features_per_step(NETHER_BIOMES));
-static NETHER_BIOME_IDS: LazyLock<HashSet<u8>> =
-    LazyLock::new(|| NETHER_BIOMES.iter().map(|biome| biome.id).collect());
+struct FeatureCatalog {
+    biomes: BiomeMask,
+    steps: Vec<Vec<(PlacedFeature, BiomeMask)>>,
+}
 
-static END_FEATURES_PER_STEP: LazyLock<Vec<Vec<PlacedFeature>>> =
-    LazyLock::new(|| sort_features_per_step(END_BIOMES));
-static END_BIOME_IDS: LazyLock<HashSet<u8>> =
-    LazyLock::new(|| END_BIOMES.iter().map(|biome| biome.id).collect());
-
-pub fn select_features(biome_ids: &[u8], step: usize) -> Vec<(usize, PlacedFeature)> {
-    if biome_ids.iter().any(|b| NETHER_BIOME_IDS.contains(b)) {
-        select_features_for_dimension(
-            biome_ids,
-            step,
-            &NETHER_BIOME_IDS,
-            &NETHER_FEATURES_PER_STEP,
-        )
-    } else if biome_ids.iter().any(|b| END_BIOME_IDS.contains(b)) {
-        select_features_for_dimension(biome_ids, step, &END_BIOME_IDS, &END_FEATURES_PER_STEP)
-    } else {
-        select_features_for_dimension(
-            biome_ids,
-            step,
-            &OVERWORLD_BIOME_IDS,
-            &OVERWORLD_FEATURES_PER_STEP,
-        )
+impl FeatureCatalog {
+    fn new(biomes: &[&Biome]) -> Self {
+        let mut mask = [0; 4];
+        for biome in biomes {
+            mask[usize::from(biome.id) / 64] |= 1 << (biome.id % 64);
+        }
+        let steps = sort_features_per_step(biomes)
+            .into_iter()
+            .enumerate()
+            .map(|(step, features)| {
+                features
+                    .into_iter()
+                    .map(|feature| {
+                        let mut mask = [0; 4];
+                        for biome in biomes {
+                            if biome
+                                .features
+                                .get(step)
+                                .is_some_and(|features| features.contains(&feature))
+                            {
+                                mask[usize::from(biome.id) / 64] |= 1 << (biome.id % 64);
+                            }
+                        }
+                        (feature, mask)
+                    })
+                    .collect()
+            })
+            .collect();
+        Self {
+            biomes: mask,
+            steps,
+        }
     }
 }
 
-fn select_features_for_dimension(
-    biome_ids: &[u8],
+// Resolve biome membership once. Selection only scans compact masks in the
+// original global feature order, preserving decorator indices and random seeds.
+static CATALOGS: LazyLock<[FeatureCatalog; 3]> =
+    LazyLock::new(|| [NETHER_BIOMES, END_BIOMES, OVERWORLD_BIOMES].map(FeatureCatalog::new));
+
+fn intersects(a: &BiomeMask, b: &BiomeMask) -> bool {
+    a.iter().zip(b).any(|(a, b)| a & b != 0)
+}
+
+pub fn select_features(
+    biomes: &BiomeMask,
     step: usize,
-    allowed_biomes: &HashSet<u8>,
-    features_per_step: &[Vec<PlacedFeature>],
-) -> Vec<(usize, PlacedFeature)> {
-    let mut selected = HashSet::new();
-
-    for biome_id in biome_ids {
-        if !allowed_biomes.contains(biome_id) {
-            continue;
-        }
-        if let Some(features) = Biome::from_id(*biome_id).and_then(|biome| biome.features.get(step))
-        {
-            selected.extend(features.iter().copied());
-        }
-    }
-
-    features_per_step
+) -> impl Iterator<Item = (usize, PlacedFeature)> {
+    let catalog = CATALOGS[..2]
+        .iter()
+        .find(|catalog| intersects(biomes, &catalog.biomes))
+        .unwrap_or(&CATALOGS[2]);
+    catalog
+        .steps
         .get(step)
         .into_iter()
         .flatten()
-        .copied()
         .enumerate()
-        .filter(|(_, feature)| selected.contains(feature))
-        .collect()
+        .filter(|(_, (_, mask))| intersects(biomes, mask))
+        .map(|(index, (feature, _))| (index, *feature))
 }
 
 fn sort_features_per_step(biomes: &[&Biome]) -> Vec<Vec<PlacedFeature>> {

@@ -1,16 +1,11 @@
-use pumpkin_data::noise_router::WrapperType;
 use pumpkin_util::math::vector3::Vector3;
 use rustc_hash::FxHashMap;
 
 use crate::generation::{biome_coords, positions::chunk_pos};
 
 use super::{
-    chunk_density_function::{Cache, ChunkSpecificNoiseFunctionComponent},
-    chunk_noise_router::ChunkNoiseFunctionComponent,
-    density_function::{NoiseFunctionComponentRange, PassThrough},
-    proto_noise_router::{
-        BEARDIFIER_ZERO_CONSTANT, ProtoNoiseFunctionComponent, ProtoSurfaceEstimator,
-    },
+    chunk_noise_router::{ChunkNoiseFunctionComponent, ChunkNoiseRouter},
+    proto_noise_router::ProtoSurfaceEstimator,
 };
 
 pub struct SurfaceHeightSamplerBuilderOptions {
@@ -129,54 +124,8 @@ impl<'a> SurfaceHeightEstimateSampler<'a> {
         base: &'a ProtoSurfaceEstimator,
         build_options: &SurfaceHeightSamplerBuilderOptions,
     ) -> Self {
-        // TODO: It seems kind of wasteful to iter over all components (even those we dont need
-        // because they're for chunk population), but this is the best I've got for now.
-        // (Should we traverse the functions and update the indices?)
-        let mut component_stack =
-            Vec::<ChunkNoiseFunctionComponent>::with_capacity(base.full_component_stack.len());
-        for base_component in &base.full_component_stack {
-            let chunk_component = match base_component {
-                ProtoNoiseFunctionComponent::Dependent(dependent) => {
-                    ChunkNoiseFunctionComponent::from_dependent(dependent)
-                }
-                ProtoNoiseFunctionComponent::Independent(independent) => {
-                    ChunkNoiseFunctionComponent::Independent(independent)
-                }
-                ProtoNoiseFunctionComponent::PassThrough(pass_through) => {
-                    ChunkNoiseFunctionComponent::PassThrough(pass_through.clone())
-                }
-                ProtoNoiseFunctionComponent::Beardifier(_) => {
-                    ChunkNoiseFunctionComponent::Independent(&BEARDIFIER_ZERO_CONSTANT)
-                }
-                ProtoNoiseFunctionComponent::Wrapper(wrapper) => {
-                    //NOTE: Due to our previous invariant with the proto-function, it is guaranteed
-                    // that the wrapped function is already on the stack
-                    let min_value = component_stack[wrapper.input_index].min();
-                    let max_value = component_stack[wrapper.input_index].max();
-
-                    match wrapper.wrapper_type {
-                        WrapperType::Cache => ChunkNoiseFunctionComponent::Chunk(
-                            ChunkSpecificNoiseFunctionComponent::Cache(Cache::new(
-                                wrapper.input_index,
-                                min_value,
-                                max_value,
-                            )),
-                        ),
-                        WrapperType::Interpolated { .. } => {
-                            ChunkNoiseFunctionComponent::PassThrough(PassThrough::new(
-                                wrapper.input_index,
-                                min_value,
-                                max_value,
-                            ))
-                        }
-                    }
-                }
-            };
-            component_stack.push(chunk_component);
-        }
-
         Self {
-            component_stack: component_stack.into_boxed_slice(),
+            component_stack: ChunkNoiseRouter::generate_stack(&base.full_component_stack, None),
 
             maximum_y: build_options.maximum_y,
             minimum_y: build_options.minimum_y,

@@ -1136,14 +1136,12 @@ impl ProtoChunk {
 
         // Vanilla gathers every biome stored in the 3x3 chunk neighborhood before selecting the
         // globally ordered feature set.
-        let mut possible_biomes = Vec::new();
+        let mut possible_biomes = [0u64; 4];
         for chunk_x in center_x - 1..=center_x + 1 {
             for chunk_z in center_z - 1..=center_z + 1 {
                 if let Some(chunk) = cache.get_chunk(chunk_x, chunk_z) {
                     for &biome_id in &chunk.flat_biome_map {
-                        if !possible_biomes.contains(&biome_id) {
-                            possible_biomes.push(biome_id);
-                        }
+                        possible_biomes[usize::from(biome_id) / 64] |= 1 << (biome_id % 64);
                     }
                 }
             }
