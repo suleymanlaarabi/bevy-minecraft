@@ -13,5 +13,6 @@ hollow-engine = { path = "../engine" }
 bevy = { version = "0.20", default-features = false, features = ["std", "async_executor", "multi_threaded", "bevy_asset", "bevy_log", "bevy_pbr", "bevy_anti_alias", "bevy_ui_render", "png"] }
 serde = { version = "1", features = ["derive"] }
 bytemuck = "1"
+indexmap = "2"
 hollow-features = { path = "../features" }
 ron = "0.12"

@@ -53,8 +53,20 @@ impl<T: Copy, const N: usize, const BYTES: usize> Palette<T, N, BYTES> {
         self.values[self.index(index)]
     }
     fn copy_mapped<U: Copy>(&self, start: usize, out: &mut [U], values: &[U]) {
+        assert!(start <= SECTION_VOLUME && out.len() <= SECTION_VOLUME - start);
+        assert!(values.len() >= usize::from(self.len));
         for (index, out) in (start..).zip(out) {
-            *out = values[self.index(index)];
+            // SAFETY: the range is checked above; palette construction and decoding
+            // validate indices below len, which the mapped values cover.
+            let palette = unsafe {
+                if N == 16 {
+                    (*self.indices.get_unchecked(index / 2) >> ((index & 1) * 4)) & 15
+                } else {
+                    *self.indices.get_unchecked(index)
+                }
+            };
+            // SAFETY: the validated palette index is below len <= values.len().
+            *out = unsafe { *values.get_unchecked(usize::from(palette)) };
         }
     }
 }

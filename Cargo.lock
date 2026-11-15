@@ -3153,6 +3153,7 @@ dependencies = [
  "hollow-core",
  "hollow-engine",
  "hollow-features",
+ "indexmap",
  "ron",
  "serde",
 ]

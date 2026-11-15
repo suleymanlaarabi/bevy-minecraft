@@ -494,39 +494,38 @@ thread_local! {
 }
 
 pub fn face_light(padded: &Padded, outside: [i32; 3], axis: usize) -> [u16; 4] {
+    assert!(axis < 3);
     let u = (axis + 1) % 3;
     let v = (axis + 2) % 3;
+    assert!((-1..=padded.dimensions[axis]).contains(&outside[axis]));
+    assert!((0..padded.dimensions[u]).contains(&outside[u]));
+    assert!((0..padded.dimensions[v]).contains(&outside[v]));
+    let stride = [
+        1,
+        PADDED_SIZE as usize * PADDED_SIZE as usize,
+        PADDED_SIZE as usize,
+    ];
+    let start = outside.map(|c| (c + 1) as usize);
+    let start = start[0] + stride[1] * start[1] + stride[2] * start[2] - stride[u] - stride[v];
+    let samples = &padded.samples[start..=start + 2 * (stride[u] + stride[v])];
     // The four corners share the 3x3 cells around the face, so each cell is read once.
-    let mut around = [[(0u32, 0u32, false); 3]; 3];
-    for (dv, row) in around.iter_mut().enumerate() {
-        for (du, entry) in row.iter_mut().enumerate() {
-            let mut cell = outside;
-            cell[u] += du as i32 - 1;
-            cell[v] += dv as i32 - 1;
-            let sample = padded.get(IVec3::from_array(cell));
-            *entry = (
-                u32::from(sample.light >> 4),
-                u32::from(sample.light & 15),
-                sample.occludes(),
-            );
-        }
-    }
-    [(0, 0), (1, 0), (1, 1), (0, 1)].map(|(cu, cv)| {
-        let mut sum = [0u32; 2];
-        let mut count = 0u32;
-        for du in [cu - 1, cu] {
-            for dv in [cv - 1, cv] {
-                let (high, low, occludes) = around[(dv + 1) as usize][(du + 1) as usize];
-                // Solid neighbors must not darken an exposed surface corner.
-                if (du != 0 || dv != 0) && occludes {
-                    continue;
-                }
-                sum[0] += high;
-                sum[1] += low;
+    let around: [(u8, bool); 9] = std::array::from_fn(|i| {
+        // SAFETY: the checked slice spans the maximum offset (2, 2).
+        let sample = unsafe { samples.get_unchecked((i % 3) * stride[u] + (i / 3) * stride[v]) };
+        (sample.light, sample.occludes())
+    });
+    [[0, 1, 3], [1, 2, 5], [5, 7, 8], [3, 6, 7]].map(|neighbors| {
+        let mut sum = [u32::from(around[4].0 >> 4), u32::from(around[4].0 & 15)];
+        let mut count = 1u32;
+        for (light, occludes) in neighbors.map(|i| around[i]) {
+            // Solid neighbors must not darken an exposed surface corner.
+            if !occludes {
+                sum[0] += u32::from(light >> 4);
+                sum[1] += u32::from(light & 15);
                 count += 1;
             }
         }
-        let average = |sum: u32| (sum as f32 * 4.0 / count.max(1) as f32).round() as u16;
+        let average = |sum: u32| (sum as f32 * 4.0 / count as f32).round() as u16;
         average(sum[0]) | (average(sum[1]) << 6)
     })
 }

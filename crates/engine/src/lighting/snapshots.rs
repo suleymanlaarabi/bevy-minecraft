@@ -42,6 +42,7 @@ struct LightingSlot<T: VoxelCell> {
     neighbors: [Option<u32>; 4],
     changed: u32,
     readers: [u32; 9],
+    pending: Vec<Option<Box<[u64; 64]>>>,
 }
 
 // Coordinate lookups are confined to arrivals and seeds. Slots and four neighbor
@@ -59,6 +60,18 @@ pub(crate) struct SnapshotAccess<T: VoxelCell> {
 }
 
 impl<T: VoxelCell> SnapshotAccess<T> {
+    pub(super) fn block_pending(&mut self, cell: LightCell) -> &mut u64 {
+        let sections = &mut self.slots[cell.chunk as usize].pending;
+        let section = cell.index as usize / SECTION_VOLUME;
+        if sections.len() <= section {
+            sections.resize_with(section + 1, || None);
+        }
+        // Only touched sections allocate. Each dequeue clears its bit before
+        // propagation, so all retained bitsets are zero when the queues drain.
+        &mut sections[section].get_or_insert_with(|| Box::new([0; 64]))
+            [cell.index as usize % SECTION_VOLUME / 64]
+    }
+
     fn cell(&self, pos: IVec3) -> Option<LightCell> {
         let y = pos.y - self.min_y;
         if !(0..self.height).contains(&y) {
@@ -139,6 +152,7 @@ impl<T: VoxelCell> SnapshotAccess<T> {
                 neighbors: [None; 4],
                 changed: 0,
                 readers: [0; 9],
+                pending: Vec::new(),
             });
             id
         });
@@ -167,6 +181,7 @@ impl<T: VoxelCell> SnapshotAccess<T> {
         }
         self.slots[id as usize].chunk = None;
         self.slots[id as usize].changed = 0;
+        self.slots[id as usize].pending = Vec::new();
         self.free.push(id);
     }
 }
@@ -176,6 +191,8 @@ impl<T: VoxelCell> LightingSnapshots<T> {
         census.bytes += self.access.slots.capacity() * size_of::<LightingSlot<T>>()
             + self.access.free.capacity() * size_of::<u32>();
         for slot in &self.access.slots {
+            census.bytes += slot.pending.capacity() * size_of::<Option<Box<[u64; 64]>>>()
+                + slot.pending.iter().flatten().count() * size_of::<[u64; 64]>();
             if let Some(chunk) = &slot.chunk {
                 chunk.states.census(census);
                 chunk.light.census(census);
@@ -227,19 +244,23 @@ impl<T: VoxelCell> LightingSnapshots<T> {
         self.access.insert((snapshot.x, snapshot.z), snapshot);
     }
     pub(crate) fn release_excess(&mut self) {
+        // The edit context is fully drained here; cap retained slot/bitset memory
+        // after a large cascade without rebuilding ordinary edit neighborhoods.
+        self.access.slots.truncate(64);
+        self.access.free.retain(|&id| id < 64);
+        self.access.free.shrink_to(64);
         self.access.slots.shrink_to(64);
     }
     pub(crate) fn drain(&mut self) -> impl Iterator<Item = (i32, i32, Layer<u8>, [u32; 9])> + '_ {
         self.access.chunks.clear();
         self.access.free.clear();
-        self.access
-            .slots
-            .drain(..)
-            .filter(|slot| slot.changed != 0)
-            .map(|slot| {
-                let chunk = slot.chunk.unwrap();
-                (chunk.x, chunk.z, chunk.light, slot.readers)
-            })
+        self.access.free.extend(0..self.access.slots.len() as u32);
+        self.access.slots.iter_mut().filter_map(|slot| {
+            let chunk = slot.chunk.take()?;
+            let changed = std::mem::take(&mut slot.changed);
+            let readers = std::mem::take(&mut slot.readers);
+            (changed != 0).then_some((chunk.x, chunk.z, chunk.light, readers))
+        })
     }
     pub fn update(
         &mut self,
@@ -353,7 +374,7 @@ impl<T: VoxelCell> LightingSnapshots<T> {
                         index: i as u32,
                     };
                     access.set_light(pos, emission, 15);
-                    engine.queue_block_light_increase(pos, emission);
+                    engine.queue_block_light_increase(access, pos);
                 }
             }
             for dz in 0..16 {
@@ -390,7 +411,7 @@ impl<T: VoxelCell> LightingSnapshots<T> {
                             let pos = access.cell(IVec3::new(bx, y, bz)).unwrap();
                             let value = access.light(pos);
                             if value & 15 > 0 {
-                                engine.queue_block_light_increase(pos, value & 15);
+                                engine.queue_block_light_increase(access, pos);
                             }
                             if value >> 4 > 0 {
                                 engine.queue_sky_light_increase(pos, value >> 4);

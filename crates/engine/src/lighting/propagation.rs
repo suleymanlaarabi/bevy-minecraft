@@ -14,7 +14,6 @@ pub enum LightingMode {
 pub struct SnapshotLightEngine {
     block_increase: VecDeque<LightCell>,
     block_decrease: VecDeque<(LightCell, u8)>,
-    block_pending: std::collections::BTreeMap<(u32, u32), Box<[u64; 64]>>,
     sky_decrease: VecDeque<(LightCell, u8)>,
     sky_increase: VecDeque<LightCell>,
     sky_seeds: Vec<(LightCell, u8)>,
@@ -36,15 +35,15 @@ impl SnapshotLightEngine {
         self.block_increase.shrink_to(4096);
         self.block_decrease.shrink_to(4096);
     }
-    pub(super) fn queue_block_light_increase(&mut self, pos: LightCell, _light: u8) {
-        // Only queued sections allocate a bitset; distant edit islands need no dense table.
-        let bits = self
-            .block_pending
-            .entry((pos.chunk, pos.index / 4096))
-            .or_insert_with(|| Box::new([0; 64]));
-        let (word, bit) = ((pos.index as usize % 4096) / 64, pos.index % 64);
-        if bits[word] & (1 << bit) == 0 {
-            bits[word] |= 1 << bit;
+    pub(super) fn queue_block_light_increase<T: VoxelCell>(
+        &mut self,
+        level: &mut SnapshotAccess<T>,
+        pos: LightCell,
+    ) {
+        let word = level.block_pending(pos);
+        let bit = 1 << (pos.index % 64);
+        if *word & bit == 0 {
+            *word |= bit;
             self.block_increase.push_back(pos);
         }
     }
@@ -56,10 +55,10 @@ impl SnapshotLightEngine {
         let old = level.light(pos) & 15;
         level.set_light(pos, 0, 15);
         self.block_decrease.push_back((pos, old));
-        self.queue_block_light_increase(pos, 0);
+        self.queue_block_light_increase(level, pos);
         for side in 0..6 {
             if let Some(neighbor) = level.neighbor(pos, side) {
-                self.queue_block_light_increase(neighbor, 0);
+                self.queue_block_light_increase(level, neighbor);
             }
         }
     }
@@ -117,17 +116,15 @@ impl SnapshotLightEngine {
                     level.set_light(neighbor, 0, 15);
                     self.block_decrease.push_back((neighbor, light));
                     if level.definition(neighbor).luminance > 0 {
-                        self.queue_block_light_increase(neighbor, 0);
+                        self.queue_block_light_increase(level, neighbor);
                     }
                 } else if light > 0 {
-                    self.queue_block_light_increase(neighbor, 0);
+                    self.queue_block_light_increase(level, neighbor);
                 }
             }
         }
         while let Some(pos) = self.block_increase.pop_front() {
-            self.block_pending
-                .get_mut(&(pos.chunk, pos.index / 4096))
-                .unwrap()[(pos.index as usize % 4096) / 64] &= !(1 << (pos.index % 64));
+            *level.block_pending(pos) &= !(1 << (pos.index % 64));
             let light = (level.light(pos) & 15).max(level.definition(pos).luminance);
             level.set_light(pos, light, 15);
             if light <= 1 {
@@ -141,12 +138,11 @@ impl SnapshotLightEngine {
                 if next > (level.light(neighbor) & 15) {
                     level.set_light(neighbor, next, 15);
                     if next > 1 {
-                        self.queue_block_light_increase(neighbor, next);
+                        self.queue_block_light_increase(level, neighbor);
                     }
                 }
             }
         }
-        self.block_pending.clear();
     }
 
     pub(super) fn perform_sky_light_updates<T: VoxelCell>(

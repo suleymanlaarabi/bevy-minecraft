@@ -17,7 +17,7 @@ use bevy::{
     },
     mesh::{Indices, MeshVertexBufferLayoutRef, MeshVertexBufferLayouts, VertexAttributeValues},
     pbr::*,
-    platform::collections::HashMap,
+    platform::{collections::HashMap, hash::FixedHasher},
     prelude::*,
     render::{
         ExtractSchedule, MainWorld, Render, RenderApp, RenderSystems,
@@ -33,6 +33,7 @@ use bevy::{
     },
     shader::ShaderDefVal,
 };
+use indexmap::{IndexMap, map::Slice};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Range,
@@ -257,28 +258,17 @@ fn extract_sections(
 #[derive(Resource)]
 struct SectionMaterials(Option<[UntypedAssetId; RANGES]>);
 
-/// Sparse columns own section slots and conservative bounds for hierarchical culling.
+/// Dense columns own section slots and bounds refreshed only when geometry changes.
+#[derive(Default)]
 struct Column {
     slots: [u32; 32],
     occupied: u32,
     mask: u32,
-    min: Vec3,
-    max: Vec3,
+    center: Vec3,
+    extent: Vec3,
+    dirty: bool,
 }
-impl Default for Column {
-    fn default() -> Self {
-        Self {
-            slots: [0; 32],
-            occupied: 0,
-            mask: u32::MAX,
-            min: Vec3::INFINITY,
-            max: Vec3::NEG_INFINITY,
-        }
-    }
-}
-struct Slot {
-    passes: [Option<Allocation>; 5],
-}
+type Slot = [Option<Allocation>; 5];
 /// Per-slot culling inputs, dense and parallel to `SectionGpu::slots`: the per-view
 /// loop streams 28 bytes per slot and reads allocations only for drawn sections.
 #[derive(Clone, Copy, Default)]
@@ -480,8 +470,9 @@ struct Arena {
 #[derive(Resource)]
 struct SectionGpu {
     arenas: [Arena; 5],
-    columns: HashMap<IVec2, Column>,
-    slots: Vec<Option<Slot>>,
+    columns: IndexMap<IVec2, Column, FixedHasher>,
+    dirty_columns: Vec<IVec2>,
+    slots: Vec<Slot>,
     cull: Vec<Cull>,
     free: Vec<usize>,
     origins: Buffer,
@@ -501,23 +492,22 @@ struct SectionGpu {
 }
 impl SectionGpu {
     fn new(world: &mut World) -> Self {
-        let layouts = {
-            let mut layouts = world.resource_mut::<MeshVertexBufferLayouts>();
-            [
-                Mesh::new(PrimitiveTopology::TriangleList, default())
-                    .with_inserted_attribute(
-                        crate::meshing::ATTRIBUTE_VOXEL,
-                        Vec::<[u32; 2]>::new(),
-                    )
-                    .get_mesh_vertex_buffer_layout(&mut layouts),
-                Mesh::new(PrimitiveTopology::TriangleList, default())
-                    .with_inserted_attribute(
-                        crate::model_mesh::ATTRIBUTE_MODEL,
-                        Vec::<[u32; 4]>::new(),
-                    )
-                    .get_mesh_vertex_buffer_layout(&mut layouts),
-            ]
-        };
+        let mut layouts = world.resource_mut::<MeshVertexBufferLayouts>();
+        let layouts = [
+            (
+                crate::meshing::ATTRIBUTE_VOXEL,
+                VertexAttributeValues::Uint32x2(Vec::new()),
+            ),
+            (
+                crate::model_mesh::ATTRIBUTE_MODEL,
+                VertexAttributeValues::Uint32x4(Vec::new()),
+            ),
+        ]
+        .map(|(attribute, values)| {
+            Mesh::new(PrimitiveTopology::TriangleList, default())
+                .with_inserted_attribute(attribute, values)
+                .get_mesh_vertex_buffer_layout(&mut layouts)
+        });
         let device = world.resource::<RenderDevice>();
         let layout = BindGroupLayoutDescriptor::new(
             "section origins",
@@ -547,6 +537,7 @@ impl SectionGpu {
                 indices: ArenaBuffer::new(device, BufferUsages::INDEX),
             }),
             columns: default(),
+            dirty_columns: Vec::new(),
             slots: Vec::new(),
             cull: Vec::new(),
             free: Vec::new(),
@@ -568,10 +559,7 @@ impl SectionGpu {
         }
     }
     fn release(&mut self, slot: usize, pass: usize) {
-        if let Some(a) = self.slots[slot]
-            .as_mut()
-            .and_then(|s| s.passes[pass].take())
-        {
+        if let Some(a) = self.slots[slot][pass].take() {
             self.arenas[pass].vertices.release(a.vertices);
             self.arenas[pass].indices.release(a.indices);
             self.cull[slot].passes &= !(1 << pass);
@@ -582,18 +570,29 @@ impl SectionGpu {
         for pass in 0..5 {
             self.release(slot, pass);
         }
-        self.slots[slot] = None;
         self.cull[slot] = Cull::default();
         self.free.push(slot);
     }
     fn remove(&mut self, column: IVec2) {
-        if let Some(column) = self.columns.remove(&column) {
+        if let Some(column) = self.columns.swap_remove(&column) {
             let mut sections = column.occupied;
             while sections != 0 {
                 self.free_slot(column.slots[sections.trailing_zeros() as usize] as usize);
                 sections &= sections - 1;
             }
         }
+    }
+    fn column(&mut self, position: IVec2, dirty: bool) -> usize {
+        let entry = self.columns.entry(position);
+        let id = entry.index();
+        let column = entry.or_insert_with(|| Column {
+            mask: u32::MAX,
+            ..default()
+        });
+        if dirty && !std::mem::replace(&mut column.dirty, true) {
+            self.dirty_columns.push(position);
+        }
+        id
     }
 }
 #[allow(clippy::too_many_arguments)]
@@ -612,10 +611,10 @@ fn prepare_sections(
     lights: Query<Option<&RenderLayers>>,
     mut seen: Local<Vec<u8>>,
     mut workers: Local<Vec<CullWorker>>,
+    mut uploads: Local<Vec<(usize, usize, u64, u64, PassGeometry)>>,
 ) {
     let gpu = &mut *gpu;
     let changed = !feed.ops.is_empty() || gpu.conservative != feed.conservative;
-    let mut uploads = Vec::new();
     for op in feed.ops.drain(..) {
         match op {
             SectionOp::Clear => {
@@ -629,9 +628,15 @@ fn prepare_sections(
                 for slot in 0..gpu.slots.len() {
                     gpu.release(slot, pass);
                 }
+                for (&position, column) in &mut gpu.columns {
+                    if !std::mem::replace(&mut column.dirty, true) {
+                        gpu.dirty_columns.push(position);
+                    }
+                }
             }
             SectionOp::Visibility { column, mask } => {
-                gpu.columns.entry(column).or_default().mask = mask;
+                let id = gpu.column(column, false);
+                gpu.columns[id].mask = mask;
             }
             SectionOp::Replace {
                 column,
@@ -640,7 +645,8 @@ fn prepare_sections(
                 geometry,
                 casts_shadow,
             } => {
-                let c = gpu.columns.entry(column).or_default();
+                let id = gpu.column(column, true);
+                let c = &mut gpu.columns[id];
                 let bit = 1 << section;
                 if geometry.iter().all(Option::is_none) {
                     if c.occupied & bit != 0 {
@@ -653,7 +659,7 @@ fn prepare_sections(
                 let fresh = c.occupied & bit == 0;
                 let slot = if fresh {
                     let slot = gpu.free.pop().unwrap_or_else(|| {
-                        gpu.slots.push(None);
+                        gpu.slots.push(default());
                         gpu.cull.push(Cull::default());
                         gpu.origin_data.push([0.0; 4]);
                         gpu.slots.len() - 1
@@ -664,15 +670,10 @@ fn prepare_sections(
                 } else {
                     c.slots[section] as usize
                 };
-                let mut previous = gpu.slots[slot]
-                    .take()
-                    .map_or_else(|| std::array::from_fn(|_| None), |slot| slot.passes);
-                let mut record = Slot {
-                    passes: std::array::from_fn(|_| None),
-                };
+                let record = &mut gpu.slots[slot];
                 let (mut min, mut max, mut passes) = (Vec3::MAX, Vec3::MIN, 0u8);
                 for (pass, geometry) in geometry.into_iter().enumerate() {
-                    let old = previous[pass].take();
+                    let old = record[pass].take();
                     if let Some(g) = geometry {
                         min = min.min(g.min + origin);
                         max = max.max(g.max + origin);
@@ -695,7 +696,7 @@ fn prepare_sections(
                         ];
                         let groups = g.groups;
                         uploads.push((slot, pass, vertices.start, indices.start, g));
-                        record.passes[pass] = Some(Allocation {
+                        record[pass] = Some(Allocation {
                             vertices,
                             indices,
                             draw,
@@ -707,12 +708,6 @@ fn prepare_sections(
                         gpu.arenas[pass].indices.release(old.indices);
                     }
                 }
-                // Bounds only expand until the column is retired. Stale space is
-                // conservative after replacement and avoids rescanning its sections.
-                let c = gpu.columns.get_mut(&column).unwrap();
-                c.min = c.min.min(min);
-                c.max = c.max.max(max);
-                gpu.slots[slot] = Some(record);
                 gpu.cull[slot] = Cull {
                     center: (min + max) * 0.5,
                     extent: (max - min) * 0.5,
@@ -736,13 +731,41 @@ fn prepare_sections(
         }
     }
     gpu.conservative = feed.conservative;
+    for position in gpu.dirty_columns.drain(..) {
+        let Some(column) = gpu.columns.get_mut(&position) else {
+            continue;
+        };
+        if !std::mem::take(&mut column.dirty) {
+            continue;
+        }
+        let (mut min, mut max) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
+        let mut sections = column.occupied;
+        while sections != 0 {
+            let c = gpu.cull[column.slots[sections.trailing_zeros() as usize] as usize];
+            sections &= sections - 1;
+            if c.passes != 0 {
+                min = min.min(c.center - c.extent);
+                max = max.max(c.center + c.extent);
+            }
+        }
+        column.center = if min.is_finite() {
+            (min + max) * 0.5
+        } else {
+            Vec3::ZERO
+        };
+        column.extent = if min.is_finite() {
+            (max - min) * 0.5
+        } else {
+            Vec3::ZERO
+        };
+    }
     if changed {
         // Cached shadow cascades may skip several frames before consuming this revision.
         gpu.revision = gpu.revision.checked_add(1).expect("section scene revision");
     }
     // One five-bit pass mask per slot; only touched masks need clearing.
     seen.resize(gpu.slots.len(), 0);
-    for (slot, ..) in &uploads {
+    for (slot, ..) in uploads.iter() {
         seen[*slot] = 0;
     }
     // Reverse order also rejects superseded uploads that reused identical ranges.
@@ -752,8 +775,7 @@ fn prepare_sections(
             && gpu
                 .slots
                 .get(*slot)
-                .and_then(Option::as_ref)
-                .and_then(|s| s.passes[*pass].as_ref())
+                .and_then(|s| s[*pass].as_ref())
                 .is_some_and(|a| {
                     a.vertices == (*v..*v + g.vertices().len() as u64)
                         && a.indices == (*i..*i + g.indices().len() as u64)
@@ -796,7 +818,6 @@ fn prepare_sections(
         }
         live
     });
-    let mut columns = None;
     let pool = bevy::tasks::ComputeTaskPool::get();
     let threads = pool.thread_num().clamp(1, 8);
     for (entity, view, camera, light) in &views {
@@ -837,7 +858,7 @@ fn prepare_sections(
         if draws.input == Some(view) && draws.revision == gpu.revision {
             continue;
         }
-        let columns = columns.get_or_insert_with(|| gpu.columns.values().collect::<Vec<_>>());
+        let columns = gpu.columns.as_slice();
         let rows = view
             .clip
             .transpose()
@@ -869,9 +890,9 @@ fn prepare_sections(
         }
         let workers = &mut workers[..jobs];
         let (cull, slots) = (&gpu.cull[..], &gpu.slots[..]);
-        if let [worker] = &mut *workers {
+        let run = |columns: &Slice<IVec2, Column>, worker: &mut CullWorker| {
             cull_columns(
-                &columns,
+                columns,
                 cull,
                 slots,
                 &view,
@@ -879,13 +900,16 @@ fn prepare_sections(
                 require_visible,
                 worker,
             );
+        };
+        if let [worker] = &mut *workers {
+            run(columns, worker);
         } else {
-            let planes = &planes;
             pool.scope(|scope| {
-                for (columns, worker) in columns.chunks(chunk).zip(workers.iter_mut()) {
-                    scope.spawn(async move {
-                        cull_columns(columns, cull, slots, &view, planes, require_visible, worker);
-                    });
+                let mut remaining = columns;
+                for worker in workers.iter_mut() {
+                    let (batch, rest) = remaining.split_at(chunk.min(remaining.len()));
+                    remaining = rest;
+                    scope.spawn(async move { run(batch, worker) });
                 }
             });
         }
@@ -956,7 +980,7 @@ fn prepare_sections(
         );
         queue.write_buffer(&gpu.quad_indices, 0, bytemuck::cast_slice(&indices));
     }
-    for (_, p, v, i, g) in uploads {
+    for (_, p, v, i, g) in uploads.drain(..) {
         queue.write_buffer(&gpu.arenas[p].vertices.buffer, v, g.vertices());
         if !g.indices().is_empty() {
             queue.write_buffer(&gpu.arenas[p].indices.buffer, i, g.indices());
@@ -1013,21 +1037,22 @@ impl Default for CullWorker {
 }
 
 fn cull_columns(
-    columns: &[&Column],
+    columns: &Slice<IVec2, Column>,
     cull: &[Cull],
-    slots: &[Option<Slot>],
+    slots: &[Slot],
     view: &ViewCull,
     planes: &[Plane; 5],
     require_visible: bool,
     worker: &mut CullWorker,
 ) {
     let CullWorker { counts, draws } = worker;
+    let buckets = if view.camera { DISTANCE_BUCKETS } else { 1 };
     for range in counts.iter_mut() {
-        range.fill(0);
+        range[..buckets].fill(0);
     }
     draws.clear();
     let eye = view.eye;
-    for column in columns {
+    for (_, column) in columns {
         let mut sections = column.occupied
             & if require_visible {
                 column.mask
@@ -1037,21 +1062,7 @@ fn cull_columns(
         if sections == 0 {
             continue;
         }
-        let (min, max) = (column.min, column.max);
-        let Some(mask) = cull_planes(
-            Vec3::new(
-                (min.x + max.x) * 0.5,
-                (min.y + max.y) * 0.5,
-                (min.z + max.z) * 0.5,
-            ),
-            Vec3::new(
-                (max.x - min.x) * 0.5,
-                (max.y - min.y) * 0.5,
-                (max.z - min.z) * 0.5,
-            ),
-            planes,
-            0b11111,
-        ) else {
+        let Some(mask) = cull_planes(column.center, column.extent, planes, 0b11111) else {
             continue;
         };
         while sections != 0 {
@@ -1081,7 +1092,7 @@ fn cull_columns(
             } else {
                 (0, ALL_FACES)
             };
-            let allocations = &slots[slot].as_ref().unwrap().passes;
+            let allocations = &slots[slot];
             let mut bits = passes;
             while bits != 0 {
                 let pass = bits.trailing_zeros() as usize;
@@ -1525,7 +1536,9 @@ fn record_memory(world: &mut World, mut last: Local<Option<std::time::Instant>>)
                         .sum::<u64>();
             }
         }
-        snapshot.cpu_payload += gpu.slots.capacity() * size_of::<Option<Slot>>()
+        snapshot.cpu_payload += gpu.slots.capacity() * size_of::<Slot>()
+            + gpu.columns.capacity() * size_of::<(IVec2, Column, usize)>()
+            + gpu.dirty_columns.capacity() * size_of::<IVec2>()
             + gpu.cull.capacity() * size_of::<Cull>()
             + gpu.origin_data.capacity() * size_of::<[f32; 4]>()
             + gpu.free.capacity() * size_of::<usize>();
