@@ -2,9 +2,10 @@
 //!
 //! Each cascade is a light-aligned box centered on the camera, so it depends on
 //! neither the camera's rotation nor its field of view and stays valid while the
-//! camera turns. Only the nearest cascade is redrawn every frame; the others take
-//! turns, one per frame, and keep their matrix and shadow map in between. A wide
-//! field of view also made Bevy's frustum fit about half as sharp for the same map.
+//! camera turns. Every cascade keeps its matrix and shadow map until its refresh
+//! period has elapsed, and a frame redraws one map at most while the frame rate
+//! exceeds the refresh rates. A wide field of view also made Bevy's frustum fit
+//! about half as sharp for the same map.
 //!
 //! Terrain and model shaders pick the first box holding a fragment
 //! (`block_lighting.wesl`); Bevy's own materials keep its view-depth split, whose
@@ -29,9 +30,19 @@ use bevy::{
 /// Half the side of each cascade's box, in blocks. Every level is sharper than the
 /// frustum cascade it replaces (12, 26, 58 and 128 blocks deep).
 const HALF_EXTENTS: [f32; 4] = [12.0, 28.0, 64.0, 144.0];
-/// The cascade redrawn beside the nearest one, by frame: the second at half rate,
-/// the two widest at quarter rate.
-const ROTATION: [usize; 4] = [1, 2, 1, 3];
+/// Seconds each cascade keeps its shadow map. Shadow maps are as large as the
+/// screen's own targets: redrawing two of them every frame, as a per-frame rotation
+/// did, cost more the higher the frame rate, for maps that had not changed. The
+/// nearest cascade follows moving casters at 90 Hz; the wide ones hold terrain,
+/// whose shadows only move with the sun, a drifting camera or an edited block.
+const REFRESH_PERIODS: [f32; 4] = [1.0 / 90.0, 1.0 / 30.0, 1.0 / 10.0, 1.0 / 5.0];
+/// A cascade this many periods late is redrawn even beside another one: frame
+/// rates below the refresh rates keep the nearest cascade redrawn every frame and
+/// the others at two thirds of their rate or better.
+const OVERDUE: f32 = 1.5;
+/// Rotation of the light (about 0.5 degree) that redraws a cached cascade at once:
+/// time skips and sleeping.
+const MAX_LIGHT_TURN: f32 = 0.999_96;
 /// Fraction of a box's half extent the camera may drift from its center before the
 /// cascade is redrawn out of turn (teleports, very low frame rates).
 const MAX_DRIFT: f32 = 0.1;
@@ -69,10 +80,13 @@ struct ClipmapState {
     light: Option<Entity>,
     camera: Option<Entity>,
     map_size: usize,
-    frame: usize,
     cascades: Vec<Cascade>,
     /// Camera position each cascade was last centered on.
     centers: [Vec3; HALF_EXTENTS.len()],
+    /// Light rotation each cascade was last drawn with.
+    rotations: [Quat; HALF_EXTENTS.len()],
+    /// Seconds since each cascade was last drawn.
+    ages: [f32; HALF_EXTENTS.len()],
 }
 
 pub(crate) fn register(app: &mut App) {
@@ -91,6 +105,7 @@ pub(crate) fn register(app: &mut App) {
 }
 
 fn update_shadow_clipmap(
+    time: Res<Time<Real>>,
     map: Res<DirectionalLightShadowMap>,
     camera: Option<Single<(Entity, &GlobalTransform, &Projection), With<VoxelViewer>>>,
     mut lights: Query<
@@ -153,16 +168,27 @@ fn update_shadow_clipmap(
     state.light = Some(light);
     state.camera = Some(viewer);
     state.map_size = map.size;
-    state.frame = state.frame.wrapping_add(1);
 
     let rotation = light_transform.rotation();
-    let turn = ROTATION[state.frame % ROTATION.len()];
+    let elapsed = time.delta_secs();
+    let mut lateness = [0.0; HALF_EXTENTS.len()];
+    for index in 0..count {
+        state.ages[index] += elapsed;
+        lateness[index] = state.ages[index] / REFRESH_PERIODS[index];
+    }
+    // The cascade the furthest past its period takes this frame's redraw.
+    let turn = (0..count)
+        .filter(|&index| lateness[index] >= 1.0)
+        .max_by(|&a, &b| lateness[a].total_cmp(&lateness[b]));
     let mut drawn = 0u8;
     for (index, half) in HALF_EXTENTS.into_iter().enumerate() {
         let drifted = (eye - state.centers[index]).abs().max_element() > half * MAX_DRIFT;
-        if reset || index == 0 || index == turn || drifted {
+        let turned = state.rotations[index].dot(rotation).abs() < MAX_LIGHT_TURN;
+        if reset || drifted || turned || turn == Some(index) || lateness[index] >= OVERDUE {
             state.cascades[index] = clipmap_cascade(eye, rotation, half, map.size as f32);
             state.centers[index] = eye;
+            state.rotations[index] = rotation;
+            state.ages[index] = 0.0;
             drawn |= 1 << index;
         }
     }

@@ -3,6 +3,7 @@
 mod apply;
 mod model;
 mod composite;
+mod present;
 mod resolution;
 mod ui;
 
@@ -35,6 +36,7 @@ impl Plugin for GameSettingsPlugin {
         apply::register(app);
         resolution::register(app);
         composite::register(app);
+        present::register(app);
         app.add_plugins(SettingsPlugin::new(SETTINGS_APP_NAME))
             .add_systems(OnEnter(GameState::Settings), spawn_settings_page)
             .add_systems(
