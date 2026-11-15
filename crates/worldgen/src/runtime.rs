@@ -330,6 +330,7 @@ impl GenerationSession {
 
 struct Entry {
     entity: Entity,
+    index: usize,
     references: [u32; Stage::COUNT],
     chunk: Option<Chunk>,
     stage: Stage,
@@ -339,6 +340,7 @@ struct Entry {
     writing: bool,
     failed: bool,
     queued: bool,
+    retirement_queued: bool,
 }
 impl Entry {
     fn target(&self) -> Stage {
@@ -363,7 +365,8 @@ struct Runtime {
     view_cursor: usize,
     view: Option<ViewDemand>,
     changes: VecDeque<(ChunkPos, Stage, bool)>,
-    candidates: VecDeque<ChunkPos>,
+    positions: Vec<ChunkPos>,
+    retiring: VecDeque<ChunkPos>,
     ready: BinaryHeap<Reverse<(u32, i32, i32)>>,
     requests: Vec<Request>,
     active: usize,
@@ -382,7 +385,8 @@ impl Runtime {
             view_cursor: 0,
             view: None,
             changes: VecDeque::new(),
-            candidates: VecDeque::new(),
+            positions: Vec::new(),
+            retiring: VecDeque::new(),
             ready: BinaryHeap::new(),
             requests: Vec::new(),
             active: 0,
@@ -404,6 +408,16 @@ impl Runtime {
                 center,
             ) as u32;
             self.ready.push(Reverse((distance, position.x, position.y)));
+        }
+    }
+
+    fn retire(&mut self, position: ChunkPos) {
+        if let Some(entry) = self.entries.get_mut(&position)
+            && entry.target() == Stage::None
+            && !entry.retirement_queued
+        {
+            entry.retirement_queued = true;
+            self.retiring.push_back(position);
         }
     }
 
@@ -455,6 +469,24 @@ impl Plugin for WorldGenerationPlugin {
         }
         app.init_resource::<GenerationGraph>()
             .add_message::<ChunkAvailable>()
+            .add_observer(
+                |event: On<Remove<ChunkRetention>>,
+                 chunks: Query<&hollow_engine::chunk::VoxelChunk>,
+                 mut graph: ResMut<GenerationGraph>| {
+                    if let Ok(chunk) = chunks.get(event.entity) {
+                        let position = ChunkPos::new(chunk.position.x, chunk.position.y);
+                        for runtime in &mut graph.0 {
+                            if runtime
+                                .entries
+                                .get(&position)
+                                .is_some_and(|entry| entry.entity == event.entity)
+                            {
+                                runtime.retire(position);
+                            }
+                        }
+                    }
+                },
+            )
             .add_systems(PostUpdate, collect.in_set(VoxelTasks::Collect))
             .add_systems(PostUpdate, update_demands.in_set(VoxelTasks::Demand))
             .add_systems(PostUpdate, schedule.in_set(VoxelTasks::Requests));
@@ -583,9 +615,11 @@ fn update_demands(
                     .lock()
                     .unwrap()
                     .insert(position, entity);
-                runtime.candidates.push_back(position);
+                let index = runtime.positions.len();
+                runtime.positions.push(position);
                 Entry {
                     entity,
+                    index,
                     references: [0; Stage::COUNT],
                     chunk: None,
                     stage: Stage::None,
@@ -595,6 +629,7 @@ fn update_demands(
                     writing: false,
                     failed: false,
                     queued: false,
+                    retirement_queued: false,
                 }
             });
             let count = &mut entry.references[stage as usize];
@@ -613,6 +648,9 @@ fn update_demands(
                 });
             }
             runtime.queue(position);
+            if !add && propagate {
+                runtime.retire(position);
+            }
         }
     }
     deadline.remaining = deadline.remaining.saturating_sub(started.elapsed());
@@ -739,6 +777,9 @@ fn collect(
                 }
             }),
         };
+        for (position, _) in task.writes.iter().chain(&task.reads) {
+            runtime.retire(*position);
+        }
         // Only completions and demand changes wake stage admission. A blocked
         // chunk waits for its neighbors instead of scanning the whole view again.
         // Reservations overlap: wake each dilated neighbor once rather than
@@ -850,18 +891,15 @@ fn schedule(
                 continue;
             }
             let capture = runtime.flush_capture.get_or_insert_with(|| FlushCapture {
-                remaining: runtime.candidates.len(),
+                remaining: runtime.positions.len(),
                 chunks: Vec::new(),
                 writes: Vec::new(),
                 replies: std::mem::take(&mut *runtime.session.0.flush.lock().unwrap()),
             });
             while capture.remaining > 0 && Instant::now() < deadline.until {
                 capture.remaining -= 1;
-                let position = runtime.candidates.pop_front().unwrap();
-                let Some(entry) = runtime.entries.get_mut(&position) else {
-                    continue;
-                };
-                runtime.candidates.push_back(position);
+                let position = runtime.positions[capture.remaining];
+                let entry = runtime.entries.get_mut(&position).unwrap();
                 if let Some(chunk) = entry.chunk.take() {
                     entry.writing = true;
                     capture.writes.push((position, entry.revision));
@@ -907,51 +945,60 @@ fn schedule(
                 task,
             );
         }
-        // Incremental eviction also observes presentation retention being removed.
         let mut evicted = Vec::new();
         let mut evicted_writes = Vec::new();
-        for _ in 0..runtime.candidates.len().min(32) {
+        // Reference changes must settle before a temporary zero can retire a dependency.
+        let retire_count = if runtime.changes.is_empty() {
+            runtime.retiring.len().min(32)
+        } else {
+            0
+        };
+        for _ in 0..retire_count {
             if Instant::now() >= deadline.until {
                 break;
             }
-            let Some(position) = runtime.candidates.pop_front() else {
-                break;
-            };
-            if !runtime.entries.contains_key(&position) {
+            let position = runtime.retiring.pop_front().unwrap();
+            let entry = runtime.entries.get_mut(&position).unwrap();
+            entry.retirement_queued = false;
+            if entry.target() != Stage::None
+                || entry.writing
+                || entry.readers != 0
+                || retained.contains(entry.entity)
+            {
                 continue;
             }
-            runtime.candidates.push_back(position);
-            if runtime.changes.is_empty() && runtime.entries[&position].target() == Stage::None {
-                let entry = runtime.entries.get_mut(&position).unwrap();
-                if !entry.writing && entry.readers == 0 && !retained.contains(entry.entity) {
-                    if entry.chunk.is_some()
-                        && runtime.session.0.storage.is_some()
-                        && entry.saved_revision != Some(entry.revision)
-                    {
-                        if runtime.active < workers.count() {
-                            entry.writing = true;
-                            evicted_writes.push((position, entry.revision));
-                            evicted.push((position, entry.chunk.take().unwrap()));
-                        }
-                    } else {
-                        let entry = runtime.entries.remove(&position).unwrap();
-                        runtime.candidates.pop_back();
-                        runtime.session.0.entities.lock().unwrap().remove(&position);
-                        commands.entity(entry.entity).despawn();
-                        runtime
-                            .session
-                            .0
-                            .snapshots
-                            .lock()
-                            .unwrap()
-                            .remove(&position);
-                        IoTaskPool::get()
-                            .spawn(async move {
-                                drop(entry);
-                            })
-                            .detach();
-                    }
+            if entry.chunk.is_some()
+                && runtime.session.0.storage.is_some()
+                && entry.saved_revision != Some(entry.revision)
+            {
+                if runtime.active < workers.count() {
+                    entry.writing = true;
+                    evicted_writes.push((position, entry.revision));
+                    evicted.push((position, entry.chunk.take().unwrap()));
+                } else {
+                    runtime.retire(position);
                 }
+            } else {
+                let entry = runtime.entries.remove(&position).unwrap();
+                // Dense positions support constant-time removal and budgeted flush capture.
+                runtime.positions.swap_remove(entry.index);
+                if let Some(swapped) = runtime.positions.get(entry.index) {
+                    runtime.entries.get_mut(swapped).unwrap().index = entry.index;
+                }
+                runtime.session.0.entities.lock().unwrap().remove(&position);
+                runtime
+                    .session
+                    .0
+                    .snapshots
+                    .lock()
+                    .unwrap()
+                    .remove(&position);
+                commands.entity(entry.entity).despawn();
+                IoTaskPool::get()
+                    .spawn(async move {
+                        drop(entry);
+                    })
+                    .detach();
             }
         }
         if !evicted.is_empty() {
@@ -1230,55 +1277,68 @@ fn spawn_store(
 pub struct GenerationMemory {
     pub working_bytes: usize,
     pub shared_bytes: usize,
+    pub metadata_lower_bound: usize,
+    pub template_bytes_lower_bound: usize,
+    pub templates: usize,
     pub in_flight: usize,
     pub density_bytes: [usize; 3],
+    pub density_buffer_counts: [[usize; 8]; 2],
 }
 #[cfg(feature = "dev")]
 pub fn memory_census(
-    world: &World,
+    world: &mut World,
     census: &mut hollow_core::sections::AllocationCensus,
 ) -> GenerationMemory {
-    use crate::generation::proto_chunk::WorkingSection;
+    use crate::generation::structure::template::global_cache;
     let mut memory = GenerationMemory {
         density_bytes: crate::generation::noise::router::density_volume::memory_bytes(),
+        density_buffer_counts:
+            crate::generation::noise::router::density_volume::memory_buffer_counts(),
+        metadata_lower_bound: world
+            .query::<&GenerationTask>()
+            .iter(world)
+            .map(|task| {
+                (task.writes.capacity() + task.reads.capacity()) * size_of::<(ChunkPos, u64)>()
+            })
+            .sum(),
         ..Default::default()
     };
     let before = census.bytes;
     if let Some(graph) = world.get_resource::<GenerationGraph>() {
         for runtime in &graph.0 {
             memory.in_flight += runtime.active;
-            for entry in runtime.entries.values() {
-                match entry.chunk.as_ref() {
-                    Some(Chunk::Proto(chunk)) => {
-                        memory.working_bytes += size_of::<ProtoChunk>()
-                            + chunk.block_sections.capacity() * size_of::<WorkingSection>()
-                            + size_of_val(chunk.flat_biome_map.as_ref())
-                            + chunk.fluid_ticks.capacity()
-                                * size_of::<
-                                    crate::tick::ScheduledTick<&'static pumpkin_data::fluid::Fluid>,
-                                >();
-                        for section in &chunk.block_sections {
-                            if let WorkingSection::Dense(cells) = section {
-                                memory.working_bytes += size_of_val(cells.as_ref());
-                            }
-                        }
-                        for channel in [&chunk.light.sky_light, &chunk.light.block_light] {
-                            memory.working_bytes += size_of_val(channel.as_ref());
-                            for section in channel.iter() {
-                                if let crate::chunk::format::LightContainer::Full(cells) = section {
-                                    memory.working_bytes += cells.len();
-                                }
-                            }
-                        }
-                    }
-                    Some(Chunk::Complete(chunk)) if census.shared(chunk) => {
-                        chunk.section.states.read().unwrap().census(census);
-                        chunk.light.lock().unwrap().census(census);
-                        census.shared(&chunk.section.biomes);
-                        census.shared(&chunk.fluid_ticks);
-                    }
-                    _ => {}
-                }
+            memory.metadata_lower_bound += runtime.entries.capacity()
+                * size_of::<(ChunkPos, Entry)>()
+                + runtime.positions.capacity() * size_of::<ChunkPos>()
+                + (runtime.retiring.capacity()
+                    + runtime.root_order.capacity()
+                    + runtime.roots.capacity())
+                    * size_of::<ChunkPos>()
+                + runtime.changes.capacity() * size_of::<(ChunkPos, Stage, bool)>()
+                + runtime.ready.capacity() * size_of::<Reverse<(u32, i32, i32)>>()
+                + runtime.requests.capacity() * size_of::<Request>()
+                + runtime.session.0.entities.lock().unwrap().capacity()
+                    * size_of::<(ChunkPos, Entity)>()
+                + runtime.session.0.snapshots.lock().unwrap().capacity()
+                    * size_of::<(ChunkPos, ChunkSnapshot)>();
+            let captured = runtime
+                .flush_capture
+                .iter()
+                .flat_map(|capture| capture.chunks.iter().map(|(_, chunk)| chunk));
+            for chunk in runtime
+                .entries
+                .values()
+                .filter_map(|entry| entry.chunk.as_ref())
+                .chain(captured)
+            {
+                memory.working_bytes += census_chunk(chunk, census);
+            }
+            if let Some(capture) = &runtime.flush_capture {
+                memory.metadata_lower_bound += capture.chunks.capacity()
+                    * size_of::<(ChunkPos, Chunk)>()
+                    + capture.writes.capacity() * size_of::<(ChunkPos, u64)>()
+                    + capture.replies.capacity()
+                        * size_of::<async_channel::Sender<Result<(), String>>>();
             }
             for snapshot in runtime.session.0.snapshots.lock().unwrap().values() {
                 snapshot.states.census(census);
@@ -1289,5 +1349,54 @@ pub fn memory_census(
         }
     }
     memory.shared_bytes = census.bytes - before;
+    let before = census.bytes;
+    memory.templates = global_cache().census(census);
+    memory.template_bytes_lower_bound = census.bytes - before;
     memory
+}
+
+#[cfg(feature = "dev")]
+fn census_chunk(chunk: &Chunk, census: &mut hollow_core::sections::AllocationCensus) -> usize {
+    use crate::generation::{proto_chunk::WorkingSection, structure::template::nbt_bytes};
+    let mut working = 0;
+    match chunk {
+        Chunk::Proto(chunk) => {
+            working += size_of::<ProtoChunk>()
+                + chunk.block_sections.capacity() * size_of::<WorkingSection>()
+                + size_of_val(chunk.flat_biome_map.as_ref())
+                + chunk.fluid_ticks.capacity()
+                    * size_of::<crate::tick::ScheduledTick<&'static pumpkin_data::fluid::Fluid>>();
+            working += chunk.surface_estimates.capacity() * size_of::<(u64, i32)>()
+                + (chunk.pending_block_entities.capacity()
+                    + chunk.pending_structure_entities.capacity())
+                    * size_of::<pumpkin_nbt::compound::NbtCompound>()
+                + chunk
+                    .pending_block_entities
+                    .iter()
+                    .chain(&chunk.pending_structure_entities)
+                    .map(nbt_bytes)
+                    .sum::<usize>();
+            for section in &chunk.block_sections {
+                if let WorkingSection::Dense(cells) = section {
+                    working += size_of_val(cells.as_ref());
+                }
+            }
+            for channel in [&chunk.light.sky_light, &chunk.light.block_light] {
+                working += size_of_val(channel.as_ref());
+                for section in channel.iter() {
+                    if let crate::chunk::format::LightContainer::Full(cells) = section {
+                        working += cells.len();
+                    }
+                }
+            }
+        }
+        Chunk::Complete(chunk) if census.shared(chunk) => {
+            chunk.section.states.read().unwrap().census(census);
+            chunk.light.lock().unwrap().census(census);
+            census.shared(&chunk.section.biomes);
+            census.shared(&chunk.fluid_ticks);
+        }
+        _ => {}
+    }
+    working
 }

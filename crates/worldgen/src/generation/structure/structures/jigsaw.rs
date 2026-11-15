@@ -507,7 +507,7 @@ impl JigsawBlock {
             return None;
         }
 
-        let nbt = block.nbt.as_ref()?;
+        let nbt = block.nbt?;
 
         // Resolve facing and up from orientation property
         let orientation = palette

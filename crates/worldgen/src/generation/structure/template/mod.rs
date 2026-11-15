@@ -42,9 +42,11 @@ pub use cache::{
 };
 pub use processor::{StructureProcessor, load_processor_list};
 pub use pumpkin_data::{BlockState, Mirror as BlockMirror, Rotation as BlockRotation};
+#[cfg(feature = "dev")]
+pub(crate) use structure_template::nbt_bytes;
 pub use structure_template::{
-    JigsawBlockInfo, Palette, PaletteEntry, SimplePalette, StructureBlockInfo, StructureEntityInfo,
-    StructurePlaceSettings, StructureTemplate, TemplateBlock, TemplateEntity,
+    Palette, PaletteEntry, StructureEntityInfo, StructurePlaceSettings, StructureTemplate,
+    TemplateBlock,
 };
 pub use template_piece::TemplatePiece;
 
@@ -112,15 +114,15 @@ pub fn place_template_with_options(
     let mut context_rng = LegacyRand::from_seed(hash_block_pos(world_x, origin.y, world_z) as u64);
     let mut context = processor::ProcessorContext::new(origin, processors, &mut context_rng);
 
-    for block in &template.blocks {
-        let palette_entry = &template.palette[block.state as usize];
+    for block in template.blocks() {
+        let palette_entry = &block.state;
 
         // Structure blocks are data markers.
         if palette_entry.id.to_block_id() == pumpkin_data::BlockId::STRUCTURE_BLOCK {
             continue;
         }
 
-        let mut block_entity_nbt = block.nbt.clone();
+        let mut block_entity_nbt = block.nbt;
         let mut placed_entry = palette_entry.clone();
 
         // Jigsaw blocks are replaced during template processing, before block entities are
@@ -166,6 +168,7 @@ pub fn place_template_with_options(
         }
 
         let world_pos = Vector3::new(wx, wy, wz);
+        let mut block_entity_nbt = block_entity_nbt.cloned();
 
         if apply_waterlogging
             && placer.get_block_state(&world_pos).to_block_id() == pumpkin_data::Block::WATER.id
@@ -223,10 +226,10 @@ pub fn place_template_with_options(
             placed_nbt.put_int("y", wy);
             placed_nbt.put_int("z", wz);
 
-            if let Some(template_nbt) = &block_entity_nbt {
-                for (key, value) in &template_nbt.child_tags {
+            if let Some(template_nbt) = block_entity_nbt {
+                for (key, value) in template_nbt.child_tags {
                     if key.as_ref() != "x" && key.as_ref() != "y" && key.as_ref() != "z" {
-                        placed_nbt.child_tags.insert(key.clone(), value.clone());
+                        placed_nbt.child_tags.insert(key, value);
                     }
                 }
             }

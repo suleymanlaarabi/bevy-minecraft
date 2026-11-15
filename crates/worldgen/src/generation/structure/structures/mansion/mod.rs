@@ -276,8 +276,8 @@ impl MansionTemplatePiece {
         random: &mut RandomGenerator,
         chunk_box: &BlockBox,
     ) {
-        for template_block in &self.template.blocks {
-            let palette = &self.template.palette[template_block.state as usize];
+        for template_block in self.template.blocks() {
+            let palette = &template_block.state;
             let position = self.world_position(template_block.pos);
             if !chunk_box.contains_pos(&position) {
                 continue;
@@ -312,13 +312,7 @@ impl MansionTemplatePiece {
                 continue;
             };
             chunk.set_block_state(position.x, position.y, position.z, state);
-            Self::place_block_entity(
-                chunk,
-                palette,
-                template_block.nbt.as_ref(),
-                position,
-                random,
-            );
+            Self::place_block_entity(chunk, palette, template_block.nbt, position, random);
         }
     }
 
@@ -380,8 +374,8 @@ impl MansionTemplatePiece {
                 Direction::North => Facing::North,
             };
             let chest = PaletteEntry::with_properties(
-                "minecraft:chest".to_string(),
-                vec![Property::Facing(target_facing)],
+                "minecraft:chest",
+                &[Property::Facing(target_facing)],
             );
             if let Some(state) = BlockStateResolver::resolve_simple(&chest) {
                 chunk.set_block_state(position.x, position.y, position.z, state);

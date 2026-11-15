@@ -459,8 +459,8 @@ impl StructurePieceBase for OceanRuinPiece {
 
         let mut suspicious_count = 0;
 
-        for block in &self.template.blocks {
-            let palette_entry = &self.template.palette[block.state as usize];
+        for block in self.template.blocks() {
+            let palette_entry = &block.state;
 
             if palette_entry.id.to_block_id() == pumpkin_data::BlockId::STRUCTURE_VOID
                 || palette_entry.id.to_block_id() == pumpkin_data::BlockId::STRUCTURE_VOID

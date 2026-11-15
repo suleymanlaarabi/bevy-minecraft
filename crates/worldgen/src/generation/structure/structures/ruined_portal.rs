@@ -454,10 +454,9 @@ impl RuinedPortalPiece {
             &mut context_rng,
         );
 
-        for block in &self.template.blocks {
-            let palette_entry = &self.template.palette[block.state as usize];
+        for block in self.template.blocks() {
+            let palette_entry = &block.state;
 
-            let mut block_entity_nbt = block.nbt.clone();
             let placed_entry = palette_entry.clone();
 
             let Some(mut state) = BlockStateResolver::resolve(&placed_entry, rotation, mirror)
@@ -472,6 +471,7 @@ impl RuinedPortalPiece {
             if !chunk_box.contains_pos(&world_pos) {
                 continue;
             }
+            let mut block_entity_nbt = block.nbt.cloned();
 
             let mut processed_state = Some(state);
             let mut capped_idx = 0;
@@ -689,8 +689,7 @@ impl RuinedPortalPiece {
             };
             let neighbor_pos = pos + dir_offset;
             if chunk.get_block_state(&neighbor_pos).to_block_id() == Block::AIR.id {
-                let entry =
-                    PaletteEntry::with_properties("minecraft:vine".to_string(), vec![vine_face]);
+                let entry = PaletteEntry::with_properties("minecraft:vine", &[vine_face]);
                 if let Some(vine_state) =
                     BlockStateResolver::resolve(&entry, Rotation::None, Mirror::None)
                 {
@@ -716,8 +715,8 @@ impl RuinedPortalPiece {
             let above = pos + Vector3::new(0, 1, 0);
             if chunk.get_block_state(&above).to_block_id() == Block::AIR.id {
                 let entry = PaletteEntry::with_properties(
-                    "minecraft:jungle_leaves".to_string(),
-                    vec![pumpkin_data::Property::Persistent(true)],
+                    "minecraft:jungle_leaves",
+                    &[pumpkin_data::Property::Persistent(true)],
                 );
                 if let Some(leaves_state) =
                     BlockStateResolver::resolve(&entry, Rotation::None, Mirror::None)

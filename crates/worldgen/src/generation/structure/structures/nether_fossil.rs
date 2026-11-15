@@ -171,10 +171,9 @@ impl NetherFossilPiece {
             &mut context_rng,
         );
 
-        for block in &self.template.blocks {
-            let palette_entry = &self.template.palette[block.state as usize];
+        for block in self.template.blocks() {
+            let palette_entry = &block.state;
 
-            let mut block_entity_nbt = block.nbt.clone();
             let placed_entry = palette_entry.clone();
 
             let Some(state) = BlockStateResolver::resolve(&placed_entry, rotation, mirror) else {
@@ -188,6 +187,7 @@ impl NetherFossilPiece {
             if !chunk_box.contains_pos(&world_pos) {
                 continue;
             }
+            let mut block_entity_nbt = block.nbt.cloned();
 
             let mut processed_state = Some(state);
             let mut capped_idx = 0;

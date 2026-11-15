@@ -34,6 +34,7 @@ impl BufferPool {
         self.bytes -= size_of_val(buffer.as_ref());
         #[cfg(feature = "dev")]
         if memory_enabled() {
+            record_buffer(1, size_of_val(buffer.as_ref()), false);
             POOLED_BYTES.fetch_sub(
                 size_of_val(buffer.as_ref()),
                 std::sync::atomic::Ordering::Relaxed,
@@ -53,6 +54,7 @@ impl BufferPool {
         self.bytes += bytes;
         #[cfg(feature = "dev")]
         if memory_enabled() {
+            record_buffer(1, bytes, true);
             POOLED_BYTES.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
         }
     }
@@ -61,6 +63,9 @@ impl BufferPool {
 impl Drop for BufferPool {
     fn drop(&mut self) {
         if memory_enabled() {
+            for buffer in &self.buffers {
+                record_buffer(1, size_of_val(buffer.as_ref()), false);
+            }
             POOLED_BYTES.fetch_sub(self.bytes, std::sync::atomic::Ordering::Relaxed);
         }
     }
@@ -71,6 +76,37 @@ static POOLED_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicU
 static ACTIVE_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 #[cfg(feature = "dev")]
 static PEAK_ACTIVE_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(feature = "dev")]
+static BUFFER_COUNTS: [[std::sync::atomic::AtomicUsize; 8]; 2] =
+    [const { [const { std::sync::atomic::AtomicUsize::new(0) }; 8] }; 2];
+#[cfg(feature = "dev")]
+fn record_buffer(kind: usize, bytes: usize, add: bool) {
+    // Capacity classes: <4 KiB, <16 KiB, <64 KiB, <256 KiB, <1 MiB,
+    // <4 MiB, <16 MiB, and >=16 MiB. Counts distinguish reuse from active work.
+    let limits = [
+        4 << 10,
+        16 << 10,
+        64 << 10,
+        256 << 10,
+        1 << 20,
+        4 << 20,
+        16 << 20,
+    ];
+    let counter = &BUFFER_COUNTS[kind][limits.partition_point(|&limit| bytes >= limit)];
+    if add {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    } else {
+        counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+#[cfg(feature = "dev")]
+pub fn memory_buffer_counts() -> [[usize; 8]; 2] {
+    BUFFER_COUNTS.each_ref().map(|counts| {
+        counts
+            .each_ref()
+            .map(|value| value.load(std::sync::atomic::Ordering::Relaxed))
+    })
+}
 #[cfg(feature = "dev")]
 pub fn memory_bytes() -> [usize; 3] {
     use std::sync::atomic::Ordering::Relaxed;
@@ -109,6 +145,7 @@ impl DensityBuffer {
         if memory_enabled() {
             use std::sync::atomic::Ordering::Relaxed;
             let bytes = size_of_val(values.as_ref());
+            record_buffer(0, bytes, true);
             let active = ACTIVE_BYTES.fetch_add(bytes, Relaxed) + bytes;
             PEAK_ACTIVE_BYTES.fetch_max(active, Relaxed);
         }
@@ -142,6 +179,7 @@ impl Drop for DensityBuffer {
         let values = std::mem::take(&mut self.values);
         #[cfg(feature = "dev")]
         if memory_enabled() {
+            record_buffer(0, size_of_val(values.as_ref()), false);
             ACTIVE_BYTES.fetch_sub(
                 size_of_val(values.as_ref()),
                 std::sync::atomic::Ordering::Relaxed,

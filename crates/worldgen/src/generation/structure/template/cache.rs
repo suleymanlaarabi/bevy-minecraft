@@ -40,6 +40,18 @@ impl Default for TemplateCache {
 }
 
 impl TemplateCache {
+    #[cfg(feature = "dev")]
+    pub(crate) fn census(&self, census: &mut hollow_core::sections::AllocationCensus) -> usize {
+        let mut count = 0;
+        for entry in &self.cache {
+            count += 1;
+            if census.shared(entry.value()) {
+                census.bytes += entry.key().capacity() + entry.value().owned_bytes();
+            }
+        }
+        count
+    }
+
     /// Creates a new empty template cache.
     #[must_use]
     pub fn new() -> Self {
@@ -63,12 +75,15 @@ impl TemplateCache {
         }
 
         let static_template = pumpkin_data::structure_template::get_structure_template(&key)?;
-        let mut template = StructureTemplate::from_static(static_template);
-        template.name = Some(key.clone());
-
-        let arc = Arc::new(template);
-        self.cache.insert(key, Arc::clone(&arc));
-        Some(arc)
+        let name = key.clone();
+        // A miss initializes under the entry lock, preventing concurrent generation
+        // jobs from retaining separate copies. Cached reads keep the shared lock.
+        let template = self.cache.entry(key).or_insert_with(|| {
+            let mut template = StructureTemplate::from_static(static_template);
+            template.name = Some(name);
+            Arc::new(template)
+        });
+        Some(Arc::clone(template.value()))
     }
 
     /// Preloads a list of templates into the cache.

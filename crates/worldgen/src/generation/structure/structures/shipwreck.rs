@@ -307,8 +307,8 @@ impl StructurePieceBase for ShipwreckPiece {
 
         // Place non-marker blocks
         let box_limit = self.piece.bounding_box;
-        for block in &self.template.blocks {
-            let palette_entry = &self.template.palette[block.state as usize];
+        for block in self.template.blocks() {
+            let palette_entry = &block.state;
 
             if palette_entry.id.to_block_id() == pumpkin_data::BlockId::STRUCTURE_BLOCK
                 || palette_entry.id.to_block_id() == pumpkin_data::BlockId::AIR
@@ -392,8 +392,8 @@ impl StructurePieceBase for ShipwreckPiece {
         }
 
         // Process data markers
-        for block in &self.template.blocks {
-            let palette_entry = &self.template.palette[block.state as usize];
+        for block in self.template.blocks() {
+            let palette_entry = &block.state;
             if palette_entry.id.to_block_id() == pumpkin_data::BlockId::STRUCTURE_BLOCK
                 && let Some(nbt) = &block.nbt
             {

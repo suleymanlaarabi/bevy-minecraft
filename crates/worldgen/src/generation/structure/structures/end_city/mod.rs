@@ -98,8 +98,8 @@ impl EndCityTemplatePiece {
         random: &mut RandomGenerator,
         chunk_box: &BlockBox,
     ) {
-        for block in &self.descriptor.template.blocks {
-            let palette = &self.descriptor.template.palette[block.state as usize];
+        for block in self.descriptor.template.blocks() {
+            let palette = &block.state;
             if matches!(
                 palette.id.to_block_id(),
                 pumpkin_data::BlockId::STRUCTURE_VOID | pumpkin_data::BlockId::STRUCTURE_BLOCK
@@ -118,11 +118,11 @@ impl EndCityTemplatePiece {
                 continue;
             };
             chunk.set_block_state(position.x, position.y, position.z, state);
-            Self::place_block_entity(chunk, palette, block.nbt.as_ref(), position, random);
+            Self::place_block_entity(chunk, palette, block.nbt, position, random);
         }
 
-        for block in &self.descriptor.template.blocks {
-            let palette = &self.descriptor.template.palette[block.state as usize];
+        for block in self.descriptor.template.blocks() {
+            let palette = &block.state;
             if palette.id.to_block_id() != pumpkin_data::BlockId::STRUCTURE_BLOCK {
                 continue;
             }

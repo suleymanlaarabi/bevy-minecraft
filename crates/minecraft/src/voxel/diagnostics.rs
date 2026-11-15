@@ -562,6 +562,7 @@ fn report_memory(world: &mut World, mut history: Local<MemoryHistory>) {
         + mesher_scratch
         + section_records
         + generation.working_bytes
+        + generation.metadata_lower_bound
         + generation.density_bytes[0]
         + generation.density_bytes[1]
         + queued_payload
@@ -584,7 +585,7 @@ fn report_memory(world: &mut World, mut history: Local<MemoryHistory>) {
         shared_allocation_bytes = shared, mesher_scratch_bytes = mesher_scratch, generation = ?generation, section_records_bytes = section_records,
         image_bytes = images, mesh_payload_bytes = mesh_payload, queued_geometry_payload_bytes = queued_payload,
         gpu_arena_live_bytes = render.arena_live, gpu_arena_reserved_bytes = render.arena_reserved,
-        "memory census: byte counts; sparse ECS and geometry are lower bounds; GPU bytes are separate");
+        "memory census: allocation lower bounds; task captures, native structure caches, catalogs and driver memory remain unattributed; GPU bytes are separate");
 }
 fn process_memory() -> [Option<usize>; 4] {
     let mut result = [None; 4];

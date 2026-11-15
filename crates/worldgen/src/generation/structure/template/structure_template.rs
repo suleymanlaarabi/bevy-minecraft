@@ -3,12 +3,12 @@
 use std::io::Cursor;
 use std::sync::OnceLock;
 
-use pumpkin_data::{Block, BlockId, BlockStateId, Mirror, Property, Rotation};
+use pumpkin_data::{Block, BlockStateId, Mirror, Property, Rotation};
 use pumpkin_nbt::{compound::NbtCompound, tag::NbtTag};
 use pumpkin_util::math::{block_box::BlockBox, vector3::Vector3};
 
 use super::processor::StructureProcessor;
-use crate::generation::structure::structures::jigsaw::{JigsawBlock, JigsawJointType};
+use crate::generation::structure::structures::jigsaw::JigsawBlock;
 
 /// Settings used when placing, transforming, or querying a [`StructureTemplate`].
 #[derive(Clone, Debug)]
@@ -182,25 +182,18 @@ impl std::fmt::Debug for JigsawBlockCache {
     }
 }
 
-/// A loaded structure template from an NBT file matching vanilla `StructureTemplate`.
+/// Embedded geometry stays in its four-byte records; only palettes and sparse NBT are owned.
 #[derive(Debug, Clone, Default)]
 pub struct StructureTemplate {
-    pub palettes: Vec<Palette>,
-    pub entity_info_list: Vec<StructureEntityInfo>,
+    palettes: Box<[Palette]>,
+    packed_blocks: &'static [[u8; 4]],
+    block_entities: Box<[(usize, NbtCompound)]>,
+    pub entities: Box<[StructureEntityInfo]>,
     pub size: Vector3<i32>,
     pub author: String,
     pub name: Option<String>,
 
-    // Backward-compatible fields
-    // TODO: make these fields private with accessors. They are public now, so a
-    // caller can change them after the jigsaw cache is filled. The cache then
-    // goes stale. `load()` resets the cache, but a direct mutation does not.
-    pub palette: Vec<PaletteEntry>,
-    pub blocks: Vec<TemplateBlock>,
-    pub entities: Vec<TemplateEntity>,
-
-    /// Jigsaw blocks parsed from the flat `blocks`/`palette` view, computed lazily
-    /// on first use so placement never rescans the template's block list.
+    /// Parsed lazily so placement never rescans the template's block list.
     jigsaw_blocks_cache: OnceLock<JigsawBlockCache>,
 }
 
@@ -214,14 +207,14 @@ impl PaletteEntry {
         Self { id }
     }
 
-    pub fn with_properties(name: String, properties: Vec<Property>) -> Self {
-        let block = Block::from_registry_key(name.strip_prefix("minecraft:").unwrap_or(&name))
+    pub fn with_properties(name: &str, properties: &[Property]) -> Self {
+        let block = Block::from_registry_key(name.strip_prefix("minecraft:").unwrap_or(name))
             .expect("Unknown template block");
         Self {
             id: block
                 .default_state
                 .id
-                .with_properties(&properties)
+                .with_properties(properties)
                 .expect("Invalid template properties"),
         }
     }
@@ -281,21 +274,6 @@ impl PaletteEntry {
 }
 const _: () = assert!(std::mem::size_of::<PaletteEntry>() == 2);
 
-/// Block info record within a template.
-#[derive(Debug, Clone, PartialEq)]
-pub struct StructureBlockInfo {
-    pub pos: Vector3<i32>,
-    pub state: PaletteEntry,
-    pub nbt: Option<NbtCompound>,
-}
-
-impl StructureBlockInfo {
-    #[must_use]
-    pub const fn new(pos: Vector3<i32>, state: PaletteEntry, nbt: Option<NbtCompound>) -> Self {
-        Self { pos, state, nbt }
-    }
-}
-
 /// Entity info record within a template.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructureEntityInfo {
@@ -315,173 +293,58 @@ impl StructureEntityInfo {
     }
 }
 
-/// Jigsaw metadata extracted from a jigsaw block in a structure template.
-#[derive(Debug, Clone, PartialEq)]
-pub struct JigsawBlockInfo {
-    pub info: StructureBlockInfo,
-    pub joint_type: JigsawJointType,
-    pub name: String,
-    pub pool: String,
-    pub target: String,
-    pub placement_priority: i32,
-    pub selection_priority: i32,
-}
-
-impl JigsawBlockInfo {
-    #[must_use]
-    pub fn of(info: StructureBlockInfo) -> Self {
-        let nbt = info.nbt.as_ref();
-        let joint_type = StructureTemplate::get_joint_type(nbt, &info.state);
-        let name = nbt
-            .and_then(|n| n.get_string("name"))
-            .unwrap_or("minecraft:empty")
-            .to_string();
-        let pool = nbt
-            .and_then(|n| n.get_string("pool"))
-            .unwrap_or("minecraft:empty")
-            .to_string();
-        let target = nbt
-            .and_then(|n| n.get_string("target"))
-            .unwrap_or("minecraft:empty")
-            .to_string();
-        let placement_priority = nbt
-            .and_then(|n| n.get_int("placement_priority"))
-            .unwrap_or(0);
-        let selection_priority = nbt
-            .and_then(|n| n.get_int("selection_priority"))
-            .unwrap_or(0);
-
-        Self {
-            info,
-            joint_type,
-            name,
-            pool,
-            target,
-            placement_priority,
-            selection_priority,
-        }
-    }
-
-    #[must_use]
-    pub fn with_info(&self, info: StructureBlockInfo) -> Self {
-        Self {
-            info,
-            joint_type: self.joint_type,
-            name: self.name.clone(),
-            pool: self.pool.clone(),
-            target: self.target.clone(),
-            placement_priority: self.placement_priority,
-            selection_priority: self.selection_priority,
-        }
-    }
-}
-
-/// Represents a palette of block placements within a template.
-#[derive(Debug, Clone)]
+/// Native states resolved once at import, shared by every placement of a palette.
+#[derive(Debug, Clone, Default)]
 pub struct Palette {
-    blocks: Vec<StructureBlockInfo>,
-    cached_jigsaws: Option<Vec<JigsawBlockInfo>>,
+    entries: Box<[PaletteEntry]>,
 }
 
-impl Palette {
-    #[must_use]
-    pub const fn new(blocks: Vec<StructureBlockInfo>) -> Self {
-        Self {
-            blocks,
-            cached_jigsaws: None,
-        }
-    }
-
-    #[must_use]
-    pub fn blocks(&self) -> &[StructureBlockInfo] {
-        &self.blocks
-    }
-
-    #[must_use]
-    pub fn blocks_by_id(&self, filter: BlockId) -> Vec<StructureBlockInfo> {
-        self.blocks
-            .iter()
-            .filter(|b| b.state.id.to_block_id() == filter)
-            .cloned()
-            .collect()
-    }
-
-    pub fn jigsaws(&mut self) -> &[JigsawBlockInfo] {
-        self.cached_jigsaws.get_or_insert_with(|| {
-            self.blocks
-                .iter()
-                .filter(|b| b.state.id.to_block_id() == BlockId::JIGSAW)
-                .map(|b| JigsawBlockInfo::of(b.clone()))
-                .collect()
-        })
-    }
-}
-
-/// Helper mapping table between palette entries and integer indices.
-#[derive(Debug, Default, Clone)]
-pub struct SimplePalette {
-    pub entries: Vec<PaletteEntry>,
-}
-
-impl SimplePalette {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn id_for(&mut self, state: PaletteEntry) -> u32 {
-        if let Some(pos) = self.entries.iter().position(|e| *e == state) {
-            pos as u32
-        } else {
-            let id = self.entries.len() as u32;
-            self.entries.push(state);
-            id
-        }
-    }
-
-    #[must_use]
-    pub fn state_for(&self, index: usize) -> Option<&PaletteEntry> {
-        self.entries.get(index)
-    }
-
-    pub fn add_mapping(&mut self, state: PaletteEntry, id: usize) {
-        if id >= self.entries.len() {
-            self.entries.resize(
-                id + 1,
-                PaletteEntry::new(pumpkin_data::Block::AIR.default_state.id),
-            );
-        }
-        self.entries[id] = state;
-    }
-
-    #[must_use]
-    pub const fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-}
-
-/// A single block placement in the template (legacy format).
-#[derive(Debug, Clone)]
-pub struct TemplateBlock {
+/// A decoded view into embedded geometry, with borrowed metadata.
+#[derive(Debug, Clone, Copy)]
+pub struct TemplateBlock<'a> {
     pub pos: Vector3<i32>,
-    pub state: u32,
-    pub nbt: Option<NbtCompound>,
-}
-
-/// An entity to spawn when placing the template (legacy format).
-#[derive(Debug, Clone)]
-pub struct TemplateEntity {
-    pub pos: Vector3<f64>,
-    pub block_pos: Vector3<i32>,
-    pub nbt: NbtCompound,
+    pub state: PaletteEntry,
+    pub nbt: Option<&'a NbtCompound>,
 }
 
 impl StructureTemplate {
+    #[cfg(feature = "dev")]
+    pub(crate) fn owned_bytes(&self) -> usize {
+        size_of_val(self.palettes.as_ref())
+            + self
+                .palettes
+                .iter()
+                .map(|p| size_of_val(p.entries.as_ref()))
+                .sum::<usize>()
+            + size_of_val(self.block_entities.as_ref())
+            + self
+                .block_entities
+                .iter()
+                .map(|(_, nbt)| nbt_bytes(nbt))
+                .sum::<usize>()
+            + size_of_val(self.entities.as_ref())
+            + self
+                .entities
+                .iter()
+                .map(|e| nbt_bytes(&e.nbt))
+                .sum::<usize>()
+            + self.author.capacity()
+            + self.name.as_ref().map_or(0, String::capacity)
+            + self.jigsaw_blocks_cache.get().map_or(0, |cache| {
+                cache.0.capacity() * size_of::<JigsawBlock>()
+                    + cache
+                        .0
+                        .iter()
+                        .map(|b| {
+                            b.name.capacity()
+                                + b.target.capacity()
+                                + b.pool.capacity()
+                                + b.final_state.capacity()
+                        })
+                        .sum::<usize>()
+            })
+    }
+
     pub const PALETTE_TAG: &'static str = "palette";
     pub const PALETTE_LIST_TAG: &'static str = "palettes";
     pub const ENTITIES_TAG: &'static str = "entities";
@@ -513,8 +376,32 @@ impl StructureTemplate {
         &self.palettes
     }
 
-    pub const fn palettes_mut(&mut self) -> &mut Vec<Palette> {
-        &mut self.palettes
+    pub fn blocks(&self) -> impl Iterator<Item = TemplateBlock<'_>> {
+        self.palettes
+            .first()
+            .into_iter()
+            .flat_map(|palette| self.blocks_in(palette))
+    }
+
+    pub fn blocks_in<'a>(
+        &'a self,
+        palette: &'a Palette,
+    ) -> impl ExactSizeIterator<Item = TemplateBlock<'a>> {
+        // NBT is sparse and ordered by block ordinal: a merge walk avoids a hash
+        // lookup or a metadata pointer stored for every ordinary template block.
+        let mut entities = self.block_entities.iter().peekable();
+        self.packed_blocks.iter().enumerate().map(move |(i, b)| {
+            let nbt = if entities.peek().is_some_and(|(index, _)| *index == i) {
+                Some(&entities.next().unwrap().1)
+            } else {
+                None
+            };
+            TemplateBlock {
+                pos: Vector3::new(i32::from(b[0]), i32::from(b[1]), i32::from(b[2])),
+                state: palette.entries[usize::from(b[3])],
+                nbt,
+            }
+        })
     }
 
     /// Returns the template's jigsaw blocks in template-local coordinates.
@@ -534,14 +421,8 @@ impl StructureTemplate {
                 }
 
                 JigsawBlockCache(
-                    self.blocks
-                        .iter()
-                        .filter_map(|block| {
-                            JigsawBlock::from_template_block(
-                                block,
-                                &self.palette[block.state as usize],
-                            )
-                        })
+                    self.blocks()
+                        .filter_map(|block| JigsawBlock::from_template_block(&block, &block.state))
                         .collect(),
                 )
             })
@@ -550,7 +431,7 @@ impl StructureTemplate {
 
     #[must_use]
     pub fn entity_info_list(&self) -> &[StructureEntityInfo] {
-        &self.entity_info_list
+        &self.entities
     }
 
     #[must_use]
@@ -764,110 +645,6 @@ impl StructureTemplate {
         bb
     }
 
-    pub fn get_jigsaws(
-        &mut self,
-        position: Vector3<i32>,
-        rotation: Rotation,
-    ) -> Vec<JigsawBlockInfo> {
-        if self.palettes.is_empty() {
-            return Vec::new();
-        }
-
-        let settings = StructurePlaceSettings::new().set_rotation(rotation);
-        let jigsaws = {
-            let palette = settings.get_random_palette(&self.palettes, position);
-            let mut pal_clone = palette.clone();
-            pal_clone.jigsaws().to_vec()
-        };
-
-        let mut result = Vec::with_capacity(jigsaws.len());
-        for jigsaw in jigsaws {
-            let block_info = &jigsaw.info;
-            let rel_pos = Self::calculate_relative_position(&settings, block_info.pos) + position;
-            let rotated_info = StructureBlockInfo::new(
-                rel_pos,
-                block_info.state.rotate(settings.get_rotation()),
-                block_info.nbt.clone(),
-            );
-            result.push(jigsaw.with_info(rotated_info));
-        }
-
-        result
-    }
-
-    #[must_use]
-    pub fn filter_blocks(
-        &self,
-        position: Vector3<i32>,
-        settings: &StructurePlaceSettings,
-        block: BlockId,
-    ) -> Vec<StructureBlockInfo> {
-        self.filter_blocks_with_absolute(position, settings, block, true)
-    }
-
-    #[must_use]
-    pub fn filter_blocks_with_absolute(
-        &self,
-        position: Vector3<i32>,
-        settings: &StructurePlaceSettings,
-        block: BlockId,
-        absolute: bool,
-    ) -> Vec<StructureBlockInfo> {
-        if self.palettes.is_empty() {
-            return Vec::new();
-        }
-
-        let mut result = Vec::new();
-        let bounding_box = settings.get_bounding_box();
-        let palette = settings.get_random_palette(&self.palettes, position);
-
-        for block_info in palette.blocks() {
-            if block_info.state.id.to_block_id() == block {
-                let block_pos = if absolute {
-                    Self::calculate_relative_position(settings, block_info.pos) + position
-                } else {
-                    block_info.pos
-                };
-                if bounding_box.is_none_or(|bb| bb.contains_pos(&block_pos)) {
-                    result.push(StructureBlockInfo::new(
-                        block_pos,
-                        block_info.state.rotate(settings.get_rotation()),
-                        block_info.nbt.clone(),
-                    ));
-                }
-            }
-        }
-
-        result
-    }
-
-    #[must_use]
-    pub fn get_joint_type(nbt: Option<&NbtCompound>, state: &PaletteEntry) -> JigsawJointType {
-        nbt.and_then(|n| n.get_string("joint")).map_or_else(
-            || Self::get_default_joint_type(state),
-            JigsawJointType::from_str,
-        )
-    }
-
-    #[must_use]
-    pub fn get_default_joint_type(state: &PaletteEntry) -> JigsawJointType {
-        use pumpkin_data::block_properties::{Orientation, Property};
-        state
-            .id
-            .properties()
-            .find_map(|p| match p {
-                Property::Orientation(o) => Some(o),
-                _ => None,
-            })
-            .map_or(JigsawJointType::Rollable, |orientation| match orientation {
-                Orientation::NorthUp
-                | Orientation::SouthUp
-                | Orientation::EastUp
-                | Orientation::WestUp => JigsawJointType::Aligned,
-                _ => JigsawJointType::Rollable,
-            })
-    }
-
     /// Loads a structure template from a pre-parsed static template definition.
     pub fn from_static(
         static_template: &pumpkin_data::structure_template::StaticStructureTemplate,
@@ -904,74 +681,47 @@ impl StructureTemplate {
             block_entities_map.insert(be.pos, nbt);
         }
 
-        let block_count = static_template.packed_blocks.len() / 4;
-        let mut palettes = Vec::with_capacity(static_template.palettes.len());
-
-        for static_palette in static_template.palettes {
-            let palette_entries: Vec<PaletteEntry> = static_palette
-                .iter()
-                .map(|p| PaletteEntry::with_properties(p.name.to_string(), p.properties.to_vec()))
-                .collect();
-
-            let mut block_info_list = Vec::with_capacity(block_count);
-            for chunk in static_template.packed_blocks.as_chunks::<4>().0 {
-                let pos = Vector3::new(chunk[0] as i32, chunk[1] as i32, chunk[2] as i32);
-                let state_idx = chunk[3] as usize;
-                let state = if state_idx < palette_entries.len() {
-                    palette_entries[state_idx].clone()
-                } else {
-                    PaletteEntry::new(pumpkin_data::Block::AIR.default_state.id)
-                };
-                let nbt = block_entities_map.get(&[pos.x, pos.y, pos.z]).cloned();
-                block_info_list.push(StructureBlockInfo::new(pos, state, nbt));
-            }
-            palettes.push(Palette::new(block_info_list));
-        }
-
-        let mut template = Self {
+        let packed_blocks = static_template.packed_blocks.as_chunks::<4>().0;
+        let palette_len = packed_blocks
+            .iter()
+            .map(|block| usize::from(block[3]) + 1)
+            .max()
+            .unwrap_or(0);
+        let palettes = static_template
+            .palettes
+            .iter()
+            .map(|states| {
+                let mut entries: Vec<_> = states
+                    .iter()
+                    .map(|p| PaletteEntry::with_properties(p.name, p.properties))
+                    .collect();
+                if entries.len() < palette_len {
+                    entries.resize(palette_len, PaletteEntry::new(BlockStateId::AIR));
+                }
+                Palette {
+                    entries: entries.into_boxed_slice(),
+                }
+            })
+            .collect();
+        let block_entities = packed_blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| {
+                block_entities_map
+                    .get(&[i32::from(b[0]), i32::from(b[1]), i32::from(b[2])])
+                    .map(|nbt| (i, nbt.clone()))
+            })
+            .collect();
+        Self {
             palettes,
-            entity_info_list,
+            packed_blocks,
+            block_entities,
+            entities: entity_info_list.into_boxed_slice(),
             size,
             author,
             name: None,
-            palette: Vec::new(),
-            blocks: Vec::new(),
-            entities: Vec::new(),
             jigsaw_blocks_cache: OnceLock::new(),
-        };
-
-        template.sync_legacy_fields();
-        template
-    }
-
-    fn sync_legacy_fields(&mut self) {
-        if let Some(main_palette) = self.palettes.first() {
-            let mut simple_palette = SimplePalette::new();
-            let mut blocks = Vec::with_capacity(main_palette.blocks().len());
-            for b in main_palette.blocks() {
-                let state_id = simple_palette.id_for(b.state.clone());
-                blocks.push(TemplateBlock {
-                    pos: b.pos,
-                    state: state_id,
-                    nbt: b.nbt.clone(),
-                });
-            }
-            self.palette = simple_palette.entries;
-            self.blocks = blocks;
-        } else {
-            self.palette.clear();
-            self.blocks.clear();
         }
-
-        self.entities = self
-            .entity_info_list
-            .iter()
-            .map(|e| TemplateEntity {
-                pos: e.pos,
-                block_pos: e.block_pos,
-                nbt: e.nbt.clone(),
-            })
-            .collect();
     }
 
     /// Saves this structure template to an NBT compound matching vanilla 1:1.
@@ -979,71 +729,42 @@ impl StructureTemplate {
     pub fn save(&self) -> NbtCompound {
         let mut tag = NbtCompound::new();
 
-        if self.palettes.is_empty() {
-            tag.put_list(Self::BLOCKS_TAG, Vec::new());
-            tag.put_list(Self::PALETTE_TAG, Vec::new());
+        let blocks = self
+            .blocks()
+            .zip(self.packed_blocks)
+            .map(|(block, packed)| {
+                let mut tag = NbtCompound::new();
+                tag.put_list(
+                    Self::BLOCK_TAG_POS,
+                    vec![
+                        NbtTag::Int(block.pos.x),
+                        NbtTag::Int(block.pos.y),
+                        NbtTag::Int(block.pos.z),
+                    ],
+                );
+                tag.put_int(Self::BLOCK_TAG_STATE, i32::from(packed[3]));
+                if let Some(nbt) = block.nbt {
+                    tag.put_compound(Self::BLOCK_TAG_NBT, nbt.clone());
+                }
+                NbtTag::Compound(tag)
+            })
+            .collect();
+        tag.put_list(Self::BLOCKS_TAG, blocks);
+        let mut palettes = self.palettes.iter().map(|palette| {
+            palette
+                .entries
+                .iter()
+                .map(|state| NbtTag::Compound(state.to_nbt_compound()))
+                .collect()
+        });
+        if self.palettes.len() <= 1 {
+            tag.put_list(Self::PALETTE_TAG, palettes.next().unwrap_or_default());
         } else {
-            let mut palettes = Vec::with_capacity(self.palettes.len());
-            let main_palette = SimplePalette::new();
-            palettes.push(main_palette);
-            for _ in 1..self.palettes.len() {
-                palettes.push(SimplePalette::new());
-            }
-
-            let mut block_list = Vec::new();
-            let main_palette_blocks = self.palettes[0].blocks();
-
-            for (i, block_info) in main_palette_blocks.iter().enumerate() {
-                let mut block_tag = NbtCompound::new();
-                let pos_tags = vec![
-                    NbtTag::Int(block_info.pos.x),
-                    NbtTag::Int(block_info.pos.y),
-                    NbtTag::Int(block_info.pos.z),
-                ];
-                block_tag.put_list(Self::BLOCK_TAG_POS, pos_tags);
-
-                let id = palettes[0].id_for(block_info.state.clone());
-                block_tag.put_int(Self::BLOCK_TAG_STATE, id as i32);
-
-                if let Some(nbt) = &block_info.nbt {
-                    block_tag.put_compound(Self::BLOCK_TAG_NBT, nbt.clone());
-                }
-
-                block_list.push(NbtTag::Compound(block_tag));
-
-                for p in 1..self.palettes.len() {
-                    let state = self.palettes[p].blocks()[i].state.clone();
-                    palettes[p].add_mapping(state, id as usize);
-                }
-            }
-
-            tag.put_list(Self::BLOCKS_TAG, block_list);
-
-            if palettes.len() == 1 {
-                let palette_tags: Vec<NbtTag> = palettes[0]
-                    .entries
-                    .iter()
-                    .map(|state| NbtTag::Compound(state.to_nbt_compound()))
-                    .collect();
-                tag.put_list(Self::PALETTE_TAG, palette_tags);
-            } else {
-                let palette_list_list: Vec<NbtTag> = palettes
-                    .into_iter()
-                    .map(|pal| {
-                        let inner_tags: Vec<NbtTag> = pal
-                            .entries
-                            .into_iter()
-                            .map(|state| NbtTag::Compound(state.to_nbt_compound()))
-                            .collect();
-                        NbtTag::List(inner_tags)
-                    })
-                    .collect();
-                tag.put_list(Self::PALETTE_LIST_TAG, palette_list_list);
-            }
+            tag.put_list(Self::PALETTE_LIST_TAG, palettes.map(NbtTag::List).collect());
         }
 
         let mut entity_list = Vec::new();
-        for entity_info in &self.entity_info_list {
+        for entity_info in &self.entities {
             let mut entity_tag = NbtCompound::new();
             let pos_tags = vec![
                 NbtTag::Double(entity_info.pos.x),
@@ -1078,16 +799,45 @@ impl StructureTemplate {
 
     #[must_use]
     pub const fn block_count(&self) -> usize {
-        self.blocks.len()
+        if self.palettes.is_empty() {
+            0
+        } else {
+            self.packed_blocks.len()
+        }
     }
 
     #[must_use]
     pub fn has_block_entities(&self) -> bool {
-        self.blocks.iter().any(|b| b.nbt.is_some())
+        !self.palettes.is_empty() && !self.block_entities.is_empty()
     }
 
     #[must_use]
     pub const fn has_entities(&self) -> bool {
         !self.entities.is_empty()
     }
+}
+
+/// Heap payload only. Hash-map capacity is a lower bound, excluding bucket slack.
+#[cfg(feature = "dev")]
+pub(crate) fn nbt_bytes(nbt: &NbtCompound) -> usize {
+    fn tag_bytes(tag: &NbtTag) -> usize {
+        match tag {
+            NbtTag::ByteArray(values) => values.len(),
+            NbtTag::String(value) => value.len(),
+            NbtTag::List(values) => {
+                values.capacity() * size_of::<NbtTag>()
+                    + values.iter().map(tag_bytes).sum::<usize>()
+            }
+            NbtTag::Compound(value) => nbt_bytes(value),
+            NbtTag::IntArray(values) => values.capacity() * size_of::<i32>(),
+            NbtTag::LongArray(values) => values.capacity() * size_of::<i64>(),
+            _ => 0,
+        }
+    }
+    nbt.child_tags.capacity() * size_of::<(Box<str>, NbtTag)>()
+        + nbt
+            .child_tags
+            .iter()
+            .map(|(key, value)| key.len() + tag_bytes(value))
+            .sum::<usize>()
 }

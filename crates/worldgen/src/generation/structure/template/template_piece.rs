@@ -173,8 +173,8 @@ impl TemplatePiece {
             .get_bounding_box(&self.place_settings, self.template_position);
         let box_limit = self.piece.bounding_box;
 
-        for block in &self.template.blocks {
-            let palette_entry = &self.template.palette[block.state as usize];
+        for block in self.template.blocks() {
+            let palette_entry = &block.state;
 
             // Structure blocks are data markers
             if palette_entry.id.to_block_id() == pumpkin_data::BlockId::STRUCTURE_BLOCK {
@@ -182,7 +182,7 @@ impl TemplatePiece {
             }
 
             let mut placed_entry = palette_entry.clone();
-            let mut block_entity_nbt = block.nbt.clone();
+            let mut block_entity_nbt = block.nbt;
 
             // Jigsaw blocks are replaced with final_state
             if palette_entry.id.to_block_id() == pumpkin_data::BlockId::JIGSAW {
@@ -215,6 +215,7 @@ impl TemplatePiece {
             if !box_limit.contains_pos(&world_pos) || !chunk_box.contains_pos(&world_pos) {
                 continue;
             }
+            let block_entity_nbt = block_entity_nbt.cloned();
 
             // Handle waterlogging if enabled
             if self.place_settings.should_apply_waterlogging()
