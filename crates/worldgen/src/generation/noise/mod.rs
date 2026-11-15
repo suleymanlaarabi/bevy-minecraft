@@ -200,6 +200,18 @@ impl<'a> ChunkNoiseGenerator<'a> {
         self.volume.min_block_z = z;
     }
 
+    /// See [`AquiferSampler::air_above_y`]. The aquifer always answers non-solid
+    /// cells before the ore sampler is consulted.
+    pub(crate) fn air_above_y(
+        &mut self,
+        height_estimator: &mut SurfaceHeightEstimateSampler,
+    ) -> i32 {
+        match self.state_sampler.samplers.first_mut() {
+            Some(BlockStateSampler::Aquifer(aquifer)) => aquifer.air_above_y(height_estimator),
+            _ => i32::MAX,
+        }
+    }
+
     pub fn sample_density(&mut self) -> ChunkDensities {
         let mut density = DensityBuffer::acquire(&self.volume);
         self.router.final_density_volume(&mut density, &self.volume);

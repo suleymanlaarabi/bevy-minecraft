@@ -835,6 +835,28 @@ impl AquiferSamplerImpl for SeaLevelAquiferSampler {
     }
 }
 
+impl AquiferSampler {
+    /// Non-solid cells above this Y are air: both samplers return the default
+    /// fluid level there, which is empty above its surface.
+    pub(crate) fn air_above_y(
+        &mut self,
+        height_estimator: &mut SurfaceHeightEstimateSampler,
+    ) -> i32 {
+        match self {
+            Self::SeaLevel(sampler) => sampler.level_sampler.empty_above_y(),
+            Self::Aquifer(aquifer) => WorldAquiferSampler::skip_sampling_above_y(
+                &mut aquifer.skip_sampling_above_y,
+                aquifer.surface_level_sample_min_x,
+                aquifer.surface_level_sample_min_z,
+                aquifer.surface_level_sample_max_x,
+                aquifer.surface_level_sample_max_z,
+                height_estimator,
+            )
+            .max(aquifer.fluid_level_sampler.empty_above_y()),
+        }
+    }
+}
+
 pub trait AquiferSamplerImpl {
     fn apply(
         &mut self,

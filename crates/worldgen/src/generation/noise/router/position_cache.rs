@@ -1,5 +1,7 @@
 //! Bounded, world-owned memoization of pure position queries.
 //! A displaced entry stays alive for its in-flight users; locks never cover work.
+//! Slots are two-way sets ordered by recency: neighboring chunks revisit the same
+//! positions, and a direct-mapped pair of colliding keys would evict each other.
 use std::{
     hash::{Hash, Hasher},
     sync::{Arc, Mutex, OnceLock},
@@ -37,19 +39,20 @@ impl<K: Hash + Eq + Copy, V: Copy> PositionCache<K, V> {
             let mut shard = self.shards[index & (SHARDS - 1)]
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let slot = &mut shard[(index / SHARDS) & (SLOTS - 1)];
-            if let Some(entry) = slot
-                && entry.key == key
-            {
-                entry.value.clone()
-            } else {
-                let value = Arc::new(OnceLock::new());
-                *slot = Some(Entry {
-                    key,
-                    value: value.clone(),
-                });
-                value
+            let first = (index / SHARDS) & (SLOTS - 2);
+            let hit =
+                |slot: &Option<Entry<K, V>>| slot.as_ref().is_some_and(|entry| entry.key == key);
+            if !hit(&shard[first]) {
+                // Promote the second way, or demote the first one before replacing it.
+                shard.swap(first, first + 1);
+                if !hit(&shard[first]) {
+                    shard[first] = Some(Entry {
+                        key,
+                        value: Arc::new(OnceLock::new()),
+                    });
+                }
             }
+            shard[first].as_ref().unwrap().value.clone()
         };
         *value.get_or_init(compute)
     }

@@ -17,6 +17,12 @@ use rustc_hash::{FxHashMap, FxHashSet};
 pub struct TerrainGenerator {
     pub(crate) structure_heights:
         super::noise::router::position_cache::PositionCache<(i32, i32), [i32; 2]>,
+    // Each chunk consults the carver biome of its 17x17 chunk neighborhood;
+    // sharing those pure samples replaces 289 climate evaluations per chunk.
+    pub(crate) carver_biomes: super::noise::router::position_cache::PositionCache<
+        (i32, i32),
+        &'static pumpkin_data::chunk::Biome,
+    >,
     pub random_config: GlobalRandomConfig,
     pub base_router: ProtoNoiseRouters,
     pub dimension: Dimension,
@@ -122,6 +128,7 @@ impl TerrainGenerator {
             structure_calculator: StructurePlacementCalculator::new(seed.0 as i64),
             structure_allowed_biomes,
             structure_heights: super::noise::router::position_cache::PositionCache::default(),
+            carver_biomes: super::noise::router::position_cache::PositionCache::default(),
             enabled_structure_sets,
         }
     }

@@ -51,16 +51,39 @@ impl ChunkSnapshot {
             VoxelState,
             sections::{Layer, Section},
         };
+        let voxel = |state: BlockStateId| VoxelState::from_id(state.as_u16()).unwrap();
         let states = Layer::from_sections((0..height as usize / 16).map(|section| {
-            let cells: [_; 4096] = std::array::from_fn(|i| {
-                let position = Vector3::new(
-                    chunk_x * 16 + (i & 15) as i32,
-                    min_y + (section * 16 + (i >> 8)) as i32,
-                    chunk_z * 16 + ((i >> 4) & 15) as i32,
-                );
-                VoxelState::from_id(chunk.get_block_state(&position).as_u16()).unwrap()
-            });
-            Section::from_cells(&cells)
+            let local_y = min_y + (section * 16) as i32 - i32::from(chunk.bottom_y());
+            if local_y < 0 || local_y % 16 != 0 || local_y >= i32::from(chunk.height()) {
+                let cells: [_; 4096] = std::array::from_fn(|i| {
+                    let position = Vector3::new(
+                        chunk_x * 16 + (i & 15) as i32,
+                        min_y + (section * 16 + (i >> 8)) as i32,
+                        chunk_z * 16 + ((i >> 4) & 15) as i32,
+                    );
+                    voxel(chunk.get_block_state(&position))
+                });
+                return Section::from_cells(&cells);
+            }
+            // Working sections are stored X/Y/Z; published ones Y/Z/X. Unallocated
+            // and single-state sections (sky, deep stone) need no transposition.
+            let start = local_y as usize / 16 * 4096;
+            let Some(source) = chunk.flat_block_map.get(start..start + 4096) else {
+                return Section::Uniform(voxel(BlockStateId::AIR));
+            };
+            let first = source[0];
+            if source.iter().all(|&state| state == first) {
+                return Section::Uniform(voxel(first));
+            }
+            let mut cells = [voxel(first); 4096];
+            for (x, plane) in source.chunks_exact(256).enumerate() {
+                for (y, row) in plane.chunks_exact(16).enumerate() {
+                    for (z, &state) in row.iter().enumerate() {
+                        cells[y * 256 + z * 16 + x] = voxel(state);
+                    }
+                }
+            }
+            Section::Dense(std::sync::Arc::new(cells))
         }));
         Self {
             chunk_x,

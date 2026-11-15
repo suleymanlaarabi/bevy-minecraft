@@ -176,11 +176,9 @@ impl VisitedBitSet {
         self.size_z = size_z;
         let total = size_x * size_y * size_z;
         let words = total.div_ceil(64);
-        if self.bits.len() == words {
-            self.bits.fill(0);
-        } else {
-            self.bits.resize(words, 0);
-        }
+        // Always start from an empty set, including after a size change.
+        self.bits.clear();
+        self.bits.resize(words, 0);
     }
 
     #[inline]
@@ -442,7 +440,8 @@ impl<P: LightProvider> Default for LightPropagator<P> {
 
 impl BlockLightPropagator {
     pub fn propagate_light(&mut self, cache: &mut Cache) {
-        self.clear();
+        self.queue.clear();
+        self.decrease_queue.clear();
 
         let min_y = cache.bottom_y() as i32;
         let max_y = min_y + cache.height() as i32;
@@ -476,7 +475,9 @@ impl BlockLightPropagator {
 
                 match &mut cache.chunks[chunk_idx] {
                     Chunk::Proto(c) => {
-                        for y in min_y..max_y {
+                        // Sections above the allocated block map are air.
+                        let allocated_height = (c.flat_block_map.len() / 256) as i32;
+                        for y in min_y..max_y.min(min_y + allocated_height) {
                             let local_y_proto = y - min_y;
                             let state_id = c.get_block_state_raw(
                                 local_x as i32,
@@ -550,7 +551,8 @@ impl BlockLightPropagator {
 impl SkyLightPropagator {
     #[expect(clippy::too_many_lines)]
     pub fn convert_light(&mut self, cache: &mut Cache) {
-        self.clear();
+        self.queue.clear();
+        self.decrease_queue.clear();
 
         let center_x = cache.x + (cache.size / 2);
         let center_z = cache.z + (cache.size / 2);
@@ -569,6 +571,23 @@ impl SkyLightPropagator {
         let size_y = (max_y - bottom_y) as usize;
         self.visited
             .ensure_capacity(min_x, bottom_y, min_z, size_x, size_y, size_z);
+
+        // Every center column is open sky above the chunk's highest surface.
+        // Mark those sections uniformly lit; filling 256 nibble columns in each
+        // would yield the same values in a dense buffer.
+        let center = ((cache.size * cache.size) >> 1) as usize;
+        if let Chunk::Proto(c) = &mut cache.chunks[center] {
+            let highest = c.flat_surface_height_map.iter().copied().max();
+            let top_local_y = (i32::from(highest.unwrap_or(i16::MIN)) + 2 - bottom_y).max(0);
+            for section in c
+                .light
+                .sky_light
+                .iter_mut()
+                .skip((top_local_y as usize >> 4) + 1)
+            {
+                *section = crate::chunk::format::LightContainer::new_empty(15);
+            }
+        }
 
         let mut surface_heights = [0i32; 18 * 18];
 
@@ -778,9 +797,8 @@ thread_local! {
 /// Keep propagation queues and visited storage on their worker between chunks.
 pub fn initialize_generation_light(cache: &mut Cache, config: &LightingEngineConfig) {
     GENERATION_ENGINE.with_borrow_mut(|engine| {
-        // Also resets a worker whose preceding generation task unwound.
-        engine.block_light.clear();
-        engine.sky_light.clear();
+        // Each pass resets its own queues and visited set, including on a
+        // worker whose preceding generation task unwound.
         engine.initialize_light(cache, config);
     });
 }

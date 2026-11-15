@@ -120,6 +120,16 @@ impl StandardChunkFluidLevelSampler {
     }
 }
 
+impl StandardChunkFluidLevelSampler {
+    /// Either default fluid is empty above this Y.
+    pub(crate) fn empty_above_y(&self) -> i32 {
+        self.top_fluid
+            .max_y_exclusive()
+            .max(self.bottom_fluid.max_y_exclusive())
+            - 1
+    }
+}
+
 impl FluidLevelSamplerImpl for StandardChunkFluidLevelSampler {
     fn get_fluid_level(&self, _x: i32, y: i32, _z: i32) -> &FluidLevel {
         if y < self.bottom_y {
@@ -340,7 +350,9 @@ impl ProtoChunk {
 
     pub fn prime_heightmaps(&mut self) {
         let bottom_y = self.generation_bottom_y() as i32;
-        let top_y = bottom_y + self.generation_height() as i32 - 1;
+        // Sections above the allocated block map are air and cannot hold a top block.
+        let allocated_height = (self.flat_block_map.len() / CHUNK_AREA) as i32;
+        let top_y = bottom_y + (self.generation_height() as i32).min(allocated_height) - 1;
         let default_y = (self.bottom_y() as i32 - 1) as i16;
 
         for lx in 0..16 {
@@ -846,6 +858,9 @@ impl ProtoChunk {
     ) {
         let volume = *noise_sampler.volume();
         let densities = noise_sampler.sample_density();
+        let has_veins = densities.has_veins();
+        // Open sky is most of the volume; it needs no aquifer evaluation.
+        let air_above_y = noise_sampler.air_above_y(surface_height_estimate_sampler);
         // Initial terrain owns the entire block volume. Updating four heightmaps
         // on every stone voxel is redundant; derive them once from the finished
         // columns instead, stopping as soon as their highest blocks are found.
@@ -859,14 +874,17 @@ impl ProtoChunk {
                     let index = volume.index_unchecked(x, y, z);
                     // With no vein sampler a positive density is unconditionally
                     // the default solid material. Avoid the sampler chain entirely.
-                    let block_state = if densities.density[index] > 0.0 && !densities.has_veins() {
+                    let density = densities.density[index];
+                    let block_state = if density > 0.0 && !has_veins {
                         generator.default_block
+                    } else if density <= 0.0 && block_y > air_above_y {
+                        AIR_BLOCK.default_state
                     } else {
                         noise_sampler
                             .sample_block_state(
                                 ore_random_deriver,
                                 &Vector3::new(block_x, block_y, block_z),
-                                densities.density[index],
+                                density,
                                 densities.vein_sample(index).as_ref(),
                                 surface_height_estimate_sampler,
                             )
