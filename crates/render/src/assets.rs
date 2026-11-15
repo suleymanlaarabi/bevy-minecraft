@@ -4,6 +4,7 @@ use crate::{
 };
 use bevy::render::storage::ShaderBuffer;
 use bevy::{
+    asset::RenderAssetUsages,
     prelude::*,
     render::render_resource::{TextureDimension, TextureViewDimension},
 };
@@ -29,6 +30,11 @@ pub fn prepare_single_layer_arrays(
     // Inspect the current handles as well when a material changes: an importer
     // can reuse an image whose Added event has already been consumed.
     for id in arrays.into_iter().flatten() {
+        // The block array keeps pixels until its asynchronous mip chain is ready.
+        let release_pixels = Some(id) != arrays[0]
+            && images.get(id).is_some_and(|image| {
+                image.data.is_some() && image.asset_usage != RenderAssetUsages::RENDER_WORLD
+            });
         let needs_array_view = images.get(id).is_some_and(|image| {
             image.texture_descriptor.dimension == TextureDimension::D2
                 && image.texture_descriptor.size.depth_or_array_layers == 1
@@ -38,11 +44,18 @@ pub fn prepare_single_layer_arrays(
                     .and_then(|view| view.dimension)
                     != Some(TextureViewDimension::D2Array)
         });
-        if needs_array_view && let Some(mut image) = images.get_mut(id) {
-            image
-                .texture_view_descriptor
-                .get_or_insert_default()
-                .dimension = Some(TextureViewDimension::D2Array);
+        if (needs_array_view || release_pixels)
+            && let Some(mut image) = images.get_mut(id)
+        {
+            if needs_array_view {
+                image
+                    .texture_view_descriptor
+                    .get_or_insert_default()
+                    .dimension = Some(TextureViewDimension::D2Array);
+            }
+            if release_pixels {
+                image.asset_usage = RenderAssetUsages::RENDER_WORLD;
+            }
         }
     }
 }

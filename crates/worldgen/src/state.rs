@@ -161,6 +161,10 @@ pub fn block_box(bounds: pumpkin_util::math::boundingbox::BoundingBox) -> BlockB
 }
 
 impl hollow_core::VoxelCell for VoxelState {
+    #[inline]
+    fn from_storage_id(id: u32) -> Self {
+        Self(hollow_core::StateId(id))
+    }
     fn shape_offset(self, position: IVec3) -> Option<Vec3> {
         self.shape_depends_on_position()
             .then(|| VoxelState::shape_offset(self, position))

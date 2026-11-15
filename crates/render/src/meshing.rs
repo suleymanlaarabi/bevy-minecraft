@@ -614,8 +614,12 @@ pub trait TerrainIndex: Copy {
     fn new(index: u32) -> Self;
     fn get(self) -> u32;
     fn into_indices(indices: Vec<Self>, vertices: usize) -> Indices;
+    fn into_pass_indices(indices: Vec<Self>) -> Indices;
 }
 impl TerrainIndex for u16 {
+    fn into_pass_indices(indices: Vec<Self>) -> Indices {
+        Indices::U16(indices)
+    }
     #[inline]
     fn new(index: u32) -> Self {
         index as u16
@@ -630,6 +634,9 @@ impl TerrainIndex for u16 {
     }
 }
 impl TerrainIndex for u32 {
+    fn into_pass_indices(indices: Vec<Self>) -> Indices {
+        Indices::U32(indices)
+    }
     #[inline]
     fn new(index: u32) -> Self {
         index

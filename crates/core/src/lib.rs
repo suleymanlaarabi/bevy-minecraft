@@ -32,6 +32,8 @@ pub mod content;
 pub trait VoxelCell: Copy + Eq + std::fmt::Debug + Send + Sync + 'static {
     type Kind: Copy;
     fn id(self) -> u32;
+    /// Reconstruct an ID previously validated by this cell implementation.
+    fn from_storage_id(id: u32) -> Self;
     fn from_id(id: u32, content: &content::ContentCatalog) -> Option<Self>;
     fn kind(self, content: &content::ContentCatalog) -> Self::Kind;
     fn default_state(kind: Self::Kind, content: &content::ContentCatalog) -> Self;
@@ -47,6 +49,10 @@ pub mod codec;
 
 /// Standard catalog-backed cell. No process-wide registry or parallel state IDs.
 impl VoxelCell for StateId {
+    #[inline]
+    fn from_storage_id(id: u32) -> Self {
+        Self(id)
+    }
     type Kind = BlockId;
     fn id(self) -> u32 {
         self.0

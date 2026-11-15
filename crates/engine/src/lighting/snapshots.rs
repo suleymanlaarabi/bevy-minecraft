@@ -271,15 +271,9 @@ impl<T: VoxelCell> LightingSnapshots<T> {
                     }
                 } else {
                     for section in 0..snapshot.states.section_count() {
-                        use hollow_core::sections::Section;
                         let previous = old.states.section(section);
                         let next = snapshot.states.section(section);
-                        let shared = match (previous, next) {
-                            (Section::Uniform(a), Section::Uniform(b)) => a == b,
-                            (Section::Dense(a), Section::Dense(b)) => std::sync::Arc::ptr_eq(a, b),
-                            _ => false,
-                        };
-                        if !shared {
+                        if !previous.shared(next) {
                             for i in section * SECTION_VOLUME..(section + 1) * SECTION_VOLUME {
                                 changed_cell(i as u32);
                             }

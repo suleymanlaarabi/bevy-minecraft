@@ -2,7 +2,7 @@ use bevy_ecs::prelude::*;
 use bevy_math::prelude::*;
 use hollow_core::VoxelCell;
 use hollow_core::coordinates::{SECTION_HEIGHT, column_cell_index, section_mask};
-use hollow_core::sections::{Layer, Section};
+use hollow_core::sections::Layer;
 
 /// Chunk data, compressed by section. Cloning it is O(1); edits use copy-on-write
 /// while a build reads it.
@@ -49,23 +49,12 @@ impl<T: VoxelCell> ChunkVoxels<T> {
 
     /// Conservative retained storage, charging shared layers in full for admission.
     pub fn retained_bytes(&self) -> usize {
-        fn layer_bytes<T: Copy + PartialEq>(layer: &Layer<T>) -> usize {
-            (0..layer.section_count())
-                .map(|index| {
-                    std::mem::size_of::<Section<T>>()
-                        + match layer.section(index) {
-                            Section::Uniform(_) => 0,
-                            Section::Dense(_) => 4096 * std::mem::size_of::<T>(),
-                        }
-                })
-                .sum::<usize>()
-                + 16
-        }
         std::mem::size_of::<Self>()
-            + layer_bytes(&self.states)
-            + layer_bytes(&self.light)
-            + self.render_light.as_ref().map_or(0, layer_bytes)
+            + self.states.retained_bytes()
+            + self.light.retained_bytes()
+            + self.render_light.as_ref().map_or(0, Layer::retained_bytes)
     }
+
     /// Save workers retain authoritative data only, without presentation estimates.
     pub fn save_snapshot(&self) -> Self {
         Self {

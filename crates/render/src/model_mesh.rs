@@ -31,6 +31,7 @@ const POSITION_MAX: u32 = (1 << 15) - 1;
 /// GPU-ready geometry, with bounds and sort keys from the original positions.
 pub struct ModelGeometry {
     pub(crate) vertices: Vec<[u32; 4]>,
+    /// Ordered meshes own indices; opaque section models use shared GPU quad indices.
     pub indices: Vec<u32>,
     pub(crate) min: Vec3,
     pub(crate) max: Vec3,
@@ -80,11 +81,11 @@ fn pack_vertex(position: [f32; 3], normal: [f32; 3], uv: [f32; 2], meta: [u32; 4
 }
 impl ModelGeometry {
     pub fn is_empty(&self) -> bool {
-        self.indices.is_empty()
+        self.vertices.is_empty()
     }
     #[cfg(feature = "dev")]
     pub fn counts(&self) -> (usize, usize) {
-        (self.vertices.len(), self.indices.len() / 3)
+        (self.vertices.len(), self.vertices.len() / 2)
     }
     fn vertex(&mut self, position: Vec3, normal: [f32; 3], uv: [f32; 2], meta: [u32; 4]) {
         self.min = self.min.min(position);
@@ -121,8 +122,8 @@ impl ModelGeometry {
                 ],
             );
         }
-        self.indices.extend(quad_indices(first / 4, false));
         if let Some(cell) = cell {
+            self.indices.extend(quad_indices(first / 4, false));
             self.sort_quads.push(SortQuad {
                 cell,
                 center: positions.into_iter().sum::<Vec3>() * 0.25,
@@ -197,8 +198,14 @@ impl ModelGeometry {
         assert_eq!(self.sort_quads.len() * 4, self.vertices.len());
         SortData(Arc::from(std::mem::take(&mut self.sort_quads)))
     }
-    pub fn into_mesh(self) -> Mesh {
+    pub fn into_mesh(mut self) -> Mesh {
         let vertex_count = self.vertices.len();
+        if self.indices.is_empty() {
+            self.indices.extend(
+                (0..u32::try_from(vertex_count / 4).expect("model quad count"))
+                    .flat_map(|quad| quad_indices(quad, false)),
+            );
+        }
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::RENDER_WORLD,
@@ -225,7 +232,7 @@ pub fn compact_indices(indices: Vec<u32>, vertices: usize) -> Indices {
 
 /// Every translucent quad owns four consecutive vertices. Reconstruct its six
 /// indices instead of retaining 24 bytes of redundant indices for every quad.
-fn quad_indices(quad: u32, reversed: bool) -> [u32; 6] {
+pub(crate) fn quad_indices(quad: u32, reversed: bool) -> [u32; 6] {
     let first = quad * 4;
     let offsets = if reversed {
         [0, 2, 1, 0, 3, 2]

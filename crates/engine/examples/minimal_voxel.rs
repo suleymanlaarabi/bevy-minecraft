@@ -13,6 +13,10 @@ use hollow_engine::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Cell(u32);
 impl VoxelCell for Cell {
+    #[inline]
+    fn from_storage_id(id: u32) -> Self {
+        Self(id)
+    }
     type Kind = BlockId;
     fn id(self) -> u32 {
         self.0

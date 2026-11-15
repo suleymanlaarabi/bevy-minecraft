@@ -15,7 +15,7 @@ use bevy::{
         MaterialProperties,
         key::{ErasedMaterialPipelineKey, ErasedMeshPipelineKey},
     },
-    mesh::{MeshVertexBufferLayoutRef, MeshVertexBufferLayouts},
+    mesh::{Indices, MeshVertexBufferLayoutRef, MeshVertexBufferLayouts, VertexAttributeValues},
     pbr::*,
     platform::collections::HashMap,
     prelude::*,
@@ -33,11 +33,15 @@ use bevy::{
     },
     shader::ShaderDefVal,
 };
-use std::{ops::Range, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::Range,
+    sync::Arc,
+};
 
 pub(crate) struct PassGeometry {
-    pub vertices: Vec<u8>,
-    pub indices: Vec<u8>,
+    vertices: VertexAttributeValues,
+    indices: Option<Indices>,
     count: u32,
     /// End of each face group in `indices` (`face_group` order), in indices.
     groups: [u32; 6],
@@ -51,17 +55,18 @@ fn face_group(vertex: [u32; 2]) -> usize {
     ((direction & 1) * 3 + (direction >> 1)) as usize
 }
 impl PassGeometry {
-    fn new(vertices: Vec<u8>, mut indices: Vec<u8>, count: usize, min: Vec3, max: Vec3) -> Self {
-        indices.resize(indices.len().next_multiple_of(4), 0);
-        let count = u32::try_from(count).expect("section index count");
-        Self {
-            vertices,
-            indices,
-            count,
-            groups: [count; 6],
-            min,
-            max,
+    pub fn vertices(&self) -> &[u8] {
+        self.vertices.get_bytes()
+    }
+    pub fn indices(&self) -> &[u8] {
+        match &self.indices {
+            Some(Indices::U16(indices)) => bytemuck::cast_slice(indices),
+            Some(Indices::U32(indices)) => bytemuck::cast_slice(indices),
+            None => &[],
         }
+    }
+    pub fn bytes(&self) -> usize {
+        self.vertices().len() + self.indices().len()
     }
     pub fn terrain<I: crate::meshing::TerrainIndex + bytemuck::Pod>(
         geometry: crate::meshing::TerrainGeometry<I>,
@@ -87,30 +92,34 @@ impl PassGeometry {
             end += *group;
             *group = end;
         }
-        let mut indices = geometry.indices.clone();
+        let count = geometry.indices.len();
+        let alignment = 4 / size_of::<I>();
+        let mut indices = vec![I::new(0); count.next_multiple_of(alignment)];
         for triangle in geometry.indices.chunks_exact(3) {
             let at = &mut next[group(triangle)];
             indices[*at..*at + 3].copy_from_slice(triangle);
             *at += 3;
         }
-        let mut pass = Self::new(
-            bytemuck::cast_slice(&geometry.vertices).to_vec(),
-            bytemuck::cast_slice(&indices).to_vec(),
-            indices.len(),
+        Self {
+            vertices: VertexAttributeValues::Uint32x2(geometry.vertices),
+            indices: Some(I::into_pass_indices(indices)),
+            count: u32::try_from(count).expect("section index count"),
+            groups,
             min,
             max,
-        );
-        pass.groups = groups;
-        pass
+        }
     }
     pub fn model(geometry: crate::model_mesh::ModelGeometry) -> Self {
-        Self::new(
-            bytemuck::cast_slice(&geometry.vertices).to_vec(),
-            bytemuck::cast_slice(&geometry.indices).to_vec(),
-            geometry.indices.len(),
-            geometry.min,
-            geometry.max,
-        )
+        debug_assert!(geometry.indices.is_empty());
+        let count = u32::try_from(geometry.vertices.len() / 4 * 6).expect("section index count");
+        Self {
+            vertices: VertexAttributeValues::Uint32x4(geometry.vertices),
+            indices: None,
+            count,
+            groups: [count; 6],
+            min: geometry.min,
+            max: geometry.max,
+        }
     }
     pub fn overhang(&self) -> bool {
         self.min.min_element() < 0.0 || self.max.max_element() > 16.0
@@ -346,7 +355,10 @@ fn section_bind_group(
 struct ArenaBuffer {
     buffer: Buffer,
     end: u64,
-    free: Vec<Range<u64>>,
+    // Two indexes trade small per-hole CPU metadata for best-fit GPU reuse,
+    // avoiding linear searches and shifts when sections are replaced.
+    free: BTreeMap<u64, u64>,
+    sizes: BTreeSet<(u64, u64)>,
 }
 impl ArenaBuffer {
     fn new(device: &RenderDevice, usage: BufferUsages) -> Self {
@@ -359,16 +371,31 @@ impl ArenaBuffer {
                 usage | BufferUsages::COPY_SRC,
             ),
             end: 0,
-            free: Vec::new(),
+            free: default(),
+            sizes: default(),
         }
     }
-    fn allocate(&mut self, size: u64) -> Range<u64> {
-        if let Some(i) = self.free.iter().position(|r| r.end - r.start >= size) {
-            let start = self.free[i].start;
-            self.free[i].start += size;
-            if self.free[i].is_empty() {
-                self.free.remove(i);
-            }
+    fn insert_free(&mut self, range: Range<u64>) {
+        if !range.is_empty() {
+            self.sizes.insert((range.end - range.start, range.start));
+            self.free.insert(range.start, range.end);
+        }
+    }
+    fn take_free(&mut self, start: u64) -> u64 {
+        let end = self.free.remove(&start).expect("free arena interval");
+        self.sizes.remove(&(end - start, start));
+        end
+    }
+    fn replace(&mut self, previous: Range<u64>, size: u64) -> Range<u64> {
+        if size <= previous.end - previous.start {
+            let end = previous.start + size;
+            self.release(end..previous.end);
+            return previous.start..end;
+        }
+        self.release(previous);
+        if let Some(&(length, start)) = self.sizes.range((size, 0)..).next() {
+            self.take_free(start);
+            self.insert_free(start + size..start + length);
             return start..start + size;
         }
         let start = self.end;
@@ -376,17 +403,22 @@ impl ArenaBuffer {
         start..self.end
     }
     fn release(&mut self, mut range: Range<u64>) {
-        let mut i = self.free.partition_point(|r| r.start < range.start);
-        if i > 0 && self.free[i - 1].end == range.start {
-            i -= 1;
-            range.start = self.free.remove(i).start;
+        if range.is_empty() {
+            return;
         }
-        if i < self.free.len() && range.end == self.free[i].start {
-            range.end = self.free.remove(i).end;
+        if let Some((&start, &end)) = self.free.range(..range.start).next_back()
+            && end == range.start
+        {
+            self.take_free(start);
+            range.start = start;
         }
-        self.free.insert(i, range);
-        while self.free.last().is_some_and(|r| r.end == self.end) {
-            self.end = self.free.pop().unwrap().start;
+        if self.free.contains_key(&range.end) {
+            range.end = self.take_free(range.end);
+        }
+        if range.end == self.end {
+            self.end = range.start;
+        } else {
+            self.insert_free(range);
         }
     }
     fn grow(&mut self, device: &RenderDevice, encoder: &mut CommandEncoder) {
@@ -421,6 +453,8 @@ struct SectionGpu {
     layout: BindGroupLayoutDescriptor,
     layouts: [MeshVertexBufferLayoutRef; 2],
     indirect: Buffer,
+    quad_indices: Buffer,
+    quad_capacity: u32,
     args: Vec<[u32; 5]>,
     ranges: HashMap<Entity, [Range<usize>; RANGES]>,
     indirect_first_instance: bool,
@@ -478,6 +512,8 @@ impl SectionGpu {
             layout,
             layouts,
             indirect: section_buffer(&device, "section draws", 20, BufferUsages::INDIRECT),
+            quad_indices: section_buffer(&device, "model quad indices", 24, BufferUsages::INDEX),
+            quad_capacity: 0,
             args: Vec::new(),
             ranges: default(),
             indirect_first_instance: device
@@ -538,17 +574,25 @@ fn prepare_sections(
     for op in feed.ops.drain(..) {
         match op {
             SectionOp::Clear => {
-                gpu.columns.clear();
-                gpu.slots.clear();
-                gpu.cull.clear();
-                gpu.origin_data.clear();
+                gpu.columns = default();
+                gpu.slots = Vec::new();
+                gpu.cull = Vec::new();
+                gpu.origin_data = Vec::new();
                 gpu.origins_dirty = None;
-                gpu.free.clear();
+                gpu.free = Vec::new();
+                gpu.views = Vec::new();
+                gpu.args = Vec::new();
+                gpu.ranges = default();
+                *workers = Vec::new();
+                gpu.origins = section_buffer(&device, "section origins", 16, BufferUsages::STORAGE);
+                gpu.bind_group = section_bind_group(&device, &gpu.layout, &gpu.origins);
+                gpu.indirect = section_buffer(&device, "section draws", 20, BufferUsages::INDIRECT);
+                gpu.quad_indices =
+                    section_buffer(&device, "model quad indices", 24, BufferUsages::INDEX);
+                gpu.quad_capacity = 0;
                 for arena in &mut gpu.arenas {
-                    for buffer in [&mut arena.vertices, &mut arena.indices] {
-                        buffer.end = 0;
-                        buffer.free.clear();
-                    }
+                    arena.vertices = ArenaBuffer::new(&device, BufferUsages::VERTEX);
+                    arena.indices = ArenaBuffer::new(&device, BufferUsages::INDEX);
                 }
                 uploads.clear();
             }
@@ -591,19 +635,26 @@ fn prepare_sections(
                 } else {
                     c.slots[section] as usize
                 };
-                for pass in 0..5 {
-                    gpu.release(slot, pass);
-                }
+                let mut previous = gpu.slots[slot]
+                    .take()
+                    .map_or_else(|| std::array::from_fn(|_| None), |slot| slot.passes);
                 let mut record = Slot {
                     passes: std::array::from_fn(|_| None),
                 };
                 let (mut min, mut max, mut passes) = (Vec3::MAX, Vec3::MIN, 0u8);
                 for (pass, geometry) in geometry.into_iter().enumerate() {
+                    let old = previous[pass].take();
                     if let Some(g) = geometry {
                         min = min.min(g.min + origin);
                         max = max.max(g.max + origin);
-                        let vertices = gpu.arenas[pass].vertices.allocate(g.vertices.len() as u64);
-                        let indices = gpu.arenas[pass].indices.allocate(g.indices.len() as u64);
+                        let (vertices, indices) =
+                            old.map_or((0..0, 0..0), |a| (a.vertices, a.indices));
+                        let vertices = gpu.arenas[pass]
+                            .vertices
+                            .replace(vertices, g.vertices().len() as u64);
+                        let indices = gpu.arenas[pass]
+                            .indices
+                            .replace(indices, g.indices().len() as u64);
                         let draw = [
                             g.count,
                             1,
@@ -622,6 +673,9 @@ fn prepare_sections(
                             groups,
                         });
                         passes |= 1 << pass;
+                    } else if let Some(old) = old {
+                        gpu.arenas[pass].vertices.release(old.vertices);
+                        gpu.arenas[pass].indices.release(old.indices);
                     }
                 }
                 // Bounds only expand until the column is retired. Stale space is
@@ -656,8 +710,8 @@ fn prepare_sections(
             .and_then(Option::as_ref)
             .and_then(|s| s.passes[*pass].as_ref())
             .is_some_and(|a| {
-                a.vertices == (*v..*v + g.vertices.len() as u64)
-                    && a.indices == (*i..*i + g.indices.len() as u64)
+                a.vertices == (*v..*v + g.vertices().len() as u64)
+                    && a.indices == (*i..*i + g.indices().len() as u64)
             })
     });
     // Submit growth copies before queue writes: otherwise old bytes overwrite uploads.
@@ -674,9 +728,32 @@ fn prepare_sections(
             }
             queue.submit([encoder.finish()]);
         }
+        let quads = uploads
+            .iter()
+            .filter(|(_, _, _, _, g)| g.indices.is_none())
+            .map(|(_, _, _, _, g)| g.count / 6)
+            .max()
+            .unwrap_or(0);
+        if quads > gpu.quad_capacity {
+            gpu.quad_capacity = quads
+                .checked_next_power_of_two()
+                .expect("model index capacity");
+            let indices: Vec<u32> = (0..gpu.quad_capacity)
+                .flat_map(|quad| crate::model_mesh::quad_indices(quad, false))
+                .collect();
+            gpu.quad_indices = section_buffer(
+                &device,
+                "model quad indices",
+                size_of_val(indices.as_slice()) as u64,
+                BufferUsages::INDEX,
+            );
+            queue.write_buffer(&gpu.quad_indices, 0, bytemuck::cast_slice(&indices));
+        }
         for (_, p, v, i, g) in uploads {
-            queue.write_buffer(&gpu.arenas[p].vertices.buffer, v, &g.vertices);
-            queue.write_buffer(&gpu.arenas[p].indices.buffer, i, &g.indices);
+            queue.write_buffer(&gpu.arenas[p].vertices.buffer, v, g.vertices());
+            if !g.indices().is_empty() {
+                queue.write_buffer(&gpu.arenas[p].indices.buffer, i, g.indices());
+            }
         }
     }
     if gpu.slots.len() as u64 > gpu.origins.size() / 16 {
@@ -1341,7 +1418,11 @@ impl<I: PhaseItem, const P: usize> RenderCommand<I> for DrawSections<P> {
         let arena = &gpu.arenas[range_pass(P)];
         pass.set_vertex_buffer(0, arena.vertices.buffer.slice(..));
         pass.set_index_buffer(
-            arena.indices.buffer.slice(..),
+            if matches!(range_pass(P), 2 | 3) {
+                gpu.quad_indices.slice(..)
+            } else {
+                arena.indices.buffer.slice(..)
+            },
             if INDEX_BYTES[range_pass(P)] == 2 {
                 IndexFormat::Uint16
             } else {

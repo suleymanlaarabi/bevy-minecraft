@@ -357,7 +357,7 @@ fn spawn_chunk_build<C: RenderSource>(
             .flatten()
             {
                 section.overhang |= geometry.overhang();
-                section.bytes += geometry.vertices.len() + geometry.indices.len();
+                section.bytes += geometry.bytes();
             }
             if let Some((mesh, _, _)) = &section.translucent {
                 section.overhang |= mesh.final_aabb.is_none_or(|bounds| {

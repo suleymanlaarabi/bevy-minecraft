@@ -1,5 +1,6 @@
 use super::material::VoxelMaterial;
 use bevy::{
+    asset::RenderAssetUsages,
     prelude::*,
     render::render_resource::{TextureDataOrder, TextureFormat},
     tasks::{Task, futures::check_ready},
@@ -143,15 +144,19 @@ pub fn generate_block_mipmaps(
             image.data = Some(data);
             image.data_order = TextureDataOrder::LayerMajor;
             image.texture_descriptor.mip_level_count = levels;
+            image.asset_usage = RenderAssetUsages::RENDER_WORLD;
             return;
         }
     }
-    let Some(image) = images
-        .get(source)
-        .filter(|image| mipmap_levels(image).is_some())
-    else {
+    let Some(image) = images.get(source) else {
         return;
     };
+    if mipmap_levels(image).is_none() {
+        if image.data.is_some() && image.asset_usage != RenderAssetUsages::RENDER_WORLD {
+            images.get_mut(source).unwrap().asset_usage = RenderAssetUsages::RENDER_WORLD;
+        }
+        return;
+    }
     let image = image.clone();
     commands.insert_resource(MipmapJob {
         image: source,

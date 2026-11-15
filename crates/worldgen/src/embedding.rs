@@ -75,15 +75,20 @@ impl ChunkSnapshot {
             if source.iter().all(|&state| state == first) {
                 return Section::Uniform(voxel(first));
             }
-            let mut cells = [voxel(first); 4096];
+            // Native IDs are already validated u16 values. Transpose directly into
+            // shared narrow storage, without a full-width intermediate or registry reads.
+            let mut cells = [first.as_u16(); 4096];
             for (x, plane) in source.chunks_exact(256).enumerate() {
                 for (y, row) in plane.chunks_exact(16).enumerate() {
                     for (z, &state) in row.iter().enumerate() {
-                        cells[y * 256 + z * 16 + x] = voxel(state);
+                        cells[y * 256 + z * 16 + x] = state.as_u16();
                     }
                 }
             }
-            Section::Dense(std::sync::Arc::new(cells))
+            Section::Narrow {
+                prefix: 0,
+                cells: std::sync::Arc::new(cells),
+            }
         }));
         Self {
             chunk_x,
