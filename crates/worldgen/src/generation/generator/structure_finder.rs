@@ -8,7 +8,7 @@ use crate::generation::structure::placement::{
     GlobalStructureCache, StrongholdLayout, get_structure_chunk_in_region,
 };
 
-use super::VanillaGenerator;
+use super::TerrainGenerator;
 
 /// Block-level position of a found structure plus squared distance from the
 /// search origin, used internally to track the running nearest candidate.
@@ -124,7 +124,7 @@ pub fn find_nearest_structure_start(
     structure_set: &StructureSet,
     target_structures: &[pumpkin_data::structures::StructureKeys],
     max_search_radius: i32,
-    generator: &VanillaGenerator,
+    generator: &TerrainGenerator,
 ) -> Option<(BlockPos, pumpkin_data::structures::StructureKeys)> {
     use crate::{
         biome::{BiomeSupplier, MultiNoiseBiomeSupplier},

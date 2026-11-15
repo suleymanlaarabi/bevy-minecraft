@@ -7,7 +7,7 @@ use crate::biome::{BiomeSupplier, MultiNoiseBiomeSupplier, end::TheEndBiomeSuppl
 use crate::generation::biome_coords;
 use crate::generation::noise::router::multi_noise_sampler::MultiNoiseSampler;
 
-use super::VanillaGenerator;
+use super::TerrainGenerator;
 
 /// Finds the closest position whose sampled biome id is contained in
 /// `targets`, mirroring vanilla's `BiomeSource.findClosestBiome3d`.
@@ -23,7 +23,7 @@ use super::VanillaGenerator;
 #[must_use]
 #[expect(clippy::implicit_hasher)]
 pub fn find_closest_biome_3d(
-    generator: &VanillaGenerator,
+    generator: &TerrainGenerator,
     origin: BlockPos,
     targets: &FxHashSet<u8>,
     horizontal_radius: i32,

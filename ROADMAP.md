@@ -23,7 +23,7 @@ Checked boxes below identify existing capabilities. Remaining-work boxes stay un
 
 ## Current foundation
 
-- [x] Seeded Overworld generation with Fast and Vanilla quality settings and asynchronous chunk streaming.
+- [x] Seeded Overworld generation and asynchronous chunk streaming.
 - [x] Voxel rendering, block models, fluid surfaces, texture-pack selection, shadows, and lighting updates after edits.
 - [x] Character movement, collision, jumping, crouching, sprinting, swimming, climbing, and flight support exposed through developer controls.
 - [x] First-person and third-person cameras, player skin/rig, held-item visuals, and arm animations.

@@ -1,12 +1,12 @@
 use crate::ProtoChunk;
-use crate::generation::generator::VanillaGenerator;
+use crate::generation::generator::TerrainGenerator;
 use crate::lighting::LightingEngineConfig;
 use crate::world::WorldPortalExt;
 
 use super::{Cache, Chunk, StagedChunkEnum};
 
 pub fn generate_single_chunk(
-    generator: &VanillaGenerator,
+    generator: &TerrainGenerator,
     block_registry: &dyn WorldPortalExt,
     chunk_x: i32,
     chunk_z: i32,
@@ -23,7 +23,7 @@ pub fn generate_single_chunk(
 }
 
 pub fn generate_single_chunk_with_radius(
-    generator: &VanillaGenerator,
+    generator: &TerrainGenerator,
     block_registry: &dyn WorldPortalExt,
     chunk_x: i32,
     chunk_z: i32,

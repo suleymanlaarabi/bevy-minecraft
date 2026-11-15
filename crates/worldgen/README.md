@@ -1,10 +1,9 @@
 # Hollow world generation
 
 Bevy owns generation demand, spatial dependencies, reservations, task admission,
-and publication. `VanillaGenerator::new(seed, dimension)` supplies the vanilla
-terrain pipeline for the Overworld, Nether, and End. Sessions select Fast or
-Vanilla terrain quality. `GenerationSession::probe_terrain` remains available for
-terrain-only spawn searches.
+and publication. `TerrainGenerator::new(seed, dimension)` supplies the terrain
+pipeline for the Overworld, Nether, and End, using coarsened density interpolation.
+`GenerationSession::probe_terrain` remains available for terrain-only spawn searches.
 
 Structure templates, jigsaw pools, and processor lists come from embedded static
 Pumpkin data. Runtime datapack registration, external template loading, flat and

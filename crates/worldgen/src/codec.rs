@@ -132,7 +132,7 @@ pub(crate) fn encode_generated(chunk: &crate::chunk_system::Chunk) -> io::Result
 pub(crate) fn decode_generated(
     record: GenerationRecord,
     position: crate::chunk_system::ChunkPos,
-    generator: &crate::generation::generator::VanillaGenerator,
+    generator: &crate::generation::generator::TerrainGenerator,
 ) -> io::Result<crate::chunk_system::Chunk> {
     use crate::{
         chunk::{ChunkData, ChunkHeightmaps, ChunkSections},

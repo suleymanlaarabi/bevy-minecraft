@@ -14,10 +14,9 @@ pub mod structure_finder;
 use pumpkin_data::structures::{StructurePlacementCalculator, StructureSet};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-pub struct VanillaGenerator {
-    pub fast_terrain: bool,
+pub struct TerrainGenerator {
     pub(crate) structure_heights:
-        super::noise::router::position_cache::PositionCache<(i32, i32, bool), [i32; 2]>,
+        super::noise::router::position_cache::PositionCache<(i32, i32), [i32; 2]>,
     pub random_config: GlobalRandomConfig,
     pub base_router: ProtoNoiseRouters,
     pub dimension: Dimension,
@@ -38,7 +37,7 @@ pub struct VanillaGenerator {
     pub enabled_structure_sets: FxHashSet<usize>,
 }
 
-impl VanillaGenerator {
+impl TerrainGenerator {
     #[must_use]
     pub fn find_spawn_position(&self) -> pumpkin_util::math::position::BlockPos {
         if self.settings.spawn_target.is_empty() {
@@ -122,7 +121,6 @@ impl VanillaGenerator {
             global_structure_cache,
             structure_calculator: StructurePlacementCalculator::new(seed.0 as i64),
             structure_allowed_biomes,
-            fast_terrain: false,
             structure_heights: super::noise::router::position_cache::PositionCache::default(),
             enabled_structure_sets,
         }

@@ -521,7 +521,7 @@ impl GenerationCache for Cache {
 }
 
 impl Cache {
-    pub fn advance_all(&mut self, stage: StagedChunkEnum, generator: &generator::VanillaGenerator) {
+    pub fn advance_all(&mut self, stage: StagedChunkEnum, generator: &generator::TerrainGenerator) {
         for index in 0..self.chunks.len() {
             self.advance_index(index, stage, generator);
         }
@@ -531,7 +531,7 @@ impl Cache {
         &mut self,
         index: usize,
         stage: StagedChunkEnum,
-        generator: &generator::VanillaGenerator,
+        generator: &generator::TerrainGenerator,
     ) {
         match &self.chunks[index] {
             Chunk::Complete(_) => return,
@@ -599,7 +599,7 @@ impl Cache {
     pub fn advance(
         &mut self,
         stage: StagedChunkEnum,
-        generator: &generator::VanillaGenerator,
+        generator: &generator::TerrainGenerator,
         block_registry: &dyn WorldPortalExt,
         lighting_config: &LightingEngineConfig,
     ) {

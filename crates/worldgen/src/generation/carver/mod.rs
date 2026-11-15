@@ -5,7 +5,7 @@ pub mod mask;
 use crate::ProtoChunk;
 use crate::biome::BiomeSupplier;
 use crate::generation::GlobalRandomConfig;
-use crate::generation::generator::VanillaGenerator;
+use crate::generation::generator::TerrainGenerator;
 use crate::generation::noise::aquifer_sampler::CarverAquiferSampler;
 use crate::generation::noise::perlin::DoublePerlinNoiseSampler;
 use crate::generation::noise::router::multi_noise_sampler::MultiNoiseSampler;
@@ -201,7 +201,7 @@ pub trait Carver {
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn carve(chunk: &mut ProtoChunk, generator: &VanillaGenerator) {
+pub fn carve(chunk: &mut ProtoChunk, generator: &TerrainGenerator) {
     // Vanilla applyCarvers uses a range of 8 chunks (17x17 area)
     let radius = 8;
     let chunk_x = chunk.x;

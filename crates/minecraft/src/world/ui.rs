@@ -127,7 +127,7 @@ fn spawn_world_list(commands: &mut Commands, browser: &Browser) {
     }
     let rows: Vec<_> = browser.entries.iter().enumerate().map(|(index, entry)| {
         let caption = match &entry.metadata {
-            Some(m) => format!("{}\nSeed: {}  ·  {}  ·  Last played: {}", m.name, m.seed, m.quality.label(), date(m.last_played)),
+            Some(m) => format!("{}\nSeed: {}  ·  Last played: {}", m.name, m.seed, date(m.last_played)),
             None => "Unreadable world".into(),
         };
         let error = entry.error.clone();
@@ -227,7 +227,6 @@ fn cancel_delete(_: On<Activate>, mut browser: ResMut<Browser>, mut commands: Co
 
 pub(super) fn create_page(mut commands: Commands, mut browser: ResMut<Browser>) {
     browser.error = None;
-    browser.quality = WorldQuality::Fast;
     commands.spawn_scene(bsn! {
         @page(GameState::WorldCreate)
         Children [
@@ -244,10 +243,6 @@ pub(super) fn create_page(mut commands: Commands, mut browser: ResMut<Browser>) 
                 --
                 @FeathersTextInputContainer
                 Children [ @FeathersTextInput { @max_characters: {Some(20)} } Text("") Field::Seed TabIndex(1) ]
-                --
-                Text("Quality: Fast prioritizes performance; Vanilla preserves Pumpkin terrain calculations.") ThemedText
-                --
-                @button("Quality: Fast", ButtonVariant::Normal) on(toggle_quality)
                 --
                 Text("") ThemedText FormStatus
                 --
@@ -298,27 +293,6 @@ fn select_world(
     let path = entry.path.clone();
     open_world(&mut browser, Some(path), None, blocks.clone());
 }
-fn toggle_quality(
-    event: On<Activate>,
-    mut browser: ResMut<Browser>,
-    children: Query<&Children>,
-    mut texts: Query<&mut Text>,
-) {
-    if browser.busy() {
-        return;
-    }
-    browser.quality = match browser.quality {
-        WorldQuality::Fast => WorldQuality::Vanilla,
-        WorldQuality::Vanilla => WorldQuality::Fast,
-    };
-    // Feathers captions are descendants of the button's scene root.
-    for entity in children.iter_descendants(event.entity) {
-        if let Ok(mut text) = texts.get_mut(entity) {
-            text.0 = format!("Quality: {}", browser.quality.label());
-        }
-    }
-}
-
 fn form(inputs: &Query<(&Field, &Text)>) -> Result<(String, Option<i64>), String> {
     let mut name = String::new();
     let mut seed = String::new();
@@ -357,13 +331,7 @@ fn submit(
     let seed = seed.unwrap_or_else(|| {
         i64::from_le_bytes(uuid::Uuid::new_v4().as_bytes()[..8].try_into().unwrap())
     });
-    let quality = browser.quality;
-    open_world(
-        &mut browser,
-        None,
-        Some((name, seed, quality)),
-        blocks.clone(),
-    );
+    open_world(&mut browser, None, Some((name, seed)), blocks.clone());
 }
 
 pub(super) fn validate_form(

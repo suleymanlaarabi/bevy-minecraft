@@ -1,10 +1,10 @@
 //! Bevy owns generation requests, spatial dependencies, reservations and tasks.
 use crate::lighting::LightingEngineConfig;
 use crate::{
-    ChunkSnapshot, ChunkStorage, Dimension, ProtoChunk, TerrainQuality, VanillaBlockRegistry,
+    ChunkSnapshot, ChunkStorage, Dimension, ProtoChunk, VanillaBlockRegistry,
     chunk_system::generation_cache::SurfaceBiomeNeighborhood,
     chunk_system::{Cache, Chunk, ChunkPos, StagedChunkEnum as Stage},
-    generation::generator::VanillaGenerator,
+    generation::generator::TerrainGenerator,
 };
 use bevy_app::{App, Plugin, PostUpdate};
 use bevy_ecs::prelude::*;
@@ -27,7 +27,6 @@ use std::{
 pub struct GenerationSettings {
     pub seed: i64,
     pub dimension: Dimension,
-    pub quality: TerrainQuality,
 }
 
 /// The game retains this column while its presentation or gameplay data is loaded.
@@ -61,7 +60,7 @@ impl ViewDemand {
 struct Shared {
     id: u64,
     settings: GenerationSettings,
-    generator: std::sync::OnceLock<Result<Arc<VanillaGenerator>, String>>,
+    generator: std::sync::OnceLock<Result<Arc<TerrainGenerator>, String>>,
     initialization_waiters: Mutex<Vec<async_channel::Sender<Result<(), String>>>>,
     storage: Option<Arc<dyn ChunkStorage>>,
     cancelled: AtomicBool,
@@ -79,20 +78,11 @@ struct Shared {
 #[derive(Resource, Clone)]
 pub struct GenerationSession(Arc<Shared>);
 impl GenerationSession {
-    pub fn new(
-        seed: i64,
-        dimension: Dimension,
-        quality: TerrainQuality,
-        storage: Option<Arc<dyn ChunkStorage>>,
-    ) -> Self {
+    pub fn new(seed: i64, dimension: Dimension, storage: Option<Arc<dyn ChunkStorage>>) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Self(Arc::new(Shared {
             id: NEXT.fetch_add(1, Ordering::Relaxed),
-            settings: GenerationSettings {
-                seed,
-                dimension,
-                quality,
-            },
+            settings: GenerationSettings { seed, dimension },
             generator: std::sync::OnceLock::new(),
             initialization_waiters: Mutex::default(),
             storage,
@@ -107,7 +97,7 @@ impl GenerationSession {
             errors: Mutex::default(),
         }))
     }
-    fn generator(&self) -> Arc<VanillaGenerator> {
+    fn generator(&self) -> Arc<TerrainGenerator> {
         self.0
             .generator
             .get()
@@ -382,7 +372,7 @@ struct GenerationGraph(Vec<Runtime>);
 
 enum Output {
     Trimmed,
-    Initialized(Result<Arc<VanillaGenerator>, String>),
+    Initialized(Result<Arc<TerrainGenerator>, String>),
     Generated(Result<(Cache, Option<ChunkSnapshot>, bool), String>),
     Stored {
         chunks: Vec<(ChunkPos, Chunk)>,
@@ -755,11 +745,10 @@ fn schedule(
                 let settings = runtime.session.settings().clone();
                 let task = budget.spawn(WorkClass::Loading, 0, async move {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let mut generator = VanillaGenerator::new(
+                        let generator = TerrainGenerator::new(
                             Seed(settings.seed as u64),
                             settings.dimension.pumpkin(),
                         );
-                        generator.fast_terrain = settings.quality == TerrainQuality::Fast;
                         Arc::new(generator)
                     }))
                     .map_err(|_| "Generation initialization failed".to_owned());
@@ -1063,7 +1052,7 @@ fn schedule(
 fn generate(
     session: &GenerationSession,
     position: ChunkPos,
-    prepare: impl FnOnce(&VanillaGenerator) -> Result<(Cache, bool), String>,
+    prepare: impl FnOnce(&TerrainGenerator) -> Result<(Cache, bool), String>,
     first: Option<Stage>,
     target: Stage,
     read_radius: i32,

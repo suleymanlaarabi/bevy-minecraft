@@ -23,12 +23,7 @@ pub(crate) type ChunkLoad = bevy_voxel::engine::streaming::ChunkLoad<
 impl WorldGenerator {
     pub(crate) fn new(seed: i64, blocks: bevy_voxel::engine::blocks::BlockCatalog) -> Self {
         Self {
-            runtime: GenerationSession::new(
-                seed,
-                Dimension::Overworld,
-                hollow_worldgen::TerrainQuality::Fast,
-                None,
-            ),
+            runtime: GenerationSession::new(seed, Dimension::Overworld, None),
             storage: None,
             blocks,
         }
@@ -36,17 +31,11 @@ impl WorldGenerator {
 
     pub(crate) fn persistent(
         seed: i64,
-        quality: crate::world::WorldQuality,
         storage: Arc<crate::world::storage::Database>,
         blocks: bevy_voxel::engine::blocks::BlockCatalog,
     ) -> Self {
         Self {
-            runtime: GenerationSession::new(
-                seed,
-                Dimension::Overworld,
-                quality.native(),
-                Some(storage.clone()),
-            ),
+            runtime: GenerationSession::new(seed, Dimension::Overworld, Some(storage.clone())),
             storage: Some(storage),
             blocks,
         }

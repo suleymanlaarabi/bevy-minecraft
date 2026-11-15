@@ -173,7 +173,8 @@ impl<'a> ChunkNoiseGenerator<'a> {
         };
         let state_sampler = ChainedBlockStateSampler::new(samplers);
 
-        let router = ChunkNoiseRouter::generate(noise_router_base, &builder_options);
+        let mut router = ChunkNoiseRouter::generate(noise_router_base, &builder_options);
+        router.coarsen_interpolation();
 
         Self {
             state_sampler,

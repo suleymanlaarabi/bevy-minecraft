@@ -23,13 +23,6 @@ impl Dimension {
         }
     }
 }
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum TerrainQuality {
-    Vanilla,
-    #[default]
-    Fast,
-}
-
 /// Registry IDs and native coordinates survive generation and cache round trips.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct GeneratedFluidTick {

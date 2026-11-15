@@ -3,7 +3,7 @@ use pumpkin_util::math::vector3::Vector3;
 use rustc_hash::FxHashMap;
 
 use crate::generation::{
-    generator::VanillaGenerator,
+    generator::TerrainGenerator,
     noise::{
         ChunkNoiseGenerator,
         aquifer_sampler::FluidLevel,
@@ -20,7 +20,7 @@ use crate::generation::{
 use super::structures::HeightSampler;
 
 pub struct NoiseHeightSampler<'a> {
-    generator: &'a VanillaGenerator,
+    generator: &'a TerrainGenerator,
     preliminary: SurfaceHeightEstimateSampler<'a>,
     heights: FxHashMap<(i32, i32), i32>,
     ocean_floor_heights: FxHashMap<(i32, i32), i32>,
@@ -29,7 +29,7 @@ pub struct NoiseHeightSampler<'a> {
 }
 
 impl<'a> NoiseHeightSampler<'a> {
-    pub fn new(generator: &'a VanillaGenerator) -> Self {
+    pub fn new(generator: &'a TerrainGenerator) -> Self {
         let shape = &generator.settings.shape;
         let preliminary = SurfaceHeightEstimateSampler::generate(
             &generator.base_router.surface_estimator,
@@ -94,7 +94,7 @@ impl<'a> NoiseHeightSampler<'a> {
             i32::from(shape.min_y),
             z,
         );
-        let mut noise = ChunkNoiseGenerator::new(
+        let noise = ChunkNoiseGenerator::new(
             &generator.base_router.noise,
             &generator.random_config,
             volume,
@@ -106,9 +106,6 @@ impl<'a> NoiseHeightSampler<'a> {
             Vec::new(),
             None,
         );
-        if generator.fast_terrain {
-            noise.router.coarsen_interpolation();
-        }
 
         (volume, noise)
     }
@@ -123,9 +120,7 @@ impl<'a> NoiseHeightSampler<'a> {
         let generator = self.generator;
         let [surface, floor] = generator
             .structure_heights
-            .get_or_compute((x, z, generator.fast_terrain), || {
-                self.compute_heights(x, z)
-            });
+            .get_or_compute((x, z), || self.compute_heights(x, z));
         self.heights.insert((x, z), surface);
         self.ocean_floor_heights.insert((x, z), floor - 1);
         if ocean_floor { floor } else { surface }
@@ -134,23 +129,19 @@ impl<'a> NoiseHeightSampler<'a> {
     fn compute_heights(&mut self, x: i32, z: i32) -> [i32; 2] {
         // Density interpolation is kept identical to the full-height volume.
         // Only block/aquifer evaluation stops once both height predicates match.
-        let mut noise = if self.generator.fast_terrain {
-            match self.height_noise.take() {
-                Some(mut noise)
-                    if noise.volume().min_block_x.div_euclid(16) == x.div_euclid(16)
-                        && noise.volume().min_block_z.div_euclid(16) == z.div_euclid(16) =>
-                {
-                    noise.move_height_column(x, z);
-                    noise
-                }
-                _ => {
-                    let (_, mut noise) = self.noise_column(x, z);
-                    noise.router.reuse_interpolation_corners();
-                    noise
-                }
+        let mut noise = match self.height_noise.take() {
+            Some(mut noise)
+                if noise.volume().min_block_x.div_euclid(16) == x.div_euclid(16)
+                    && noise.volume().min_block_z.div_euclid(16) == z.div_euclid(16) =>
+            {
+                noise.move_height_column(x, z);
+                noise
             }
-        } else {
-            self.noise_column(x, z).1
+            _ => {
+                let (_, mut noise) = self.noise_column(x, z);
+                noise.router.reuse_interpolation_corners();
+                noise
+            }
         };
         let volume = *noise.volume();
         let densities = noise.sample_density();
@@ -179,9 +170,7 @@ impl<'a> NoiseHeightSampler<'a> {
         }
         let surface = surface.unwrap_or(volume.min_block_y);
         let floor = floor.unwrap_or(volume.min_block_y);
-        if self.generator.fast_terrain {
-            self.height_noise = Some(noise);
-        }
+        self.height_noise = Some(noise);
         static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *VERIFY.get_or_init(|| std::env::var("WORLDGEN_VERIFY_HEIGHTS").as_deref() == Ok("1")) {
             assert_eq!(

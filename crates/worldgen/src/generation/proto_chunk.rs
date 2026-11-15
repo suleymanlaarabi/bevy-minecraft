@@ -198,7 +198,7 @@ impl ProtoChunk {
     }
 
     #[must_use]
-    pub fn new(x: i32, z: i32, generator: &super::generator::VanillaGenerator) -> Self {
+    pub fn new(x: i32, z: i32, generator: &super::generator::TerrainGenerator) -> Self {
         let dimension = &generator.dimension;
         let height = dimension.height as u16;
         let bottom_y = dimension.min_y as i8;
@@ -550,7 +550,7 @@ impl ProtoChunk {
         self.flat_biome_map[index]
     }
 
-    pub fn step_to_biomes(&mut self, generator: &super::generator::VanillaGenerator) {
+    pub fn step_to_biomes(&mut self, generator: &super::generator::TerrainGenerator) {
         debug_assert_eq!(self.stage, StagedChunkEnum::Empty);
         let mut multi_noise_sampler =
             MultiNoiseSampler::generate(&generator.base_router.multi_noise);
@@ -559,7 +559,7 @@ impl ProtoChunk {
     }
 
     #[expect(clippy::too_many_lines)]
-    pub fn step_to_noise(&mut self, generator: &super::generator::VanillaGenerator) {
+    pub fn step_to_noise(&mut self, generator: &super::generator::TerrainGenerator) {
         debug_assert_eq!(self.stage, StagedChunkEnum::StructureReferences);
         let settings = generator.settings;
         let generation_shape = &settings.shape;
@@ -708,9 +708,6 @@ impl ProtoChunk {
             beardifier_junctions,
             affected_box,
         );
-        if generator.fast_terrain {
-            noise_sampler.router.coarsen_interpolation();
-        }
 
         let surface_config = SurfaceHeightSamplerBuilderOptions::new(
             generation_shape.min_y as i32,
@@ -739,7 +736,7 @@ impl ProtoChunk {
 
     pub(crate) fn step_to_surface(
         &mut self,
-        generator: &super::generator::VanillaGenerator,
+        generator: &super::generator::TerrainGenerator,
         surface_biomes: &SurfaceBiomeNeighborhood,
     ) {
         debug_assert_eq!(self.stage, StagedChunkEnum::Noise);
@@ -775,7 +772,7 @@ impl ProtoChunk {
         self.stage = StagedChunkEnum::Surface;
     }
 
-    pub fn step_to_carvers(&mut self, generator: &super::generator::VanillaGenerator) {
+    pub fn step_to_carvers(&mut self, generator: &super::generator::TerrainGenerator) {
         debug_assert_eq!(self.stage, StagedChunkEnum::Surface);
         super::carver::carve(self, generator);
 
@@ -786,7 +783,7 @@ impl ProtoChunk {
 
     pub fn populate_biomes(
         &mut self,
-        generator: &super::generator::VanillaGenerator,
+        generator: &super::generator::TerrainGenerator,
         multi_noise_sampler: &mut MultiNoiseSampler,
     ) {
         let biome_supplier: &dyn BiomeSupplier = &generator.biome_supplier;
@@ -842,7 +839,7 @@ impl ProtoChunk {
 
     pub fn populate_noise(
         &mut self,
-        generator: &super::generator::VanillaGenerator,
+        generator: &super::generator::TerrainGenerator,
         noise_sampler: &mut ChunkNoiseGenerator,
         ore_random_deriver: &XoroshiroSplitter,
         surface_height_estimate_sampler: &mut SurfaceHeightEstimateSampler,
@@ -945,7 +942,7 @@ impl ProtoChunk {
     )]
     pub(crate) fn build_surface(
         &mut self,
-        generator: &super::generator::VanillaGenerator,
+        generator: &super::generator::TerrainGenerator,
         surface_biomes: &SurfaceBiomeNeighborhood,
         surface_height_estimate_sampler: &mut SurfaceHeightEstimateSampler,
     ) {
@@ -1360,7 +1357,7 @@ impl ProtoChunk {
     }
 
     /// Creates the structure starts owned by this chunk.
-    pub fn set_structure_starts(&mut self, generator: &super::generator::VanillaGenerator) {
+    pub fn set_structure_starts(&mut self, generator: &super::generator::TerrainGenerator) {
         debug_assert_eq!(self.stage, StagedChunkEnum::Biomes);
         let random_config = &generator.random_config;
         let settings = generator.settings;
@@ -1416,7 +1413,7 @@ impl ProtoChunk {
         global_cache: &GlobalStructureCache,
         sea_level: i32,
         entry: &WeightedEntry,
-        generator: &super::generator::VanillaGenerator,
+        generator: &super::generator::TerrainGenerator,
         height_sampler: &mut dyn crate::generation::structure::structures::HeightSampler,
     ) -> bool {
         if entry.structure == StructureKeys::Monument {
@@ -1476,7 +1473,7 @@ impl ProtoChunk {
 
     /// Adds references to nearby structure starts that intersect this chunk.
     #[expect(clippy::too_many_lines)]
-    pub fn set_structure_references(&mut self, generator: &super::generator::VanillaGenerator) {
+    pub fn set_structure_references(&mut self, generator: &super::generator::TerrainGenerator) {
         debug_assert_eq!(self.stage, StagedChunkEnum::StructureStart);
         let random_config = &generator.random_config;
         let settings = generator.settings;

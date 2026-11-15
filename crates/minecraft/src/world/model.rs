@@ -5,43 +5,21 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WorldQuality {
-    #[default]
-    Fast,
-    Vanilla,
-}
-impl WorldQuality {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Fast => "Fast",
-            Self::Vanilla => "Vanilla",
-        }
-    }
-    pub(crate) fn native(self) -> hollow_worldgen::TerrainQuality {
-        match self {
-            Self::Fast => hollow_worldgen::TerrainQuality::Fast,
-            Self::Vanilla => hollow_worldgen::TerrainQuality::Vanilla,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorldMetadata {
     pub id: String,
     pub name: String,
     pub seed: i64,
-    pub quality: WorldQuality,
     pub created_at: u64,
     pub last_played: u64,
 }
 impl WorldMetadata {
-    pub(super) fn new(name: String, seed: i64, quality: WorldQuality) -> Self {
+    pub(super) fn new(name: String, seed: i64) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             name,
             seed,
-            quality,
             created_at: now(),
             last_played: now(),
         }

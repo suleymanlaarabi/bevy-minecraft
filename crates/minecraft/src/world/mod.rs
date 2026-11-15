@@ -23,8 +23,8 @@ use bevy_voxel::engine::storage::save::{
     CaptureLimits, CaptureQueue, ColumnPressure, SaveRevisions, StoragePressure,
     TerrainAcknowledgements, TerrainSnapshots, forget_pressure,
 };
+pub use model::WorldMetadata;
 pub(crate) use model::{Checkpoint, SavedDrop, SavedPlayer, SavedStack};
-pub use model::{WorldMetadata, WorldQuality};
 use std::{io, path::PathBuf, sync::Arc};
 use storage::{CatalogEntry, Database};
 
@@ -102,7 +102,6 @@ struct Browser {
     delete_task: Option<Task<io::Result<()>>>,
     pending_delete: Option<PathBuf>,
     error: Option<String>,
-    quality: WorldQuality,
     close_after_operation: bool,
     reopen: Option<PathBuf>,
 }
@@ -228,7 +227,7 @@ fn start_catalog(
 fn open_world(
     browser: &mut Browser,
     path: Option<PathBuf>,
-    creation: Option<(String, i64, WorldQuality)>,
+    creation: Option<(String, i64)>,
     blocks: bevy_voxel::engine::blocks::BlockCatalog,
 ) {
     if !browser.idle() {
@@ -240,17 +239,16 @@ fn open_world(
         let (database, metadata, resume) = if let Some(path) = path {
             Database::open(&path)?
         } else {
-            let (name, seed, quality) =
+            let (name, seed) =
                 creation.ok_or_else(|| io::Error::other("Invalid world creation request."))?;
-            let metadata = WorldMetadata::new(name, seed, quality);
+            let metadata = WorldMetadata::new(name, seed);
             (
                 Database::create(&metadata)?,
                 metadata,
                 Checkpoint::default(),
             )
         };
-        let generator =
-            WorldGenerator::persistent(metadata.seed, metadata.quality, database.clone(), blocks);
+        let generator = WorldGenerator::persistent(metadata.seed, database.clone(), blocks);
         let path = source_path.map_or_else(
             || storage::root().map(|root| root.join(&metadata.id).join("world.sqlite3")),
             Ok,
@@ -276,7 +274,7 @@ pub(crate) fn register_flight_benchmark(app: &mut App) {
             open_world(
                 &mut browser,
                 None,
-                Some(("Flight benchmark".into(), 12, WorldQuality::Fast)),
+                Some(("Flight benchmark".into(), 12)),
                 blocks.clone(),
             );
         },
