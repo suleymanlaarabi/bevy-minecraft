@@ -1,4 +1,5 @@
 //! Explicit camera presentation capabilities, independent of application settings.
+mod bloom;
 mod composite;
 mod present;
 mod resolution;

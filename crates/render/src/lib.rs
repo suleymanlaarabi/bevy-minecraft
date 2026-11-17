@@ -62,6 +62,7 @@ impl<C: RenderSource> Plugin for VoxelRenderPlugin<C> {
         bevy::shader::load_shader_library!(app, "shaders/voxel_material.wesl");
         bevy::shader::load_shader_library!(app, "shaders/water_material.wesl");
         bevy::shader::load_shader_library!(app, "shaders/model_material.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/present_scene.wesl");
         app.init_resource::<environment::CameraLiquid>()
             .init_resource::<environment::SkyLighting>()
             .init_resource::<environment::EnvironmentSettings>()

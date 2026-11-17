@@ -10,7 +10,7 @@ dev = []
 [dependencies]
 hollow-core = { path = "../core" }
 hollow-engine = { path = "../engine" }
-bevy = { version = "0.20", default-features = false, features = ["std", "async_executor", "multi_threaded", "bevy_asset", "bevy_log", "bevy_pbr", "bevy_anti_alias", "bevy_ui_render", "png"] }
+bevy = { version = "0.20", default-features = false, features = ["std", "async_executor", "multi_threaded", "bevy_asset", "bevy_log", "bevy_pbr", "bevy_anti_alias", "bevy_post_process", "bevy_ui_render", "png"] }
 serde = { version = "1", features = ["derive"] }
 bytemuck = "1"
 indexmap = "2"

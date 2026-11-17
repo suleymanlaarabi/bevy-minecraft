@@ -5,20 +5,25 @@
 //! then copies that texture to the window: two more full-screen reads and writes
 //! per frame, and a tonemapped image requantized to the scene's packed float format
 //! before its 8-bit encoding. Nothing reads the tonemapped main texture when the
-//! camera presents at native resolution without FXAA, so those views skip both.
-//! With FXAA, Bevy's tonemapping stays and FXAA itself writes the window, with the
-//! interface drawn over it in the same pass: the copy and its second target go.
+//! camera presents at native resolution, so those views skip both. With FXAA or
+//! bloom, the same pass also anti-aliases and adds the bloom (`present_scene.wesl`,
+//! `bloom.rs`): Bevy's final bloom blend, its separate tonemapping pass, its second
+//! target and the copy all go.
 //! Scaled rendering keeps its own single pass (`composite`).
 use bevy::{
-    anti_alias::fxaa::{CameraFxaaPipeline, Fxaa, fxaa},
+    anti_alias::fxaa::{Fxaa, Sensitivity, fxaa},
     camera::CameraOutputMode,
     core_pipeline::{
-        Core3dSystems,
+        Core3dSystems, FullscreenShader,
         schedule::Core3d,
-        tonemapping::{DebandDither, Tonemapping, TonemappingLuts, get_lut_bindings, tonemapping},
+        tonemapping::{
+            DebandDither, Tonemapping, TonemappingLuts, get_lut_bind_group_layout_entries,
+            get_lut_bindings, tonemapping,
+        },
         upscaling::upscaling,
     },
     ecs::{entity::EntityHashMap, schedule::ScheduleCleanupPolicy},
+    post_process::bloom::{Bloom, BloomCompositeMode, bloom},
     prelude::*,
     render::extract_component::{ExtractComponent, ExtractComponentPlugin},
     render::{
@@ -27,36 +32,54 @@ use bevy::{
         diagnostic::RecordDiagnostics,
         render_asset::RenderAssets,
         render_phase::ViewSortedRenderPhases,
-        render_resource::*,
-        renderer::{CurrentView, RenderContext, ViewQuery},
+        render_resource::{
+            binding_types::{sampler, texture_2d, uniform_buffer},
+            *,
+        },
+        renderer::{CurrentView, RenderContext, RenderDevice, RenderQueue, ViewQuery},
         texture::{FallbackImage, GpuImage},
-        view::{ExtractedView, ViewTarget, ViewUniformOffset, ViewUniforms, prepare_view_targets},
+        view::{
+            ExtractedView, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
+            prepare_view_targets,
+        },
     },
     shader::ShaderDefVal,
     ui_render::{TransparentUi, UiCameraView, ui_pass},
 };
 
+use super::bloom::{BloomPasses, render_pyramid};
+
 /// Scene format, window format and tonemapping variant of a presentation pipeline.
 type PresentKey = (TextureFormat, TextureFormat, Tonemapping, DebandDither);
+
+/// FXAA's edge and dark thresholds.
+type FxaaKey = (Sensitivity, Sensitivity);
+
+/// Tonemapping, FXAA thresholds when anti-aliased, bloom blend when blooming.
+type PipelineKey = (PresentKey, Option<FxaaKey>, Option<BloomCompositeMode>);
 
 #[derive(Resource, Default)]
 struct DirectPresentation {
     /// Bevy's tonemapping, upscaling and interface passes were made conditional.
     installed: bool,
-    /// Bevy's FXAA pass was made conditional as well.
+    /// Bevy's FXAA and bloom passes were made conditional as well.
     fxaa: bool,
-    pipelines: Vec<(PresentKey, CachedRenderPipelineId)>,
-    /// Bevy's FXAA pipeline and the window format, with its window variant.
-    fxaa_pipelines: Vec<((CachedRenderPipelineId, TextureFormat), CachedRenderPipelineId)>,
-    /// Views presenting directly this frame, with their compiled pipeline.
+    bloom: bool,
+    pipelines: Vec<(PipelineKey, CachedRenderPipelineId)>,
+    /// The scene shader for FXAA or bloom, and its layouts without and with bloom:
+    /// the tonemapping layout with a filtering sampler for bilinear taps.
+    shader: Handle<Shader>,
+    layouts: Option<[BindGroupLayoutDescriptor; 2]>,
+    /// Views presenting directly this frame.
     views: EntityHashMap<Presented>,
 }
+
 #[derive(Clone, Copy)]
-enum Presented {
-    /// Tonemapped straight into the window.
-    Tonemapped(CachedRenderPipelineId),
-    /// Tonemapped by Bevy, then anti-aliased into the window.
-    Fxaa(CachedRenderPipelineId),
+struct Presented {
+    pipeline: CachedRenderPipelineId,
+    /// Drawn by the scene shader rather than Bevy's tonemapping shader.
+    scene_shader: bool,
+    bloom: bool,
 }
 
 /// Opt in when no later pass needs the tonemapped main texture.
@@ -82,6 +105,36 @@ pub(super) fn register(app: &mut App) {
 }
 
 fn install(world: &mut World) {
+    let shader = world
+        .resource::<AssetServer>()
+        .load("embedded://hollow_render/shaders/present_scene.wesl");
+    let bloom_passes = BloomPasses::new(world);
+    world.insert_resource(bloom_passes);
+    {
+        let mut direct = world.resource_mut::<DirectPresentation>();
+        direct.shader = shader;
+        let [lut, lut_sampler] = get_lut_bind_group_layout_entries();
+        let entries = DynamicBindGroupLayoutEntries::new_with_indices(
+            ShaderStages::FRAGMENT,
+            (
+                (0, uniform_buffer::<ViewUniform>(true)),
+                (1, texture_2d(TextureSampleType::Float { filterable: true })),
+                (2, sampler(SamplerBindingType::Filtering)),
+                (3, lut),
+                (4, lut_sampler),
+            ),
+        );
+        direct.layouts = Some([
+            BindGroupLayoutDescriptor::new("present scene layout", &entries),
+            BindGroupLayoutDescriptor::new(
+                "present bloom scene layout",
+                &entries.extend_with_indices((
+                    (5, texture_2d(TextureSampleType::Float { filterable: true })),
+                    (6, uniform_buffer::<Vec4>(false)),
+                )),
+            ),
+        ]);
+    }
     let mut installed = true;
     world.schedule_scope(Core3d, |world, schedule| {
         // The system sets stay, so the ordering other passes declare against these
@@ -94,7 +147,7 @@ fn install(world: &mut World) {
             schedule.add_systems(
                 tonemapping
                     .in_set(Core3dSystems::PostProcess)
-                    .run_if(not(tonemaps_directly)),
+                    .run_if(not(presents_directly)),
             );
         } else {
             installed = false;
@@ -124,6 +177,24 @@ fn install(world: &mut World) {
         } else {
             installed = false;
         }
+        let bloom_removed = matches!(
+            schedule.remove_systems_in_set(bloom, world, policy),
+            Ok(1)
+        );
+        if bloom_removed {
+            schedule.add_systems(
+                bloom
+                    .before(tonemapping)
+                    .in_set(Core3dSystems::PostProcess)
+                    .run_if(not(presents_directly)),
+            );
+            schedule.add_systems(
+                render_pyramid
+                    .before(tonemapping)
+                    .in_set(Core3dSystems::PostProcess)
+                    .run_if(presents_directly),
+            );
+        }
         let fxaa_removed = matches!(
             schedule.remove_systems_in_set(fxaa, world, policy),
             Ok(1)
@@ -141,7 +212,9 @@ fn install(world: &mut World) {
                 .before(upscaling)
                 .run_if(presents_directly),
         );
-        world.resource_mut::<DirectPresentation>().fxaa = fxaa_removed;
+        let mut direct = world.resource_mut::<DirectPresentation>();
+        direct.fxaa = fxaa_removed;
+        direct.bloom = bloom_removed;
     });
     if !installed {
         error!("Bevy's presentation passes are kept: one of them was not found");
@@ -153,16 +226,17 @@ fn presents_directly(view: Res<CurrentView>, direct: Res<DirectPresentation>) ->
     direct.views.contains_key(&view.0)
 }
 
-fn tonemaps_directly(view: Res<CurrentView>, direct: Res<DirectPresentation>) -> bool {
-    matches!(direct.views.get(&view.0), Some(Presented::Tonemapped(_)))
-}
-
 /// Picks the views presented directly this frame. A view keeps Bevy's passes until
-/// its pipeline is compiled, and whenever something still needs the tonemapped
+/// its pipelines are compiled, and whenever something still needs the tonemapped
 /// main texture or shares the output with an earlier camera.
+#[allow(clippy::too_many_arguments)]
 fn select_presentation(
     mut direct: ResMut<DirectPresentation>,
+    mut bloom_passes: ResMut<BloomPasses>,
     cache: Res<PipelineCache>,
+    device: Res<RenderDevice>,
+    queue: Res<RenderQueue>,
+    fullscreen: Res<FullscreenShader>,
     cameras: Query<
         (
             Entity,
@@ -172,7 +246,7 @@ fn select_presentation(
             &Tonemapping,
             Option<&DebandDither>,
             Option<&Fxaa>,
-            Option<&CameraFxaaPipeline>,
+            Option<&Bloom>,
             Option<&UiCameraView>,
         ),
         With<DirectPresent>,
@@ -182,16 +256,20 @@ fn select_presentation(
     let direct = &mut *direct;
     direct.views.clear();
     if !direct.installed {
+        bloom_passes.retain(|_| false);
         return;
     }
-    for (entity, camera, view, target, tonemapping, dither, fxaa, fxaa_pipeline, ui) in &cameras
-    {
+    for (entity, camera, view, target, tonemapping, dither, fxaa, bloom, ui) in &cameras {
         let Some(window_format) = target.out_texture_view_format() else {
             continue;
         };
-        let fxaa = fxaa.is_some_and(|fxaa| fxaa.enabled);
+        let fxaa = fxaa
+            .filter(|fxaa| fxaa.enabled)
+            .map(|fxaa| (fxaa.edge_threshold, fxaa.edge_threshold_min));
+        let bloom = bloom.filter(|bloom| bloom.intensity > 0.0);
         if !camera.hdr
-            || (fxaa && !direct.fxaa)
+            || (fxaa.is_some() && !direct.fxaa)
+            || (bloom.is_some() && !direct.bloom)
             || !tonemapping.is_enabled()
             || camera.viewport.is_some()
             || camera.sorted_camera_index_for_target != 0
@@ -201,68 +279,85 @@ fn select_presentation(
         {
             continue;
         }
-        let presented = if fxaa {
-            // Bevy's own FXAA pipeline, writing the window format instead.
-            let Some(source) = fxaa_pipeline.map(|pipeline| pipeline.pipeline_id) else {
-                continue;
-            };
-            let key = (source, window_format);
-            let id = match direct.fxaa_pipelines.iter().find(|(known, _)| *known == key) {
-                Some(&(_, id)) => id,
-                None => {
-                    let mut descriptor = cache.get_render_pipeline_descriptor(source).clone();
-                    descriptor.label = Some("present fxaa".into());
-                    if let Some(Some(output)) = descriptor
-                        .fragment
-                        .as_mut()
-                        .and_then(|fragment| fragment.targets.first_mut())
-                    {
-                        output.format = window_format;
-                    }
-                    let id = cache.queue_render_pipeline(descriptor);
-                    direct.fxaa_pipelines.push((key, id));
-                    id
-                }
-            };
-            Presented::Fxaa(id)
-        } else {
-            let key = (
+        let key = (
+            (
                 view.target_format,
                 window_format,
                 *tonemapping,
                 dither.copied().unwrap_or(DebandDither::Disabled),
-            );
-            Presented::Tonemapped(match direct.pipelines.iter().find(|(known, _)| *known == key) {
+            ),
+            fxaa,
+            bloom.map(|bloom| bloom.composite_mode),
+        );
+        let scene_shader = fxaa.is_some() || bloom.is_some();
+        let id = match direct.pipelines.iter().find(|(known, _)| *known == key) {
             Some(&(_, id)) => id,
             None => {
                 // Bevy queues its own pipeline for the view during the first frame.
-                let Some(mut descriptor) = tonemapping_descriptor(&cache, &key).cloned() else {
+                let Some(mut descriptor) = tonemapping_descriptor(&cache, &key.0).cloned() else {
                     continue;
                 };
                 descriptor.label = Some("present scene".into());
-                if let Some(Some(output)) = descriptor
-                    .fragment
-                    .as_mut()
-                    .and_then(|fragment| fragment.targets.first_mut())
-                {
-                    output.format = window_format;
+                if let Some(fragment) = descriptor.fragment.as_mut() {
+                    if scene_shader && let Some(layouts) = &direct.layouts {
+                        descriptor.layout = vec![layouts[usize::from(bloom.is_some())].clone()];
+                        fragment.shader = direct.shader.clone();
+                        // The thresholds are declared even when FXAA is off.
+                        let (edge, dark) = fxaa.unwrap_or((Sensitivity::High, Sensitivity::High));
+                        fragment.shader_defs.extend([
+                            format!("EDGE_THRESH_{}", edge.get_str()).into(),
+                            format!("EDGE_THRESH_MIN_{}", dark.get_str()).into(),
+                        ]);
+                        if fxaa.is_some() {
+                            fragment.shader_defs.push("FXAA".into());
+                        }
+                        if let Some(bloom) = bloom {
+                            fragment.shader_defs.push("BLOOM".into());
+                            if bloom.composite_mode == BloomCompositeMode::Additive {
+                                fragment.shader_defs.push("BLOOM_ADDITIVE".into());
+                            }
+                        }
+                    }
+                    if let Some(Some(output)) = fragment.targets.first_mut() {
+                        output.format = window_format;
+                    }
                 }
                 let id = cache.queue_render_pipeline(descriptor);
                 direct.pipelines.push((key, id));
                 id
             }
-            })
         };
-        let (Presented::Tonemapped(id) | Presented::Fxaa(id)) = presented;
-        if cache.get_render_pipeline(id).is_none() {
+        // Bloom's own pipelines are queued on its first frame as well.
+        let bloom_ready = match (bloom, camera.physical_viewport_size) {
+            (None, _) => true,
+            (Some(bloom), Some(size)) => bloom_passes.prepare(
+                entity,
+                size,
+                bloom,
+                &device,
+                &queue,
+                &cache,
+                &fullscreen,
+            ),
+            (Some(_), None) => false,
+        };
+        if !bloom_ready || cache.get_render_pipeline(id).is_none() {
             continue;
         }
-        direct.views.insert(entity, presented);
+        direct.views.insert(
+            entity,
+            Presented {
+                pipeline: id,
+                scene_shader,
+                bloom: bloom.is_some(),
+            },
+        );
         // The interface's pipelines are specialized for the texture it is drawn into.
         if let Some(mut ui_view) = ui.and_then(|ui| ui_views.get_mut(ui.0).ok()) {
             ui_view.target_format = window_format;
         }
     }
+    bloom_passes.retain(|view| direct.views.get(&view).is_some_and(|presented| presented.bloom));
 }
 
 /// The pipeline Bevy's tonemapping pass uses for a view of this key. Its key and
@@ -305,11 +400,12 @@ fn tonemapping_descriptor<'a>(
     })
 }
 
-/// Bindings of the tonemapping shader: view uniforms, scene, tonemapping LUT.
+/// Bindings of the present shaders: view uniforms, scene, tonemapping LUT, bloom.
 type Bound = (
     BufferId,
     TextureViewId,
     TextureViewId,
+    Option<TextureViewId>,
     CachedRenderPipelineId,
 );
 
@@ -328,6 +424,7 @@ fn present(
     ui_views: Query<&ExtractedView>,
     ui_phases: Res<ViewSortedRenderPhases<TransparentUi>>,
     direct: Res<DirectPresentation>,
+    bloom_passes: Res<BloomPasses>,
     cache: Res<PipelineCache>,
     images: Res<RenderAssets<GpuImage>>,
     fallback: Res<FallbackImage>,
@@ -342,23 +439,35 @@ fn present(
     let Some(&presented) = direct.views.get(&entity) else {
         return;
     };
-    let (Presented::Tonemapped(id) | Presented::Fxaa(id)) = presented;
+    let id = presented.pipeline;
+    let pyramid = bloom_passes.pyramid(entity);
+    if presented.bloom && pyramid.is_none() {
+        return;
+    }
     let (Some(pipeline), Some(uniform_buffer)) =
         (cache.get_render_pipeline(id), uniforms.uniforms.buffer())
     else {
         return;
     };
-    // The scene, or with FXAA its tonemapped copy, stays in the current main
-    // texture: nothing is written back to it.
+    // The scene stays in the current main texture: nothing is written back to it.
     let scene = target.main_texture_view();
     let (lut, lut_sampler) = get_lut_bindings(&images, &luts, tonemapping, &fallback);
-    let key = (uniform_buffer.id(), scene.id(), lut.id(), id);
+    let bloom = pyramid
+        .filter(|_| presented.bloom)
+        .map(|pyramid| (pyramid.first_level(), pyramid.composite()));
+    let key = (
+        uniform_buffer.id(),
+        scene.id(),
+        lut.id(),
+        bloom.map(|(level, _)| level.id()),
+        id,
+    );
     if bound.as_ref().is_none_or(|(current, _)| *current != key) {
         let device = ctx.render_device();
-        let (sampler, fxaa_sampler) = samplers.get_or_insert_with(|| {
+        let (nearest, linear) = samplers.get_or_insert_with(|| {
             (
                 device.create_sampler(&SamplerDescriptor::default()),
-                // Bevy's FXAA sampler.
+                // Bevy's FXAA sampler, for bilinear FXAA and bloom taps.
                 device.create_sampler(&SamplerDescriptor {
                     mipmap_filter: MipmapFilterMode::Linear,
                     mag_filter: FilterMode::Linear,
@@ -369,22 +478,35 @@ fn present(
         });
         let layout =
             cache.get_bind_group_layout(&cache.get_render_pipeline_descriptor(id).layout[0]);
-        let bind_group = match presented {
-            Presented::Tonemapped(_) => device.create_bind_group(
+        let sampler = if presented.scene_shader {
+            &*linear
+        } else {
+            &*nearest
+        };
+        let bind_group = match bloom {
+            Some((level, composite)) => device.create_bind_group(
                 "present scene",
                 &layout,
                 &BindGroupEntries::sequential((
                     &uniforms.uniforms,
                     scene,
-                    &*sampler,
+                    sampler,
+                    lut,
+                    lut_sampler,
+                    level,
+                    composite.as_entire_binding(),
+                )),
+            ),
+            None => device.create_bind_group(
+                "present scene",
+                &layout,
+                &BindGroupEntries::sequential((
+                    &uniforms.uniforms,
+                    scene,
+                    sampler,
                     lut,
                     lut_sampler,
                 )),
-            ),
-            Presented::Fxaa(_) => device.create_bind_group(
-                "present fxaa",
-                &layout,
-                &BindGroupEntries::sequential((scene, &*fxaa_sampler)),
             ),
         };
         *bound = Some((key, bind_group));
@@ -413,10 +535,7 @@ fn present(
     });
     let span = diagnostics.pass_span(&mut pass, "present");
     pass.set_render_pipeline(pipeline);
-    match presented {
-        Presented::Tonemapped(_) => pass.set_bind_group(0, bind_group, &[uniform_offset.offset]),
-        Presented::Fxaa(_) => pass.set_bind_group(0, bind_group, &[]),
-    }
+    pass.set_bind_group(0, bind_group, &[uniform_offset.offset]);
     pass.draw(0..3, 0..1);
     if let Some((ui_view, phase)) = ui
         && let Err(err) = phase.render(&mut pass, world, ui_view)
