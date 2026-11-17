@@ -22,7 +22,7 @@ struct PrepassVaryings {
 @vertex
 fn vertex(in: PackedVertex) -> PrepassVaryings {
     let vertex = decode(in.voxel);
-    let world_from_local = section_transform::world_from_local(in.instance_index);
+    let world_from_local = section_transform::world_from_local(in.instance_index, in.vertex_index);
     var out: PrepassVaryings;
     // Match the forward pass without changing the geometry or biasing depth.
     out.position = mesh_functions::mesh_position_local_to_clip(

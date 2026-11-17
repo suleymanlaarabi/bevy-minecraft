@@ -286,10 +286,21 @@ const BURIED_CASTERS: u8 = 1 << 4;
 struct Allocation {
     vertices: Range<u64>,
     indices: Range<u64>,
-    /// Indirect arguments, fixed while the allocation lives.
-    draw: [u32; 5],
+    /// Gather job of the whole allocation (`section_compact.wgsl`), fixed while the
+    /// allocation lives; its output offset is set per view.
+    job: Job,
     /// `PassGeometry::groups`.
     groups: [u32; 6],
+}
+/// First index, index count with the pass in the top three bits, base vertex and
+/// output offset of one gathered range of section indices.
+type Job = [u32; 4];
+const JOB_PASS_SHIFT: u32 = 29;
+/// Vertices per page of a pass's vertex arena. Allocations are whole pages, so a
+/// vertex's page names its section (`section_transform.wesl`).
+const PAGE_VERTICES: u64 = 64;
+const fn page_bytes(pass: usize) -> u64 {
+    PAGE_VERTICES * VERTEX_BYTES[pass]
 }
 /// Draw ranges of a view: the five geometry passes, then the camera's far terrain.
 const RANGES: usize = 6;
@@ -304,11 +315,6 @@ const fn range_pass(range: usize) -> usize {
 /// is a texture and fog, most of a long view's triangles are there and sections
 /// already draw front to back: rasterizing them twice costs more than it saves.
 const PREPASS_BUCKETS: usize = 20;
-/// Sections with at most this many indices draw whole: a second draw would cost
-/// more than the back faces it removes.
-const WHOLE_DRAW_INDICES: u32 = 384;
-/// Hidden indices drawn between two visible face groups rather than splitting a draw.
-const MERGE_GAP: u32 = 96;
 const ALL_FACES: u8 = 0b111111;
 
 /// Calls `emit(first index, index count)` for each run of non-empty `faces` groups.
@@ -319,7 +325,7 @@ fn face_runs(groups: &[u32; 6], faces: u8, mut emit: impl FnMut(u32, u32)) {
         if faces & 1 << group != 0 && next > previous {
             if end == start {
                 start = previous;
-            } else if previous - end > MERGE_GAP {
+            } else if previous != end {
                 emit(start, end - start);
                 start = previous;
             }
@@ -347,14 +353,37 @@ struct ViewCull {
     enabled: u8,
     camera: bool,
 }
+/// Every section draw of a view is gathered into one index list (`section_compact.wgsl`):
+/// a view draws each range with a single call instead of one indirect draw per
+/// section and face group, whose fixed cost dominated long views on integrated GPUs.
 #[derive(Default)]
 struct ViewDraws {
     input: Option<ViewCull>,
     revision: u64,
-    allocation: Range<u64>,
-    args: Vec<[u32; 5]>,
-    ranges: [Range<usize>; RANGES],
-    upload: bool,
+    jobs: Vec<Job>,
+    /// Gathered indices of each range, in draw order.
+    indices: [Range<u32>; RANGES],
+    job_buffer: Option<Buffer>,
+    output: Option<Buffer>,
+    /// The jobs changed: gather them again this frame.
+    gather: bool,
+}
+/// Reuses `buffer` when it holds `size` bytes, or replaces it with a power-of-two one.
+fn reserve(
+    device: &RenderDevice,
+    buffer: &mut Option<Buffer>,
+    label: &str,
+    size: u64,
+    usage: BufferUsages,
+) {
+    if buffer.as_ref().is_none_or(|b| b.size() < size) {
+        *buffer = Some(section_buffer(
+            device,
+            label,
+            size.next_power_of_two().max(256),
+            usage,
+        ));
+    }
 }
 fn section_buffer(device: &RenderDevice, label: &str, size: u64, usage: BufferUsages) -> Buffer {
     device.create_buffer(&BufferDescriptor {
@@ -367,16 +396,81 @@ fn section_buffer(device: &RenderDevice, label: &str, size: u64, usage: BufferUs
 fn section_bind_group(
     device: &RenderDevice,
     layout: &BindGroupLayoutDescriptor,
-    origins: &Buffer,
+    pages: &Buffer,
 ) -> BindGroup {
     device.create_bind_group(
-        "section origins",
+        "section pages",
         &device.create_bind_group_layout(layout.label.as_ref(), &layout.entries),
         &[BindGroupEntry {
             binding: 32,
-            resource: origins.as_entire_binding(),
+            resource: pages.as_entire_binding(),
         }],
     )
+}
+/// Section origin of each vertex page of one pass's arena, mirrored on the CPU so a
+/// grown table is uploaded whole.
+struct PageTable {
+    buffer: Buffer,
+    data: Vec<[f32; 4]>,
+    bind_group: BindGroup,
+}
+impl PageTable {
+    fn new(device: &RenderDevice, layout: &BindGroupLayoutDescriptor) -> Self {
+        let buffer = section_buffer(device, "section pages", 16, BufferUsages::STORAGE);
+        Self {
+            bind_group: section_bind_group(device, layout, &buffer),
+            buffer,
+            data: Vec::new(),
+        }
+    }
+}
+#[derive(Clone)]
+struct Gather {
+    pipeline: ComputePipeline,
+    layout: BindGroupLayout,
+}
+impl Gather {
+    fn new(device: &RenderDevice) -> Self {
+        let storage = |binding, read_only| BindGroupLayoutEntry {
+            binding,
+            visibility: ShaderStages::COMPUTE,
+            ty: BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let layout = device.create_bind_group_layout(
+            "section gather",
+            &[
+                storage(0, true),
+                storage(1, false),
+                storage(2, true),
+                storage(3, true),
+                storage(4, true),
+                storage(5, true),
+            ],
+        );
+        let module = device.create_and_validate_shader_module(ShaderModuleDescriptor {
+            label: Some("section gather"),
+            source: ShaderSource::Wgsl(include_str!("shaders/section_compact.wgsl").into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("section gather"),
+            bind_group_layouts: &[Some(&*layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_compute_pipeline(&RawComputePipelineDescriptor {
+            label: Some("section gather"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some("gather"),
+            compilation_options: default(),
+            cache: None,
+        });
+        Self { pipeline, layout }
+    }
 }
 struct ArenaBuffer {
     buffer: Buffer,
@@ -475,20 +569,15 @@ struct SectionGpu {
     slots: Vec<Slot>,
     cull: Vec<Cull>,
     free: Vec<usize>,
-    origins: Buffer,
-    /// CPU copy of `origins`; only new or moved slots are written.
-    origin_data: Vec<[f32; 4]>,
-    origins_dirty: Option<Range<usize>>,
+    pages: [PageTable; 5],
     views: HashMap<Entity, ViewDraws>,
     revision: u64,
     conservative: bool,
-    bind_group: BindGroup,
     layout: BindGroupLayoutDescriptor,
     layouts: [MeshVertexBufferLayoutRef; 2],
-    indirect: ArenaBuffer,
+    gather: Gather,
     quad_indices: Buffer,
     quad_capacity: u32,
-    indirect_first_instance: bool,
 }
 impl SectionGpu {
     fn new(world: &mut World) -> Self {
@@ -522,40 +611,40 @@ impl SectionGpu {
                 count: None,
             }],
         );
-        Self::empty(device, layout, layouts)
+        let gather = Gather::new(device);
+        Self::empty(device, layout, layouts, gather)
     }
     fn empty(
         device: &RenderDevice,
         layout: BindGroupLayoutDescriptor,
         layouts: [MeshVertexBufferLayoutRef; 2],
+        gather: Gather,
     ) -> Self {
-        let origins = section_buffer(device, "section origins", 16, BufferUsages::STORAGE);
-        let bind_group = section_bind_group(device, &layout, &origins);
         Self {
             arenas: std::array::from_fn(|_| Arena {
                 vertices: ArenaBuffer::new(device, BufferUsages::VERTEX),
-                indices: ArenaBuffer::new(device, BufferUsages::INDEX),
+                // Index arenas are only read by the gather pass.
+                indices: ArenaBuffer::new(device, BufferUsages::STORAGE),
             }),
             columns: default(),
             dirty_columns: Vec::new(),
             slots: Vec::new(),
             cull: Vec::new(),
             free: Vec::new(),
-            origins,
-            origin_data: Vec::new(),
-            origins_dirty: None,
+            pages: std::array::from_fn(|_| PageTable::new(device, &layout)),
             views: default(),
             revision: 0,
             conservative: false,
-            bind_group,
             layout,
             layouts,
-            indirect: ArenaBuffer::new(device, BufferUsages::INDIRECT),
-            quad_indices: section_buffer(&device, "model quad indices", 24, BufferUsages::INDEX),
+            gather,
+            quad_indices: section_buffer(
+                &device,
+                "model quad indices",
+                24,
+                BufferUsages::STORAGE,
+            ),
             quad_capacity: 0,
-            indirect_first_instance: device
-                .features()
-                .contains(WgpuFeatures::INDIRECT_FIRST_INSTANCE),
         }
     }
     fn release(&mut self, slot: usize, pass: usize) {
@@ -611,14 +700,19 @@ fn prepare_sections(
     lights: Query<Option<&RenderLayers>>,
     mut seen: Local<Vec<u8>>,
     mut workers: Local<Vec<CullWorker>>,
-    mut uploads: Local<Vec<(usize, usize, u64, u64, PassGeometry)>>,
+    mut uploads: Local<Vec<(usize, usize, Range<u64>, u64, PassGeometry, Vec3)>>,
 ) {
     let gpu = &mut *gpu;
     let changed = !feed.ops.is_empty() || gpu.conservative != feed.conservative;
     for op in feed.ops.drain(..) {
         match op {
             SectionOp::Clear => {
-                *gpu = SectionGpu::empty(&device, gpu.layout.clone(), gpu.layouts.clone());
+                *gpu = SectionGpu::empty(
+                    &device,
+                    gpu.layout.clone(),
+                    gpu.layouts.clone(),
+                    gpu.gather.clone(),
+                );
                 *workers = Vec::new();
                 *seen = Vec::new();
                 uploads.clear();
@@ -661,7 +755,6 @@ fn prepare_sections(
                     let slot = gpu.free.pop().unwrap_or_else(|| {
                         gpu.slots.push(default());
                         gpu.cull.push(Cull::default());
-                        gpu.origin_data.push([0.0; 4]);
                         gpu.slots.len() - 1
                     });
                     c.slots[section] = u32::try_from(slot).expect("section slot");
@@ -679,27 +772,29 @@ fn prepare_sections(
                         max = max.max(g.max + origin);
                         let (vertices, indices) =
                             old.map_or((0..0, 0..0), |a| (a.vertices, a.indices));
-                        let vertices = gpu.arenas[pass]
-                            .vertices
-                            .replace(vertices, g.vertices().len() as u64);
+                        // Whole pages: every allocation starts on a page boundary.
+                        let vertices = gpu.arenas[pass].vertices.replace(
+                            vertices,
+                            (g.vertices().len() as u64).next_multiple_of(page_bytes(pass)),
+                        );
                         let indices = gpu.arenas[pass]
                             .indices
                             .replace(indices, g.indices().len() as u64);
-                        let draw = [
-                            g.count,
-                            1,
+                        assert!(g.count < 1 << JOB_PASS_SHIFT, "section index count");
+                        let job = [
                             u32::try_from(indices.start / INDEX_BYTES[pass])
                                 .expect("arena index offset"),
-                            i32::try_from(vertices.start / VERTEX_BYTES[pass])
-                                .expect("arena vertex offset") as u32,
-                            u32::try_from(slot).expect("section slot"),
+                            g.count | (pass as u32) << JOB_PASS_SHIFT,
+                            u32::try_from(vertices.start / VERTEX_BYTES[pass])
+                                .expect("arena vertex offset"),
+                            0,
                         ];
                         let groups = g.groups;
-                        uploads.push((slot, pass, vertices.start, indices.start, g));
+                        uploads.push((slot, pass, vertices.clone(), indices.start, g, origin));
                         record[pass] = Some(Allocation {
                             vertices,
                             indices,
-                            draw,
+                            job,
                             groups,
                         });
                         passes |= 1 << pass;
@@ -718,15 +813,6 @@ fn prepare_sections(
                         passes & BURIED_CASTERS
                     },
                 };
-                let origin = origin.extend(0.0).to_array();
-                if fresh || gpu.origin_data[slot] != origin {
-                    gpu.origin_data[slot] = origin;
-                    gpu.origins_dirty = Some(
-                        gpu.origins_dirty
-                            .take()
-                            .map_or(slot..slot + 1, |r| r.start.min(slot)..r.end.max(slot + 1)),
-                    );
-                }
             }
         }
     }
@@ -770,15 +856,14 @@ fn prepare_sections(
     }
     // Reverse order also rejects superseded uploads that reused identical ranges.
     uploads.reverse();
-    uploads.retain(|(slot, pass, v, i, g)| {
+    uploads.retain(|(slot, pass, v, i, g, _)| {
         let keep = seen[*slot] & (1 << pass) == 0
             && gpu
                 .slots
                 .get(*slot)
                 .and_then(|s| s[*pass].as_ref())
                 .is_some_and(|a| {
-                    a.vertices == (*v..*v + g.vertices().len() as u64)
-                        && a.indices == (*i..*i + g.indices().len() as u64)
+                    a.vertices == *v && a.indices == (*i..*i + g.indices().len() as u64)
                 });
         if keep {
             seen[*slot] |= 1 << pass;
@@ -786,37 +871,14 @@ fn prepare_sections(
         keep
     });
     uploads.reverse();
-    if gpu.slots.len() as u64 > gpu.origins.size() / 16 {
-        gpu.origins = section_buffer(
-            &device,
-            "section origins",
-            (gpu.slots.len().next_power_of_two() * 16) as u64,
-            BufferUsages::STORAGE,
-        );
-        gpu.bind_group = section_bind_group(&device, &gpu.layout, &gpu.origins);
-        gpu.origins_dirty = Some(0..gpu.slots.len());
-    }
-    if let Some(range) = gpu.origins_dirty.take()
-        && !range.is_empty()
-    {
-        queue.write_buffer(
-            &gpu.origins,
-            (range.start * 16) as u64,
-            bytemuck::cast_slice(&gpu.origin_data[range]),
-        );
-    }
-    gpu.views.retain(|entity, draws| {
-        let live = views
+    gpu.views.retain(|entity, _| {
+        views
             .get(*entity)
             .is_ok_and(|(_, _, camera, light)| match light {
                 Some(LightEntity::Directional { .. }) => true,
                 Some(_) => false,
                 None => camera.is_some(),
-            });
-        if !live {
-            gpu.indirect.release(draws.allocation.clone());
-        }
-        live
+            })
     });
     let pool = bevy::tasks::ComputeTaskPool::get();
     let threads = pool.thread_num().clamp(1, 8);
@@ -913,56 +975,77 @@ fn prepare_sections(
                 }
             });
         }
-        // Prefix sums place each range directly into the final indirect buffer,
-        // nearest buckets first. Shadow views use just one unsorted bucket.
-        let mut arg_end = 0;
+        // Prefix sums place each range directly into the final job list, nearest
+        // buckets first. Shadow views use just one unsorted bucket.
+        let mut job_end = 0;
         let buckets = if view.camera { DISTANCE_BUCKETS } else { 1 };
-        draws.ranges = std::array::from_fn(|p| {
-            let start = arg_end;
+        let ranges: [Range<usize>; RANGES] = std::array::from_fn(|p| {
+            let start = job_end;
             for bucket in 0..buckets {
                 for worker in workers.iter_mut() {
                     let count = &mut worker.counts[p][bucket];
-                    let next = arg_end + *count as usize;
-                    *count = u32::try_from(arg_end).expect("view draw offset");
-                    arg_end = next;
+                    let next = job_end + *count as usize;
+                    *count = u32::try_from(job_end).expect("view draw offset");
+                    job_end = next;
                 }
             }
-            start..arg_end
+            start..job_end
         });
-        draws.args.resize(arg_end, [0; 5]);
+        draws.jobs.resize(job_end, [0; 4]);
         for worker in workers.iter_mut() {
-            for &(range, bucket, draw) in &worker.draws {
+            for &(range, bucket, job) in &worker.draws {
                 let at = &mut worker.counts[usize::from(range)][usize::from(bucket)];
-                draws.args[*at as usize] = draw;
+                draws.jobs[*at as usize] = job;
                 *at += 1;
             }
         }
+        // Output offsets follow the final draw order.
+        let mut out = 0u32;
+        draws.indices = ranges.map(|range| {
+            let start = out;
+            for job in &mut draws.jobs[range] {
+                job[3] = out;
+                out = out
+                    .checked_add(job[1] & ((1 << JOB_PASS_SHIFT) - 1))
+                    .expect("view index count");
+            }
+            start..out
+        });
         draws.input = Some(view);
         draws.revision = gpu.revision;
-        if gpu.indirect_first_instance {
-            draws.allocation = gpu.indirect.replace(
-                std::mem::take(&mut draws.allocation),
-                size_of_val(draws.args.as_slice()) as u64,
+        if !draws.jobs.is_empty() {
+            reserve(
+                &device,
+                &mut draws.job_buffer,
+                "section gather jobs",
+                size_of_val(draws.jobs.as_slice()) as u64,
+                BufferUsages::STORAGE,
             );
-            draws.upload = true;
+            reserve(
+                &device,
+                &mut draws.output,
+                "section view indices",
+                u64::from(out) * 4,
+                BufferUsages::INDEX | BufferUsages::STORAGE,
+            );
+            draws.gather = true;
         }
     }
-    // Submit all growth copies before queue writes, including cached view commands.
-    if !uploads.is_empty() || gpu.indirect.end > gpu.indirect.buffer.size() {
+    // Submit all growth copies before queue writes.
+    if !uploads.is_empty() {
         let mut encoder = None;
         for arena in &mut gpu.arenas {
             arena.vertices.grow(&device, &mut encoder);
             arena.indices.grow(&device, &mut encoder);
         }
-        gpu.indirect.grow(&device, &mut encoder);
         if let Some(encoder) = encoder {
             queue.submit([encoder.finish()]);
         }
     }
     let quads = uploads
         .iter()
-        .filter(|(_, _, _, _, g)| g.indices.is_none())
-        .map(|(_, _, _, _, g)| g.count / 6)
+        .filter(|(_, _, _, _, g, _)| g.indices.is_none())
+        .map(|(_, _, _, _, g, _)| g.count / 6)
         .max()
         .unwrap_or(0);
     if quads > gpu.quad_capacity {
@@ -976,27 +1059,96 @@ fn prepare_sections(
             &device,
             "model quad indices",
             size_of_val(indices.as_slice()) as u64,
-            BufferUsages::INDEX,
+            BufferUsages::STORAGE,
         );
         queue.write_buffer(&gpu.quad_indices, 0, bytemuck::cast_slice(&indices));
     }
-    for (_, p, v, i, g) in uploads.drain(..) {
-        queue.write_buffer(&gpu.arenas[p].vertices.buffer, v, g.vertices());
+    // Page tables cover their whole arena; a grown table is uploaded whole.
+    let mut grown = [false; 5];
+    for (pass, table) in gpu.pages.iter_mut().enumerate() {
+        let pages = (gpu.arenas[pass].vertices.buffer.size() / page_bytes(pass)) as usize;
+        if table.data.len() < pages {
+            table.data.resize(pages, [0.0; 4]);
+        }
+        if (table.buffer.size() / 16) < table.data.len() as u64 {
+            table.buffer = section_buffer(
+                &device,
+                "section pages",
+                table.data.len() as u64 * 16,
+                BufferUsages::STORAGE,
+            );
+            table.bind_group = section_bind_group(&device, &gpu.layout, &table.buffer);
+            grown[pass] = true;
+        }
+    }
+    for (_, p, v, i, g, origin) in uploads.drain(..) {
+        queue.write_buffer(&gpu.arenas[p].vertices.buffer, v.start, g.vertices());
         if !g.indices().is_empty() {
             queue.write_buffer(&gpu.arenas[p].indices.buffer, i, g.indices());
         }
-    }
-    for draws in gpu.views.values_mut().filter(|draws| draws.upload) {
-        draws.upload = false;
-        if !draws.args.is_empty() {
+        let pages = (v.start / page_bytes(p)) as usize..(v.end / page_bytes(p)) as usize;
+        let table = &mut gpu.pages[p];
+        table.data[pages.clone()].fill(origin.extend(0.0).to_array());
+        if !grown[p] {
             queue.write_buffer(
-                &gpu.indirect.buffer,
-                draws.allocation.start,
-                bytemuck::cast_slice(&draws.args),
+                &table.buffer,
+                pages.start as u64 * 16,
+                bytemuck::cast_slice(&table.data[pages]),
             );
         }
     }
+    for (pass, table) in gpu.pages.iter().enumerate() {
+        if grown[pass] {
+            queue.write_buffer(&table.buffer, 0, bytemuck::cast_slice(&table.data));
+        }
+    }
+    // Gather the indices of every view whose draws changed, after this frame's
+    // arena writes and before any pass draws them.
+    let mut encoder = None;
+    for draws in gpu.views.values_mut().filter(|draws| draws.gather) {
+        draws.gather = false;
+        let (Some(jobs), Some(output)) = (&draws.job_buffer, &draws.output) else {
+            continue;
+        };
+        let job_bytes = size_of_val(draws.jobs.as_slice()) as u64;
+        queue.write_buffer(jobs, 0, bytemuck::cast_slice(&draws.jobs));
+        let bind_group = device.create_bind_group(
+            "section gather",
+            &gpu.gather.layout,
+            &BindGroupEntries::sequential((
+                BufferBinding {
+                    buffer: jobs,
+                    offset: 0,
+                    size: std::num::NonZeroU64::new(job_bytes),
+                },
+                output.as_entire_binding(),
+                gpu.arenas[0].indices.buffer.as_entire_binding(),
+                gpu.arenas[1].indices.buffer.as_entire_binding(),
+                gpu.quad_indices.as_entire_binding(),
+                gpu.arenas[4].indices.buffer.as_entire_binding(),
+            )),
+        );
+        let encoder = encoder.get_or_insert_with(|| {
+            device.create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("section gather"),
+            })
+        });
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("section gather"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&gpu.gather.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        let groups = draws.jobs.len() as u32;
+        let width = groups.min(MAX_GROUPS);
+        pass.dispatch_workgroups(width, groups.div_ceil(width), 1);
+    }
+    if let Some(encoder) = encoder {
+        queue.submit([encoder.finish()]);
+    }
 }
+/// Workgroups per dispatch dimension guaranteed by WebGPU.
+const MAX_GROUPS: u32 = 65535;
 
 /// Frustum plane: normal, absolute normal and offset. Scalar on purpose: the
 /// culling loops run per section every frame the camera moves.
@@ -1025,7 +1177,7 @@ fn cull_planes(center: Vec3, extent: Vec3, planes: &[Plane; 5], mut mask: u8) ->
 /// Draws and per-bucket counts one culling task collects for a view.
 struct CullWorker {
     counts: Box<[[u32; DISTANCE_BUCKETS]; RANGES]>,
-    draws: Vec<(u8, u8, [u32; 5])>,
+    draws: Vec<(u8, u8, Job)>,
 }
 impl Default for CullWorker {
     fn default() -> Self {
@@ -1104,17 +1256,18 @@ fn cull_columns(
                     pass
                 };
                 // Only greedy cube faces are grouped; shadow views draw both sides.
-                if !view.camera || pass > 1 || a.draw[0] <= WHOLE_DRAW_INDICES {
+                // Gathered ranges cost no draw call, so every hidden group is skipped.
+                if !view.camera || pass > 1 {
                     counts[range][bucket] += 1;
-                    draws.push((range as u8, bucket as u8, a.draw));
+                    draws.push((range as u8, bucket as u8, a.job));
                     continue;
                 }
                 face_runs(&a.groups, faces, |first, count| {
                     counts[range][bucket] += 1;
-                    let mut draw = a.draw;
-                    draw[0] = count;
-                    draw[2] += first;
-                    draws.push((range as u8, bucket as u8, draw));
+                    let mut job = a.job;
+                    job[0] += first;
+                    job[1] = count | (pass as u32) << JOB_PASS_SHIFT;
+                    draws.push((range as u8, bucket as u8, job));
                 });
             }
         }
@@ -1284,7 +1437,7 @@ fn queue_sections(
             let active = gpu
                 .views
                 .get(&entity)
-                .is_some_and(|draws| !draws.ranges[p].is_empty());
+                .is_some_and(|draws| !draws.indices[p].is_empty());
             let mut pipeline = |key: Option<&MeshPipelineKey>, depth: bool, reuse_depth: bool| {
                 key.filter(|_| active).and_then(|key| {
                     pipelines
@@ -1402,7 +1555,7 @@ type MainDraw<const P: usize> = (
     SetItemPipeline,
     SetMeshViewBindGroup<0>,
     SetMeshViewBindingArrayBindGroup<1>,
-    SetSections,
+    SetSections<P>,
     SetSectionMaterial<P>,
     DrawSections<P>,
 );
@@ -1410,12 +1563,12 @@ type DepthDraw<const P: usize> = (
     SetItemPipeline,
     SetPrepassViewBindGroup<0>,
     SetPrepassViewEmptyBindGroup<1>,
-    SetSections,
+    SetSections<P>,
     SetSectionMaterial<P>,
     DrawSections<P>,
 );
-struct SetSections;
-impl<I: PhaseItem> RenderCommand<I> for SetSections {
+struct SetSections<const P: usize>;
+impl<I: PhaseItem, const P: usize> RenderCommand<I> for SetSections<P> {
     type Param = SRes<SectionGpu>;
     type ViewQuery = ();
     type ItemQuery = ();
@@ -1426,7 +1579,7 @@ impl<I: PhaseItem> RenderCommand<I> for SetSections {
         gpu: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        pass.set_bind_group(2, &gpu.into_inner().bind_group, &[]);
+        pass.set_bind_group(2, &gpu.into_inner().pages[range_pass(P)].bind_group, &[]);
         RenderCommandResult::Success
     }
 }
@@ -1481,35 +1634,14 @@ impl<I: PhaseItem, const P: usize> RenderCommand<I> for DrawSections<P> {
         let Some(draws) = gpu.views.get(&view) else {
             return RenderCommandResult::Skip;
         };
-        let range = draws.ranges[P].clone();
-        if range.is_empty() {
+        let range = draws.indices[P].clone();
+        let Some(output) = draws.output.as_ref().filter(|_| !range.is_empty()) else {
             return RenderCommandResult::Skip;
-        }
-        let arena = &gpu.arenas[range_pass(P)];
-        pass.set_vertex_buffer(0, arena.vertices.buffer.slice(..));
-        pass.set_index_buffer(
-            if matches!(range_pass(P), 2 | 3) {
-                gpu.quad_indices.slice(..)
-            } else {
-                arena.indices.buffer.slice(..)
-            },
-            if INDEX_BYTES[range_pass(P)] == 2 {
-                IndexFormat::Uint16
-            } else {
-                IndexFormat::Uint32
-            },
-        );
-        if gpu.indirect_first_instance {
-            pass.multi_draw_indexed_indirect(
-                &gpu.indirect.buffer,
-                draws.allocation.start + (range.start * 20) as u64,
-                u32::try_from(range.len()).expect("section draw count"),
-            );
-        } else {
-            for a in &draws.args[range] {
-                pass.draw_indexed(a[2]..a[2] + a[0], a[3] as i32, a[4]..a[4] + 1);
-            }
-        }
+        };
+        // Gathered indices name arena vertices directly (`section_compact.wgsl`).
+        pass.set_vertex_buffer(0, gpu.arenas[range_pass(P)].vertices.buffer.slice(..));
+        pass.set_index_buffer(output.slice(..), IndexFormat::Uint32);
+        pass.draw_indexed(range, 0, 0..1);
         RenderCommandResult::Success
     }
 }
@@ -1540,7 +1672,11 @@ fn record_memory(world: &mut World, mut last: Local<Option<std::time::Instant>>)
             + gpu.columns.capacity() * size_of::<(IVec2, Column, usize)>()
             + gpu.dirty_columns.capacity() * size_of::<IVec2>()
             + gpu.cull.capacity() * size_of::<Cull>()
-            + gpu.origin_data.capacity() * size_of::<[f32; 4]>()
+            + gpu
+                .pages
+                .iter()
+                .map(|table| table.data.capacity() * size_of::<[f32; 4]>())
+                .sum::<usize>()
             + gpu.free.capacity() * size_of::<usize>();
     }
     if let Some(feed) = world.get_resource::<SectionFeed>() {

@@ -37,7 +37,7 @@ struct VoxelVaryings {
 @vertex
 fn vertex(in: PackedVertex) -> VoxelVaryings {
     let vertex = decode(in.voxel);
-    let world_from_local = section_transform::world_from_local(in.instance_index);
+    let world_from_local = section_transform::world_from_local(in.instance_index, in.vertex_index);
     var out: VoxelVaryings;
     out.world_position = mesh_functions::mesh_position_local_to_world(
         world_from_local,

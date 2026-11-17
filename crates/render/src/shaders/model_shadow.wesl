@@ -16,7 +16,7 @@ struct ShadowVaryings {
 @vertex
 fn vertex(in: ModelVertex) -> ShadowVaryings {
     var out: ShadowVaryings;
-    let transform = section_transform::world_from_local(in.instance_index);
+    let transform = section_transform::world_from_local(in.instance_index, in.vertex_index);
     let model = decode_model(in.data);
     out.position = mesh_functions::mesh_position_local_to_clip(transform, vec4<f32>(model.position, 1.0));
     // Effect surfaces share section meshes without casting solid model shadows.

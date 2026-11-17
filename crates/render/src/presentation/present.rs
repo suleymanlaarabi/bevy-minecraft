@@ -6,9 +6,11 @@
 //! per frame, and a tonemapped image requantized to the scene's packed float format
 //! before its 8-bit encoding. Nothing reads the tonemapped main texture when the
 //! camera presents at native resolution without FXAA, so those views skip both.
+//! With FXAA, Bevy's tonemapping stays and FXAA itself writes the window, with the
+//! interface drawn over it in the same pass: the copy and its second target go.
 //! Scaled rendering keeps its own single pass (`composite`).
 use bevy::{
-    anti_alias::fxaa::Fxaa,
+    anti_alias::fxaa::{CameraFxaaPipeline, Fxaa, fxaa},
     camera::CameraOutputMode,
     core_pipeline::{
         Core3dSystems,
@@ -41,9 +43,20 @@ type PresentKey = (TextureFormat, TextureFormat, Tonemapping, DebandDither);
 struct DirectPresentation {
     /// Bevy's tonemapping, upscaling and interface passes were made conditional.
     installed: bool,
+    /// Bevy's FXAA pass was made conditional as well.
+    fxaa: bool,
     pipelines: Vec<(PresentKey, CachedRenderPipelineId)>,
+    /// Bevy's FXAA pipeline and the window format, with its window variant.
+    fxaa_pipelines: Vec<((CachedRenderPipelineId, TextureFormat), CachedRenderPipelineId)>,
     /// Views presenting directly this frame, with their compiled pipeline.
-    views: EntityHashMap<CachedRenderPipelineId>,
+    views: EntityHashMap<Presented>,
+}
+#[derive(Clone, Copy)]
+enum Presented {
+    /// Tonemapped straight into the window.
+    Tonemapped(CachedRenderPipelineId),
+    /// Tonemapped by Bevy, then anti-aliased into the window.
+    Fxaa(CachedRenderPipelineId),
 }
 
 /// Opt in when no later pass needs the tonemapped main texture.
@@ -81,7 +94,7 @@ fn install(world: &mut World) {
             schedule.add_systems(
                 tonemapping
                     .in_set(Core3dSystems::PostProcess)
-                    .run_if(not(presents_directly)),
+                    .run_if(not(tonemaps_directly)),
             );
         } else {
             installed = false;
@@ -111,12 +124,24 @@ fn install(world: &mut World) {
         } else {
             installed = false;
         }
+        let fxaa_removed = matches!(
+            schedule.remove_systems_in_set(fxaa, world, policy),
+            Ok(1)
+        );
+        if fxaa_removed {
+            schedule.add_systems(
+                fxaa.after(tonemapping)
+                    .in_set(Core3dSystems::PostProcess)
+                    .run_if(not(presents_directly)),
+            );
+        }
         schedule.add_systems(
             present
                 .after(Core3dSystems::PostProcess)
                 .before(upscaling)
                 .run_if(presents_directly),
         );
+        world.resource_mut::<DirectPresentation>().fxaa = fxaa_removed;
     });
     if !installed {
         error!("Bevy's presentation passes are kept: one of them was not found");
@@ -126,6 +151,10 @@ fn install(world: &mut World) {
 
 fn presents_directly(view: Res<CurrentView>, direct: Res<DirectPresentation>) -> bool {
     direct.views.contains_key(&view.0)
+}
+
+fn tonemaps_directly(view: Res<CurrentView>, direct: Res<DirectPresentation>) -> bool {
+    matches!(direct.views.get(&view.0), Some(Presented::Tonemapped(_)))
 }
 
 /// Picks the views presented directly this frame. A view keeps Bevy's passes until
@@ -142,7 +171,8 @@ fn select_presentation(
             &ViewTarget,
             &Tonemapping,
             Option<&DebandDither>,
-            Has<Fxaa>,
+            Option<&Fxaa>,
+            Option<&CameraFxaaPipeline>,
             Option<&UiCameraView>,
         ),
         With<DirectPresent>,
@@ -154,12 +184,14 @@ fn select_presentation(
     if !direct.installed {
         return;
     }
-    for (entity, camera, view, target, tonemapping, dither, fxaa, ui) in &cameras {
+    for (entity, camera, view, target, tonemapping, dither, fxaa, fxaa_pipeline, ui) in &cameras
+    {
         let Some(window_format) = target.out_texture_view_format() else {
             continue;
         };
+        let fxaa = fxaa.is_some_and(|fxaa| fxaa.enabled);
         if !camera.hdr
-            || fxaa
+            || (fxaa && !direct.fxaa)
             || !tonemapping.is_enabled()
             || camera.viewport.is_some()
             || camera.sorted_camera_index_for_target != 0
@@ -169,13 +201,38 @@ fn select_presentation(
         {
             continue;
         }
-        let key = (
-            view.target_format,
-            window_format,
-            *tonemapping,
-            dither.copied().unwrap_or(DebandDither::Disabled),
-        );
-        let id = match direct.pipelines.iter().find(|(known, _)| *known == key) {
+        let presented = if fxaa {
+            // Bevy's own FXAA pipeline, writing the window format instead.
+            let Some(source) = fxaa_pipeline.map(|pipeline| pipeline.pipeline_id) else {
+                continue;
+            };
+            let key = (source, window_format);
+            let id = match direct.fxaa_pipelines.iter().find(|(known, _)| *known == key) {
+                Some(&(_, id)) => id,
+                None => {
+                    let mut descriptor = cache.get_render_pipeline_descriptor(source).clone();
+                    descriptor.label = Some("present fxaa".into());
+                    if let Some(Some(output)) = descriptor
+                        .fragment
+                        .as_mut()
+                        .and_then(|fragment| fragment.targets.first_mut())
+                    {
+                        output.format = window_format;
+                    }
+                    let id = cache.queue_render_pipeline(descriptor);
+                    direct.fxaa_pipelines.push((key, id));
+                    id
+                }
+            };
+            Presented::Fxaa(id)
+        } else {
+            let key = (
+                view.target_format,
+                window_format,
+                *tonemapping,
+                dither.copied().unwrap_or(DebandDither::Disabled),
+            );
+            Presented::Tonemapped(match direct.pipelines.iter().find(|(known, _)| *known == key) {
             Some(&(_, id)) => id,
             None => {
                 // Bevy queues its own pipeline for the view during the first frame.
@@ -194,11 +251,13 @@ fn select_presentation(
                 direct.pipelines.push((key, id));
                 id
             }
+            })
         };
+        let (Presented::Tonemapped(id) | Presented::Fxaa(id)) = presented;
         if cache.get_render_pipeline(id).is_none() {
             continue;
         }
-        direct.views.insert(entity, id);
+        direct.views.insert(entity, presented);
         // The interface's pipelines are specialized for the texture it is drawn into.
         if let Some(mut ui_view) = ui.and_then(|ui| ui_views.get_mut(ui.0).ok()) {
             ui_view.target_format = window_format;
@@ -274,33 +333,60 @@ fn present(
     fallback: Res<FallbackImage>,
     uniforms: Res<ViewUniforms>,
     luts: Res<TonemappingLuts>,
-    mut sampler: Local<Option<Sampler>>,
+    mut samplers: Local<Option<(Sampler, Sampler)>>,
     mut bound: Local<Option<(Bound, BindGroup)>>,
     mut ctx: RenderContext,
 ) {
     let entity = view.entity();
     let (uniform_offset, target, tonemapping, ui) = view.into_inner();
-    let Some(&id) = direct.views.get(&entity) else {
+    let Some(&presented) = direct.views.get(&entity) else {
         return;
     };
+    let (Presented::Tonemapped(id) | Presented::Fxaa(id)) = presented;
     let (Some(pipeline), Some(uniform_buffer)) =
         (cache.get_render_pipeline(id), uniforms.uniforms.buffer())
     else {
         return;
     };
-    // The scene stays in the current main texture: nothing is written back to it.
+    // The scene, or with FXAA its tonemapped copy, stays in the current main
+    // texture: nothing is written back to it.
     let scene = target.main_texture_view();
     let (lut, lut_sampler) = get_lut_bindings(&images, &luts, tonemapping, &fallback);
     let key = (uniform_buffer.id(), scene.id(), lut.id(), id);
     if bound.as_ref().is_none_or(|(current, _)| *current != key) {
         let device = ctx.render_device();
-        let sampler =
-            sampler.get_or_insert_with(|| device.create_sampler(&SamplerDescriptor::default()));
-        let bind_group = device.create_bind_group(
-            "present scene",
-            &cache.get_bind_group_layout(&cache.get_render_pipeline_descriptor(id).layout[0]),
-            &BindGroupEntries::sequential((&uniforms.uniforms, scene, &*sampler, lut, lut_sampler)),
-        );
+        let (sampler, fxaa_sampler) = samplers.get_or_insert_with(|| {
+            (
+                device.create_sampler(&SamplerDescriptor::default()),
+                // Bevy's FXAA sampler.
+                device.create_sampler(&SamplerDescriptor {
+                    mipmap_filter: MipmapFilterMode::Linear,
+                    mag_filter: FilterMode::Linear,
+                    min_filter: FilterMode::Linear,
+                    ..default()
+                }),
+            )
+        });
+        let layout =
+            cache.get_bind_group_layout(&cache.get_render_pipeline_descriptor(id).layout[0]);
+        let bind_group = match presented {
+            Presented::Tonemapped(_) => device.create_bind_group(
+                "present scene",
+                &layout,
+                &BindGroupEntries::sequential((
+                    &uniforms.uniforms,
+                    scene,
+                    &*sampler,
+                    lut,
+                    lut_sampler,
+                )),
+            ),
+            Presented::Fxaa(_) => device.create_bind_group(
+                "present fxaa",
+                &layout,
+                &BindGroupEntries::sequential((scene, &*fxaa_sampler)),
+            ),
+        };
         *bound = Some((key, bind_group));
     }
     let Some((_, bind_group)) = bound.as_ref() else {
@@ -327,7 +413,10 @@ fn present(
     });
     let span = diagnostics.pass_span(&mut pass, "present");
     pass.set_render_pipeline(pipeline);
-    pass.set_bind_group(0, bind_group, &[uniform_offset.offset]);
+    match presented {
+        Presented::Tonemapped(_) => pass.set_bind_group(0, bind_group, &[uniform_offset.offset]),
+        Presented::Fxaa(_) => pass.set_bind_group(0, bind_group, &[]),
+    }
     pass.draw(0..3, 0..1);
     if let Some((ui_view, phase)) = ui
         && let Err(err) = phase.render(&mut pass, world, ui_view)

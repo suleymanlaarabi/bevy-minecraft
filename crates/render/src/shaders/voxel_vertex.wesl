@@ -12,6 +12,7 @@ struct VoxelVertex {
 
 struct PackedVertex {
     @builtin(instance_index) instance_index: u32,
+    @builtin(vertex_index) vertex_index: u32,
     @location(0) voxel: vec2<u32>,
 }
 

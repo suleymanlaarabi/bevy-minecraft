@@ -45,7 +45,7 @@ var still_sampler: sampler;
 @vertex
 fn vertex(in: ModelVertex) -> ModelVaryings {
     let model = decode_model(in.data);
-    let world_from_local = section_transform::world_from_local(in.instance_index);
+    let world_from_local = section_transform::world_from_local(in.instance_index, in.vertex_index);
     var out: ModelVaryings;
     out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(model.position, 1.0)).xyz;
     // Match the terrain's invariant transform at coplanar water/block contacts.
