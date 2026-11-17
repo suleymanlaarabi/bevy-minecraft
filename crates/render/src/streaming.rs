@@ -8,7 +8,7 @@ use hollow_core::coordinates::neighbor_slot;
 use hollow_engine::{
     chunk::{ChunkVoxels, VoxelChunk},
     streaming::{AwaitingNeighbors, StreamOffsets, StreamState},
-    world::{ChunkIndex, WorldLayout},
+    world::ChunkIndex,
 };
 #[derive(Component)]
 #[component(storage = "SparseSet")]
@@ -87,7 +87,7 @@ pub fn release_ready_chunks<C: RenderSource>(
         } else {
             commands
                 .entity(entity)
-                .despawn_children()
+                .despawn_related::<ColumnViews>()
                 .remove::<(
                     ChunkSections,
                     crate::build::ChunkBuild,
@@ -158,29 +158,21 @@ pub fn refresh_neighbors_of_spawned<C: RenderSource>(
     }
 }
 
-/// Presentation components arrive with `VoxelChunk` itself as required components,
-/// so a new column takes one archetype move; this only places it.
+/// A new column waits for its neighbors before its first mesh.
 pub fn register_chunk_presentation(app: &mut App) {
-    app.register_required_components::<VoxelChunk, Transform>()
-        .register_required_components::<VoxelChunk, Visibility>()
-        .register_required_components_with::<VoxelChunk, AwaitingNeighbors>(|| AwaitingNeighbors);
+    app.register_required_components_with::<VoxelChunk, AwaitingNeighbors>(|| AwaitingNeighbors);
 }
 
-pub fn prepare_chunk(
-    event: On<Add<VoxelChunk>>,
-    mut chunks: Query<(&VoxelChunk, &mut Transform, &mut Visibility)>,
-    layout: Res<WorldLayout>,
-) {
-    if let Ok((chunk, mut transform, mut visibility)) = chunks.get_mut(event.entity) {
-        // A provider entity keeps both components across unloads.
-        transform.set_if_neq(Transform::from_xyz(
-            (chunk.position.x * 16) as f32,
-            layout.min_y() as f32,
-            (chunk.position.y * 16) as f32,
-        ));
-        visibility.set_if_neq(Visibility::default());
-    }
-}
+/// Presentation entities owned by a rendered column, such as block-entity models.
+/// Columns carry no transform or visibility, which keeps thousands of them out of
+/// Bevy's per-frame transform and visibility passes; views are placed in world space.
+#[derive(Component)]
+#[relationship(relationship_target = ColumnViews)]
+pub struct ColumnView(pub Entity);
+#[derive(Component, Default)]
+#[relationship_target(relationship = ColumnView, linked_spawn)]
+pub struct ColumnViews(Vec<Entity>);
+
 pub fn remove_chunk(
     event: On<Remove<VoxelChunk>>,
     owner: Query<&hollow_engine::blocks::LoadedColumn>,
@@ -190,9 +182,9 @@ pub fn remove_chunk(
     let owner = owner.get(entity).ok().map(|owner| owner.0);
     commands.queue(move |world: &mut World| {
         // A component removal keeps the provider entity alive; a despawn already
-        // cleaned its linked children by the time this deferred command runs.
+        // cleaned its linked views by the time this deferred command runs.
         if let Ok(mut entity) = world.get_entity_mut(entity) {
-            entity.despawn_children().remove::<(
+            entity.despawn_related::<ColumnViews>().remove::<(
                 ChunkSections,
                 crate::build::ChunkBuild,
                 NeedsChunkBuild,

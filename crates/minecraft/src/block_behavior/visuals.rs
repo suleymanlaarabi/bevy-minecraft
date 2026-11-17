@@ -176,17 +176,14 @@ fn prepare_views(
         let rotation =
             Quat::from_rotation_y((2.0 - info.facing as f32) * std::f32::consts::FRAC_PI_2);
         let center = Vec3::new(0.5, 0.0, 0.5);
-        let local = crate::voxel::split_world_position(block.position)
-            .1
-            .as_vec3();
         let tag = MeshTag::new(instance_light(&world, block.position));
         let root = commands
             .spawn((
                 InstanceOf(entity),
-                ChildOf(terrain),
+                bevy_voxel::render::streaming::ColumnView(terrain),
                 Mesh3d(meshes[0].clone()),
                 MeshMaterial3d(cache.material.clone()),
-                Transform::from_translation(local + center - rotation * center)
+                Transform::from_translation(block.position.as_vec3() + center - rotation * center)
                     .with_rotation(rotation),
                 Visibility::default(),
                 tag.clone(),

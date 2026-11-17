@@ -70,7 +70,6 @@ impl<C: RenderSource> Plugin for VoxelRenderPlugin<C> {
         app.init_resource::<streaming::ChunkArrivals>()
             .add_observer(reset)
             .add_observer(streaming::track_chunk_arrival)
-            .add_observer(streaming::prepare_chunk)
             .add_observer(streaming::remove_chunk)
             .add_systems(
                 PostUpdate,
@@ -132,6 +131,23 @@ impl<C: RenderSource> Plugin for VoxelRenderPlugin<C> {
                     .or_else(resource_exists::<mipmaps::MipmapJob>),
             ),
         );
+    }
+    fn finish(&self, app: &mut App) {
+        // No view renders motion vectors: TAA and motion blur are not installed. Bevy
+        // would still copy every mesh's transform into a `PreviousGlobalTransform`
+        // each frame, through a parallel iteration that wakes the compute threads, and
+        // re-extract every mesh the frame after it moves. Extraction falls back to the
+        // current transform without it.
+        let removed = app.world_mut().schedule_scope(PreUpdate, |world, schedule| {
+            schedule.remove_systems_in_set(
+                bevy::pbr::update_mesh_previous_global_transforms,
+                world,
+                bevy::ecs::schedule::ScheduleCleanupPolicy::RemoveSystemsOnly,
+            )
+        });
+        if !matches!(removed, Ok(1)) {
+            warn!("Bevy's previous mesh transform update was not found and keeps running");
+        }
     }
 }
 
