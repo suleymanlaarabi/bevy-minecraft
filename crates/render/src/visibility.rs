@@ -6,10 +6,7 @@
 
 use super::build::{ChunkSections, poll_builds};
 use crate::{RenderSource, VoxelViewer};
-use bevy::{
-    camera::visibility::{RenderLayers, VisibilitySystems},
-    prelude::*,
-};
+use bevy::{camera::visibility::VisibilitySystems, prelude::*};
 use hollow_core::coordinates::SECTION_HEIGHT;
 use hollow_core::{StateId, VoxelCell};
 use hollow_engine::{
@@ -223,15 +220,6 @@ impl VisibilityGraph {
             self.stale.insert(i);
         }
     }
-    /// The layer the next publish most likely assigns to a section, so new entities
-    /// can start there. Columns outside the initialized ring are shown.
-    pub fn likely_visible(&self, position: IVec2, section: usize, overhang: bool) -> bool {
-        self.columns.len() < self.count()
-            || self
-                .slot(position)
-                .is_none_or(|i| self.columns[i].position != Some(position))
-            || self.visible(position, overhang) & (1 << section) != 0
-    }
     fn enter(&mut self, i: usize, face: usize, mask: u32) {
         let column = &mut self.columns[i];
         if mask & !column.reached[face] != 0 {
@@ -340,9 +328,11 @@ fn removed_topology(
     chunks: Query<&VoxelChunk>,
     mut graph: ResMut<VisibilityGraph>,
     mut feed: ResMut<super::sections::SectionFeed>,
+    mut translucent: ResMut<super::sort::TranslucentSections>,
 ) {
     if let Ok(chunk) = chunks.get(event.entity) {
         graph.invalidate_column(chunk.position, u32::MAX, true);
+        translucent.remove_column(chunk.position);
         feed.ops
             .push(super::sections::SectionOp::RemoveColumn(chunk.position));
     }
@@ -367,9 +357,8 @@ pub fn register<C: RenderSource>(app: &mut App) {
         );
 }
 
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
 fn update_visibility<C: RenderSource>(
-    mut commands: Commands,
     camera: Option<Single<&GlobalTransform, With<VoxelViewer>>>,
     source: Res<C>,
     layout: Res<WorldLayout>,
@@ -377,12 +366,8 @@ fn update_visibility<C: RenderSource>(
     offsets: Res<StreamOffsets>,
     stream: Res<StreamState>,
     chunks: Query<(&ChunkVoxels<C::Cell>, Option<&ChunkSections>)>,
-    mut layers: ParamSet<(
-        Query<(Entity, Option<&mut RenderLayers>), (With<Camera3d>, With<VoxelViewer>)>,
-        Query<Option<&mut RenderLayers>, With<Mesh3d>>,
-    )>,
     mut graph: ResMut<VisibilityGraph>,
-    mut sort_version: ResMut<super::sort::SortVersion>,
+    mut translucent: ResMut<super::sort::TranslucentSections>,
     mut feed: ResMut<super::sections::SectionFeed>,
     #[cfg(feature = "dev")] diagnostics: Option<ResMut<crate::diagnostics::VoxelDiagnostics>>,
 ) {
@@ -537,44 +522,23 @@ fn update_visibility<C: RenderSource>(
                     visible |= g.visible(position, true) & overhanging;
                 }
                 let column = &mut g.columns[cursor];
-                let mut changed = (visible ^ column.published) | column.publish;
+                let changed = (visible ^ column.published) | column.publish;
                 if changed != 0 {
                     feed.ops.push(super::sections::SectionOp::Visibility {
                         column: position,
                         mask: visible,
                     });
+                    let blended = sections
+                        .sections
+                        .iter()
+                        .enumerate()
+                        .fold(0, |mask, (y, s)| {
+                            mask | u32::from(s.passes & 1 << super::sections::TRANSLUCENT != 0) << y
+                        });
+                    translucent.publish(position, visible, blended);
                 }
-                let mut meshes = layers.p1();
-                while changed != 0 {
-                    if expired() {
-                        g.stale.insert(cursor);
-                        break 'work;
-                    }
-                    let y = changed.trailing_zeros() as usize;
-                    let bit = 1 << y;
-                    changed &= !bit;
-                    column.published = (column.published & !bit) | (visible & bit);
-                    column.publish &= !bit;
-                    if let Some(entity) = sections.sections[y].translucent {
-                        if let Ok(current) = meshes.get_mut(entity) {
-                            let mut target = current.as_deref().cloned().unwrap_or_default();
-                            let was_visible = target.intersects(&RenderLayers::layer(0));
-                            let now_visible = visible & (1 << y) != 0;
-                            target = target
-                                .without(0)
-                                .without(OCCLUDED_LAYER)
-                                .with(if now_visible { 0 } else { OCCLUDED_LAYER });
-                            if was_visible != now_visible && !g.conservative {
-                                sort_version.0 = sort_version.0.wrapping_add(1);
-                            }
-                            if let Some(mut current) = current {
-                                current.set_if_neq(target);
-                            } else if !now_visible {
-                                commands.entity(entity).try_insert(target);
-                            }
-                        }
-                    }
-                }
+                column.published = visible;
+                column.publish = 0;
             }
             #[cfg(feature = "dev")]
             {
@@ -671,22 +635,7 @@ fn update_visibility<C: RenderSource>(
     });
     let conservative = g.conservative || (valid_eye && far);
     feed.conservative = conservative;
-    for (entity, current) in &mut layers.p0() {
-        let current_value = current.as_deref().cloned().unwrap_or_default();
-        let target = if conservative {
-            current_value.clone().with(OCCLUDED_LAYER)
-        } else {
-            current_value.clone().without(OCCLUDED_LAYER)
-        };
-        if current_value != target {
-            sort_version.0 = sort_version.0.wrapping_add(1);
-        }
-        if let Some(mut current) = current {
-            current.set_if_neq(target);
-        } else if conservative {
-            commands.entity(entity).try_insert(target);
-        }
-    }
+    translucent.set_conservative(conservative);
     #[cfg(feature = "dev")]
     if let Some(mut diagnostics) = diagnostics {
         diagnostics.visibility_seconds += started.elapsed().as_secs_f64();

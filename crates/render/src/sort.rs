@@ -1,23 +1,12 @@
 //! Translucent sections are sorted back to front when meshed, then re-sorted as
-//! the eye moves. Grid-cell ordering stays valid when the camera turns. Meshes
-//! retain immutable GPU vertices; re-sorts patch only their index allocation.
+//! the eye moves. Grid-cell ordering stays valid when the camera turns. Section
+//! arenas retain immutable vertices; re-sorts patch only their index allocation.
 use super::model_mesh::SortData;
 use crate::VoxelViewer;
-use bevy::mesh::Indices;
+use crate::sections::{SectionFeed, SectionOp};
 use bevy::platform::collections::HashMap;
 use bevy::{
-    core_pipeline::core_3d::{Transparent3d, TransparentSortingInfo3d},
     prelude::*,
-    render::{
-        Extract, ExtractSchedule, Render, RenderApp, RenderSystems,
-        mesh::{RenderMesh, allocator::MeshAllocator},
-        render_asset::RenderAssets,
-        render_phase::{ViewSortedRenderPhases, sort_phase_system},
-        render_resource::IndexFormat,
-        renderer::RenderQueue,
-        sync_world::{MainEntity, MainEntityHashMap},
-        view::ExtractedView,
-    },
     tasks::{Task, futures::check_ready},
 };
 use hollow_core::coordinates::{CHUNK_SIZE, SECTION_HEIGHT};
@@ -33,7 +22,8 @@ const NEAR_POSITION_STEPS: f32 = 4.0;
 const FAR_POSITION_STEPS: f32 = 1.0 / CHUNK_SIZE as f32;
 /// Concurrent re-sorts and applications per frame; a changed order uploads indices.
 const MAX_SORTS: usize = 2;
-const SECTION_SIZE: Vec3 = Vec3::new(CHUNK_SIZE as f32, SECTION_HEIGHT as f32, CHUNK_SIZE as f32);
+pub(crate) const SECTION_SIZE: Vec3 =
+    Vec3::new(CHUNK_SIZE as f32, SECTION_HEIGHT as f32, CHUNK_SIZE as f32);
 
 /// Quantized position and position-grid discriminator.
 pub type SortKey = (IVec3, bool);
@@ -50,144 +40,121 @@ pub fn sort_key(eye: Vec3, local_eye: Vec3) -> SortKey {
     ((eye * position_steps).floor().as_ivec3(), near)
 }
 
-struct Output {
-    indices: Option<Arc<Indices>>,
-    key: SortKey,
-    mesh: AssetId<Mesh>,
-}
+/// A column and section index.
+type SectionKey = (IVec2, u8);
+/// Indices that differ from the previous sort, and the key they were sorted for.
+type SortOutput = (Option<Arc<[u32]>>, SortKey);
 
-#[derive(Component)]
-pub struct SortState {
+struct Section {
+    origin: Vec3,
+    sort: SortData,
     /// View key the current indices were sorted for; `None` while unsorted.
     key: Option<SortKey>,
-    task: Option<Task<Output>>,
+    /// Dropping a replaced section cancels its sort.
+    task: Option<Task<SortOutput>>,
     /// Frame of the last applied sort: the slots after the nearest one go to the
     /// stalest sections, so none starves during continuous movement.
     last_sorted: u64,
-    indices: Option<Arc<Indices>>,
+    indices: Option<Arc<[u32]>>,
 }
 
-impl SortState {
-    pub fn new(key: Option<SortKey>) -> Self {
-        Self {
-            key,
-            task: None,
-            last_sorted: 0,
-            indices: None,
+/// Sort data of every translucent section in the section arenas, with the
+/// visibility masks the camera culls them by.
+#[derive(Resource, Default)]
+pub struct TranslucentSections {
+    sections: HashMap<SectionKey, Section>,
+    /// Published visible sections per column; absent columns are shown.
+    visible: HashMap<IVec2, u32>,
+    conservative: bool,
+    /// Changes whenever the set of sortable sections may have changed.
+    version: u64,
+}
+
+impl TranslucentSections {
+    pub(crate) fn replace(
+        &mut self,
+        column: IVec2,
+        section: usize,
+        origin: Vec3,
+        sort: Option<(SortData, Option<SortKey>)>,
+    ) {
+        let key = (column, section as u8);
+        match sort {
+            Some((sort, key_sorted)) => {
+                self.sections.insert(
+                    key,
+                    Section {
+                        origin,
+                        sort,
+                        key: key_sorted,
+                        task: None,
+                        last_sorted: 0,
+                        indices: None,
+                    },
+                );
+            }
+            None => {
+                if self.sections.remove(&key).is_none() {
+                    return;
+                }
+            }
+        }
+        self.version = self.version.wrapping_add(1);
+    }
+    pub(crate) fn remove_column(&mut self, column: IVec2) {
+        self.sections.retain(|key, _| key.0 != column);
+        self.visible.remove(&column);
+        self.version = self.version.wrapping_add(1);
+    }
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
+    /// Records a column's published mask; returns whether a translucent section
+    /// changed visibility.
+    pub(crate) fn publish(&mut self, column: IVec2, mask: u32, translucent: u32) {
+        let previous = self.visible.insert(column, mask).unwrap_or(u32::MAX);
+        if (previous ^ mask) & translucent != 0 {
+            self.version = self.version.wrapping_add(1);
+        }
+    }
+    pub(crate) fn set_conservative(&mut self, conservative: bool) {
+        if self.conservative != conservative {
+            self.conservative = conservative;
+            self.version = self.version.wrapping_add(1);
+        }
+    }
+    #[cfg(feature = "dev")]
+    pub fn census(&self, census: &mut hollow_core::sections::AllocationCensus) {
+        for section in self.sections.values() {
+            section.sort.census(census);
         }
     }
 }
 
 pub fn register(app: &mut App) {
-    app.init_resource::<IndexUpdates>()
-        .init_resource::<SortVersion>()
-        .add_observer(mark_sort_changed)
+    app.init_resource::<TranslucentSections>()
+        .add_observer(
+            |_: On<hollow_engine::session::SessionClosed>,
+             mut sections: ResMut<TranslucentSections>| sections.clear(),
+        )
         .add_systems(
             PostUpdate,
-            sort_translucent.after(
-                bevy::camera::visibility::VisibilitySystems::MarkNewlyHiddenEntitiesInvisible,
-            ),
+            sort_translucent.after(crate::VoxelRenderSystems::Build),
         );
-    if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
-        render_app
-            .init_resource::<SectionCenters>()
-            .init_resource::<PendingIndices>()
-            .add_systems(ExtractSchedule, extract_index_updates)
-            .add_systems(
-                Render,
-                upload_indices.in_set(RenderSystems::PrepareBindGroups),
-            )
-            .add_systems(ExtractSchedule, extract_section_centers)
-            .add_systems(
-                Render,
-                prepare_section_sorting
-                    .in_set(RenderSystems::PhaseSort)
-                    .before(sort_phase_system::<Transparent3d>),
-            );
-    }
 }
 
-/// Canonical grid centers, independent of which faces happen to be exposed.
-#[derive(Resource, Default)]
-struct SectionCenters(MainEntityHashMap<Vec3>);
-
-fn extract_section_centers(
-    mut centers: ResMut<SectionCenters>,
-    sections: Extract<
-        Query<
-            (Entity, &GlobalTransform),
-            (
-                With<SortState>,
-                Or<(Added<SortState>, Changed<GlobalTransform>)>,
-            ),
-        >,
-    >,
-    mut removed: Extract<RemovedComponents<SortState>>,
-) {
-    for entity in removed.read() {
-        centers.0.remove(&MainEntity::from(entity));
-    }
-    let half_size = SECTION_SIZE * 0.5;
-    centers.0.extend(
-        sections
-            .iter()
-            .map(|(entity, transform)| (entity.into(), transform.translation() + half_size)),
-    );
-}
-
-fn prepare_section_sorting(
-    centers: Res<SectionCenters>,
-    views: Query<&ExtractedView>,
-    mut phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
-) {
-    for view in &views {
-        // The grid ordering is for perspective rays from a shared eye. Leave
-        // orthographic views to Bevy's parallel-ray depth ordering.
-        if view.clip_from_view.w_axis.w != 0.0 {
-            continue;
-        }
-        let Some(phase) = phases.get_mut(&view.retained_view_entity) else {
-            continue;
-        };
-        let eye = view.world_from_view.translation();
-        for item in phase.items.values_mut() {
-            let Some(center) = centers.0.get(&item.entity.1) else {
-                continue;
-            };
-            // View-depth sorting of partial section bounds can draw a whole
-            // underwater section over nearer ice. Use the same radial grid
-            // ordering as the block sort. A common sort point and radial bias
-            // supply that key to Bevy's existing sorter without an extra sort.
-            // Culling bounds and vertex positions retain their actual geometry.
-            item.sorting_info = TransparentSortingInfo3d::Sorted {
-                mesh_center: eye,
-                depth_bias: -center.distance(eye),
-            };
-        }
-    }
-}
-
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn sort_translucent(
     budget: Res<hollow_engine::tasks::VoxelTaskBudget>,
     camera: Option<Single<&GlobalTransform, With<VoxelViewer>>>,
-    mut sections: Query<(
-        Entity,
-        &Mesh3d,
-        &GlobalTransform,
-        &ViewVisibility,
-        &SortData,
-        &mut SortState,
-    )>,
-    visibility_changes: Query<(), (With<SortState>, Changed<ViewVisibility>)>,
-    mut updates: ResMut<IndexUpdates>,
-    version: Res<SortVersion>,
+    mut translucent: ResMut<TranslucentSections>,
+    mut feed: ResMut<SectionFeed>,
     mut previous: Local<Option<((IVec3, IVec3), u64)>>,
     mut active_hint: Local<usize>,
-    mut candidates: Local<Vec<(u64, f32, Entity, SortKey, Vec3)>>,
+    mut candidates: Local<Vec<(u64, f32, SectionKey, SortKey, Vec3)>>,
     mut frame: Local<u64>,
     #[cfg(feature = "dev")] diagnostics: Option<ResMut<crate::diagnostics::VoxelDiagnostics>>,
 ) {
-    updates.0.clear();
     let Some(camera) = camera else {
         return;
     };
@@ -198,63 +165,63 @@ fn sort_translucent(
     let quarter = eye * NEAR_POSITION_STEPS;
     let view_key = (
         (quarter.floor().as_ivec3(), quarter.ceil().as_ivec3()),
-        version.0,
+        translucent.version,
     );
-    // Rotation cannot change a radial ordering. Bevy's visibility change ticks
-    // identify newly exposed sections, including after projection changes.
-    if *previous == Some(view_key) && visibility_changes.is_empty() && *active_hint == 0 {
+    // Rotation cannot change a radial ordering, and every visible section is kept
+    // sorted whatever the camera faces.
+    if *previous == Some(view_key) && *active_hint == 0 {
         return;
     }
     #[cfg(feature = "dev")]
     let started = std::time::Instant::now();
     *previous = Some(view_key);
     *frame += 1;
-    let mut active = 0;
-    let mut applied = 0;
+    let (mut active, mut applied) = (0, 0);
     candidates.clear();
-    for (entities, meshes, transforms, visibility, _, states) in sections
-        .contiguous_iter_mut()
-        .expect("Dense translucent section query")
-    {
-        // Polling dirties only the active task rows, not every visible section.
-        let (states, mut ticks) = ContiguousMut::bypass_change_detection_split(states);
-        for (index, state) in states.iter_mut().enumerate() {
-            if state.task.is_some() && applied < MAX_SORTS {
-                let row = u32::try_from(index).expect("Section index must fit in a table row");
-                ticks.reborrow().slice(row..row + 1).mark_all_as_changed();
-                if let Some(output) = state.task.as_mut().and_then(check_ready) {
-                    state.task = None;
-                    if output.mesh == meshes[index].0.id() {
-                        if let Some(indices) = output.indices {
-                            updates.0.push((output.mesh, indices.clone()));
-                            state.indices = Some(indices);
-                        }
-                        state.key = Some(output.key);
-                        state.last_sorted = *frame;
-                        applied += 1;
-                    }
-                }
+    let TranslucentSections {
+        sections,
+        visible,
+        conservative,
+        ..
+    } = &mut *translucent;
+    for (&key, section) in sections.iter_mut() {
+        if let Some(task) = section.task.as_mut().filter(|_| applied < MAX_SORTS)
+            && let Some((indices, sorted)) = check_ready(task)
+        {
+            section.task = None;
+            if let Some(indices) = indices {
+                feed.ops.push(SectionOp::Sort {
+                    column: key.0,
+                    section: usize::from(key.1),
+                    indices: indices.clone(),
+                });
+                section.indices = Some(indices);
             }
-            if state.task.is_some() {
-                active += 1;
-                continue;
-            }
-            if !visibility[index].get() {
-                continue;
-            }
-            // Section transforms are pure translations.
-            let origin = transforms[index].translation();
-            let local_eye = eye - origin;
-            let key = sort_key(eye, local_eye);
-            if state.key != Some(key) {
-                candidates.push((
-                    state.last_sorted,
-                    (origin + SECTION_SIZE * 0.5).distance_squared(eye),
-                    entities[index],
-                    key,
-                    local_eye,
-                ));
-            }
+            section.key = Some(sorted);
+            section.last_sorted = *frame;
+            applied += 1;
+        }
+        if section.task.is_some() {
+            active += 1;
+            continue;
+        }
+        if !*conservative
+            && visible
+                .get(&key.0)
+                .is_some_and(|mask| mask & 1 << key.1 == 0)
+        {
+            continue;
+        }
+        let local_eye = eye - section.origin;
+        let sort = sort_key(eye, local_eye);
+        if section.key != Some(sort) {
+            candidates.push((
+                section.last_sorted,
+                (section.origin + SECTION_SIZE * 0.5).distance_squared(eye),
+                key,
+                sort,
+                local_eye,
+            ));
         }
     }
     let available = MAX_SORTS.saturating_sub(active);
@@ -273,22 +240,22 @@ fn sort_translucent(
     }
     candidates.truncate(available);
     *active_hint = active + candidates.len();
-    for &(_, _, entity, key, local_eye) in candidates.iter() {
-        let Ok((_, mesh, _, _, sort, mut state)) = sections.get_mut(entity) else {
+    for &(_, _, key, sorted, local_eye) in candidates.iter() {
+        let Some(section) = sections.get_mut(&key) else {
             continue;
         };
-        let sort = sort.clone();
-        let mesh = mesh.0.id();
-        let previous = state.indices.clone();
-        state.task = Some(budget.spawn(
+        let sort = section.sort.clone();
+        let previous = section.indices.clone();
+        section.task = Some(budget.spawn(
             hollow_engine::tasks::WorkClass::Streaming,
             local_eye.length_squared() as u32,
             async move {
-                let indices = sort.mesh_indices(local_eye);
+                let indices = sort.indices(local_eye);
                 // Comparing and dropping a large unchanged payload belongs on the
                 // worker too; the ECS thread only handles the shared result.
-                let indices = (previous.as_deref() != Some(&indices)).then(|| Arc::new(indices));
-                Output { indices, key, mesh }
+                let indices =
+                    (previous.as_deref() != Some(indices.as_slice())).then(|| Arc::from(indices));
+                (indices, sorted)
             },
         ));
     }
@@ -296,53 +263,4 @@ fn sort_translucent(
     if let Some(mut diagnostics) = diagnostics {
         diagnostics.translucent_sort_seconds += started.elapsed().as_secs_f64();
     }
-}
-
-/// Only the latest immutable index payload crosses extraction; vertices stay untouched.
-#[derive(Resource, Default)]
-struct IndexUpdates(Vec<(AssetId<Mesh>, Arc<Indices>)>);
-
-#[derive(Resource, Default)]
-struct PendingIndices(HashMap<AssetId<Mesh>, Arc<Indices>>);
-
-fn extract_index_updates(
-    updates: Extract<Res<IndexUpdates>>,
-    meshes: Extract<Res<Assets<Mesh>>>,
-    mut pending: ResMut<PendingIndices>,
-) {
-    pending.0.extend(updates.0.iter().cloned());
-    pending.0.retain(|mesh, _| meshes.contains(*mesh));
-}
-
-fn upload_indices(
-    mut pending: ResMut<PendingIndices>,
-    allocator: Res<MeshAllocator>,
-    meshes: Res<RenderAssets<RenderMesh>>,
-    queue: Res<RenderQueue>,
-) {
-    pending.0.retain(|id, indices| {
-        let (Some(mesh), Some(slice)) = (meshes.get(*id), allocator.mesh_index_slice(id)) else {
-            return true;
-        };
-        let (format, bytes): (IndexFormat, &[u8]) = match &**indices {
-            Indices::U16(values) => (IndexFormat::Uint16, bytemuck::cast_slice(values)),
-            Indices::U32(values) => (IndexFormat::Uint32, bytemuck::cast_slice(values)),
-        };
-        // The ID changes on remeshing. Never write across a replaced allocation.
-        if mesh.index_format() == Some(format) && slice.range.len() >= indices.len() {
-            let stride = match format {
-                IndexFormat::Uint16 => 2,
-                IndexFormat::Uint32 => 4,
-            };
-            queue.write_buffer(&slice.buffer, u64::from(slice.range.start) * stride, bytes);
-        }
-        false
-    });
-}
-
-#[derive(Resource, Default)]
-pub struct SortVersion(pub u64);
-
-fn mark_sort_changed(_event: On<Insert<SortState>>, mut version: ResMut<SortVersion>) {
-    version.0 = version.0.wrapping_add(1);
 }

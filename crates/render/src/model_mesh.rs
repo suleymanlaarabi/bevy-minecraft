@@ -249,7 +249,7 @@ struct SortQuad {
 }
 
 /// Owning cells, face centers and winding of a translucent section.
-#[derive(Clone, Component)]
+#[derive(Clone)]
 pub struct SortData(Arc<[SortQuad]>);
 impl SortData {
     #[cfg(feature = "dev")]
@@ -261,14 +261,6 @@ impl SortData {
     /// front of ice in a nearer block merely because their face centers differ.
     pub fn indices(&self, eye: Vec3) -> Vec<u32> {
         self.sorted(eye, |index| index)
-    }
-    /// Sorted indices at the narrowest width the vertex count allows.
-    pub fn mesh_indices(&self, eye: Vec3) -> Indices {
-        if self.vertex_count() <= usize::from(u16::MAX) + 1 {
-            Indices::U16(self.sorted(eye, |index| index as u16))
-        } else {
-            Indices::U32(self.indices(eye))
-        }
     }
     fn sorted<T>(&self, eye: Vec3, narrow: impl Fn(u32) -> T) -> Vec<T> {
         thread_local! {

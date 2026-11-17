@@ -3,11 +3,14 @@
 // A job is `(first index, count | pass << 29, base vertex, out)`.
 @group(0) @binding(0) var<storage, read> jobs: array<vec4<u32>>;
 @group(0) @binding(1) var<storage, read_write> output: array<u32>;
-// Pass index arenas: packed u16 terrain and shadow hull, u32 cutouts and model quads.
+// Pass index arenas: packed u16 terrain and shadow hull, u32 cutouts, model quads
+// and translucent quads.
 @group(0) @binding(2) var<storage, read> terrain: array<u32>;
 @group(0) @binding(3) var<storage, read> cutout: array<u32>;
 @group(0) @binding(4) var<storage, read> quads: array<u32>;
 @group(0) @binding(5) var<storage, read> hull: array<u32>;
+// Translucent quads, re-sorted in place as the eye moves.
+@group(0) @binding(6) var<storage, read> translucent: array<u32>;
 
 const LANES: u32 = 64u;
 
@@ -36,6 +39,9 @@ fn gather(
             }
             case 1u: {
                 vertex = cutout[at];
+            }
+            case 5u: {
+                vertex = translucent[at];
             }
             default: {
                 vertex = quads[at];

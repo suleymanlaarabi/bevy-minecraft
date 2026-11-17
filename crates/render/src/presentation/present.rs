@@ -177,10 +177,7 @@ fn install(world: &mut World) {
         } else {
             installed = false;
         }
-        let bloom_removed = matches!(
-            schedule.remove_systems_in_set(bloom, world, policy),
-            Ok(1)
-        );
+        let bloom_removed = matches!(schedule.remove_systems_in_set(bloom, world, policy), Ok(1));
         if bloom_removed {
             schedule.add_systems(
                 bloom
@@ -195,10 +192,7 @@ fn install(world: &mut World) {
                     .run_if(presents_directly),
             );
         }
-        let fxaa_removed = matches!(
-            schedule.remove_systems_in_set(fxaa, world, policy),
-            Ok(1)
-        );
+        let fxaa_removed = matches!(schedule.remove_systems_in_set(fxaa, world, policy), Ok(1));
         if fxaa_removed {
             schedule.add_systems(
                 fxaa.after(tonemapping)
@@ -330,15 +324,9 @@ fn select_presentation(
         // Bloom's own pipelines are queued on its first frame as well.
         let bloom_ready = match (bloom, camera.physical_viewport_size) {
             (None, _) => true,
-            (Some(bloom), Some(size)) => bloom_passes.prepare(
-                entity,
-                size,
-                bloom,
-                &device,
-                &queue,
-                &cache,
-                &fullscreen,
-            ),
+            (Some(bloom), Some(size)) => {
+                bloom_passes.prepare(entity, size, bloom, &device, &queue, &cache, &fullscreen)
+            }
             (Some(_), None) => false,
         };
         if !bloom_ready || cache.get_render_pipeline(id).is_none() {
@@ -357,7 +345,12 @@ fn select_presentation(
             ui_view.target_format = window_format;
         }
     }
-    bloom_passes.retain(|view| direct.views.get(&view).is_some_and(|presented| presented.bloom));
+    bloom_passes.retain(|view| {
+        direct
+            .views
+            .get(&view)
+            .is_some_and(|presented| presented.bloom)
+    });
 }
 
 /// The pipeline Bevy's tonemapping pass uses for a view of this key. Its key and

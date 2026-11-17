@@ -512,19 +512,9 @@ fn report_memory(world: &mut World, mut history: Local<MemoryHistory>) {
     {
         light.census(census);
     }
-    for data in world
-        .query::<&bevy_voxel::render::model_mesh::SortData>()
-        .iter(world)
+    if let Some(translucent) = world.get_resource::<bevy_voxel::render::sort::TranslucentSections>()
     {
-        data.census(census);
-    }
-    for mesh in world
-        .query::<&bevy_voxel::render::uploads::PendingMesh>()
-        .iter(world)
-    {
-        if let Some((data, _)) = &mesh.sort {
-            data.census(census);
-        }
+        translucent.census(census);
     }
     let model_catalog = super::render::models::memory_census(census);
     let shared = census.bytes;

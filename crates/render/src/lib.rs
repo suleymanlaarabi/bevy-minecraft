@@ -21,7 +21,6 @@ pub mod sky;
 pub mod sort;
 pub mod source;
 pub mod streaming;
-pub mod uploads;
 pub mod visibility;
 use bevy::prelude::*;
 pub use source::RenderSource;
@@ -92,7 +91,6 @@ impl<C: RenderSource> Plugin for VoxelRenderPlugin<C> {
         app.add_plugins(sections::SectionsPlugin);
         sort::register(app);
         visibility::register::<C>(app);
-        uploads::register(app);
         fog::register(app);
         shadows::register(app);
         main_pass::register(app);

@@ -10,7 +10,6 @@ use bevy::{
     ecs::entity::EntityHashMap,
     post_process::bloom::{Bloom, BloomCompositeMode},
     prelude::*,
-    shader::ShaderDefVal,
     render::{
         diagnostic::RecordDiagnostics,
         render_resource::{
@@ -20,6 +19,7 @@ use bevy::{
         renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
         view::ViewTarget,
     },
+    shader::ShaderDefVal,
 };
 use std::num::NonZero;
 
@@ -257,38 +257,36 @@ impl BloomPasses {
         cache: &PipelineCache,
         fullscreen: &FullscreenShader,
     ) -> [CachedRenderPipelineId; 3] {
-        let pipeline = |label: &'static str,
-                        entry: &'static str,
-                        first: bool,
-                        blend: Option<BlendState>| {
-            let mut shader_defs: Vec<ShaderDefVal> = Vec::new();
-            if first {
-                shader_defs.push("FIRST_DOWNSAMPLE".into());
-            }
-            if prefilter {
-                shader_defs.push("USE_THRESHOLD".into());
-            }
-            if uniform_scale {
-                shader_defs.push("UNIFORM_SCALE".into());
-            }
-            cache.queue_render_pipeline(RenderPipelineDescriptor {
-                label: Some(label.into()),
-                layout: vec![self.layout.clone()],
-                vertex: fullscreen.to_vertex_state(),
-                fragment: Some(FragmentState {
-                    shader: self.shader.clone(),
-                    shader_defs,
-                    entry_point: Some(entry.into()),
-                    targets: vec![Some(ColorTargetState {
-                        format: FORMAT,
-                        blend,
-                        write_mask: ColorWrites::ALL,
-                    })],
+        let pipeline =
+            |label: &'static str, entry: &'static str, first: bool, blend: Option<BlendState>| {
+                let mut shader_defs: Vec<ShaderDefVal> = Vec::new();
+                if first {
+                    shader_defs.push("FIRST_DOWNSAMPLE".into());
+                }
+                if prefilter {
+                    shader_defs.push("USE_THRESHOLD".into());
+                }
+                if uniform_scale {
+                    shader_defs.push("UNIFORM_SCALE".into());
+                }
+                cache.queue_render_pipeline(RenderPipelineDescriptor {
+                    label: Some(label.into()),
+                    layout: vec![self.layout.clone()],
+                    vertex: fullscreen.to_vertex_state(),
+                    fragment: Some(FragmentState {
+                        shader: self.shader.clone(),
+                        shader_defs,
+                        entry_point: Some(entry.into()),
+                        targets: vec![Some(ColorTargetState {
+                            format: FORMAT,
+                            blend,
+                            write_mask: ColorWrites::ALL,
+                        })],
+                        ..default()
+                    }),
                     ..default()
-                }),
-                ..default()
-            })
-        };
+                })
+            };
         let color = match composite {
             BloomCompositeMode::EnergyConserving => BlendComponent {
                 src_factor: BlendFactor::Constant,
@@ -302,7 +300,12 @@ impl BloomPasses {
             },
         };
         [
-            pipeline("present bloom first downsample", "downsample_first", true, None),
+            pipeline(
+                "present bloom first downsample",
+                "downsample_first",
+                true,
+                None,
+            ),
             pipeline("present bloom downsample", "downsample", false, None),
             pipeline(
                 "present bloom upsample",
@@ -350,15 +353,17 @@ pub(super) fn render_pyramid(
     let Some(pyramid) = passes.pyramids.get(&entity) else {
         return;
     };
-    let [Some(first), Some(down), Some(up)] = pyramid
-        .pipelines
-        .map(|id| cache.get_render_pipeline(id))
+    let [Some(first), Some(down), Some(up)] =
+        pyramid.pipelines.map(|id| cache.get_render_pipeline(id))
     else {
         return;
     };
     let scene = target.main_texture_view();
     let key = (scene.id(), pyramid.uniform.id());
-    if scene_read.as_ref().is_none_or(|(current, _)| *current != key) {
+    if scene_read
+        .as_ref()
+        .is_none_or(|(current, _)| *current != key)
+    {
         let bind_group = ctx.render_device().create_bind_group(
             "present bloom scene",
             &cache.get_bind_group_layout(&passes.layout),
@@ -409,7 +414,14 @@ pub(super) fn render_pyramid(
     };
     // Every texel of a level is written before it is read.
     let clear = LoadOp::Clear(default());
-    draw("bloom downsample", &pyramid.views[0], clear, first, scene_read, None);
+    draw(
+        "bloom downsample",
+        &pyramid.views[0],
+        clear,
+        first,
+        scene_read,
+        None,
+    );
     for level in 1..pyramid.views.len() {
         draw(
             "bloom downsample",

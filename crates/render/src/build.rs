@@ -10,9 +10,6 @@ use crate::{
     sections::{PassGeometry, SectionFeed, SectionOp},
 };
 use bevy::{
-    camera::{primitives::MeshAabb, visibility::RenderLayers},
-    light::NotShadowCaster,
-    mesh::Indices,
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
@@ -36,7 +33,7 @@ pub struct ChunkSections {
 }
 #[derive(Default)]
 pub struct SectionEntities {
-    pub translucent: Option<Entity>,
+    /// Geometry passes in the section arenas (`sections.rs`).
     pub passes: u8,
     pub connectivity: u64,
 }
@@ -53,7 +50,7 @@ impl ChunkSections {
     pub fn mesh_count(&self) -> usize {
         self.sections
             .iter()
-            .map(|s| s.passes.count_ones() as usize + usize::from(s.translucent.is_some()))
+            .map(|s| s.passes.count_ones() as usize)
             .sum()
     }
 }
@@ -63,15 +60,14 @@ struct BuiltSection {
     connectivity: u64,
     overhang: bool,
     bytes: usize,
-    mesh_count: usize,
     terrain: Option<PassGeometry>,
     cutout: Option<PassGeometry>,
     models: Option<PassGeometry>,
     models_cutout: Option<PassGeometry>,
-    /// Mesh sorted for the view at build time, its quads, and the view key it
+    /// Geometry sorted for the view at build time, its quads, and the view key it
     /// was sorted for (`None` without a view).
     translucent: Option<(
-        Mesh,
+        PassGeometry,
         super::model_mesh::SortData,
         Option<super::sort::SortKey>,
     )>,
@@ -122,17 +118,7 @@ fn max_pending_builds() -> usize {
 /// Mesh bytes handed to the GPU per frame, including player edits.
 /// Spreads the upload of newly visible terrain over several frames.
 const UPLOAD_BUDGET_BYTES: usize = 2 << 20;
-/// Translucent mesh assets applied per frame; opaque geometry uses shared arenas.
-const UPLOAD_BUDGET_MESHES: usize = 32;
 const UPLOAD_BUDGET_TIME: Duration = Duration::from_millis(1);
-
-fn mesh_bytes(mesh: &Mesh) -> usize {
-    mesh.get_vertex_buffer_size()
-        + mesh.indices().map_or(0, |indices| match indices {
-            Indices::U16(indices) => indices.len() * 2,
-            Indices::U32(indices) => indices.len() * 4,
-        })
-}
 
 /// Squared distance to the viewer, with coordinates as a deterministic tie-break.
 type DistanceKey = (i32, i32, i32);
@@ -337,7 +323,6 @@ fn spawn_chunk_build<C: RenderSource>(
                 connectivity: section.connectivity,
                 overhang: false,
                 bytes: 0,
-                mesh_count: 0,
                 index: section.index,
                 terrain: section.terrain.map(PassGeometry::terrain),
                 cutout: section.cutout.map(PassGeometry::terrain),
@@ -353,7 +338,7 @@ fn spawn_chunk_build<C: RenderSource>(
                         geometry.indices = sort.indices(eye - origin);
                         super::sort::sort_key(eye, eye - origin)
                     });
-                    (geometry.into_mesh(), sort, key)
+                    (PassGeometry::translucent(geometry), sort, key)
                 }),
                 shadow: section.shadow.map(PassGeometry::terrain),
                 casts_shadow: section.casts_shadow,
@@ -369,17 +354,10 @@ fn spawn_chunk_build<C: RenderSource>(
             ]
             .into_iter()
             .flatten()
+            .chain(section.translucent.as_ref().map(|(geometry, ..)| geometry))
             {
                 section.overhang |= geometry.overhang();
                 section.bytes += geometry.bytes();
-            }
-            if let Some((mesh, _, _)) = &section.translucent {
-                section.overhang |= mesh.final_aabb.is_none_or(|bounds| {
-                    bounds.min.min_element() < 0.0
-                        || bounds.max.max_element() > SECTION_HEIGHT as f32
-                });
-                section.bytes += mesh_bytes(mesh);
-                section.mesh_count = 1;
             }
         }
         BuildOutput {
@@ -405,8 +383,8 @@ pub(crate) fn poll_builds<C: RenderSource>(
     mut commands: Commands,
     assets: Option<Res<VoxelAssets>>,
     settings: Res<EnvironmentSettings>,
-    mut meshes: ResMut<Assets<Mesh>>,
     mut feed: ResMut<SectionFeed>,
+    mut translucent: ResMut<super::sort::TranslucentSections>,
     layout: Res<WorldLayout>,
     viewer: Option<Single<&Transform, With<VoxelViewer>>>,
     mut topology: Option<ResMut<super::visibility::VisibilityGraph>>,
@@ -422,7 +400,7 @@ pub(crate) fn poll_builds<C: RenderSource>(
     #[cfg(feature = "dev")] mut diagnostics: Option<ResMut<crate::diagnostics::VoxelDiagnostics>>,
 ) {
     let started = Instant::now();
-    let (mut uploaded, mut meshes_applied, mut applied_sections) = (0usize, 0usize, 0usize);
+    let (mut uploaded, mut applied_sections) = (0usize, 0usize);
     let center = viewer.map_or(IVec2::ZERO, |viewer| chunk_at(viewer.translation));
     candidates.clear();
     candidates.extend(chunks.iter().map(|(entity, chunk, _, _, _, edited)| {
@@ -460,7 +438,6 @@ pub(crate) fn poll_builds<C: RenderSource>(
         if applied_sections > 0
             && let Some(next) = output.sections.as_slice().first()
             && (uploaded.saturating_add(next.bytes) > UPLOAD_BUDGET_BYTES
-                || meshes_applied + next.mesh_count > UPLOAD_BUDGET_MESHES
                 || started.elapsed() >= UPLOAD_BUDGET_TIME)
         {
             // Borrowing ChunkSections mutably would trigger visibility work even
@@ -478,7 +455,6 @@ pub(crate) fn poll_builds<C: RenderSource>(
             // section to make progress, even if its geometry exceeds the byte cap.
             if applied_sections > 0
                 && (uploaded.saturating_add(next.bytes) > UPLOAD_BUDGET_BYTES
-                    || meshes_applied + next.mesh_count > UPLOAD_BUDGET_MESHES
                     || started.elapsed() >= UPLOAD_BUDGET_TIME)
             {
                 break;
@@ -496,72 +472,38 @@ pub(crate) fn poll_builds<C: RenderSource>(
                 entities.overhanging_sections &= !section_bit;
             }
             uploaded += section.bytes;
-            meshes_applied += section.mesh_count;
             applied_sections += 1;
             voxels.bypass_change_detection().dirty_sections &= !(1 << section.index);
-            if let Some(assets) = assets.as_deref() {
-                let placement = (
-                    Transform::from_xyz(0.0, (section.index as i32 * SECTION_HEIGHT) as f32, 0.0),
-                    ChildOf(entity),
+            if assets.is_some() {
+                let origin = Vec3::new(
+                    (chunk.position.x * 16) as f32,
+                    layout.min_y() as f32 + (section.index as i32 * SECTION_HEIGHT) as f32,
+                    (chunk.position.y * 16) as f32,
                 );
-                // New camera entities start in their likely layer, so an occluded
-                // section needs no later insert. The invalidation above keeps the
-                // camera conservative until visibility republishes this section.
-                let camera = RenderLayers::layer(
-                    if topology.as_deref().is_none_or(|graph| {
-                        graph.likely_visible(chunk.position, section.index, section.overhang)
-                    }) {
-                        0
-                    } else {
-                        super::visibility::OCCLUDED_LAYER
-                    },
-                );
-                let slots = &mut entities.sections[section.index];
+                let (geometry, sort) = section
+                    .translucent
+                    .map(|(geometry, sort, key)| (geometry, (sort, key)))
+                    .unzip();
+                translucent.replace(chunk.position, section.index, origin, sort);
                 let geometry = [
                     section.terrain,
                     section.cutout,
                     section.models,
                     section.models_cutout,
                     section.shadow,
+                    geometry,
                 ];
-                slots.passes = geometry
+                entities.sections[section.index].passes = geometry
                     .iter()
                     .enumerate()
                     .fold(0, |bits, (i, g)| bits | (u8::from(g.is_some()) << i));
                 feed.ops.push(SectionOp::Replace {
                     column: chunk.position,
                     section: section.index,
-                    origin: Vec3::new(
-                        (chunk.position.x * 16) as f32,
-                        layout.min_y() as f32 + (section.index as i32 * SECTION_HEIGHT) as f32,
-                        (chunk.position.y * 16) as f32,
-                    ),
+                    origin,
                     geometry,
                     casts_shadow: section.casts_shadow,
                 });
-                let (translucent, sort) = section
-                    .translucent
-                    .map(|(mesh, sort, key)| (mesh, (sort, key)))
-                    .unzip();
-                update_section(
-                    &mut commands,
-                    &mut meshes,
-                    &mut slots.translucent,
-                    translucent,
-                    sort,
-                    |mesh, sort| {
-                        let (sort, key) = sort.expect("translucent sort data");
-                        (
-                            Mesh3d(mesh),
-                            MeshMaterial3d(assets.translucent.clone()),
-                            NotShadowCaster,
-                            camera.clone(),
-                            placement.clone(),
-                            sort,
-                            super::sort::SortState::new(key),
-                        )
-                    },
-                );
             }
         }
         let complete = output.sections.as_slice().is_empty();
@@ -586,9 +528,7 @@ pub(crate) fn poll_builds<C: RenderSource>(
             }
         }
         if applied_sections > 0
-            && (uploaded >= UPLOAD_BUDGET_BYTES
-                || meshes_applied >= UPLOAD_BUDGET_MESHES
-                || started.elapsed() >= UPLOAD_BUDGET_TIME)
+            && (uploaded >= UPLOAD_BUDGET_BYTES || started.elapsed() >= UPLOAD_BUDGET_TIME)
         {
             break;
         }
@@ -597,45 +537,6 @@ pub(crate) fn poll_builds<C: RenderSource>(
     if let Some(diagnostics) = diagnostics.as_deref_mut() {
         diagnostics.mesh_apply_seconds += started.elapsed().as_secs_f64();
         diagnostics.uploaded_bytes += uploaded as u64;
-        diagnostics.uploaded_meshes += meshes_applied as u64;
-    }
-}
-
-type PendingSortData = (super::model_mesh::SortData, Option<super::sort::SortKey>);
-
-/// Swaps a section's mesh, spawning or despawning its entity as it gains or loses faces.
-/// A replacement waits in `PendingMesh` until uploaded; a new entity has no geometry
-/// to keep, so it is spawned once with its final components.
-fn update_section<B: Bundle>(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    slot: &mut Option<Entity>,
-    mesh: Option<Mesh>,
-    sort: Option<PendingSortData>,
-    bundle: impl FnOnce(Handle<Mesh>, Option<PendingSortData>) -> B,
-) {
-    match (mesh, *slot) {
-        (Some(mesh), Some(entity)) => {
-            commands
-                .entity(entity)
-                .try_insert(super::uploads::PendingMesh {
-                    mesh: meshes.add(mesh),
-                    sort,
-                });
-        }
-        (Some(mesh), None) => {
-            // The bounds Bevy's `calculate_bounds` would otherwise insert a frame later.
-            let aabb = mesh.get_aabb();
-            let bundle = bundle(meshes.add(mesh), sort);
-            *slot = Some(match aabb {
-                Some(aabb) => commands.spawn((bundle, aabb)).id(),
-                None => commands.spawn(bundle).id(),
-            });
-        }
-        (None, Some(entity)) => {
-            commands.entity(entity).try_despawn();
-            *slot = None;
-        }
-        (None, None) => {}
+        diagnostics.uploaded_meshes += applied_sections as u64;
     }
 }

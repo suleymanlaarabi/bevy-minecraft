@@ -1,10 +1,13 @@
-//! Shared opaque geometry, independent of Bevy's per-mesh instance machinery.
+//! Shared section geometry, independent of Bevy's per-mesh instance machinery.
 use crate::{VoxelViewer, assets::VoxelAssets};
 use bevy::{
     asset::UntypedAssetId,
     camera::visibility::RenderLayers,
     core_pipeline::{
-        core_3d::{AlphaMask3d, Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey},
+        core_3d::{
+            AlphaMask3d, Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey, Transparent3d,
+            TransparentSortingInfo3d,
+        },
         prepass::{Opaque3dPrepass, OpaqueNoLightmap3dBatchSetKey, OpaqueNoLightmap3dBinKey},
     },
     ecs::{
@@ -15,6 +18,7 @@ use bevy::{
         MaterialProperties,
         key::{ErasedMaterialPipelineKey, ErasedMeshPipelineKey},
     },
+    math::FloatOrd,
     mesh::{Indices, MeshVertexBufferLayoutRef, MeshVertexBufferLayouts, VertexAttributeValues},
     pbr::*,
     platform::{collections::HashMap, hash::FixedHasher},
@@ -122,6 +126,25 @@ impl PassGeometry {
             max: geometry.max,
         }
     }
+    /// Translucent quads in back-to-front order for some eye: a section's blending
+    /// order lives in its indices, which re-sorts replace in place.
+    pub fn translucent(mut geometry: crate::model_mesh::ModelGeometry) -> Self {
+        if geometry.indices.is_empty() {
+            let quads = u32::try_from(geometry.vertices.len() / 4).expect("model quad count");
+            geometry.indices = (0..quads)
+                .flat_map(|quad| crate::model_mesh::quad_indices(quad, false))
+                .collect();
+        }
+        let count = u32::try_from(geometry.indices.len()).expect("section index count");
+        Self {
+            vertices: VertexAttributeValues::Uint32x4(geometry.vertices),
+            indices: Some(Indices::U32(geometry.indices)),
+            count,
+            groups: [count; 6],
+            min: geometry.min,
+            max: geometry.max,
+        }
+    }
     pub fn overhang(&self) -> bool {
         self.min.min_element() < 0.0 || self.max.max_element() > 16.0
     }
@@ -131,7 +154,7 @@ pub(crate) enum SectionOp {
         column: IVec2,
         section: usize,
         origin: Vec3,
-        geometry: [Option<PassGeometry>; 5],
+        geometry: [Option<PassGeometry>; PASSES],
         /// Sunlight reaches the section or its border. Buried cutouts and models
         /// stay out of the shadow maps, like buried terrain (`SectionMeshes::shadow`).
         casts_shadow: bool,
@@ -139,6 +162,12 @@ pub(crate) enum SectionOp {
     Visibility {
         column: IVec2,
         mask: u32,
+    },
+    /// Back-to-front indices of a section's current translucent geometry.
+    Sort {
+        column: IVec2,
+        section: usize,
+        indices: Arc<[u32]>,
     },
     RemoveColumn(IVec2),
     ClearPass(usize),
@@ -218,6 +247,7 @@ impl Plugin for SectionsPlugin {
         register_draws::<3>(render);
         register_draws::<4>(render);
         register_draws::<5>(render);
+        render.add_render_command::<Transparent3d, MainDraw<TRANSLUCENT_RANGE>>();
     }
     fn finish(&self, app: &mut App) {
         let Some(render) = app.get_sub_app_mut(RenderApp) else {
@@ -251,6 +281,7 @@ fn extract_sections(
             a.models_cutout.id().untyped(),
             a.terrain.id().untyped(),
             a.terrain.id().untyped(),
+            a.translucent.id().untyped(),
         ]
     });
     commands.insert_resource(SectionMaterials(materials));
@@ -268,7 +299,7 @@ struct Column {
     extent: Vec3,
     dirty: bool,
 }
-type Slot = [Option<Allocation>; 5];
+type Slot = [Option<Allocation>; PASSES];
 /// Per-slot culling inputs, dense and parallel to `SectionGpu::slots`: the per-view
 /// loop streams 28 bytes per slot and reads allocations only for drawn sections.
 #[derive(Clone, Copy, Default)]
@@ -283,6 +314,11 @@ struct Cull {
 /// Passes drawn into shadow maps from sections that sunlight never reaches: only the
 /// shadow hull, which is built for sunlit sections alone.
 const BURIED_CASTERS: u8 = 1 << 4;
+/// Geometry passes: greedy terrain, cutouts, model quads, cutout model quads,
+/// the shadow hull and translucent quads.
+const PASSES: usize = 6;
+/// Blended back to front, never cast into shadow maps.
+pub(crate) const TRANSLUCENT: usize = 5;
 struct Allocation {
     vertices: Range<u64>,
     indices: Range<u64>,
@@ -291,6 +327,9 @@ struct Allocation {
     job: Job,
     /// `PassGeometry::groups`.
     groups: [u32; 6],
+    /// Distinguishes this allocation from earlier ones at the same place, so a
+    /// queued re-sort never lands in a replacement's indices.
+    serial: u64,
 }
 /// First index, index count with the pass in the top three bits, base vertex and
 /// output offset of one gathered range of section indices.
@@ -302,13 +341,19 @@ const PAGE_VERTICES: u64 = 64;
 const fn page_bytes(pass: usize) -> u64 {
     PAGE_VERTICES * VERTEX_BYTES[pass]
 }
-/// Draw ranges of a view: the five geometry passes, then the camera's far terrain.
-const RANGES: usize = 6;
+/// Draw ranges of a view: the first five geometry passes, the camera's far terrain,
+/// then the translucent pass.
+const RANGES: usize = 7;
 /// Terrain (pass 0 geometry and material) past `PREPASS_BUCKETS`, drawn by the main
 /// pass alone with depth writes.
 const FAR_TERRAIN: usize = 5;
+const TRANSLUCENT_RANGE: usize = 6;
 const fn range_pass(range: usize) -> usize {
-    if range == FAR_TERRAIN { 0 } else { range }
+    match range {
+        FAR_TERRAIN => 0,
+        TRANSLUCENT_RANGE => TRANSLUCENT,
+        range => range,
+    }
 }
 /// The depth prepass keeps the costly shadowed shading of near terrain to one
 /// fragment per pixel. Past the shadow clipmap (144 blocks plus a section) shading
@@ -339,8 +384,8 @@ fn face_runs(groups: &[u32; 6], faces: u8, mut emit: impl FnMut(u32, u32)) {
 }
 /// Bytes per index and vertex of each pass (u16 terrain and shadow indices,
 /// 16-byte model vertices).
-const INDEX_BYTES: [u64; 5] = [2, 4, 4, 4, 2];
-const VERTEX_BYTES: [u64; 5] = [8, 8, 16, 16, 8];
+const INDEX_BYTES: [u64; PASSES] = [2, 4, 4, 4, 2, 4];
+const VERTEX_BYTES: [u64; PASSES] = [8, 8, 16, 16, 8, 16];
 /// Front-to-back draw order in 8-block distance buckets.
 const DISTANCE_BUCKETS: usize = 256;
 const BUCKETS_PER_BLOCK: f32 = 1.0 / 8.0;
@@ -363,6 +408,8 @@ struct ViewDraws {
     jobs: Vec<Job>,
     /// Gathered indices of each range, in draw order.
     indices: [Range<u32>; RANGES],
+    /// Distance from the eye to the nearest translucent section drawn.
+    nearest_translucent: f32,
     job_buffer: Option<Buffer>,
     output: Option<Buffer>,
     /// The jobs changed: gather them again this frame.
@@ -450,6 +497,7 @@ impl Gather {
                 storage(3, true),
                 storage(4, true),
                 storage(5, true),
+                storage(6, true),
             ],
         );
         let module = device.create_and_validate_shader_module(ShaderModuleDescriptor {
@@ -563,15 +611,16 @@ struct Arena {
 }
 #[derive(Resource)]
 struct SectionGpu {
-    arenas: [Arena; 5],
+    arenas: [Arena; PASSES],
     columns: IndexMap<IVec2, Column, FixedHasher>,
     dirty_columns: Vec<IVec2>,
     slots: Vec<Slot>,
     cull: Vec<Cull>,
     free: Vec<usize>,
-    pages: [PageTable; 5],
+    pages: [PageTable; PASSES],
     views: HashMap<Entity, ViewDraws>,
     revision: u64,
+    serial: u64,
     conservative: bool,
     layout: BindGroupLayoutDescriptor,
     layouts: [MeshVertexBufferLayoutRef; 2],
@@ -634,16 +683,12 @@ impl SectionGpu {
             pages: std::array::from_fn(|_| PageTable::new(device, &layout)),
             views: default(),
             revision: 0,
+            serial: 0,
             conservative: false,
             layout,
             layouts,
             gather,
-            quad_indices: section_buffer(
-                &device,
-                "model quad indices",
-                24,
-                BufferUsages::STORAGE,
-            ),
+            quad_indices: section_buffer(&device, "model quad indices", 24, BufferUsages::STORAGE),
             quad_capacity: 0,
         }
     }
@@ -656,7 +701,7 @@ impl SectionGpu {
         }
     }
     fn free_slot(&mut self, slot: usize) {
-        for pass in 0..5 {
+        for pass in 0..PASSES {
             self.release(slot, pass);
         }
         self.cull[slot] = Cull::default();
@@ -701,6 +746,7 @@ fn prepare_sections(
     mut seen: Local<Vec<u8>>,
     mut workers: Local<Vec<CullWorker>>,
     mut uploads: Local<Vec<(usize, usize, Range<u64>, u64, PassGeometry, Vec3)>>,
+    mut sorts: Local<Vec<(usize, u64, Arc<[u32]>)>>,
 ) {
     let gpu = &mut *gpu;
     let changed = !feed.ops.is_empty() || gpu.conservative != feed.conservative;
@@ -716,6 +762,7 @@ fn prepare_sections(
                 *workers = Vec::new();
                 *seen = Vec::new();
                 uploads.clear();
+                sorts.clear();
             }
             SectionOp::RemoveColumn(column) => gpu.remove(column),
             SectionOp::ClearPass(pass) => {
@@ -731,6 +778,23 @@ fn prepare_sections(
             SectionOp::Visibility { column, mask } => {
                 let id = gpu.column(column, false);
                 gpu.columns[id].mask = mask;
+            }
+            SectionOp::Sort {
+                column,
+                section,
+                indices,
+            } => {
+                let allocation = gpu
+                    .columns
+                    .get(&column)
+                    .filter(|c| c.occupied & 1 << section != 0)
+                    .map(|c| c.slots[section] as usize)
+                    .and_then(|slot| Some((slot, gpu.slots[slot][TRANSLUCENT].as_ref()?)));
+                if let Some((slot, a)) = allocation
+                    && a.indices.end - a.indices.start == size_of_val(&*indices) as u64
+                {
+                    sorts.push((slot, a.serial, indices));
+                }
             }
             SectionOp::Replace {
                 column,
@@ -790,12 +854,23 @@ fn prepare_sections(
                             0,
                         ];
                         let groups = g.groups;
+                        // Origins are recorded now: this frame's culling orders
+                        // translucent sections by them before the uploads.
+                        let pages = (vertices.start / page_bytes(pass)) as usize
+                            ..(vertices.end / page_bytes(pass)) as usize;
+                        let table = &mut gpu.pages[pass].data;
+                        if table.len() < pages.end {
+                            table.resize(pages.end, [0.0; 4]);
+                        }
+                        table[pages].fill(origin.extend(0.0).to_array());
                         uploads.push((slot, pass, vertices.clone(), indices.start, g, origin));
+                        gpu.serial += 1;
                         record[pass] = Some(Allocation {
                             vertices,
                             indices,
                             job,
                             groups,
+                            serial: gpu.serial,
                         });
                         passes |= 1 << pass;
                     } else if let Some(old) = old {
@@ -808,7 +883,7 @@ fn prepare_sections(
                     extent: (max - min) * 0.5,
                     passes,
                     casters: if casts_shadow {
-                        passes
+                        passes & !(1 << TRANSLUCENT)
                     } else {
                         passes & BURIED_CASTERS
                     },
@@ -900,7 +975,7 @@ fn prepare_sections(
             None if camera.is_some() => None,
             _ => continue,
         };
-        let enabled = shadow_layers.as_ref().map_or(0b01111, |layers| {
+        let enabled = shadow_layers.as_ref().map_or(0b101111, |layers| {
             let models = layers.intersects(&RenderLayers::from_layers(&[
                 0,
                 crate::visibility::OCCLUDED_LAYER,
@@ -999,6 +1074,17 @@ fn prepare_sections(
                 *at += 1;
             }
         }
+        // Blending needs translucent sections back to front. Canonical grid centers
+        // give a consistent radial order whatever faces a section exposes; each
+        // section's own indices are sorted for the eye (`sort.rs`).
+        let pages = &gpu.pages[TRANSLUCENT].data;
+        let distance = |job: &Job| {
+            let origin = Vec4::from_array(pages[(job[2] as u64 / PAGE_VERTICES) as usize]);
+            (origin.truncate() + crate::sort::SECTION_SIZE * 0.5).distance(view.eye)
+        };
+        let translucent = &mut draws.jobs[ranges[TRANSLUCENT_RANGE].clone()];
+        translucent.sort_by_cached_key(|job| std::cmp::Reverse((FloatOrd(distance(job)), job[2])));
+        draws.nearest_translucent = translucent.last().map_or(0.0, distance);
         // Output offsets follow the final draw order.
         let mut out = 0u32;
         draws.indices = ranges.map(|range| {
@@ -1064,7 +1150,7 @@ fn prepare_sections(
         queue.write_buffer(&gpu.quad_indices, 0, bytemuck::cast_slice(&indices));
     }
     // Page tables cover their whole arena; a grown table is uploaded whole.
-    let mut grown = [false; 5];
+    let mut grown = [false; PASSES];
     for (pass, table) in gpu.pages.iter_mut().enumerate() {
         let pages = (gpu.arenas[pass].vertices.buffer.size() / page_bytes(pass)) as usize;
         if table.data.len() < pages {
@@ -1081,14 +1167,13 @@ fn prepare_sections(
             grown[pass] = true;
         }
     }
-    for (_, p, v, i, g, origin) in uploads.drain(..) {
+    for (_, p, v, i, g, _) in uploads.drain(..) {
         queue.write_buffer(&gpu.arenas[p].vertices.buffer, v.start, g.vertices());
         if !g.indices().is_empty() {
             queue.write_buffer(&gpu.arenas[p].indices.buffer, i, g.indices());
         }
         let pages = (v.start / page_bytes(p)) as usize..(v.end / page_bytes(p)) as usize;
-        let table = &mut gpu.pages[p];
-        table.data[pages.clone()].fill(origin.extend(0.0).to_array());
+        let table = &gpu.pages[p];
         if !grown[p] {
             queue.write_buffer(
                 &table.buffer,
@@ -1100,6 +1185,28 @@ fn prepare_sections(
     for (pass, table) in gpu.pages.iter().enumerate() {
         if grown[pass] {
             queue.write_buffer(&table.buffer, 0, bytemuck::cast_slice(&table.data));
+        }
+    }
+    // Re-sorted translucent indices replace their section's initial order, so they
+    // follow this frame's uploads; the cameras gather the new order again.
+    let mut resorted = false;
+    for (slot, serial, indices) in sorts.drain(..) {
+        if let Some(a) = gpu.slots[slot][TRANSLUCENT]
+            .as_ref()
+            .filter(|a| a.serial == serial)
+        {
+            let buffer = &gpu.arenas[TRANSLUCENT].indices.buffer;
+            queue.write_buffer(buffer, a.indices.start, bytemuck::cast_slice(&indices));
+            resorted = true;
+        }
+    }
+    if resorted {
+        for draws in gpu.views.values_mut() {
+            if draws.input.is_some_and(|view| view.camera)
+                && !draws.indices[TRANSLUCENT_RANGE].is_empty()
+            {
+                draws.gather = true;
+            }
         }
     }
     // Gather the indices of every view whose draws changed, after this frame's
@@ -1126,6 +1233,7 @@ fn prepare_sections(
                 gpu.arenas[1].indices.buffer.as_entire_binding(),
                 gpu.quad_indices.as_entire_binding(),
                 gpu.arenas[4].indices.buffer.as_entire_binding(),
+                gpu.arenas[TRANSLUCENT].indices.buffer.as_entire_binding(),
             )),
         );
         let encoder = encoder.get_or_insert_with(|| {
@@ -1250,7 +1358,9 @@ fn cull_columns(
                 let pass = bits.trailing_zeros() as usize;
                 bits &= bits - 1;
                 let a = allocations[pass].as_ref().unwrap();
-                let range = if view.camera && pass == 0 && bucket >= PREPASS_BUCKETS {
+                let range = if pass == TRANSLUCENT {
+                    TRANSLUCENT_RANGE
+                } else if view.camera && pass == 0 && bucket >= PREPASS_BUCKETS {
                     FAR_TERRAIN
                 } else {
                     pass
@@ -1334,7 +1444,7 @@ impl SpecializedMeshPipeline for SectionSpecializer {
 }
 /// Section draws are retained `NonMesh` phase items: one is replaced only when its
 /// pipeline or presence changes instead of being removed and re-added every frame.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn queue_sections(
     gpu: Res<SectionGpu>,
     ids: Res<SectionIds>,
@@ -1355,11 +1465,13 @@ fn queue_sections(
     mut alpha: ResMut<ViewBinnedRenderPhases<AlphaMask3d>>,
     mut depth: ResMut<ViewBinnedRenderPhases<Opaque3dPrepass>>,
     mut shadows: ResMut<ViewBinnedRenderPhases<Shadow>>,
-    (od, ad, dd, sd): (
+    mut transparent: ResMut<ViewSortedRenderPhases<Transparent3d>>,
+    (od, ad, dd, sd, td): (
         Res<DrawFunctions<Opaque3d>>,
         Res<DrawFunctions<AlphaMask3d>>,
         Res<DrawFunctions<Opaque3dPrepass>>,
         Res<DrawFunctions<Shadow>>,
+        Res<DrawFunctions<Transparent3d>>,
     ),
 ) {
     let Some(materials) = &materials.0 else {
@@ -1382,6 +1494,7 @@ fn queue_sections(
         sd.id::<DepthDraw<4>>(),
     ];
     let depth_draw = dd.id::<DepthDraw<0>>();
+    let translucent_draw = td.read().id::<MainDraw<TRANSLUCENT_RANGE>>();
     let topology = MeshPipelineKey::from_primitive_topology_and_strip_index(
         PrimitiveTopology::TriangleList,
         None,
@@ -1401,7 +1514,7 @@ fn queue_sections(
             layout: gpu.layout.clone(),
         });
         specializer.properties = material.properties.clone();
-        let layout = &gpu.layouts[usize::from(p == 2 || p == 3)];
+        let layout = &gpu.layouts[usize::from(matches!(range_pass(p), 2 | 3 | TRANSLUCENT))];
         let key_for = |view_key: MeshPipelineKey, depth: bool, reuse_depth: bool| {
             let mut key = view_key | topology;
             if !depth {
@@ -1453,6 +1566,7 @@ fn queue_sections(
             let ready = |id: CachedRenderPipelineId| cache.get_render_pipeline(id).is_some();
             if light.is_some() {
                 if p != FAR_TERRAIN
+                    && p != TRANSLUCENT_RANGE
                     && let Some(phase) = shadows.get_mut(&retained)
                 {
                     let keys = pipeline(light_keys.get(&retained), true, false).map(|pipeline| {
@@ -1465,6 +1579,29 @@ fn queue_sections(
                         (batch, ShadowBinKey { asset_id })
                     });
                     keep(phase, keys, item(entity));
+                }
+                continue;
+            }
+            if p == TRANSLUCENT_RANGE {
+                // One sorted item draws every translucent section back to front. It
+                // sorts with the nearest of them against other blended meshes.
+                if let Some(phase) = transparent.get_mut(&retained)
+                    && let Some(pipeline) = pipeline(keys.get(&retained), false, false)
+                    && let Some(draws) = gpu.views.get(&entity)
+                {
+                    phase.add_transient(Transparent3d {
+                        sorting_info: TransparentSortingInfo3d::Sorted {
+                            mesh_center: view.world_from_view.translation(),
+                            depth_bias: -draws.nearest_translucent,
+                        },
+                        distance: 0.0,
+                        pipeline,
+                        entity: item(entity),
+                        draw_function: translucent_draw,
+                        batch_range: 0..1,
+                        extra_index: PhaseItemExtraIndex::None,
+                        indexed: true,
+                    });
                 }
                 continue;
             }
