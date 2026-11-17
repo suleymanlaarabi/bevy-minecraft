@@ -30,6 +30,18 @@ fn clipmap_shadow(
     frag_coord: vec2<f32>,
 ) -> f32 {
     let count = view_bindings::lights.directional_lights[light_id].num_cascades;
+    if count == 0u {
+        return 1.0;
+    }
+    // Enclose every cached box around the current eye before doing any matrix work.
+    // Half the map width is its box half-extent. With <=10% eye drift per axis
+    // (`MAX_DRIFT` in shadows.rs), sqrt(3) * 1.1 < 2; two texels also cover snapping.
+    let texel = view_bindings::lights.directional_lights[light_id].cascades[count - 1u].texel_size;
+    let radius = texel * (f32(textureDimensions(view_bindings::directional_shadow_textures).x) + 2.0);
+    let offset = world_position.xyz - view_bindings::view.world_position;
+    if dot(offset, offset) > radius * radius {
+        return 1.0;
+    }
     for (var i = 0u; i < count; i += 1u) {
         let clip = view_bindings::lights.directional_lights[light_id].cascades[i].clip_from_world
             * world_position;

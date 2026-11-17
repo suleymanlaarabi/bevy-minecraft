@@ -96,19 +96,6 @@ impl Plugin for HollowPlugin {
             VoxelPlugin::default(),
             GamePlugin,
         ));
-        // Terrain generation runs on the efficiency cores, which frame and voxel
-        // workers leave idle; meshing and lighting keep the performance-core pool.
-        #[cfg(target_os = "linux")]
-        if let Some(threads) = cpu_set("/sys/devices/cpu_atom/cpus")
-            // SAFETY: `CPU_COUNT` only reads the mask.
-            .map(|set| unsafe { libc::CPU_COUNT(&set) } as usize)
-            .filter(|&threads| threads > 0)
-        {
-            app.insert_resource(hollow_worldgen::GenerationPool::new(threads, || {
-                background_priority();
-                pin_to_cpus("/sys/devices/cpu_atom/cpus");
-            }));
-        }
         #[cfg(feature = "dev")]
         app.add_plugins(dev::DevelopmentPlugin);
         #[cfg(not(feature = "dev"))]
